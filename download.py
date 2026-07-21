@@ -3,6 +3,7 @@ import re
 import ssl
 import urllib.request
 from urllib.parse import urlparse
+import cloudscraper
 
 OUTPUT_DIR = "downloaded_media"
 
@@ -42,22 +43,22 @@ def download_file(number: int, url: str, is_video: bool = False) -> None:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     context = ssl._create_unverified_context()
 
-    # === УМНЫЙ ПАРСИНГ ПРЯМОЙ ССЫЛКИ PEXELS ===
+    # === УМНЫЙ ОБХОД CLOUDFLARE ЧЕРЕЗ CLOUDSCRAPER ===
     if is_video and "pexels.com" in url:
         try:
-            print(f"Парсинг страницы Pexels для поиска видео-файла: {url}")
-            request_page = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(request_page, timeout=15, context=context) as p_response:
-                html = p_response.read().decode('utf-8', errors='ignore')
-                # Ищем CDN-ссылки на mp4 файлы прямо в коде страницы
-                video_urls = re.findall(r'(https://video-files\.pexels\.com/[^\s"\'<>\\\]+\.mp4)', html)
-                if video_urls:
-                    url = video_urls[0]
-                    print(f"Найдена прямая ссылка на видео: {url}")
-                else:
-                    # Запасной вариант
-                    video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
-                    url = f"https://www.pexels.com/video/{video_id}/download"
+            print(f"Парсинг страницы Pexels через cloudscraper: {url}")
+            # Создаем обходной скрепер, имитирующий браузер
+            scraper = cloudscraper.create_scraper()
+            html = scraper.get(url, timeout=15).text
+            
+            # Ищем прямые CDN-ссылки на видеофайлы
+            video_urls = re.findall(r'(https://video-files\.pexels\.com/[^\s"\'<>\\\]+\.mp4)', html)
+            if video_urls:
+                url = video_urls[0]
+                print(f"Найдена прямая ссылка на видео: {url}")
+            else:
+                video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
+                url = f"https://www.pexels.com/video/{video_id}/download"
         except Exception as scrap_err:
             print(f"Ошибка при парсинге страницы Pexels: {scrap_err}")
             video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
