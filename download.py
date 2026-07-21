@@ -40,28 +40,30 @@ def guess_extension(url: str, content_type: str = "") -> str:
     return ".jpg"
 
 def download_file(number: int, url: str, is_video: bool = False) -> None:
-    # === ЕСЛИ ЭТО ВИДЕО — КАЧАЕМ ЧЕРЕЗ YT-DLP С МАСКИРОВКОЙ ПОД CHROME ===
     if is_video:
         print(f"Запуск yt-dlp с маскировкой под Chrome для видео: {url}")
         try:
-            # Запускаем консольную команду yt-dlp с обходом Cloudflare
             cmd = [
                 "yt-dlp",
-                "--extractor-args", "generic:impersonate",
+                "--extractor-args", "generic:impersonate=chrome",
                 "-o", f"{OUTPUT_DIR}/{number}.%(ext)s",
                 "--format", "mp4/best",
+                "--no-check-certificate",
+                "--retries", "3",
                 url
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 print(f"[OK] ВИДЕО-ФУТАЖ {number} успешно скачан")
             else:
-                print(f"[ОШИБКА] Ошибка запуска yt-dlp: {result.stderr}")
+                # Печатаем полный stderr, чтобы в логах Actions было видно,
+                # почему именно не получилось (это помогает диагностировать
+                # будущие изменения в защите Cloudflare/Pexels).
+                print(f"[ОШИБКА] Ошибка запуска yt-dlp для {number}:\n{result.stderr}")
         except Exception as ytdl_err:
             print(f"[ОШИБКА] Не удалось запустить yt-dlp: {ytdl_err}")
         return
 
-    # === ЕСЛИ ЭТО КАРТИНКА — КАЧАЕМ СТАНДАРТНО ===
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     request = urllib.request.Request(url, headers=headers)
     context = ssl._create_unverified_context()
