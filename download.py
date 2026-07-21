@@ -47,12 +47,11 @@ def download_file(number: int, url: str, is_video: bool = False) -> None:
     if is_video and "pexels.com" in url:
         try:
             print(f"Парсинг страницы Pexels через cloudscraper: {url}")
-            # Создаем обходной скрепер, имитирующий браузер
             scraper = cloudscraper.create_scraper()
             html = scraper.get(url, timeout=15).text
             
-            # Ищем прямые CDN-ссылки на видеофайлы
-            video_urls = re.findall(r'(https://video-files\.pexels\.com/[^\s"\'<>\\\]+\.mp4)', html)
+            # Исправленное, надежное регулярное выражение для поиска mp4 ссылок
+            video_urls = re.findall(r'(https://video-files\.pexels\.com/[^"\']+\.mp4)', html)
             if video_urls:
                 url = video_urls[0]
                 print(f"Найдена прямая ссылка на видео: {url}")
