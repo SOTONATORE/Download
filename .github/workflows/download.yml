@@ -25,6 +25,17 @@ jobs:
       run: |
         pip install -U "yt-dlp[default,curl-cffi]"
 
+    - name: Diagnose Pexels API key
+      env:
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      run: |
+        echo "Длина ключа (символов): ${#PEXELS_API_KEY}"
+        curl -s -o /tmp/pexels_test.json -w "HTTP статус: %{http_code}\n" \
+          -H "Authorization: ${PEXELS_API_KEY}" \
+          "https://api.pexels.com/videos/videos/2499611"
+        echo "Тело ответа:"
+        cat /tmp/pexels_test.json
+
     - name: Run download script with input
       env:
         INPUT_LINKS: ${{ inputs.links }}
