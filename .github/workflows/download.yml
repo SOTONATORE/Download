@@ -25,39 +25,15 @@ jobs:
       run: |
         pip install -U "yt-dlp[default,curl-cffi]"
 
-    - name: Diagnose Pexels API key
-      env:
-        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-      run: |
-        echo "Длина ключа (символов): ${#PEXELS_API_KEY}"
-        echo "--- Проверка с обычным User-Agent (как curl) ---"
-        curl -s -o /tmp/pexels_test.json -w "HTTP статус: %{http_code}\n" \
-          -H "Authorization: ${PEXELS_API_KEY}" \
-          "https://api.pexels.com/v1/videos/videos/7947467"
-        echo "Тело ответа:"
-        cat /tmp/pexels_test.json
-        echo ""
-        echo "--- Проверка с User-Agent как у Python urllib по умолчанию ---"
-        curl -s -o /tmp/pexels_test2.json -w "HTTP статус: %{http_code}\n" \
-          -H "Authorization: ${PEXELS_API_KEY}" \
-          -H "User-Agent: Python-urllib/3.12" \
-          "https://api.pexels.com/v1/videos/videos/7947467"
-        echo "Тело ответа:"
-        cat /tmp/pexels_test2.json
-
     - name: Run download script with input
       env:
         INPUT_LINKS: ${{ inputs.links }}
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: python download.py
 
-    - name: Archive downloaded media
-      run: |
-        zip -r media_archive.zip downloaded_media
-
-    - name: Upload zip artifact
+    - name: Upload downloaded media
       uses: actions/upload-artifact@v4
       with:
         name: media_archive
-        path: media_archive.zip
+        path: downloaded_media/
         retention-days: 1
