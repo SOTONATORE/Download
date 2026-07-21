@@ -3,7 +3,7 @@ import re
 import ssl
 import urllib.request
 from urllib.parse import urlparse
-import cloudscraper
+import yt_dlp # Профессиональный загрузчик видео
 
 OUTPUT_DIR = "downloaded_media"
 
@@ -40,53 +40,40 @@ def guess_extension(url: str, content_type: str = "") -> str:
     return ".jpg"
 
 def download_file(number: int, url: str, is_video: bool = False) -> None:
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    context = ssl._create_unverified_context()
-
-    # === УМНЫЙ ОБХОД ЭКРАНИРОВАНИЯ СЛЭШЕЙ В PEXELS ===
-    if is_video and "pexels.com" in url:
+    # === ЕСЛИ ЭТО ВИДЕО — КАЧАЕМ ЧЕРЕЗ YT-DLP (100% БЕЗУПРЕЧНО) ===
+    if is_video:
+        print(f"Запуск yt-dlp для видео: {url}")
         try:
-            print(f"Парсинг страницы Pexels через cloudscraper: {url}")
-            scraper = cloudscraper.create_scraper()
-            html = scraper.get(url, timeout=15).text
-            
-            # Находим вообще все ссылки на mp4 на странице
-            all_mp4_urls = re.findall(r'(https?[^\s"\']+\.mp4)', html)
-            video_urls = []
-            
-            for raw_url in all_mp4_urls:
-                # Очищаем экранированные слэши (\/ -> /)
-                cleaned_url = raw_url.replace(r"\/", "/").replace("\\/", "/")
-                if "pexels" in cleaned_url.lower() and "video-files" in cleaned_url.lower():
-                    video_urls.append(cleaned_url)
-            
-            if video_urls:
-                url = video_urls[0]
-                print(f"Найдена прямая ссылка на видео: {url}")
-            else:
-                video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
-                url = f"https://www.pexels.com/video/{video_id}/download"
-        except Exception as scrap_err:
-            print(f"Ошибка при парсинге страницы Pexels: {scrap_err}")
-            video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
-            url = f"https://www.pexels.com/video/{video_id}/download"
+            ydl_opts = {
+                'outtmpl': f'{OUTPUT_DIR}/{number}.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'format': 'mp4/best', # Скачиваем сразу в готовом mp4 формате
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            print(f"[OK] ВИДЕО-ФУТАЖ {number} успешно скачан")
+        except Exception as ytdl_err:
+            print(f"[ОШИБКА] Не удалось скачать видео через yt-dlp: {ytdl_err}")
+        return
 
+    # === ЕСЛИ ЭТО КАРТИНКА — КАЧАЕМ СТАНДАРТНО ===
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     request = urllib.request.Request(url, headers=headers)
+    context = ssl._create_unverified_context()
 
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
             content_type = response.headers.get("Content-Type", "")
             ext = guess_extension(url, content_type)
-            if is_video and ext == ".jpg": ext = ".mp4"
-
             filename = f"{number}{ext}"
             filepath = os.path.join(OUTPUT_DIR, filename)
 
             with open(filepath, "wb") as f:
                 f.write(response.read())
-            print(f"[OK] Скачан {'ВИДЕО-ФУТАЖ' if is_video else 'КАРТИНКА'} {number} ({filename})")
+            print(f"[OK] КАРТИНКА {number} ({filename}) успешно скачана")
     except Exception as e:
-        print(f"[ОШИБКА] Не удалось скачать {number}: {e}")
+        print(f"[ОШИБКА] Не удалось скачать картинку {number}: {e}")
 
 def main():
     if os.path.exists(OUTPUT_DIR):
