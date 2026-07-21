@@ -14,7 +14,6 @@ def parse_and_download_links(env_name: str) -> None:
 
     print("Начинаю разбор и скачивание файлов...")
     
-    # Разбираем текст по строкам
     for line in raw_text.strip().split("\n"):
         if not line or ":" not in line:
             continue
@@ -23,8 +22,6 @@ def parse_and_download_links(env_name: str) -> None:
             number = int(num_str.strip())
             url = url_str.strip()
             
-            # === АВТООПРЕДЕЛЕНИЕ ТИПА ФАЙЛА ===
-            # Если в ссылке есть pexels.com/video или она заканчивается на видео-расширение
             is_video = "pexels.com/video" in url.lower() or url.lower().endswith((".mp4", ".mov", ".avi"))
             
             download_file(number, url, is_video=is_video)
@@ -42,14 +39,31 @@ def guess_extension(url: str, content_type: str = "") -> str:
     return ".jpg"
 
 def download_file(number: int, url: str, is_video: bool = False) -> None:
-    if is_video and "pexels.com" in url:
-        clean_url = url.rstrip("/")
-        video_id = clean_url.split("/")[-1].split("-")[-1]
-        url = f"https://www.pexels.com/video/{video_id}/download"
-
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    request = urllib.request.Request(url, headers=headers)
     context = ssl._create_unverified_context()
+
+    # === УМНЫЙ ПАРСИНГ ПРЯМОЙ ССЫЛКИ PEXELS ===
+    if is_video and "pexels.com" in url:
+        try:
+            print(f"Парсинг страницы Pexels для поиска видео-файла: {url}")
+            request_page = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request_page, timeout=15, context=context) as p_response:
+                html = p_response.read().decode('utf-8', errors='ignore')
+                # Ищем CDN-ссылки на mp4 файлы прямо в коде страницы
+                video_urls = re.findall(r'(https://video-files\.pexels\.com/[^\s"\'<>\\\]+\.mp4)', html)
+                if video_urls:
+                    url = video_urls[0]
+                    print(f"Найдена прямая ссылка на видео: {url}")
+                else:
+                    # Запасной вариант
+                    video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
+                    url = f"https://www.pexels.com/video/{video_id}/download"
+        except Exception as scrap_err:
+            print(f"Ошибка при парсинге страницы Pexels: {scrap_err}")
+            video_id = url.rstrip("/").split("/")[-1].split("-")[-1]
+            url = f"https://www.pexels.com/video/{video_id}/download"
+
+    request = urllib.request.Request(url, headers=headers)
 
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:
@@ -72,7 +86,6 @@ def main():
         shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Читаем единое поле ввода из GitHub Actions
     parse_and_download_links("INPUT_LINKS")
 
 if __name__ == "__main__":
