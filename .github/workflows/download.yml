@@ -21,6 +21,9 @@ jobs:
       with:
         python-version: '3.12'
 
+    - name: Install Cloudflare Bypass
+      run: pip install cloudscraper
+
     - name: Run download script with input
       env:
         INPUT_LINKS: ${{ inputs.links }}
