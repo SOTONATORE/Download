@@ -43,15 +43,23 @@ def download_file(number: int, url: str, is_video: bool = False) -> None:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     context = ssl._create_unverified_context()
 
-    # === УМНЫЙ ОБХОД CLOUDFLARE ЧЕРЕЗ CLOUDSCRAPER ===
+    # === УМНЫЙ ОБХОД ЭКРАНИРОВАНИЯ СЛЭШЕЙ В PEXELS ===
     if is_video and "pexels.com" in url:
         try:
             print(f"Парсинг страницы Pexels через cloudscraper: {url}")
             scraper = cloudscraper.create_scraper()
             html = scraper.get(url, timeout=15).text
             
-            # Исправленное, надежное регулярное выражение для поиска mp4 ссылок
-            video_urls = re.findall(r'(https://video-files\.pexels\.com/[^"\']+\.mp4)', html)
+            # Находим вообще все ссылки на mp4 на странице
+            all_mp4_urls = re.findall(r'(https?[^\s"\']+\.mp4)', html)
+            video_urls = []
+            
+            for raw_url in all_mp4_urls:
+                # Очищаем экранированные слэши (\/ -> /)
+                cleaned_url = raw_url.replace(r"\/", "/").replace("\\/", "/")
+                if "pexels" in cleaned_url.lower() and "video-files" in cleaned_url.lower():
+                    video_urls.append(cleaned_url)
+            
             if video_urls:
                 url = video_urls[0]
                 print(f"Найдена прямая ссылка на видео: {url}")
