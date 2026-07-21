@@ -30,12 +30,20 @@ jobs:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: |
         echo "Длина ключа (символов): ${#PEXELS_API_KEY}"
-        echo "--- Проверка через актуальный путь /v1/videos/videos/ ---"
+        echo "--- Проверка с обычным User-Agent (как curl) ---"
         curl -s -o /tmp/pexels_test.json -w "HTTP статус: %{http_code}\n" \
           -H "Authorization: ${PEXELS_API_KEY}" \
           "https://api.pexels.com/v1/videos/videos/7947467"
         echo "Тело ответа:"
         cat /tmp/pexels_test.json
+        echo ""
+        echo "--- Проверка с User-Agent как у Python urllib по умолчанию ---"
+        curl -s -o /tmp/pexels_test2.json -w "HTTP статус: %{http_code}\n" \
+          -H "Authorization: ${PEXELS_API_KEY}" \
+          -H "User-Agent: Python-urllib/3.12" \
+          "https://api.pexels.com/v1/videos/videos/7947467"
+        echo "Тело ответа:"
+        cat /tmp/pexels_test2.json
 
     - name: Run download script with input
       env:
