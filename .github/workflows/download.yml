@@ -22,7 +22,9 @@ jobs:
         python-version: '3.12'
 
     - name: Install Download Tools with Impersonation
-      run: pip install "yt-dlp[impersonate]"
+      run: |
+        pip install -U "yt-dlp[default,curl-cffi]"
+        yt-dlp --list-impersonate-targets
 
     - name: Run download script with input
       env:
