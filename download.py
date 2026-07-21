@@ -53,7 +53,7 @@ def download_pexels_video(number: int, video_id: str) -> None:
               f"(Settings -> Secrets and variables -> Actions) с ключом от https://www.pexels.com/api/")
         return
 
-    api_url = f"https://api.pexels.com/videos/videos/{video_id}"
+    api_url = f"https://api.pexels.com/v1/videos/videos/{video_id}"
     request = urllib.request.Request(api_url, headers={"Authorization": PEXELS_API_KEY})
 
     try:
