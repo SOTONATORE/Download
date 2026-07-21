@@ -21,8 +21,8 @@ jobs:
       with:
         python-version: '3.12'
 
-    - name: Install Download Tools
-      run: pip install yt-dlp
+    - name: Install Download Tools with Impersonation
+      run: pip install "yt-dlp[impersonate]"
 
     - name: Run download script with input
       env:
