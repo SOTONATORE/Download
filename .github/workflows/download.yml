@@ -24,11 +24,11 @@ jobs:
     - name: Install Download Tools with Impersonation
       run: |
         pip install -U "yt-dlp[default,curl-cffi]"
-        yt-dlp --list-impersonate-targets
 
     - name: Run download script with input
       env:
         INPUT_LINKS: ${{ inputs.links }}
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: python download.py
 
     - name: Archive downloaded media
