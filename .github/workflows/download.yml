@@ -1,0 +1,38 @@
+name: Download Media Archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      links:
+        description: 'Вставь СЮДА весь объединенный список ссылок от Клода'
+        required: true
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Run download script with input
+      env:
+        INPUT_LINKS: ${{ inputs.links }}
+      run: python download.py
+
+    - name: Archive downloaded media
+      run: |
+        zip -r media_archive.zip downloaded_media
+
+    - name: Upload zip artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: media_archive
+        path: media_archive.zip
+        retention-days: 1
