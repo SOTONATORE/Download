@@ -3,7 +3,7 @@ import re
 import ssl
 import urllib.request
 from urllib.parse import urlparse
-import yt_dlp # Профессиональный загрузчик видео
+import subprocess
 
 OUTPUT_DIR = "downloaded_media"
 
@@ -40,21 +40,25 @@ def guess_extension(url: str, content_type: str = "") -> str:
     return ".jpg"
 
 def download_file(number: int, url: str, is_video: bool = False) -> None:
-    # === ЕСЛИ ЭТО ВИДЕО — КАЧАЕМ ЧЕРЕЗ YT-DLP (100% БЕЗУПРЕЧНО) ===
+    # === ЕСЛИ ЭТО ВИДЕО — КАЧАЕМ ЧЕРЕЗ YT-DLP С МАСКИРОВКОЙ ПОД CHROME ===
     if is_video:
-        print(f"Запуск yt-dlp для видео: {url}")
+        print(f"Запуск yt-dlp с маскировкой под Chrome для видео: {url}")
         try:
-            ydl_opts = {
-                'outtmpl': f'{OUTPUT_DIR}/{number}.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'mp4/best', # Скачиваем сразу в готовом mp4 формате
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            print(f"[OK] ВИДЕО-ФУТАЖ {number} успешно скачан")
+            # Запускаем консольную команду yt-dlp с обходом Cloudflare
+            cmd = [
+                "yt-dlp",
+                "--extractor-args", "generic:impersonate",
+                "-o", f"{OUTPUT_DIR}/{number}.%(ext)s",
+                "--format", "mp4/best",
+                url
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"[OK] ВИДЕО-ФУТАЖ {number} успешно скачан")
+            else:
+                print(f"[ОШИБКА] Ошибка запуска yt-dlp: {result.stderr}")
         except Exception as ytdl_err:
-            print(f"[ОШИБКА] Не удалось скачать видео через yt-dlp: {ytdl_err}")
+            print(f"[ОШИБКА] Не удалось запустить yt-dlp: {ytdl_err}")
         return
 
     # === ЕСЛИ ЭТО КАРТИНКА — КАЧАЕМ СТАНДАРТНО ===
