@@ -30,9 +30,10 @@ jobs:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: |
         echo "Длина ключа (символов): ${#PEXELS_API_KEY}"
+        echo "--- Проверка через актуальный путь /v1/videos/videos/ ---"
         curl -s -o /tmp/pexels_test.json -w "HTTP статус: %{http_code}\n" \
           -H "Authorization: ${PEXELS_API_KEY}" \
-          "https://api.pexels.com/videos/videos/2499611"
+          "https://api.pexels.com/v1/videos/videos/7947467"
         echo "Тело ответа:"
         cat /tmp/pexels_test.json
 
