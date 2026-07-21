@@ -54,7 +54,13 @@ def download_pexels_video(number: int, video_id: str) -> None:
         return
 
     api_url = f"https://api.pexels.com/v1/videos/videos/{video_id}"
-    request = urllib.request.Request(api_url, headers={"Authorization": PEXELS_API_KEY})
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Authorization": PEXELS_API_KEY,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        },
+    )
 
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
