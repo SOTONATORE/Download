@@ -29,6 +29,7 @@ jobs:
       env:
         INPUT_LINKS: ${{ inputs.links }}
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       run: python download.py
 
     - name: Upload downloaded media
