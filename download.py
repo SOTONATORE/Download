@@ -6,10 +6,11 @@ import urllib.request
 import urllib.error
 from urllib.parse import urlparse
 import subprocess
-from curl_cffi import requests as cffi_requests # Браузерная маскировка Chrome
+from curl_cffi import requests as cffi_requests
 
 OUTPUT_DIR = "downloaded_media"
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
 
 def parse_and_download_links(env_name: str) -> None:
     raw_text = os.environ.get(env_name, "")
@@ -30,40 +31,36 @@ def parse_and_download_links(env_name: str) -> None:
         number = int(num_str)
         download_media_item(number, url)
 
+def extract_id(url: str) -> str:
+    match = re.search(r"(\d+)/?$", url.strip().rstrip("/"))
+    return match.group(1) if match else ""
+
 def download_media_item(number: int, url: str) -> None:
     url = url.strip()
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     context = ssl._create_unverified_context()
 
     # 1. PEXELS ВИДЕО
-    pexels_vid = re.search(r"pexels\.com/(?:[a-z-]+/)?video/[^/]*?(\d+)", url.lower())
-    if pexels_vid:
-        download_pexels_video(number, pexels_vid.group(1))
+    if "pexels.com" in url.lower() and "/video/" in url.lower():
+        video_id = extract_id(url)
+        if video_id: download_pexels_video(number, video_id)
         return
 
     # 2. PEXELS ФОТО
-    pexels_img = re.search(r"pexels\.com/(?:[a-z-]+/)?photo/[^/]*?(\d+)", url.lower())
-    if pexels_img and PEXELS_API_KEY:
-        download_pexels_photo(number, pexels_img.group(1))
+    if "pexels.com" in url.lower() and "/photo/" in url.lower():
+        photo_id = extract_id(url)
+        if photo_id and PEXELS_API_KEY: download_pexels_photo(number, photo_id)
         return
 
-    # 3. PIXABAY ИЛИ ДРУГИЕ СТРАНИЦЫ С ЗАЩИТОЙ (Обход через curl_cffi Chrome)
-    if "pixabay.com" in url.lower() or not url.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov")):
-        try:
-            resp = cffi_requests.get(url, impersonate="chrome", timeout=20)
-            if resp.status_code == 200:
-                html = resp.text
-                img_urls = re.findall(r'(https://cdn\.pixabay\.com/photo/[^"\']+\.(?:jpg|png|webp))', html)
-                if img_urls:
-                    direct_url = img_urls[0].replace(r"\/", "/").replace("\\/", "/")
-                    img_data = cffi_requests.get(direct_url, impersonate="chrome", timeout=30).content
-                    filepath = os.path.join(OUTPUT_DIR, f"{number}.jpg")
-                    with open(filepath, "wb") as f:
-                        f.write(img_data)
-                    print(f"[OK] ФОТО PIXABAY {number} успешно скачано")
-                    return
-        except Exception as e:
-            print(f"Ошибка при парсинге страницы {number}: {e}")
+    # 3. PIXABAY (ФОТО И ВИДЕО ЧЕРЕЗ ОФИЦИАЛЬНЫЙ API)
+    if "pixabay.com" in url.lower():
+        item_id = extract_id(url)
+        if item_id and PIXABAY_API_KEY:
+            if "/videos/" in url.lower():
+                download_pixabay_video(number, item_id)
+            else:
+                download_pixabay_photo(number, item_id)
+            return
 
     # 4. ОБЫЧНЫЕ ВИДЕО (.mp4)
     if url.lower().endswith((".mp4", ".mov", ".avi")):
@@ -84,6 +81,50 @@ def download_media_item(number: int, url: str) -> None:
             print(f"[OK] КАРТИНКА {number} ({filename}) успешно скачана")
     except Exception as e:
         print(f"[ОШИБКА] Не удалось скачать {number}: {e}")
+
+def download_pixabay_photo(number: int, photo_id: str) -> None:
+    api_url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&id={photo_id}"
+    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            hits = data.get("hits", [])
+            if hits:
+                direct_url = hits[0].get("largeImageURL") or hits[0].get("imageURL")
+                if direct_url:
+                    img_req = urllib.request.Request(direct_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(img_req, timeout=30) as img_resp:
+                        filepath = os.path.join(OUTPUT_DIR, f"{number}.jpg")
+                        with open(filepath, "wb") as f:
+                            f.write(img_resp.read())
+                    print(f"[OK] ФОТО PIXABAY {number} (id={photo_id}) успешно скачано")
+                    return
+        print(f"[ОШИБКА] Не удалось получить фото Pixabay {number}")
+    except Exception as e:
+        print(f"[ОШИБКА] Pixabay API ошибка {number}: {e}")
+
+def download_pixabay_video(number: int, video_id: str) -> None:
+    api_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&id={video_id}"
+    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            hits = data.get("hits", [])
+            if hits:
+                videos = hits[0].get("videos", {})
+                best_video = videos.get("large") or videos.get("medium") or videos.get("small")
+                if best_video and "url" in best_video:
+                    direct_url = best_video["url"]
+                    vid_req = urllib.request.Request(direct_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(vid_req, timeout=60) as vid_resp:
+                        filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
+                        with open(filepath, "wb") as f:
+                            f.write(vid_resp.read())
+                    print(f"[OK] ВИДЕО PIXABAY {number} (id={video_id}) успешно скачано")
+                    return
+        print(f"[ОШИБКА] Не удалось получить видео Pixabay {number}")
+    except Exception as e:
+        print(f"[ОШИБКА] Pixabay API ошибка {number}: {e}")
 
 def download_pexels_photo(number: int, photo_id: str) -> None:
     api_url = f"https://api.pexels.com/v1/photos/{photo_id}"
@@ -110,10 +151,7 @@ def download_pexels_video(number: int, video_id: str) -> None:
     api_url = f"https://api.pexels.com/v1/videos/videos/{video_id}"
     request = urllib.request.Request(
         api_url,
-        headers={
-            "Authorization": PEXELS_API_KEY,
-            "User-Agent": "Mozilla/5.0",
-        },
+        headers={"Authorization": PEXELS_API_KEY, "User-Agent": "Mozilla/5.0"},
     )
 
     try:
@@ -124,9 +162,7 @@ def download_pexels_video(number: int, video_id: str) -> None:
         return
 
     video_files = data.get("video_files", [])
-    if not video_files:
-        print(f"[ОШИБКА] Нет доступных файлов для видео {number}")
-        return
+    if not video_files: return
 
     mp4_files = [f for f in video_files if f.get("file_type") == "video/mp4"]
     candidates = mp4_files if mp4_files else video_files
