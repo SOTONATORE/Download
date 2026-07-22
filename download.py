@@ -6,7 +6,7 @@ import urllib.request
 import urllib.error
 from urllib.parse import urlparse
 import subprocess
-import cloudscraper
+from curl_cffi import requests as cffi_requests # Браузерная маскировка Chrome
 
 OUTPUT_DIR = "downloaded_media"
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
@@ -18,8 +18,6 @@ def parse_and_download_links(env_name: str) -> None:
         return
 
     print("Начинаю разбор и скачивание файлов...")
-    
-    # Регулярное выражение находит ВСЕ пары "номер: ссылка", даже если они вставлены в одну строку через пробел
     matches = re.findall(r'(\d+)\s*:\s*(https?://[^\s]+)', raw_text)
     
     if not matches:
@@ -49,23 +47,30 @@ def download_media_item(number: int, url: str) -> None:
         download_pexels_photo(number, pexels_img.group(1))
         return
 
-    # 3. PIXABAY ИЛИ СТРАНИЦЫ ФОТОСТОКОВ
+    # 3. PIXABAY ИЛИ ДРУГИЕ СТРАНИЦЫ С ЗАЩИТОЙ (Обход через curl_cffi Chrome)
     if "pixabay.com" in url.lower() or not url.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov")):
         try:
-            scraper = cloudscraper.create_scraper()
-            html = scraper.get(url, timeout=15).text
-            img_urls = re.findall(r'(https://cdn\.pixabay\.com/[^"\']+\.(?:jpg|png|webp))', html)
-            if img_urls:
-                url = img_urls[0].replace(r"\/", "/").replace("\\/", "/")
-        except Exception:
-            pass
+            resp = cffi_requests.get(url, impersonate="chrome", timeout=20)
+            if resp.status_code == 200:
+                html = resp.text
+                img_urls = re.findall(r'(https://cdn\.pixabay\.com/photo/[^"\']+\.(?:jpg|png|webp))', html)
+                if img_urls:
+                    direct_url = img_urls[0].replace(r"\/", "/").replace("\\/", "/")
+                    img_data = cffi_requests.get(direct_url, impersonate="chrome", timeout=30).content
+                    filepath = os.path.join(OUTPUT_DIR, f"{number}.jpg")
+                    with open(filepath, "wb") as f:
+                        f.write(img_data)
+                    print(f"[OK] ФОТО PIXABAY {number} успешно скачано")
+                    return
+        except Exception as e:
+            print(f"Ошибка при парсинге страницы {number}: {e}")
 
     # 4. ОБЫЧНЫЕ ВИДЕО (.mp4)
     if url.lower().endswith((".mp4", ".mov", ".avi")):
         download_via_ytdlp(number, url)
         return
 
-    # 5. СТАНДАРТНОЕ СКАЧИВАНИЕ ФОТО
+    # 5. СТАНДАРТНОЕ СКАЧИВАНИЕ ПО ПРЯМОЙ ССЫЛКЕ
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=30, context=context) as response:
@@ -95,7 +100,7 @@ def download_pexels_photo(number: int, photo_id: str) -> None:
                         f.write(img_resp.read())
                 print(f"[OK] ФОТО PEXELS {number} (id={photo_id}) успешно скачано")
     except Exception as e:
-        print(f"[ОШИБКА] Не удалось скачать фото Pexels {number}: {e}")
+        print(f"[ОШИБКА] Ошибка скачивания фото Pexels {number}: {e}")
 
 def download_pexels_video(number: int, video_id: str) -> None:
     if not PEXELS_API_KEY:
@@ -107,7 +112,7 @@ def download_pexels_video(number: int, video_id: str) -> None:
         api_url,
         headers={
             "Authorization": PEXELS_API_KEY,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0",
         },
     )
 
