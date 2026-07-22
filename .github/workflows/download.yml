@@ -23,7 +23,7 @@ jobs:
 
     - name: Install Download Tools with Impersonation
       run: |
-        pip install -U "yt-dlp[default,curl-cffi]"
+        pip install -U "yt-dlp[default,curl-cffi]" cloudscraper
 
     - name: Run download script with input
       env:
