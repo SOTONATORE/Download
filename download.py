@@ -43,12 +43,20 @@ def extract_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
-def extract_coverr_id(url: str) -> str:
-    """Coverr URL выглядит как .../videos/<slug>-<id>/ - id это последний сегмент после дефиса."""
-    path = urlparse(url).path.rstrip("/")
-    slug = path.split("/")[-1]
-    parts = slug.split("-")
-    return parts[-1] if parts else slug
+def extract_og_video_url(html: str) -> str:
+    """Достаём прямую ссылку на видео из og:video / og:video:secure_url meta-тега страницы."""
+    match = re.search(
+        r'<meta[^>]+property=["\']og:video(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+        html, re.IGNORECASE
+    )
+    if match:
+        return match.group(1)
+    # На случай, если порядок атрибутов в теге обратный (content раньше property)
+    match = re.search(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?::secure_url)?["\']',
+        html, re.IGNORECASE
+    )
+    return match.group(1) if match else ""
 
 
 def looks_like_html(content: bytes) -> bool:
@@ -85,13 +93,9 @@ def download_media_item(number: int, url: str) -> None:
                 download_pixabay_photo(number, item_id)
             return
 
-    # 4. COVERR ВИДЕО (ЧЕРЕЗ ОФИЦИАЛЬНЫЙ API)
+    # 4. COVERR ВИДЕО (ТОЧНАЯ ССЫЛКА ИЗ og:video НА САМОЙ СТРАНИЦЕ, БЕЗ API/ПОИСКА)
     if "coverr.co" in url_lower:
-        video_id = extract_coverr_id(url)
-        if video_id and COVERR_API_KEY:
-            download_coverr_video(number, video_id)
-        else:
-            print(f"[ОШИБКА] Coverr {number}: нет COVERR_API_KEY или не удалось извлечь id.")
+        download_coverr_video(number, url)
         return
 
     # 5. LIBRARY OF CONGRESS (loc.gov) - ЧЕРЕЗ ОФИЦИАЛЬНЫЙ JSON API
@@ -231,25 +235,31 @@ def download_pexels_video(number: int, video_id: str) -> None:
         print(f"[ОШИБКА] Не удалось скачать файл видео {number}: {e}")
 
 
-def download_coverr_video(number: int, video_id: str) -> None:
-    api_url = f"https://api.coverr.co/videos/{video_id}?api_key={COVERR_API_KEY}"
+def download_coverr_video(number: int, url: str) -> None:
     try:
-        resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        direct_url = data.get("urls", {}).get("mp4_download") or data.get("urls", {}).get("mp4")
+        page_resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
+        page_resp.raise_for_status()
+        html = page_resp.text
+
+        direct_url = extract_og_video_url(html)
         if not direct_url:
-            print(f"[ОШИБКА] Coverr {number}: не нашли ссылку на файл в ответе API")
+            print(f"[ОШИБКА] Coverr {number}: не нашли og:video на странице {url}")
             return
 
         vid_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
         vid_resp.raise_for_status()
+        content = vid_resp.content
+
+        if looks_like_html(content):
+            print(f"[ОШИБКА] Coverr {number}: по ссылке из og:video пришла HTML-страница, а не видео")
+            return
+
         filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
         with open(filepath, "wb") as f:
-            f.write(vid_resp.content)
-        print(f"[OK] ВИДЕО COVERR {number} (id={video_id}) успешно скачано")
+            f.write(content)
+        print(f"[OK] ВИДЕО COVERR {number} успешно скачано ({direct_url})")
     except Exception as e:
-        print(f"[ОШИБКА] Coverr API ошибка {number}: {e}")
+        print(f"[ОШИБКА] Coverr ошибка {number}: {e}")
 
 
 def download_loc_gov(number: int, url: str) -> None:
