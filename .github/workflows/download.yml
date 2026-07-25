@@ -6,19 +6,26 @@ on:
         description: 'Вставь СЮДА весь объединенный список ссылок от Клода'
         required: true
         type: string
+
+permissions:
+  contents: write   # нужно, чтобы workflow мог создавать Release
+
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
+
     - name: Install Download Tools with Impersonation
       run: |
         pip install -U "yt-dlp[default,curl-cffi]" cloudscraper
+
     - name: Run download script with input
       env:
         INPUT_LINKS: ${{ inputs.links }}
@@ -26,9 +33,43 @@ jobs:
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
       run: python download.py
-    - name: Upload downloaded media
-      uses: actions/upload-artifact@v4
-      with:
-        name: media_archive
-        path: downloaded_media/
-        retention-days: 1
+
+    - name: Publish files as a GitHub Release
+      id: release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="media-${{ github.run_id }}"
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+        # Создаём релиз (пустой, файлы добавим отдельным шагом)
+        gh release create "$TAG" \
+          --repo "${{ github.repository }}" \
+          --title "Медиафайлы от $(date -u +'%Y-%m-%d %H:%M UTC')" \
+          --notes "Автоматическая публикация из workflow. Файлов: $(ls downloaded_media | wc -l)"
+
+        # Загружаем все скачанные файлы как отдельные вложения релиза
+        gh release upload "$TAG" downloaded_media/* \
+          --repo "${{ github.repository }}" \
+          --clobber
+
+    - name: Build direct-links list for download manager
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${{ steps.release.outputs.tag }}"
+        > links.txt
+        for f in downloaded_media/*; do
+          filename=$(basename "$f")
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$filename" >> links.txt
+        done
+        cat links.txt
+
+        gh release upload "$TAG" links.txt \
+          --repo "${{ github.repository }}" \
+          --clobber
+
+    - name: Print release URL
+      run: |
+        echo "Релиз со всеми файлами:"
+        echo "https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}"
