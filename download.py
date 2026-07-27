@@ -43,17 +43,16 @@ def extract_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
-def extract_og_video_url(html: str) -> str:
-    """Достаём прямую ссылку на видео из og:video / og:video:secure_url meta-тега страницы."""
+def extract_og_media_url(html: str) -> str:
+    """Достаём прямую ссылку на фото/видео из og:image или og:video meta-тегов страницы."""
     match = re.search(
-        r'<meta[^>]+property=["\']og:video(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+property=["\']og:(?:image|video)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
         html, re.IGNORECASE
     )
     if match:
         return match.group(1)
-    # На случай, если порядок атрибутов в теге обратный (content раньше property)
     match = re.search(
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:video(?::secure_url)?["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:(?:image|video)(?::secure_url)?["\']',
         html, re.IGNORECASE
     )
     return match.group(1) if match else ""
@@ -93,23 +92,79 @@ def download_media_item(number: int, url: str) -> None:
                 download_pixabay_photo(number, item_id)
             return
 
-    # 4. COVERR ВИДЕО (ТОЧНАЯ ССЫЛКА ИЗ og:video НА САМОЙ СТРАНИЦЕ, БЕЗ API/ПОИСКА)
+    # 4. COVERR ВИДЕО
     if "coverr.co" in url_lower:
         download_coverr_video(number, url)
         return
 
-    # 5. LIBRARY OF CONGRESS (loc.gov) - ЧЕРЕЗ ОФИЦИАЛЬНЫЙ JSON API
+    # 5. WIKIMEDIA COMMONS (wikimedia.org / wikipedia.org)
+    if "wikimedia.org" in url_lower or "wikipedia.org" in url_lower:
+        download_wikimedia_commons(number, url)
+        return
+
+    # 6. LIBRARY OF CONGRESS (loc.gov)
     if "loc.gov" in url_lower:
         download_loc_gov(number, url)
         return
 
-    # 6. ПРЯМЫЕ ССЫЛКИ НА ВИДЕОФАЙЛЫ + СТРАНИЦЫ MIXKIT -> ЧЕРЕЗ yt-dlp
+    # 7. ПРЯМЫЕ ССЫЛКИ НА ВИДЕОФАЙЛЫ + СТРАНИЦЫ MIXKIT -> ЧЕРЕЗ yt-dlp
     if url_lower.endswith((".mp4", ".mov", ".avi")) or "mixkit.co" in url_lower:
         download_via_ytdlp(number, url)
         return
 
-    # 7. ВСЁ ОСТАЛЬНОЕ - СКАЧИВАНИЕ ЧЕРЕЗ curl_cffi С ИМИТАЦИЕЙ БРАУЗЕРА
+    # 8. ВСЁ ОСТАЛЬНОЕ - СКАЧИВАНИЕ ЧЕРЕЗ curl_cffi С ИМИТАЦИЕЙ БРАУЗЕРА
     download_direct_via_cffi(number, url)
+
+
+def download_wikimedia_commons(number: int, url: str) -> None:
+    """Скачивание оригинального файла с Wikimedia Commons через API."""
+    try:
+        path = urlparse(url).path
+        file_part = path.split("/wiki/")[-1] if "/wiki/" in path else path.split("/")[-1]
+        file_title = urllib.parse.unquote(file_part)
+
+        if not file_title.lower().startswith(("file:", "файл:")):
+            file_title = "File:" + file_title
+
+        api_url = f"https://commons.wikimedia.org/w/api.php?action=query&titles={urllib.parse.quote(file_title)}&prop=imageinfo&iiprop=url&format=json"
+
+        resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+
+        pages = data.get("query", {}).get("pages", {})
+        direct_url = None
+        for _, page_data in pages.items():
+            imageinfo = page_data.get("imageinfo", [])
+            if imageinfo and "url" in imageinfo[0]:
+                direct_url = imageinfo[0]["url"]
+                break
+
+        # Если API не вернул URL, пробуем вытащить og:image со страницы
+        if not direct_url:
+            page_resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
+            page_resp.raise_for_status()
+            direct_url = extract_og_media_url(page_resp.text)
+
+        if not direct_url:
+            print(f"[ОШИБКА] Wikimedia {number}: не удалось извлечь ссылку на изображение ({url})")
+            return
+
+        img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
+        img_resp.raise_for_status()
+        content = img_resp.content
+
+        if looks_like_html(content):
+            print(f"[ОШИБКА] Wikimedia {number}: скачалась HTML-страница вместо медиафайла")
+            return
+
+        ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
+        filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
+        with open(filepath, "wb") as f:
+            f.write(content)
+        print(f"[OK] WIKIMEDIA {number} ({number}{ext}) успешно скачано")
+    except Exception as e:
+        print(f"[ОШИБКА] Wikimedia ошибка {number}: {e}")
 
 
 def download_direct_via_cffi(number: int, url: str) -> None:
@@ -118,8 +173,23 @@ def download_direct_via_cffi(number: int, url: str) -> None:
         resp.raise_for_status()
         content = resp.content
 
+        # Если по прямой ссылке пришла HTML-страница, пытаемся вытащить og:image / og:video
         if looks_like_html(content):
-            print(f"[ОШИБКА] {number}: похоже, скачалась HTML-страница, а не медиафайл ({url})")
+            media_url = extract_og_media_url(resp.text)
+            if media_url:
+                media_resp = cffi_requests.get(media_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
+                media_resp.raise_for_status()
+                media_content = media_resp.content
+                if not looks_like_html(media_content):
+                    ext = guess_extension(media_url, media_resp.headers.get("Content-Type", ""))
+                    filename = f"{number}{ext}"
+                    filepath = os.path.join(OUTPUT_DIR, filename)
+                    with open(filepath, "wb") as f:
+                        f.write(media_content)
+                    print(f"[OK] ФАЙЛ {number} ({filename}) извлечён из страницы")
+                    return
+
+            print(f"[ОШИБКА] {number}: страница не содержит медиафайла ({url})")
             return
 
         content_type = resp.headers.get("Content-Type", "")
@@ -241,7 +311,7 @@ def download_coverr_video(number: int, url: str) -> None:
         page_resp.raise_for_status()
         html = page_resp.text
 
-        direct_url = extract_og_video_url(html)
+        direct_url = extract_og_media_url(html)
         if not direct_url:
             print(f"[ОШИБКА] Coverr {number}: не нашли og:video на странице {url}")
             return
@@ -251,7 +321,7 @@ def download_coverr_video(number: int, url: str) -> None:
         content = vid_resp.content
 
         if looks_like_html(content):
-            print(f"[ОШИБКА] Coverr {number}: по ссылке из og:video пришла HTML-страница, а не видео")
+            print(f"[ОШИБКА] Coverr {number}: по ссылке пришла HTML-страница, а не видео")
             return
 
         filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
@@ -263,7 +333,6 @@ def download_coverr_video(number: int, url: str) -> None:
 
 
 def download_loc_gov(number: int, url: str) -> None:
-    # Официальный JSON API Библиотеки Конгресса не требует ключа - достаточно добавить fo=json
     parsed = urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)
     query["fo"] = ["json"]
@@ -276,7 +345,6 @@ def download_loc_gov(number: int, url: str) -> None:
 
         direct_url = None
         resource = data.get("resource", {}) or {}
-        # Пытаемся достать самое качественное изображение из разных возможных мест ответа
         if isinstance(resource.get("files"), list):
             for file_group in resource["files"]:
                 if isinstance(file_group, list) and file_group:
@@ -293,7 +361,7 @@ def download_loc_gov(number: int, url: str) -> None:
                 direct_url = image_url
 
         if not direct_url:
-            print(f"[ОШИБКА] loc.gov {number}: не удалось найти прямую ссылку на файл в JSON-ответе")
+            print(f"[ОШИБКА] loc.gov {number}: не удалось найти прямую ссылку на файл")
             return
 
         file_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
@@ -301,7 +369,7 @@ def download_loc_gov(number: int, url: str) -> None:
         content = file_resp.content
 
         if looks_like_html(content):
-            print(f"[ОШИБКА] loc.gov {number}: похоже, скачалась HTML-страница, а не файл")
+            print(f"[ОШИБКА] loc.gov {number}: похоже, скачалась HTML-страница")
             return
 
         ext = guess_extension(direct_url, file_resp.headers.get("Content-Type", ""))
