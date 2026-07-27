@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import urllib.parse
 from urllib.parse import urlparse
 import subprocess
@@ -117,7 +118,9 @@ def download_media_item(number: int, url: str) -> None:
 
 
 def download_wikimedia_commons(number: int, url: str) -> None:
-    """Скачивание оригинального файла с Wikimedia Commons через API."""
+    """Скачивание оригинального файла с Wikimedia Commons с паузами от лимита 429."""
+    time.sleep(1.5)  # Небольшая задержка, чтобы сервера Викимедии не блочили по 429
+
     try:
         path = urlparse(url).path
         file_part = path.split("/wiki/")[-1] if "/wiki/" in path else path.split("/")[-1]
@@ -128,9 +131,20 @@ def download_wikimedia_commons(number: int, url: str) -> None:
 
         api_url = f"https://commons.wikimedia.org/w/api.php?action=query&titles={urllib.parse.quote(file_title)}&prop=imageinfo&iiprop=url&format=json"
 
-        resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+        data = None
+        for attempt in range(3):
+            resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
+            if resp.status_code == 429:
+                print(f"[ИНФО] Wikimedia 429 limit, пауза {4 * (attempt + 1)} сек для {number}...")
+                time.sleep(4 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            break
+
+        if not data:
+            print(f"[ОШИБКА] Wikimedia {number}: лимит запросов 429 не сбросился")
+            return
 
         pages = data.get("query", {}).get("pages", {})
         direct_url = None
@@ -140,22 +154,29 @@ def download_wikimedia_commons(number: int, url: str) -> None:
                 direct_url = imageinfo[0]["url"]
                 break
 
-        # Если API не вернул URL, пробуем вытащить og:image со страницы
         if not direct_url:
             page_resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
             page_resp.raise_for_status()
             direct_url = extract_og_media_url(page_resp.text)
 
         if not direct_url:
-            print(f"[ОШИБКА] Wikimedia {number}: не удалось извлечь ссылку на изображение ({url})")
+            print(f"[ОШИБКА] Wikimedia {number}: не удалось извлечь ссылку ({url})")
             return
 
-        img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
-        img_resp.raise_for_status()
-        content = img_resp.content
+        # Скачивание файла с повторами
+        content = None
+        img_resp = None
+        for attempt in range(3):
+            img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
+            if img_resp.status_code == 429:
+                time.sleep(4 * (attempt + 1))
+                continue
+            img_resp.raise_for_status()
+            content = img_resp.content
+            break
 
-        if looks_like_html(content):
-            print(f"[ОШИБКА] Wikimedia {number}: скачалась HTML-страница вместо медиафайла")
+        if not content or looks_like_html(content):
+            print(f"[ОШИБКА] Wikimedia {number}: не удалось скачать файл изображения")
             return
 
         ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
@@ -173,7 +194,6 @@ def download_direct_via_cffi(number: int, url: str) -> None:
         resp.raise_for_status()
         content = resp.content
 
-        # Если по прямой ссылке пришла HTML-страница, пытаемся вытащить og:image / og:video
         if looks_like_html(content):
             media_url = extract_og_media_url(resp.text)
             if media_url:
