@@ -77,37 +77,70 @@ CHECKPOINT_SUFFIX = ".checkpoint.json"
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
 
 SYSTEM_INSTRUCTION = """\
-Ты помогаешь подбирать поисковые запросы для стоковых/архивных видео и фото под сцены видеоролика.
-На вход ты получаешь пронумерованные сегменты сцен (номер = порядковый номер в исходном SRT, тайминг и текст).
+You generate search-query instructions for stock/archival video and photo sourcing for a video's \
+scenes. You receive numbered scene segments (number = the segment's sequential position in the \
+original SRT, plus its timing and on-screen text).
 
-Верни JSON-МАССИВ объектов - РОВНО по одному объекту на каждый сегмент из блока "Сегменты, для
-которых нужен ответ" (включая пустые/немые сегменты), без пропусков и без дублей. Каждый объект
-обязан содержать поле segment_index (целое число, точно равное номеру из "### Сегмент N") и
-остальные поля по схеме. Порядок объектов в массиве не важен.
+Return a JSON ARRAY of objects - EXACTLY one object per segment listed under "Segments that need \
+a response" (including silent/empty segments), with no gaps and no duplicates. Every object MUST \
+contain a segment_index field (an integer, exactly matching the number from "### Segment N") plus \
+the remaining fields defined by the schema. The order of objects in the array does not matter.
 
-Правила заполнения остальных полей:
-- Если сегмент про конкретного named человека, историческое событие, историческое место или документ:
-  sites = ["wikimedia", "loc"], порядок = приоритет. Для космоса/астрономии добавляй "nasa" первым.
-- Если сегмент - абстрактная современная сцена без привязки к конкретной реальной сущности:
-  sites = ["pexels", "pixabay"].
-- query всегда на английском, 5-10 слов, специфичный под ПЕРВЫЙ сайт в списке sites:
-  для wikimedia/loc/nasa - точные термины, даты, имена собственные;
-  для pexels/pixabay - обычные стоковые формулировки.
-- fallback_query - более общая версия на английском для pexels/pixabay на случай провала
-  основного поиска, или null если запасной вариант не нужен.
-- is_entity = true, если сегмент содержит конкретного named человека/событие/место.
-- entity_keywords - варианты написания (английский + русский) ВСЕХ сущностей сегмента,
-  если их несколько - объединяй варианты всех, а не только главной. Пустой список, если is_entity=false.
-- Никогда не используй в query слова "creative commons", "free", "no copyright" - это не работает
-  как поисковый термин.
-- Пустые/немые сегменты тоже включай в ответ с нейтральным запросом, подобранным по контексту
-  соседних сегментов; номер сегмента пропускать нельзя.
+FIELD RULES:
 
-Тебе может быть передан дополнительный КОНТЕКСТ - соседние сегменты до и/или после основного
-списка, помеченные отдельным блоком "Контекст ДО" / "Контекст ПОСЛЕ". Используй его только для
-понимания сюжета (например, чтобы понять, к кому относится местоимение или продолжение мысли в
-текущем сегменте) - но НЕ создавай для этих контекстных сегментов отдельные объекты в ответе.
-Отвечай строго по сегментам, помеченным как "Сегмент N" в блоке "Сегменты, для которых нужен ответ".
+1. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
+"pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources.
+   - Use sites = ["wikimedia", "loc"] when the segment is about a specific named real person, a \
+specific real historical event with a date/place, a specific historical document, artifact, or \
+building. Add "nasa" first only when the scene is explicitly about space, astronomy, or a NASA \
+mission.
+   - Use sites = ["pexels", "pixabay"] when the segment is a generic, modern, or abstract scene \
+with no tie to a specific real person, event, or place (b-roll: an office, nature, a city street, \
+an emotion, an everyday action, a UI/screen-recording style moment).
+   - When genuinely unsure, include both, real/archival sources first.
+
+2. query - the primary search query, ALWAYS in English, 5-10 words, tailored to the FIRST site in \
+"sites":
+   - For wikimedia/loc/nasa: exact proper nouns, dates, and specific terms (e.g. a person's full \
+name, a place name, a year).
+   - For pexels/pixabay: ordinary stock-footage phrasing describing the visual action or mood, not \
+proper nouns.
+
+3. fallback_query - a more general English query to fall back on for pexels/pixabay if the primary \
+search on the sites above fails entirely, or null if no fallback is needed (e.g. the segment is \
+already stock-only with no historical specificity).
+
+4. type - "image" or "video", whichever fits the described scene better (a static portrait, \
+document, or map -> "image"; a dynamic action or general b-roll -> "video").
+
+5. is_entity - true ONLY if the segment is about ONE OR MORE SPECIFIC, NAMEABLE real-world \
+entities that a database text search could match against: a specific person's name (e.g. "Mehmed \
+VI", "Peter the Great"), a specific place name (e.g. "Topkapi Palace", "Vienna"), or a specific \
+dated historical event (e.g. "Siege of Vienna 1683"). Set is_entity = false for anything broader or \
+more abstract, even if it sounds historical or important: general religions, ideologies, \
+nationalities, empires-as-a-whole-concept, professions, emotions, or generic historical themes (for \
+example "Islam", "the Ottoman dynasty" used generically, "war", "monarchy", "tradition") are NOT \
+entities - they cannot be verified by a text-metadata match the way a specific proper name can, so \
+they must get is_entity = false and an empty entity_keywords list, even if sites still points to \
+wikimedia/loc for the visual style of the scene.
+
+6. entity_keywords - only populated when is_entity = true. Give 2-4 spelling variants (English AND \
+Russian) of ALL the specific named entities mentioned in the segment - if the segment names several \
+distinct people/places/events, merge all of their variants into this single list rather than \
+picking only the most important one. Empty list [] when is_entity = false.
+
+GENERAL RULES:
+- Never include "creative commons", "free", or "no copyright" in query - these are not effective \
+search terms; licensing is filtered separately downstream, not through the query text.
+- Do not invent scene details beyond what the segment's text actually says.
+- Always include silent/empty segments in the output with a neutral query inferred from \
+neighboring segments' context - never skip a segment number.
+
+You may also be given extra CONTEXT - neighboring segments before and/or after the main list, under \
+separate "Context BEFORE" / "Context AFTER" headers. Use this context only to understand the \
+narrative (for example, to resolve a pronoun or continue a thought from the current segment) - do \
+NOT create response objects for these context segment numbers. Only answer for the segments listed \
+under "Segments that need a response", each marked as "### Segment N".
 """
 
 SEGMENT_ENTRY_SCHEMA = types.Schema(
@@ -230,7 +263,7 @@ def source_hash(segments: list[Segment]) -> str:
 # ---------------------------------------------------------------------------
 
 def _format_context_line(s: Segment) -> str:
-    text = s.text if s.text else "(тишина / нет текста)"
+    text = s.text if s.text else "(silence / no text)"
     return f"[{s.index}] {text}"
 
 
@@ -242,17 +275,17 @@ def build_prompt(
     lines: list[str] = []
 
     if context_before:
-        lines.append("### Контекст ДО (не создавай для этих номеров объекты в ответе, только для связности сюжета)")
+        lines.append("### Context BEFORE (do not create response objects for these segment numbers - context only)")
         lines.extend(_format_context_line(s) for s in context_before)
         lines.append("")
 
-    lines.append("### Сегменты, для которых нужен ответ")
+    lines.append("### Segments that need a response")
     for s in batch:
-        text = s.text if s.text else "(тишина / нет текста)"
-        lines.append(f"### Сегмент {s.index}\nТайминг: {s.start} --> {s.end}\nТекст: {text}\n")
+        text = s.text if s.text else "(silence / no text)"
+        lines.append(f"### Segment {s.index}\nTiming: {s.start} --> {s.end}\nText: {text}\n")
 
     if context_after:
-        lines.append("### Контекст ПОСЛЕ (не создавай для этих номеров объекты в ответе, только для связности сюжета)")
+        lines.append("### Context AFTER (do not create response objects for these segment numbers - context only)")
         lines.extend(_format_context_line(s) for s in context_after)
 
     return "\n".join(lines)
