@@ -2,16 +2,58 @@ name: Download Media Archive
 on:
   workflow_dispatch:
     inputs:
+      srt_path:
+        description: 'Путь к SRT-файлу в репозитории (для генерации поисковых запросов через Gemini). Оставь пустым, если сейчас не нужно.'
+        required: false
+        type: string
       links:
-        description: 'Вставь СЮДА весь объединенный список ссылок от Клода'
-        required: true
+        description: 'Вставь СЮДА весь объединенный список ссылок от Клода. Оставь пустым, если сейчас не нужно.'
+        required: false
         type: string
 
 permissions:
   contents: write   # нужно, чтобы workflow мог создавать Release
 
 jobs:
+  # -------------------------------------------------------------------------
+  # Шаг 1 (новый): SRT -> requests.json через Gemini (structured output)
+  # Запускается, только если при ручном триггере заполнено поле srt_path.
+  # Результат пока просто публикуется как artifact запуска - до появления
+  # search.py автоматической стыковки с job'ом download нет.
+  # -------------------------------------------------------------------------
+  generate_queries:
+    if: ${{ inputs.srt_path != '' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install query-generation deps
+      run: pip install -U google-genai
+
+    - name: Generate search queries via Gemini
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
+
+    - name: Upload requests.json as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: requests-json
+        path: requests.json
+        retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # Шаг 2 (без изменений): готовые ссылки -> скачивание -> GitHub Release.
+  # Запускается, только если при ручном триггере заполнено поле links.
+  # -------------------------------------------------------------------------
   download:
+    if: ${{ inputs.links != '' }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
