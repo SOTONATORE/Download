@@ -10,9 +10,23 @@ response_schema).
     python generate_queries.py --input input.srt --output requests.json
 
 Переменные окружения:
-    GEMINI_API_KEY   - обязателен, ключ Gemini API
-    GENQ_MODEL       - опционально, имя модели (по умолчанию gemini-3.8-flash)
-    GENQ_BATCH_SIZE  - опционально, число сегментов в одном вызове (по умолчанию 100)
+    GEMINI_API_KEY       - обязателен, ключ Gemini API
+    GENQ_MODEL           - опционально, основная модель (по умолчанию gemini-3.5-flash-lite)
+    GENQ_FALLBACK_MODELS - опционально, через запятую - модели для переключения при
+                           исчерпании дневного лимита основной (по умолчанию
+                           "gemini-3.1-flash-lite" - RPD 500, подтверждено на реальном
+                           аккаунте; gemini-3.8-flash из цепочки исключена намеренно -
+                           у неё RPD всего 20, что слишком мало для батчевой генерации)
+    GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
+
+Возвращаемые коды:
+    0 - requests.json успешно записан целиком
+    1 - структурная ошибка (битый SRT, невалидный запрос/schema, ключ) - НЕ связана
+        с дневной квотой, требует разбора кода/данных
+    3 - дневной лимит исчерпан у всех моделей из списка (основной + fallback) - НЕ баг,
+        нужно либо подождать сброса квоты (полночь по тихоокеанскому времени), либо
+        включить billing, либо добавить ещё моделей в --fallback-models. Прогресс
+        сохранён в чекпоинте, повторный запуск продолжит с прерванного места.
 
 Зависимости:
     pip install google-genai
@@ -21,6 +35,7 @@ response_schema).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +43,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 from google import genai
@@ -38,17 +54,26 @@ from google.genai import errors as genai_errors
 # Константы
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "gemini-3.8-flash"
-# 65 536 выходных токенов - жёсткий лимит модели. При ~150-250 токенах на один
-# JSON-объект сегмента (segment_index/sites/query/fallback_query/type/is_entity/
-# entity_keywords) 100 сегментов на батч даёт разумный запас прочности.
+# gemini-3.8-flash исключена из значений по умолчанию: RPD 20/день (подтверждено на
+# реальном аккаунте - счётчик показал 21/20, т.е. даже отклонённый запрос считается
+# в счёт квоты). gemini-3.5-flash-lite даёт RPD 500 при сопоставимом качестве для
+# этой чисто структурной задачи (генерация JSON по схеме, без творческой составляющей).
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# RPD 500 у обеих Flash-Lite моделей против RPD 20 у gemini-3.8-flash - проверено
+# напрямую в панели лимитов аккаунта (не только по статьям в вебе).
+DEFAULT_FALLBACK_MODELS = ["gemini-3.1-flash-lite"]
 DEFAULT_BATCH_SIZE = 100
-# Сколько соседних сегментов ДО и ПОСЛЕ батча передавать модели только как контекст
-# (без создания для них отдельных объектов в ответе) - чтобы не терять связность
-# сюжета на границе двух батчей (например, сегмент 100/101 при батче 100).
 CONTEXT_WINDOW = 3
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
+# Практический потолок ожидания для НЕ-дневных 429 (RPM/TPM) внутри одного запуска -
+# дневную квоту (часы ожидания) всё равно нет смысла ждать в рамках одной CI-джобы.
+MAX_RATE_LIMIT_SLEEP_SECONDS = 90
+# Сколько часов считать модель "всё ещё исчерпанной сегодня" без повторной проверки -
+# грубая эвристика (RPD сбрасывается в полночь по тихоокеанскому времени, точный запас
+# в UTC зависит от сезона/DST, поэтому берём консервативные 20 часов).
+EXHAUSTED_MODEL_TTL_HOURS = 20
+CHECKPOINT_SUFFIX = ".checkpoint.json"
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
 
 SYSTEM_INSTRUCTION = """\
@@ -85,7 +110,6 @@ SYSTEM_INSTRUCTION = """\
 Отвечай строго по сегментам, помеченным как "Сегмент N" в блоке "Сегменты, для которых нужен ответ".
 """
 
-# Схема одного элемента массива (статическая - не зависит от размера батча).
 SEGMENT_ENTRY_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
@@ -113,9 +137,6 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
     ],
 )
 
-# Ответ - JSON-массив таких объектов (официально задокументированный Gemini-паттерн
-# для структурированного вывода переменной длины, в отличие от объекта с динамическими
-# ключами-номерами, который, судя по всему, и приводил к 400 INVALID_ARGUMENT).
 RESPONSE_SCHEMA = types.Schema(type=types.Type.ARRAY, items=SEGMENT_ENTRY_SCHEMA)
 
 
@@ -125,6 +146,15 @@ class Segment:
     start: str
     end: str
     text: str
+
+
+class DailyQuotaExceededError(RuntimeError):
+    """Дневной лимит запросов (RPD) для конкретной модели исчерпан - ретраить эту же
+    модель бессмысленно до сброса квоты."""
+
+    def __init__(self, model: str, message: str):
+        super().__init__(message)
+        self.model = model
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +217,14 @@ def parse_srt(path: str) -> list[Segment]:
     return segments
 
 
+def source_hash(segments: list[Segment]) -> str:
+    """Хэш содержимого сегментов - чтобы не применить чекпоинт от другого SRT-файла."""
+    h = hashlib.sha256()
+    for s in segments:
+        h.update(f"{s.index}|{s.start}|{s.end}|{s.text}".encode("utf-8"))
+    return h.hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
@@ -221,21 +259,60 @@ def build_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Вызов Gemini с ретраями
+# Разбор ошибок Gemini API (коды, quotaId, retryDelay)
 # ---------------------------------------------------------------------------
 
 _STATUS_CODE_RE = re.compile(r"\b([1-5]\d{2})\b")
+_QUOTA_ID_RE = re.compile(r"quotaId['\"]?\s*:\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_RETRY_HOURS_RE = re.compile(r"retry in\s+([\d.]+)\s*hours?\b", re.IGNORECASE)
+_RETRY_SECONDS_RE = re.compile(r"retry in\s+([\d.]+)\s*s(?:econds)?\b", re.IGNORECASE)
+_RETRY_DELAY_FIELD_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"](\d+(?:\.\d+)?)s['\"]", re.IGNORECASE)
 
 
 def _extract_status_code(e: Exception) -> Optional[int]:
-    """Пытается достать HTTP-код из исключения даже если атрибут .code недоступен
-    в текущей версии SDK - парсим из текстового представления ошибки."""
+    """Достаёт HTTP-код из исключения даже если атрибут .code недоступен в текущей
+    версии SDK - парсим из текстового представления ошибки как запасной вариант."""
     code = getattr(e, "code", None)
     if isinstance(code, int):
         return code
     m = _STATUS_CODE_RE.search(str(e))
     return int(m.group(1)) if m else None
 
+
+def _is_daily_quota_error(e: Exception) -> bool:
+    m = _QUOTA_ID_RE.search(str(e))
+    return bool(m and "perday" in m.group(1).lower())
+
+
+def _extract_retry_delay_seconds(e: Exception) -> Optional[float]:
+    s = str(e)
+    m = _RETRY_HOURS_RE.search(s)
+    if m:
+        return float(m.group(1)) * 3600
+    m = _RETRY_SECONDS_RE.search(s)
+    if m:
+        return float(m.group(1))
+    m = _RETRY_DELAY_FIELD_RE.search(s)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _hours_since(iso_ts: str) -> float:
+    try:
+        then = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return 9999.0
+    return (datetime.now(timezone.utc) - then).total_seconds() / 3600
+
+
+# ---------------------------------------------------------------------------
+# Вызов Gemini с ретраями
+# ---------------------------------------------------------------------------
 
 def call_gemini_batch(
     client: "genai.Client",
@@ -287,17 +364,37 @@ def call_gemini_batch(
 
         except genai_errors.ClientError as e:
             code = _extract_status_code(e)
+
+            if code == 429 and _is_daily_quota_error(e):
+                # Дневная квота - ретраить эту модель бессмысленно в принципе.
+                raise DailyQuotaExceededError(model, str(e)) from e
+
             if code == 429:
-                last_error = e  # лимит запросов - имеет смысл повторить
-            else:
-                # Любой другой 4xx (400/401/403/404/...) - структурная ошибка запроса
-                # или ключа, ретраить бессмысленно. Печатаем полное тело ответа API.
-                logging.error(
-                    "Клиентская ошибка Gemini API (код %s), запрос некорректен либо ключ "
-                    "невалиден - НЕ ретраю. Полный ответ API: %s",
-                    code, e,
+                # RPM/TPM - временное ограничение, ждём подсказанное API время (с потолком).
+                delay = _extract_retry_delay_seconds(e)
+                if delay is None:
+                    delay = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                capped_delay = min(delay, MAX_RATE_LIMIT_SLEEP_SECONDS)
+                logging.warning(
+                    "Батч [%s..%s]: 429 (не дневная квота) на модели %s, попытка %s/%s. "
+                    "API просит подождать %.1fs (жду %.1fs). %s",
+                    batch[0].index, batch[-1].index, model, attempt, MAX_RETRIES,
+                    delay, capped_delay, e,
                 )
-                raise
+                if attempt < MAX_RETRIES:
+                    time.sleep(capped_delay)
+                last_error = e
+                continue
+
+            # Любой другой 4xx (400/401/403/404/...) - структурная ошибка запроса или
+            # ключа, ретраить бессмысленно. Печатаем полное тело ответа API.
+            logging.error(
+                "Клиентская ошибка Gemini API (код %s), запрос некорректен либо ключ "
+                "невалиден - НЕ ретраю. Полный ответ API: %s",
+                code, e,
+            )
+            raise
+
         except genai_errors.ServerError as e:
             last_error = e  # 5xx - транзиентная ошибка сервера, есть смысл повторить
         except (json.JSONDecodeError, ValueError, KeyError) as e:
@@ -319,39 +416,100 @@ def call_gemini_batch(
     )
 
 
-def preflight_check(client: "genai.Client", model: str) -> None:
-    """Быстрая проверка перед основным циклом, чтобы отличить проблему с ключом/моделью
-    от проблемы конкретно в конструкции response_schema - и не сжигать батчи впустую."""
-    logging.info("Preflight 1/2: проверка ключа и модели (без response_schema)...")
-    try:
-        response = client.models.generate_content(model=model, contents="Ответь одним словом: OK")
-        if not response.text:
-            raise ValueError("Пустой ответ на проверочный запрос без schema")
-        logging.info("Preflight 1/2 пройден. Ответ модели: %r", response.text.strip()[:50])
-    except genai_errors.ClientError as e:
-        code = _extract_status_code(e)
-        logging.error(
-            "Preflight 1/2 НЕ пройден (код %s) - проблема в ключе/модели, а не в schema. "
-            "Полный ответ API: %s",
-            code, e,
-        )
-        raise
+def pick_working_model(
+    client: "genai.Client", candidates: list[str], exhausted_models: dict[str, str]
+) -> tuple[str, list[str]]:
+    """Пробует модели по очереди (основная + fallback), пропуская без лишнего запроса
+    те, что уже отмечены исчерпанными сегодня. Возвращает (рабочая_модель, остаток_очереди).
+    Мутирует exhausted_models при обнаружении новой исчерпанной модели."""
+    remaining = list(candidates)
+    while remaining:
+        model = remaining[0]
+        known_exhausted_at = exhausted_models.get(model)
+        if known_exhausted_at and _hours_since(known_exhausted_at) < EXHAUSTED_MODEL_TTL_HOURS:
+            logging.info(
+                "Модель %s уже отмечена исчерпанной %.1fч назад - пропускаю без запроса.",
+                model, _hours_since(known_exhausted_at),
+            )
+            remaining.pop(0)
+            continue
 
-    logging.info("Preflight 2/2: проверка response_schema на 2 синтетических сегментах...")
+        logging.info("Preflight: проверяю модель %s (без response_schema)...", model)
+        try:
+            response = client.models.generate_content(model=model, contents="Ответь одним словом: OK")
+            if not response.text:
+                raise ValueError("Пустой ответ на проверочный запрос без schema")
+            logging.info("Модель %s доступна. Ответ: %r", model, response.text.strip()[:50])
+            return model, remaining[1:]
+        except genai_errors.ClientError as e:
+            if _extract_status_code(e) == 429 and _is_daily_quota_error(e):
+                logging.warning("У модели %s уже исчерпан дневной лимит: %s", model, e)
+                exhausted_models[model] = _now_iso()
+                remaining.pop(0)
+                continue
+            logging.error(
+                "Preflight не пройден для модели %s (код %s, НЕ дневная квота) - похоже "
+                "проблема в ключе/доступе, а не в лимитах. Полный ответ: %s",
+                model, _extract_status_code(e), e,
+            )
+            raise
+
+    raise RuntimeError(
+        f"У всех моделей из списка ({', '.join(candidates)}) на сегодня исчерпан дневной лимит."
+    )
+
+
+def schema_preflight_check(client: "genai.Client", model: str) -> None:
+    """Проверка response_schema на 2 синтетических сегментах - изолирует проблемы в
+    самой схеме/конфиге от проблем с ключом/моделью (которые уже проверил pick_working_model)."""
+    logging.info("Preflight: проверяю response_schema на 2 синтетических сегментах...")
     tiny_batch = [
         Segment(index=999901, start="00:00:00,000", end="00:00:01,000", text="A man walks through a forest."),
         Segment(index=999902, start="00:00:01,000", end="00:00:02,000", text=""),
     ]
+    call_gemini_batch(client, model, tiny_batch)
+    logging.info("Preflight по response_schema пройден.")
+
+
+# ---------------------------------------------------------------------------
+# Чекпоинт (для возобновления после исчерпания дневной квоты или любого прерывания)
+# ---------------------------------------------------------------------------
+
+def checkpoint_path_for(output_path: str) -> str:
+    return output_path + CHECKPOINT_SUFFIX
+
+
+def load_checkpoint(path: str, expected_hash: str) -> tuple[dict[str, dict], dict[str, str]]:
+    if not os.path.isfile(path):
+        return {}, {}
     try:
-        call_gemini_batch(client, model, tiny_batch)
-        logging.info("Preflight 2/2 пройден - schema/config в порядке.")
-    except Exception as e:
-        logging.error(
-            "Preflight 2/2 НЕ пройден - проблема именно в response_schema/config, "
-            "не в размере батча. Ошибка: %s",
-            e,
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logging.warning("Не удалось прочитать чекпоинт %s (%s) - начинаю с нуля.", path, e)
+        return {}, {}
+
+    if data.get("source_hash") != expected_hash:
+        raise ValueError(
+            f"Чекпоинт {path} относится к ДРУГОМУ SRT-файлу (хэш содержимого не совпадает). "
+            f"Если это ожидаемо (SRT намеренно изменился) - удалите файл чекпоинта вручную "
+            f"и запустите заново. Продолжать с несовпадающим чекпоинтом небезопасно."
         )
-        raise
+    results = data.get("results", {})
+    exhausted = data.get("exhausted_models", {})
+    if results:
+        logging.info("Найден чекпоинт: %s сегментов уже обработано ранее.", len(results))
+    return results, exhausted
+
+
+def save_checkpoint(path: str, src_hash: str, results: dict, exhausted_models: dict) -> None:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"source_hash": src_hash, "results": results, "exhausted_models": exhausted_models},
+            f, ensure_ascii=False,
+        )
+    os.replace(tmp_path, path)  # атомарная замена, не оставляет битый файл при сбое на записи
 
 
 # ---------------------------------------------------------------------------
@@ -400,8 +558,13 @@ def main() -> int:
     )
     parser.add_argument("--model", default=os.environ.get("GENQ_MODEL", DEFAULT_MODEL))
     parser.add_argument(
-        "--skip-preflight", action="store_true",
-        help="Пропустить preflight-проверки перед основным циклом (не рекомендуется).",
+        "--fallback-models",
+        default=os.environ.get("GENQ_FALLBACK_MODELS", ",".join(DEFAULT_FALLBACK_MODELS)),
+        help="Через запятую - модели для переключения при исчерпании дневного лимита основной.",
+    )
+    parser.add_argument(
+        "--skip-schema-preflight", action="store_true",
+        help="Пропустить проверку response_schema на 2 синтетических сегментах (не рекомендуется).",
     )
     args = parser.parse_args()
 
@@ -421,48 +584,105 @@ def main() -> int:
         return 1
     logging.info("Распарсено сегментов: %s", len(segments))
 
+    src_hash = source_hash(segments)
+    checkpoint_path = checkpoint_path_for(args.output)
+    try:
+        results, exhausted_models = load_checkpoint(checkpoint_path, src_hash)
+    except ValueError as e:
+        logging.error("%s", e)
+        return 1
+
     client = genai.Client(api_key=api_key)
 
-    if not args.skip_preflight:
-        try:
-            preflight_check(client, args.model)
-        except Exception:
-            logging.error("Preflight-проверка не пройдена, основной цикл не запускается.")
-            return 1
+    fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
+    candidates = [args.model] + [m for m in fallback_models if m != args.model]
 
-    results: dict[str, dict] = {}
+    try:
+        current_model, fallback_queue = pick_working_model(client, candidates, exhausted_models)
+    except Exception:
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+        logging.error(
+            "Не удалось найти рабочую модель среди %s - дневной лимит исчерпан у всех. "
+            "Прогресс (%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
+            "повторно позже (лимит сбрасывается в полночь по тихоокеанскому времени) или "
+            "добавьте больше моделей в --fallback-models / GENQ_FALLBACK_MODELS.",
+            candidates, len(results), len(segments), checkpoint_path,
+        )
+        return 3
+
+    if not args.skip_schema_preflight:
+        try:
+            schema_preflight_check(client, current_model)
+        except Exception as e:
+            logging.error("Preflight по response_schema не пройден: %s. Основной цикл не запускается.", e)
+            return 1
 
     batches = make_batches(segments, args.batch_size, CONTEXT_WINDOW)
+
     for batch_num, (batch, context_before, context_after) in enumerate(batches, start=1):
-        logging.info(
-            "Батч %s/%s: сегменты %s..%s", batch_num, len(batches), batch[0].index, batch[-1].index
-        )
-        try:
-            batch_result = call_gemini_batch(client, args.model, batch, context_before, context_after)
-        except Exception as e:
-            # Жёсткое падение: тихая деградация хуже явной ошибки, которую можно сразу
-            # увидеть в логах и перезапустить job. Частичный requests.json НЕ создаётся.
-            logging.error(
-                "Батч %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
-                "requests.json НЕ будет записан.",
-                batch[0].index, batch[-1].index, MAX_RETRIES, e,
+        if all(str(s.index) in results for s in batch):
+            logging.info(
+                "Батч %s/%s (сегменты %s..%s) уже есть в чекпоинте, пропускаю.",
+                batch_num, len(batches), batch[0].index, batch[-1].index,
             )
-            return 1
+            continue
+
+        logging.info(
+            "Батч %s/%s: сегменты %s..%s (модель: %s)",
+            batch_num, len(batches), batch[0].index, batch[-1].index, current_model,
+        )
+
+        while True:
+            try:
+                batch_result = call_gemini_batch(
+                    client, current_model, batch, context_before, context_after
+                )
+                break
+            except DailyQuotaExceededError as e:
+                logging.warning(
+                    "Дневной лимит исчерпан для модели %s: %s", e.model, e
+                )
+                exhausted_models[e.model] = _now_iso()
+                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                if not fallback_queue:
+                    logging.error(
+                        "Дневной лимит исчерпан, а запасных моделей больше нет. Прогресс "
+                        "(%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
+                        "повторно позже или добавьте больше моделей в --fallback-models.",
+                        len(results), len(segments), checkpoint_path,
+                    )
+                    return 3
+                current_model = fallback_queue.pop(0)
+                logging.warning("Переключаюсь на запасную модель: %s", current_model)
+                continue
+            except Exception as e:
+                # Структурная ошибка (не квота): жёсткое падение, но чекпоинт с уже
+                # готовыми батчами остаётся на диске - requests.json не пишется.
+                logging.error(
+                    "Батч %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
+                    "requests.json НЕ будет записан (чекпоинт с %s готовыми сегментами "
+                    "сохранён в %s).",
+                    batch[0].index, batch[-1].index, MAX_RETRIES, e, len(results), checkpoint_path,
+                )
+                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                return 1
 
         results.update(batch_result)
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
 
-        progress_pct = batch_num / len(batches) * 100
+        progress_pct = len(results) / len(segments) * 100
         logging.info(
-            "Батч %s/%s готов (%.0f%%): %s сегментов обработано из %s",
+            "Батч %s/%s готов (%.0f%% сегментов): %s из %s",
             batch_num, len(batches), progress_pct, len(results), len(segments),
         )
 
-    # Финальная сортировка по числовому значению ключа (на случай, если батчи
-    # обрабатывались не строго по порядку) - защита от рассинхрона нумерации.
     ordered = {str(k): results[str(k)] for k in sorted(int(k) for k in results.keys())}
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(ordered, f, ensure_ascii=False, indent=2)
+
+    if os.path.isfile(checkpoint_path):
+        os.remove(checkpoint_path)
 
     logging.info("Готово: %s сегментов записано в %s", len(ordered), args.output)
     return 0
