@@ -29,15 +29,18 @@ search.py
           в принципе уходит) - при высокой глобальной параллельности сегментов
           семафор сам по себе не мешает 10 запросам уйти почти синхронно, а затем
           ещё 10 через долю секунды, и LOC отвечает 429 почти на всё подряд.
-          Умолч. 5.0 сек (~12 запросов/мин) - подобрано по ОФИЦИАЛЬНОЙ документации
-          LOC (https://www.loc.gov/apis/json-and-yaml/working-within-limits/):
-          лимит JSON/YAML API - 20 запросов/мин, при превышении - блокировка IP на
-          1 ЧАС (не на минуту!). 5с даёт ~40% запас против этого потолка - выбран
-          сознательно с большим запасом, а не впритык к 20/мин, т.к. сам LOC
-          предупреждает, что при высокой нагрузке на их стороне лимит может
-          эффективно снижаться и ниже заявленного, а цена ошибки - часовой бан,
-          а не просто лишняя секунда ожидания на сегмент. Если 429 всё равно
-          появляются - увеличивайте ещё (7-10 сек и выше).
+          Официальный лимит LOC (https://www.loc.gov/apis/json-and-yaml/working-within-limits/)
+          - 20 запросов/мин у JSON/YAML API, при превышении - блокировка IP на 1 ЧАС
+          (не на минуту!). Умолч. 3.2 сек (~18.75 запросов/мин, ~6% запас от потолка -
+          пересчитано по итогам реального прогона на 126 сегментах, где именно этот
+          интервал оказался доминирующим узким местом всего скрипта: 104 из 126
+          сегментов трогали LOC, а при старом значении 5.0с/~12 запросов/мин, ~40%
+          запас, это одно давало ~520с из ~620с общего времени прогона). 3.2с - намеренно
+          НЕ математически ровно 5% запаса (=3.158с), а округлено В БОЛЬШУЮ сторону
+          (~6.25% запаса) - чтобы дрожание таймингов asyncio/event loop не утащило
+          фактическую частоту выше 19 запросов/мин и не спровоцировало тот самый часовой
+          бан, который вся эта конструкция должна предотвращать. Если 429 всё равно
+          появляются - увеличивайте (сначала обратно к 5с, если совсем плохо - выше).
     SEARCH_GLOBAL_CONCURRENCY  - сколько сегментов обрабатывать параллельно (умолч. 40)
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
@@ -241,7 +244,14 @@ GLOBAL_SEGMENT_CONCURRENCY = int(os.environ.get("SEARCH_GLOBAL_CONCURRENCY", 40)
 # 20 запросов/мин у JSON/YAML API, час блокировки при превышении), с большим запасом
 # (5с = 12 запросов/мин, ~40% ниже потолка) - цена ошибки высокая (часовой бан), поэтому
 # лучше перестраховаться, чем экономить секунды на сегмент.
-LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 5.0))
+# Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье"/"Четвёртое"
+# допущение. Официальный лимит LOC - 20 запросов/мин у JSON/YAML API, час блокировки
+# при превышении (working-within-limits). Умолч. 3.2с (~18.75/мин, ~6% запас от потолка,
+# намеренно округлено В БОЛЬШУЮ сторону от математических 3.158с=5% запаса - см. подробное
+# обоснование выше в SEARCH_LOC_MIN_INTERVAL_SECONDS) - пересчитано с прежних 5.0с/~40%
+# запаса по факту: в реальном прогоне этот интервал оказался доминирующим узким местом
+# всего скрипта (104/126 сегментов трогали LOC), 5.0с был неоправданно консервативен.
+LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 3.2))
 
 PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -477,6 +487,17 @@ def log_site_stats_summary(site_stats: dict) -> None:
 # Глобальный rate-limiter (минимальный интервал между запросами)
 # ---------------------------------------------------------------------------
 
+# Точечные DEBUG-логгеры для тайминга (тот же принцип, что и PREVIEW_DEBUG_LOGGER выше по
+# файлу - отдельный логгер со своим уровнем DEBUG, не завязанный на глобальный уровень root,
+# который остаётся INFO). Без этого logging.debug(...) внутри RateLimiter.wait_turn/ClipScorer
+# просто не печатался бы вообще - что и произошло в первом прогоне с этим тайммингом (см.
+# обсуждение).
+RATE_LIMITER_DEBUG_LOGGER = logging.getLogger("search.rate_limiter")
+RATE_LIMITER_DEBUG_LOGGER.setLevel(logging.DEBUG)
+CLIP_TIMING_DEBUG_LOGGER = logging.getLogger("search.clip_timing")
+CLIP_TIMING_DEBUG_LOGGER.setLevel(logging.DEBUG)
+
+
 class RateLimiter:
     """Гарантирует минимальный интервал между НАЧАЛОМ двух последовательных запросов,
     глобально на весь запуск - в отличие от asyncio.Semaphore, который ограничивает
@@ -512,7 +533,7 @@ class RateLimiter:
                     wait_start = time.monotonic()
                     await asyncio.sleep(remaining)
                     actual_wait = time.monotonic() - wait_start
-                    logging.debug(
+                    RATE_LIMITER_DEBUG_LOGGER.debug(
                         "RateLimiter.wait_turn: реально ждал %.3fs (запрошено %.3fs, "
                         "min_interval=%.2fs)", actual_wait, remaining, self.min_interval,
                     )
@@ -623,7 +644,7 @@ class ClipScorer:
             return await loop.run_in_executor(None, self._score_sync, image_bytes, text)
         finally:
             elapsed = time.monotonic() - start
-            logging.debug("CLIP-инференс (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
+            CLIP_TIMING_DEBUG_LOGGER.debug("CLIP-инференс (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
 
     def _score_sync(self, image_bytes: bytes, text: str) -> float:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -1055,6 +1076,16 @@ PREVIEW_DEBUG_LOGGER.setLevel(logging.DEBUG)
 
 async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     if not cand.preview_url:
+        # Раньше этот путь ничего не логировал - выглядело как "0 ушло в CLIP", неотличимо
+        # от HTTP-провала ниже, хотя причина другая: сайт вообще не дал URL превью в самом
+        # ответе поиска (см. search_pixabay/search_wikimedia/etc.) - до сети дело не доходит.
+        # Пиксабай в реальном прогоне ни разу не дошёл до HTTP-попытки ниже - это как раз
+        # тот случай, который эта строка теперь делает видимым.
+        PREVIEW_DEBUG_LOGGER.debug(
+            "Превью %s/%s: у кандидата нет preview_url вообще (текст кандидата: %r) - "
+            "запрос в сеть не уходит, поиск на своей стороне не вернул URL превью.",
+            cand.site, cand.cand_id, (cand.text or "")[:120],
+        )
         return None
 
     # См. "Седьмое уточнение" в докстринге модуля: без Referer (часто и Origin) CDN
@@ -1063,6 +1094,15 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     # кандидата (страница файла на Commons) - он надёжнее общего домена, т.к. некоторые
     # CDN сверяют не только домен, но и правдоподобие самой страницы-источника.
     headers = dict(PREVIEW_HEADERS)
+    if cand.site == "wikimedia":
+        # ПОДТВЕРЖДЕНО DEBUG-логом реального прогона: CDN превью Wikimedia
+        # (thumb./upload.wikimedia.org) отдаёт 403 "Please respect our robot policy"
+        # именно на браузерный User-Agent из PREVIEW_HEADERS - Wikimedia требует
+        # описательный UA с контактом на ЛЮБОМ запросе, не только к API (см. "Седьмое
+        # уточнение" в докстринге модуля - этот хвост там был явно не закрыт). Для
+        # остальных сайтов браузерный UA наоборот нужен (обход хотлинк-защиты CDN),
+        # поэтому переопределяем только для wikimedia, не трогая PREVIEW_HEADERS глобально.
+        headers["User-Agent"] = SESSION_USER_AGENT
     referer = cand.page_url if (cand.site == "wikimedia" and cand.page_url) else PREVIEW_REFERERS.get(cand.site)
     if referer:
         headers["Referer"] = referer
