@@ -1,11 +1,25 @@
 import os
 import re
 import json
+import sys
 import time
 import urllib.parse
 from urllib.parse import urlparse
 import subprocess
 from curl_cffi import requests as cffi_requests
+
+# Живой прогресс в CI-логе: без этого stdout буферизуется блоками (не построчно, т.к.
+# он не привязан к терминалу в GitHub Actions), и все print() из скрипта, скачивающего
+# десятки файлов последовательно, могут появиться в логе одним куском в конце шага или
+# с большой задержкой - выглядит как "зависло", хотя скрипт всё это время реально
+# работал. sys.stdout.reconfigure(line_buffering=True) переключает стандартный вывод на
+# построчный флаш немедленно при импорте модуля (до первого print), не заставляя
+# добавлять flush=True в каждый print() по всему файлу. PYTHONUNBUFFERED=1 (см.
+# download.yml, шаг "Run download script with input") решает ту же задачу ещё раньше -
+# полностью отключает буферизацию на уровне интерпретатора, ДО того как этот код вообще
+# успевает выполниться - оставлено здесь как подстраховка, если скрипт когда-нибудь
+# запустят без этой переменной окружения (например локально).
+sys.stdout.reconfigure(line_buffering=True)
 
 OUTPUT_DIR = "downloaded_media"
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
