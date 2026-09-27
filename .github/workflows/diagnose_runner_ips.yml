@@ -1,0 +1,108 @@
+name: Diagnose Runner IPs
+
+# Разовый диагностический workflow, не часть основного пайплайна.
+# Запускается вручную (Actions -> Diagnose Runner IPs -> Run workflow) 2-3 раза
+# отдельными прогонами - см. обоснование ниже. Цель: проверить допущение, на
+# котором держится вся выгода от шардинга для LOC ("параллельные matrix-job'ы
+# GitHub Actions получают разные исходящие IP") ДО того, как тратить время на
+# matrix/merge-логику. LOC банит по IP на час при превышении 20 запросов/мин -
+# если IP у раннеров совпадают/пересекаются, шардинг просто соберёт несколько
+# параллельных процессов, дерущихся за один и тот же лимит, без выигрыша.
+#
+# check_ip_a и check_ip_b НЕ связаны через needs - GitHub Actions запускает их
+# одновременно по умолчанию, это и даёт "два параллельных job'а", а не имитацию.
+#
+# ВАЖНО: одного запуска недостаточно для вывода. IP-пулы облачных провайдеров
+# у hosted-раннеров не гарантированно стабильны между запусками - нужно
+# повторить весь workflow 2-3 раза (Run workflow) в разное время и посмотреть,
+# держится ли результат (все "разные" / все "одинаковые"), а не полагаться на
+# один прогон, который может оказаться случайным совпадением или несовпадением.
+on:
+  workflow_dispatch:
+
+jobs:
+  check_ip_a:
+    runs-on: ubuntu-latest
+    outputs:
+      ip_ipify: ${{ steps.get_ip.outputs.ip_ipify }}
+      ip_alt: ${{ steps.get_ip.outputs.ip_alt }}
+    steps:
+      - id: get_ip
+        run: |
+          IP_IPIFY=$(curl -s --max-time 10 https://api.ipify.org || echo "ERROR")
+          IP_ALT=$(curl -s --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]' || echo "ERROR")
+          HOSTNAME=$(hostname)
+          echo "Раннер A: ipify=$IP_IPIFY, amazonaws=$IP_ALT, hostname=$HOSTNAME"
+          echo "ip_ipify=$IP_IPIFY" >> "$GITHUB_OUTPUT"
+          echo "ip_alt=$IP_ALT" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Раннер A"
+            echo "- ipify: \`$IP_IPIFY\`"
+            echo "- amazonaws: \`$IP_ALT\`"
+            echo "- hostname: \`$HOSTNAME\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  check_ip_b:
+    runs-on: ubuntu-latest
+    outputs:
+      ip_ipify: ${{ steps.get_ip.outputs.ip_ipify }}
+      ip_alt: ${{ steps.get_ip.outputs.ip_alt }}
+    steps:
+      - id: get_ip
+        run: |
+          IP_IPIFY=$(curl -s --max-time 10 https://api.ipify.org || echo "ERROR")
+          IP_ALT=$(curl -s --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]' || echo "ERROR")
+          HOSTNAME=$(hostname)
+          echo "Раннер B: ipify=$IP_IPIFY, amazonaws=$IP_ALT, hostname=$HOSTNAME"
+          echo "ip_ipify=$IP_IPIFY" >> "$GITHUB_OUTPUT"
+          echo "ip_alt=$IP_ALT" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Раннер B"
+            echo "- ipify: \`$IP_IPIFY\`"
+            echo "- amazonaws: \`$IP_ALT\`"
+            echo "- hostname: \`$HOSTNAME\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  compare:
+    needs: [check_ip_a, check_ip_b]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Сравнить IP раннеров A и B
+        run: |
+          A_IPIFY="${{ needs.check_ip_a.outputs.ip_ipify }}"
+          B_IPIFY="${{ needs.check_ip_b.outputs.ip_ipify }}"
+          A_ALT="${{ needs.check_ip_a.outputs.ip_alt }}"
+          B_ALT="${{ needs.check_ip_b.outputs.ip_alt }}"
+
+          echo "A: ipify=$A_IPIFY amazonaws=$A_ALT"
+          echo "B: ipify=$B_IPIFY amazonaws=$B_ALT"
+
+          {
+            echo "## Итог сравнения (этот прогон)"
+            echo ""
+            echo "| Источник | Раннер A | Раннер B | Совпадают? |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          SAME_ANY=0
+          if [ "$A_IPIFY" = "$B_IPIFY" ]; then
+            echo "| ipify | \`$A_IPIFY\` | \`$B_IPIFY\` | ⚠️ ДА |" >> "$GITHUB_STEP_SUMMARY"
+            SAME_ANY=1
+          else
+            echo "| ipify | \`$A_IPIFY\` | \`$B_IPIFY\` | ✅ нет |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$A_ALT" = "$B_ALT" ]; then
+            echo "| amazonaws | \`$A_ALT\` | \`$B_ALT\` | ⚠️ ДА |" >> "$GITHUB_STEP_SUMMARY"
+            SAME_ANY=1
+          else
+            echo "| amazonaws | \`$A_ALT\` | \`$B_ALT\` | ✅ нет |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SAME_ANY" = "1" ]; then
+            echo "**Результат этого прогона: IP совпали хотя бы по одному источнику.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Результат этого прогона: IP разные по обоим источникам.**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "⚠️ Один прогон ничего не доказывает - повтори workflow ещё 1-2 раза (Actions -> Diagnose Runner IPs -> Run workflow) в разное время и сравни Step Summary всех прогонов между собой. Вывод про IP-допущение делай только если результат стабилен во всех 2-3 запусках, а не по одному." >> "$GITHUB_STEP_SUMMARY"
