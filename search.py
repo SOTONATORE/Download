@@ -119,6 +119,17 @@ PREVIEW_HEADERS = {
     "Accept": "*/*",
 }
 
+# Wikimedia (и вообще большинство API) с некоторых пор жёстко требуют внятный
+# User-Agent с указанием, что это за инструмент и как с ним связаться - иначе 403
+# ("Please set a user-agent and respect our robot policy"). Это НЕ временная ошибка,
+# ретраить её бессмысленно - см. правку в http_get_json ниже. Подставьте сюда свой
+# реальный контакт/ссылку на репозиторий - Wikimedia может ужесточить проверку и на
+# осмысленность значения, не только на его наличие.
+SESSION_USER_AGENT = (
+    "MediaSearchPipeline/1.0 "
+    "(https://github.com/SOTONATORE/Download; contact: fordlababit@gmail.com)"
+)
+
 # Белый список LicenseShortName для Wikimedia Commons (регистронезависимо, по префиксу).
 # "pd" матчится только как отдельное "слово" (PD, PD-old, PD-US, ...), чтобы не словить
 # случайные ложные совпадения.
@@ -314,12 +325,21 @@ async def http_get_json(
                         last_error = RuntimeError("429 Too Many Requests")
                         continue
 
-                    if status in (401, 403) and site in ("pexels", "pixabay"):
+                    if status in (401, 403):
                         text = await resp.text()
-                        raise FatalConfigError(
-                            f"{site}: HTTP {status} - похоже на невалидный API-ключ. "
-                            f"Тело ответа: {text[:300]}"
+                        if site in ("pexels", "pixabay"):
+                            raise FatalConfigError(
+                                f"{site}: HTTP {status} - похоже на невалидный API-ключ. "
+                                f"Тело ответа: {text[:300]}"
+                            )
+                        # Для остальных сайтов 401/403 - НЕ транзиентная ошибка (неверный
+                        # User-Agent, política робота и т.п.) - ретраить бессмысленно,
+                        # отдаём пустой результат сразу, чтобы не жечь минуты на 5 попыток.
+                        logging.error(
+                            "%s: HTTP %s - не ретраю (не временная ошибка). Тело: %s",
+                            site, status, text[:300],
                         )
+                        return None
 
                     if status >= 500:
                         delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
@@ -835,7 +855,9 @@ async def amain(args: argparse.Namespace) -> int:
         return 1
 
     connector = aiohttp.TCPConnector(limit=0)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession(
+        connector=connector, headers={"User-Agent": SESSION_USER_AGENT},
+    ) as session:
         ctx = Context(
             session=session,
             pexels_api_key=pexels_key,
