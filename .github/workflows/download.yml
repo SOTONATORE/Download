@@ -170,6 +170,10 @@ jobs:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+        # Живой прогресс в логе шага, без блочной буферизации stdout (см. комментарий
+        # в download.py рядом с sys.stdout.reconfigure - это то же самое, но раньше:
+        # отключает буферизацию ДО того, как интерпретатор вообще начал выполнять код).
+        PYTHONUNBUFFERED: "1"
       run: python download.py
 
     # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
@@ -243,3 +247,4 @@ jobs:
       run: |
         echo "Релиз со всеми файлами:"
         echo "https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}"
+        
