@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       srt_path:
-        description: 'Путь к SRT-файлу в репозитории (для генерации поисковых запросов через Gemini). Оставь пустым, если сейчас не нужно.'
+        description: 'Путь к SRT-файлу в репозитории (для генерации поисковых запросов через Gemini, а затем автоматического подбора медиа через search.py). Оставь пустым, если сейчас не нужно.'
         required: false
         type: string
       links:
-        description: 'Вставь СЮДА весь объединенный список ссылок от Клода. Оставь пустым, если сейчас не нужно.'
+        description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно.'
         required: false
         type: string
 
@@ -16,10 +16,8 @@ permissions:
 
 jobs:
   # -------------------------------------------------------------------------
-  # Шаг 1 (новый): SRT -> requests.json через Gemini (structured output)
+  # Шаг 1: SRT -> requests.json через Gemini (structured output).
   # Запускается, только если при ручном триггере заполнено поле srt_path.
-  # Результат пока просто публикуется как artifact запуска - до появления
-  # search.py автоматической стыковки с job'ом download нет.
   # -------------------------------------------------------------------------
   generate_queries:
     if: ${{ inputs.srt_path != '' }}
@@ -49,11 +47,81 @@ jobs:
         retention-days: 14
 
   # -------------------------------------------------------------------------
-  # Шаг 2 (без изменений): готовые ссылки -> скачивание -> GitHub Release.
-  # Запускается, только если при ручном триггере заполнено поле links.
+  # Шаг 2 (новый): requests.json -> links.txt/missing.txt через search.py.
+  # Запускается автоматически следом за generate_queries (тот же ручной триггер
+  # через srt_path), отдельным job'ом - чтобы CLIP/torch ставились и кэшировались
+  # только тогда, когда реально нужны.
+  # -------------------------------------------------------------------------
+  search_media:
+    needs: generate_queries
+    if: ${{ !cancelled() && inputs.srt_path != '' && needs.generate_queries.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Download requests.json artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: requests-json
+
+    # Кэш весов CLIP (open_clip тянет их через huggingface_hub) - без кэша каждый
+    # запуск заново качает ~350МБ для ViT-B-32. Ключ включает модель/pretrained,
+    # чтобы смена SEARCH_CLIP_MODEL/_PRETRAINED не подсунула чужой кэш.
+    - name: Cache CLIP weights
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/huggingface
+          ~/.cache/clip
+          ~/.cache/torch
+        key: clip-weights-${{ runner.os }}-${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32' }}-${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
+
+    - name: Install search deps (CPU-only torch first, чтобы не тянуть CUDA-сборку)
+      run: |
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install aiohttp pillow open_clip_torch
+
+    - name: Run search.py
+      env:
+        PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      run: python search.py --input requests.json --links-output links.txt --missing-output missing.txt
+
+    - name: Show missing segments summary
+      run: |
+        echo "## Пропущенные сегменты (ничего не найдено)" >> "$GITHUB_STEP_SUMMARY"
+        if [ -s missing.txt ]; then
+          echo "Количество: $(wc -l < missing.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat missing.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "Нет пропущенных сегментов." >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Upload links.txt / missing.txt as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: search-links
+        path: |
+          links.txt
+          missing.txt
+        retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # Шаг 3: готовые ссылки -> скачивание -> GitHub Release.
+  # Источник ссылок: либо артефакт от search_media (когда запуск шёл через
+  # srt_path), либо ручной ввод inputs.links (старый сценарий, без изменений).
   # -------------------------------------------------------------------------
   download:
-    if: ${{ inputs.links != '' }}
+    needs: search_media
+    if: ${{ !cancelled() && (inputs.links != '' || needs.search_media.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -68,9 +136,28 @@ jobs:
       run: |
         pip install -U "yt-dlp[default,curl-cffi]" cloudscraper
 
+    - name: Download search-links artifact (если ссылки пришли из search.py)
+      if: needs.search_media.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: search-links
+
+    - name: Load INPUT_LINKS from search.py output
+      if: needs.search_media.result == 'success'
+      run: |
+        echo "INPUT_LINKS<<EOF" >> "$GITHUB_ENV"
+        cat links.txt >> "$GITHUB_ENV"
+        echo "EOF" >> "$GITHUB_ENV"
+
+    - name: Load INPUT_LINKS from manual input (старый сценарий)
+      if: needs.search_media.result != 'success'
+      run: |
+        echo "INPUT_LINKS<<EOF" >> "$GITHUB_ENV"
+        echo "${{ inputs.links }}" >> "$GITHUB_ENV"
+        echo "EOF" >> "$GITHUB_ENV"
+
     - name: Run download script with input
       env:
-        INPUT_LINKS: ${{ inputs.links }}
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
@@ -84,13 +171,11 @@ jobs:
         TAG="media-${{ github.run_id }}"
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-        # Создаём релиз (пустой, файлы добавим отдельным шагом)
         gh release create "$TAG" \
           --repo "${{ github.repository }}" \
           --title "Медиафайлы от $(date -u +'%Y-%m-%d %H:%M UTC')" \
           --notes "Автоматическая публикация из workflow. Файлов: $(ls downloaded_media | wc -l)"
 
-        # Загружаем все скачанные файлы как отдельные вложения релиза
         gh release upload "$TAG" downloaded_media/* \
           --repo "${{ github.repository }}" \
           --clobber
@@ -100,14 +185,14 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG="${{ steps.release.outputs.tag }}"
-        > links.txt
+        > release_links.txt
         for f in downloaded_media/*; do
           filename=$(basename "$f")
-          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$filename" >> links.txt
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$filename" >> release_links.txt
         done
-        cat links.txt
+        cat release_links.txt
 
-        gh release upload "$TAG" links.txt \
+        gh release upload "$TAG" release_links.txt \
           --repo "${{ github.repository }}" \
           --clobber
 
