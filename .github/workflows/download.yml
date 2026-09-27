@@ -47,7 +47,7 @@ jobs:
         retention-days: 14
 
   # -------------------------------------------------------------------------
-  # Шаг 2 (новый): requests.json -> links.txt/missing.txt через search.py.
+  # Шаг 2: requests.json -> links.txt/missing.txt через search.py.
   # Запускается автоматически следом за generate_queries (тот же ручной триггер
   # через srt_path), отдельным job'ом - чтобы CLIP/torch ставились и кэшировались
   # только тогда, когда реально нужны.
@@ -118,6 +118,15 @@ jobs:
   # Шаг 3: готовые ссылки -> скачивание -> GitHub Release.
   # Источник ссылок: либо артефакт от search_media (когда запуск шёл через
   # srt_path), либо ручной ввод inputs.links (старый сценарий, без изменений).
+  #
+  # links.txt используется ЗДЕСЬ ТОЛЬКО как временный вход для download.py (через
+  # INPUT_LINKS) - в релиз он не публикуется и артефактом до конца прогона не
+  # является (это осознанно: он не нужен никому после того, как файлы скачаны).
+  # Наружу (в релиз) идут missing.txt - объединённый список номеров, для которых
+  # так ничего и не удалось получить: те, что не нашёл search.py, ПЛЮС те, что
+  # search.py нашёл, но download.py не смог скачать (см. шаг "Merge failed
+  # downloads into missing.txt" и download_failed.txt в download.py) - и,
+  # отдельно, download_failed.txt (только если реально что-то не скачалось).
   # -------------------------------------------------------------------------
   download:
     needs: search_media
@@ -163,6 +172,28 @@ jobs:
         COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
       run: python download.py
 
+    # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
+    # (см. write_failed_report в download.py). Здесь их номера подмешиваются в
+    # missing.txt - если search_media не запускался (сценарий с ручными ссылками),
+    # missing.txt ещё не существует, поэтому сначала touch, чтобы шаг не падал.
+    - name: Merge failed downloads into missing.txt
+      run: |
+        touch missing.txt
+        if [ -s download_failed.txt ]; then
+          cut -d: -f1 download_failed.txt >> missing.txt
+        fi
+        sort -n -u -o missing.txt missing.txt
+
+    - name: Show download failures summary
+      run: |
+        if [ -s download_failed.txt ]; then
+          echo "## Ошибки скачивания (номер найден поиском, но файл не скачался)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Количество: $(wc -l < download_failed.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat download_failed.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        fi
+
     - name: Publish files as a GitHub Release
       id: release
       env:
@@ -177,6 +208,18 @@ jobs:
           --notes "Автоматическая публикация из workflow. Файлов: $(ls downloaded_media | wc -l)"
 
         gh release upload "$TAG" downloaded_media/* \
+          --repo "${{ github.repository }}" \
+          --clobber
+
+        # missing.txt (уже объединённый с провалами download.py) прикладываем всегда -
+        # даже пустой файл полезен как явное подтверждение "пропущенных нет". А вот
+        # download_failed.txt - только если он реально не пуст, чтобы не тащить в
+        # релиз шум, когда скачивание прошло без единого сбоя.
+        UPLOAD_EXTRA="missing.txt"
+        if [ -s download_failed.txt ]; then
+          UPLOAD_EXTRA="$UPLOAD_EXTRA download_failed.txt"
+        fi
+        gh release upload "$TAG" $UPLOAD_EXTRA \
           --repo "${{ github.repository }}" \
           --clobber
 
