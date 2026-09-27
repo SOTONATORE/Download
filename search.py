@@ -175,6 +175,7 @@ import os
 import random
 import re
 import sys
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
@@ -459,8 +460,9 @@ def log_site_stats_summary(site_stats: dict) -> None:
         "лиценз.=0 при raw>0 -> все кандидаты отсеяны лицензионным фильтром. "
         "keyword=0 при лиценз.>0 -> entity_keywords/is_entity слишком узкие или не совпадают "
         "с текстом кандидатов. нет_прев.=raw (или близко) -> превью не скачиваются (сайт "
-        "блокирует PREVIEW_HEADERS/Referer/хотлинкинг - включите DEBUG-логирование, чтобы "
-        "увидеть точный статус-код и тело ответа по каждому провалу). scored>0, но "
+        "блокирует PREVIEW_HEADERS/Referer/хотлинкинг - точный статус-код и тело ответа по "
+        "каждому провалу теперь всегда пишется отдельным логгером 'search.fetch_preview_bytes' "
+        "на уровне DEBUG, см. его вывод выше). scored>0, но "
         "avg/best низкие (ниже SIM_MIN_THRESHOLD) -> CLIP отрабатывает, но ничего не "
         "совпадает по смыслу - либо сам CLIP настроен неверно (см. 'Пятое уточнение' в "
         "докстринге модуля про QuickGELU), либо запросы от generate_queries.py слишком "
@@ -502,7 +504,18 @@ class RateLimiter:
                 elapsed = now - self._last_start_ts
                 remaining = self.min_interval - elapsed
                 if remaining > 0:
+                    # Явный тайминг ожидания в rate-limiter'е (см. договорённость по итогам
+                    # предыдущего прогона) - те же соображения, что и у тайминга CLIP выше:
+                    # если каскад на LOC уйдёт после фикса превью (пункт 1), нагрузка на LOC
+                    # может кардинально измениться, и текущие цифры "сколько реально ждём
+                    # здесь" нужны как точка отсчёта ДО, а не только после этого изменения.
+                    wait_start = time.monotonic()
                     await asyncio.sleep(remaining)
+                    actual_wait = time.monotonic() - wait_start
+                    logging.debug(
+                        "RateLimiter.wait_turn: реально ждал %.3fs (запрошено %.3fs, "
+                        "min_interval=%.2fs)", actual_wait, remaining, self.min_interval,
+                    )
                     now = loop.time()
             self._last_start_ts = now
 
@@ -600,7 +613,17 @@ class ClipScorer:
     async def score(self, image_bytes: bytes, text: str) -> float:
         await self.ensure_loaded()
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._score_sync, image_bytes, text)
+        # Явный тайминг CLIP-инференса (см. договорённость по итогам предыдущего прогона):
+        # пока не подтверждено, что каскад на LOC ушёл после фикса превью (см. пункт 1 этой
+        # правки), непонятно, где реально узкое место - в CLIP (CPU-bound, SEARCH_CLIP_CONCURRENCY
+        # ограничивает параллелизм) или в самом ожидании превью/сети. Замер отдельно от общего
+        # времени сегмента, чтобы не гадать, а увидеть цифру напрямую.
+        start = time.monotonic()
+        try:
+            return await loop.run_in_executor(None, self._score_sync, image_bytes, text)
+        finally:
+            elapsed = time.monotonic() - start
+            logging.debug("CLIP-инференс (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
 
     def _score_sync(self, image_bytes: bytes, text: str) -> float:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -1017,6 +1040,19 @@ SITE_SEARCH_FUNCS: dict = {
 # Превью + CLIP-скоринг + финализация URL
 # ---------------------------------------------------------------------------
 
+# Точечный DEBUG-логгер для fetch_preview_bytes (не глобальный root-level DEBUG,
+# чтобы не залить лог всем подряд - CLIP/aiohttp и т.п. тоже используют logging).
+# Дочерний логгер со своим уровнем DEBUG эмитит записи независимо от уровня root-
+# логгера (root задаёт уровень ТОЛЬКО себе через basicConfig(level=logging.INFO)),
+# а сам StreamHandler, который повесил basicConfig на root, уровня не фильтрует
+# (NOTSET) - записи от этого логгера всё равно долетят до консоли/CI-лога. Нужно
+# сейчас, чтобы наконец увидеть реальный статус-код/тело ответа wikimedia/pixabay
+# при провале превью (см. "Седьмое уточнение" в докстринге модуля) - это блокирует
+# всё остальное в диагностике каскада на LOC.
+PREVIEW_DEBUG_LOGGER = logging.getLogger("search.fetch_preview_bytes")
+PREVIEW_DEBUG_LOGGER.setLevel(logging.DEBUG)
+
+
 async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     if not cand.preview_url:
         return None
@@ -1048,7 +1084,7 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
                         last_body_preview = (await resp.text())[:200]
                     except Exception:
                         last_body_preview = "<не текст/не удалось прочитать тело>"
-                    logging.debug(
+                    PREVIEW_DEBUG_LOGGER.debug(
                         "Превью %s/%s: HTTP %s при GET %s (попытка %s/2, Referer=%s). Тело: %s",
                         cand.site, cand.cand_id, resp.status, cand.preview_url,
                         attempt, referer, last_body_preview,
@@ -1056,14 +1092,14 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
                     return None
                 return await resp.read()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logging.debug(
+            PREVIEW_DEBUG_LOGGER.debug(
                 "Превью %s/%s: сетевая ошибка (попытка %s/2) при GET %s: %s",
                 cand.site, cand.cand_id, attempt, cand.preview_url, e,
             )
             await asyncio.sleep(1.0 * attempt)
 
     if last_status is not None:
-        logging.debug(
+        PREVIEW_DEBUG_LOGGER.debug(
             "Превью %s/%s: не удалось скачать после всех попыток, последний статус %s, тело: %s",
             cand.site, cand.cand_id, last_status, last_body_preview,
         )
@@ -1077,6 +1113,16 @@ async def score_candidates(
     key = stats_key or (candidates[0].site if candidates else "unknown")
     stats = ctx.site_stats.setdefault(key, SiteStats())
 
+    # ВАЖНО: stats.sent_to_clip_total - это НАКОПИТЕЛЬНЫЙ счётчик на весь сайт (site_stats
+    # хранится по ключу "сайт", а не "сайт+сегмент" - см. log_site_stats_summary), он растёт
+    # по мере обработки ВСЕХ сегментов этого сайта. Раньше он же использовался ниже в
+    # per-сегментном info-логе ("Сегмент %s/%s: %s кандидатов ушло в CLIP...") - из-за чего
+    # там печаталось общее число по сайту на момент вызова, а не число кандидатов ИМЕННО
+    # этого сегмента, что вводило в заблуждение при чтении лога по ходу прогона. Заведён
+    # отдельный локальный счётчик для текущего вызова (текущего сегмента) - глобальный
+    # stats.sent_to_clip_total по-прежнему копится как было, для итоговой сводки по сайту.
+    sent_to_clip_this_segment = 0
+
     scored: list[Candidate] = []
     for cand in candidates:
         preview_bytes = await fetch_preview_bytes(ctx, cand)
@@ -1085,6 +1131,7 @@ async def score_candidates(
             stats.preview_missing_total += 1
             continue
         stats.sent_to_clip_total += 1
+        sent_to_clip_this_segment += 1
         async with ctx.clip_semaphore:
             try:
                 sim = await ctx.clip.score(preview_bytes, query_text)
@@ -1099,18 +1146,19 @@ async def score_candidates(
     scored.sort(key=lambda c: c.similarity, reverse=True)
 
     if candidates and not scored:
-        if stats.sent_to_clip_total == 0:
+        if sent_to_clip_this_segment == 0:
             logging.info(
                 "Сегмент %s/%s: %s кандидатов, но ни для одного не скачалось превью "
-                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью (см. DEBUG-лог "
-                "с точным статусом/телом ответа выше), а не проблема со смыслом/CLIP.",
+                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью (см. лог "
+                "'search.fetch_preview_bytes' на уровне DEBUG с точным статусом/телом "
+                "ответа выше), а не проблема со смыслом/CLIP.",
                 seg_index, key, len(candidates),
             )
         else:
             logging.info(
                 "Сегмент %s/%s: %s кандидатов ушло в CLIP, ни один не набрал >= %.2f "
                 "(лучший скор в этом сегменте см. в общей сводке по сайту в конце лога).",
-                seg_index, key, stats.sent_to_clip_total, SIM_MIN_THRESHOLD,
+                seg_index, key, sent_to_clip_this_segment, SIM_MIN_THRESHOLD,
             )
     return scored
 
