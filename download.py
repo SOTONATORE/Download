@@ -3,9 +3,11 @@ import re
 import json
 import sys
 import time
+import threading
 import urllib.parse
 from urllib.parse import urlparse
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests as cffi_requests
 
 # Живой прогресс в CI-логе: без этого stdout буферизуется блоками (не построчно, т.к.
@@ -43,11 +45,17 @@ BROWSER_HEADERS = {
 # ---------------------------------------------------------------------------
 
 FAILED_ITEMS: list[str] = []
+_failed_items_lock = threading.Lock()  # раунд 5: FAILED_ITEMS теперь пишут несколько
+                                        # потоков одновременно (list.append сам по себе
+                                        # атомарен под GIL, но лок оставлен явно - дешевле
+                                        # и понятнее, чем полагаться на детали реализации
+                                        # CPython, если код когда-нибудь перенесут).
 
 
 def fail(number: int, message: str) -> None:
     print(f"[ОШИБКА] {message}")
-    FAILED_ITEMS.append(f"{number}: {message}")
+    with _failed_items_lock:
+        FAILED_ITEMS.append(f"{number}: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +84,81 @@ LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_MIN_INTERVAL_SECON
 # поэтому ретраи на сетевые сбои/таймауты по-прежнему сериализуются этим же интервалом,
 # просто сам интервал теперь короче.
 LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
+
+# ---------------------------------------------------------------------------
+# Раунд 5 - конкурентность для НЕ-LOC скачиваний.
+#
+# По реальному прогону на 126 файлах: LOC (28/125 файлов) - avg 10.74с между
+# скачиваниями (rate-limiter 3.2с + сама медленная сеть LOC), а ВСЁ ОСТАЛЬНОЕ
+# (97/125: wikimedia avg 2.16с, pexels/pixabay avg 0.43с, видео через yt-dlp
+# avg 0.80с) шло СТРОГО последовательно, хотя каждый сайт по отдельности явно
+# выдерживает параллельные запросы. Раньше это был чистый sequential-цикл без
+# единого потока/корутины - LOC был не единственной причиной долгого прогона,
+# просто маскировал остальное.
+#
+# Решение: LOC остаётся полностью последовательным (не трогаем его логику
+# вообще - она и так работает и завязана на глобальный rate-limiter), а всё
+# остальное разбирается пулом потоков ThreadPoolExecutor, который запускается
+# ОДНОВРЕМЕННО с последовательным циклом по LOC (не до и не после), чтобы время
+# LOC и время всего остального перекрывались, а не суммировались - см. main().
+#
+# Внутри пула нужны ДВА отдельных thread-safe ограничителя, иначе параллелизм
+# сам создаст новые проблемы:
+#   1) Wikimedia - раньше здесь был точечный time.sleep(1.5) ПЕРЕД каждым
+#      запросом ("чтобы сервера Викимедии не блочили по 429"), рассчитанный на
+#      строго последовательный вызов. При параллельных потоках он ничего не
+#      гарантирует: N потоков проснутся почти одновременно и всё равно ударят
+#      в Wikimedia все разом. Заменён на WikimediaRateLimiter - тот же принцип,
+#      что и RateLimiter в search.py (минимальный интервал между СТАРТАМИ
+#      последовательных запросов), но на threading.Lock вместо asyncio.Lock.
+#   2) Pexels/Pixabay - лимит у обоих ПО API-КЛЮЧУ, а не по IP/раннеру (в
+#      отличие от LOC). Общий ThreadPoolExecutor по умолчанию даёт им такую же
+#      конкурентность, как всем остальным (DOWNLOAD_CONCURRENCY потоков) - это
+#      бьёт по одному и тому же ключу все сразу. Добавлен отдельный, более
+#      узкий Semaphore именно для pexels+pixabay (не для видео/wikimedia/loc),
+#      чтобы не спалить их лимит запросов даже при большом общем пуле потоков.
+# ---------------------------------------------------------------------------
+
+DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", 8))
+WIKIMEDIA_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS", 1.5))
+PEXELS_PIXABAY_CONCURRENCY = int(os.environ.get("DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY", 3))
+
+
+class ThreadRateLimiter:
+    """Thread-safe версия RateLimiter из search.py (там - на asyncio.Lock, здесь -
+    на threading.Lock, т.к. download.py синхронный и качает файлы через
+    ThreadPoolExecutor, а не asyncio). Гарантирует минимальный интервал между
+    НАЧАЛОМ двух последовательных запросов, общий на все потоки сразу."""
+
+    def __init__(self, min_interval_seconds: float):
+        self.min_interval = max(0.0, min_interval_seconds)
+        self._lock = threading.Lock()
+        self._last_start_ts = 0.0
+
+    def wait_turn(self) -> None:
+        if self.min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = self.min_interval - (now - self._last_start_ts)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_start_ts = time.monotonic()
+
+
+_wikimedia_rate_limiter = ThreadRateLimiter(WIKIMEDIA_MIN_INTERVAL_SECONDS)
+_pexels_pixabay_semaphore = threading.Semaphore(PEXELS_PIXABAY_CONCURRENCY)
+
+
+def _pexels_pixabay_throttled(func):
+    """Декоратор вместо ручного 'with _pexels_pixabay_semaphore:' внутри каждой из
+    четырёх функций download_pexels_*/download_pixabay_* - не нужно переотступать
+    тело функции, ограничение вешается снаружи."""
+    def wrapper(*args, **kwargs):
+        with _pexels_pixabay_semaphore:
+            return func(*args, **kwargs)
+    wrapper.__name__ = func.__name__
+    return wrapper
 
 _loc_last_request_ts = 0.0
 _loc_exhausted = False
@@ -142,9 +225,38 @@ def parse_and_download_links(env_name: str) -> None:
 
     print(f"Найдено ссылок для скачивания: {len(matches)}")
 
+    # Раунд 5: LOC остаётся полностью последовательным (не трогаем его rate-limiter
+    # логику), всё остальное идёт через ThreadPoolExecutor - см. подробное обоснование
+    # в блоке комментариев "Раунд 5" в начале файла. Важно: LOC-цикл ниже запускается
+    # СРАЗУ ПОСЛЕ submit() пула, а не после его завершения - это даёт перекрытие по
+    # времени (пока LOC ждёт свои 3.2с между запросами, пул параллельно докачивает
+    # всё остальное в фоне), а не сложение времени LOC + времени всего остального.
+    loc_items = []
+    other_items = []
     for num_str, url in matches:
         number = int(num_str)
-        download_media_item(number, url)
+        if "loc.gov" in url.lower():
+            loc_items.append((number, url))
+        else:
+            other_items.append((number, url))
+
+    print(
+        f"[ИНФО] {len(other_items)} файлов пойдут параллельно (до {DOWNLOAD_CONCURRENCY} "
+        f"потоков, pexels+pixabay внутри этого пула дополнительно ограничены "
+        f"{PEXELS_PIXABAY_CONCURRENCY} потоками - общий ключ), {len(loc_items)} файлов "
+        f"LOC - строго последовательно, тем же rate-limiter'ом, что и раньше, запущены "
+        f"ОДНОВРЕМЕННО с пулом (не после него)."
+    )
+
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as executor:
+        futures = [executor.submit(download_media_item, number, url) for number, url in other_items]
+
+        for number, url in loc_items:
+            download_media_item(number, url)
+
+        for future in as_completed(futures):
+            future.result()  # пробрасываем неожиданные исключения - download_media_item
+                              # сам ловит и логирует всё ожидаемое через fail()
 
 
 def extract_id(url: str) -> str:
@@ -233,7 +345,13 @@ def download_media_item(number: int, url: str) -> None:
 
 def download_wikimedia_commons(number: int, url: str) -> None:
     """Скачивание оригинального файла с Wikimedia Commons с паузами от лимита 429."""
-    time.sleep(1.5)  # Небольшая задержка, чтобы сервера Викимедии не блочили по 429
+    # Раунд 5: раньше был просто time.sleep(1.5) - работало только при строго
+    # последовательном вызове. Теперь несколько потоков могут звать эту функцию
+    # одновременно, поэтому пауза стала общим thread-safe rate-limiter'ом (см.
+    # блок "Раунд 5" в начале файла) - интервал тот же (1.5с), но теперь он
+    # действительно минимальный интервал МЕЖДУ запросами всех потоков вместе,
+    # а не просто пауза перед каждым отдельным вызовом.
+    _wikimedia_rate_limiter.wait_turn()
 
     try:
         path = urlparse(url).path
@@ -338,6 +456,7 @@ def download_direct_via_cffi(number: int, url: str) -> None:
         fail(number, f"Не удалось скачать {number}: {e}")
 
 
+@_pexels_pixabay_throttled
 def download_pixabay_photo(number: int, photo_id: str) -> None:
     api_url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&id={photo_id}"
     try:
@@ -360,6 +479,7 @@ def download_pixabay_photo(number: int, photo_id: str) -> None:
         fail(number, f"Pixabay API ошибка {number}: {e}")
 
 
+@_pexels_pixabay_throttled
 def download_pixabay_video(number: int, video_id: str) -> None:
     api_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&id={video_id}"
     try:
@@ -384,6 +504,7 @@ def download_pixabay_video(number: int, video_id: str) -> None:
         fail(number, f"Pixabay API ошибка {number}: {e}")
 
 
+@_pexels_pixabay_throttled
 def download_pexels_photo(number: int, photo_id: str) -> None:
     api_url = f"https://api.pexels.com/v1/photos/{photo_id}"
     try:
@@ -407,6 +528,7 @@ def download_pexels_photo(number: int, photo_id: str) -> None:
         fail(number, f"Ошибка скачивания фото Pexels {number}: {e}")
 
 
+@_pexels_pixabay_throttled
 def download_pexels_video(number: int, video_id: str) -> None:
     if not PEXELS_API_KEY:
         fail(number, f"Видео {number}: нет PEXELS_API_KEY.")
