@@ -91,7 +91,9 @@ jobs:
       env:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-      run: python search.py --input requests.json --links-output links.txt --missing-output missing.txt
+      run: >
+        python search.py --input requests.json --links-output links.txt
+        --backup-links-output backup_links.txt --missing-output missing.txt
 
     - name: Show missing segments summary
       run: |
@@ -105,12 +107,13 @@ jobs:
           echo "Нет пропущенных сегментов." >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    - name: Upload links.txt / missing.txt as artifact
+    - name: Upload links.txt / backup_links.txt / missing.txt as artifact
       uses: actions/upload-artifact@v4
       with:
         name: search-links
         path: |
           links.txt
+          backup_links.txt
           missing.txt
         retention-days: 14
 
@@ -151,19 +154,27 @@ jobs:
       with:
         name: search-links
 
-    - name: Load INPUT_LINKS from search.py output
+    - name: Load INPUT_LINKS / INPUT_BACKUP_LINKS from search.py output
       if: needs.search_media.result == 'success'
       run: |
         echo "INPUT_LINKS<<EOF" >> "$GITHUB_ENV"
         cat links.txt >> "$GITHUB_ENV"
         echo "EOF" >> "$GITHUB_ENV"
 
-    - name: Load INPUT_LINKS from manual input (старый сценарий)
+        echo "INPUT_BACKUP_LINKS<<EOF" >> "$GITHUB_ENV"
+        cat backup_links.txt >> "$GITHUB_ENV"
+        echo "EOF" >> "$GITHUB_ENV"
+
+    - name: Load INPUT_LINKS from manual input (старый сценарий, без backup)
       if: needs.search_media.result != 'success'
       run: |
         echo "INPUT_LINKS<<EOF" >> "$GITHUB_ENV"
         echo "${{ inputs.links }}" >> "$GITHUB_ENV"
         echo "EOF" >> "$GITHUB_ENV"
+        # INPUT_BACKUP_LINKS сознательно не задаётся - в сценарии с ручными
+        # ссылками backup-файла просто не существует (search.py не запускался).
+        # download.py трактует отсутствующую/пустую INPUT_BACKUP_LINKS как
+        # "backup ни для одного номера нет" - это нормальный случай.
 
     - name: Run download script with input
       env:
