@@ -9,12 +9,21 @@ search.py
 по схожести превью с текстом запроса.
 
 На выходе:
-    links.txt   - строки "номер: URL" в формате, который уже понимает download.py
-                  (передаётся туда как переменная окружения INPUT_LINKS)
-    missing.txt - номера сегментов, для которых ничего подходящего не нашлось
+    links.txt        - строки "номер: URL" в формате, который уже понимает
+                        download.py (передаётся туда как переменная окружения
+                        INPUT_LINKS)
+    backup_links.txt - тот же формат "номер: URL", но резервная ссылка на ДРУГОЙ
+                        файл для того же сегмента (передаётся в download.py как
+                        INPUT_BACKUP_LINKS) - используется, если скачивание
+                        primary-ссылки не удалось из-за транзиентного сбоя
+                        соединения. Покрывает не все номера из links.txt - для
+                        части сегментов backup просто не находится, это
+                        нормальный случай (см. try_claim_backup)
+    missing.txt      - номера сегментов, для которых ничего подходящего не нашлось
 
 Использование:
-    python search.py --input requests.json --links-output links.txt --missing-output missing.txt
+    python search.py --input requests.json --links-output links.txt \
+        --backup-links-output backup_links.txt --missing-output missing.txt
 
 Переменные окружения:
     PEXELS_API_KEY, PIXABAY_API_KEY   - обязательны (в т.ч. для fallback_query)
@@ -229,6 +238,7 @@ except ImportError:
 DEFAULT_SEARCH_INPUT = "requests.json"
 DEFAULT_LINKS_OUTPUT = "links.txt"
 DEFAULT_MISSING_OUTPUT = "missing.txt"
+DEFAULT_BACKUP_LINKS_OUTPUT = "backup_links.txt"
 
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
@@ -1282,8 +1292,35 @@ async def finalize_candidate(ctx: Context, cand: Candidate) -> Optional[str]:
     return cand.page_url
 
 
-async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> Optional[str]:
-    for cand in pool:  # уже отсортирован по убыванию similarity
+async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: str) -> Optional[str]:
+    """Выбирает и финализирует РОВНО ОДНОГО backup-кандидата (без каскада на
+    следующего, если этот не финализировался). tail - хвост пула ПОСЛЕ позиции
+    primary (всё ещё по убыванию similarity): кандидаты до этой позиции либо уже
+    заняты (кем-то другим), либо провалили финализацию и по тому же правилу, что
+    и для primary, считаются непригодными никому - их backup тоже не рассматривает.
+
+    Приоритет: лучший по similarity кандидат с сайта, ОТЛИЧНОГО от сайта primary.
+    Если таких в tail нет - второй по similarity кандидат с ТЕМ ЖЕ сайтом, что и
+    primary. Если и этого нет - backup отсутствует (нормальный случай, не ошибка)."""
+    backup_cand = next((c for c in tail if c.site != primary_site), None)
+    if backup_cand is None:
+        backup_cand = next((c for c in tail if c.site == primary_site), None)
+    if backup_cand is None:
+        return None
+
+    key = (backup_cand.site, backup_cand.cand_id)
+    async with ctx.used_files_lock:
+        if key in ctx.used_files:
+            # Забрали конкурентно другим сегментом между составлением tail и этим
+            # моментом - по правилу "не каскад" НЕ ищем следующего кандидата,
+            # backup для этого сегмента просто отсутствует.
+            return None
+        ctx.used_files.add(key)
+    return await finalize_candidate(ctx, backup_cand)
+
+
+async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> tuple[Optional[str], Optional[str]]:
+    for i, cand in enumerate(pool):  # уже отсортирован по убыванию similarity
         key = (cand.site, cand.cand_id)
         async with ctx.used_files_lock:
             if key in ctx.used_files:
@@ -1291,10 +1328,11 @@ async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> Optional[str]:
             ctx.used_files.add(key)  # бронируем сразу внутри лока, в момент выбора
         final_url = await finalize_candidate(ctx, cand)
         if final_url:
-            return final_url
+            backup_url = await try_claim_backup(ctx, pool[i + 1:], cand.site)
+            return final_url, backup_url
         # Финализация не удалась (например NASA-манифест не дал нужного файла) -
         # кандидат уже забронирован, но он всё равно непригоден никому - пробуем следующего.
-    return None
+    return None, None
 
 
 async def fetch_and_filter(ctx: Context, site: str, seg: SegmentSpec) -> list[Candidate]:
@@ -1334,7 +1372,7 @@ async def fetch_and_filter(ctx: Context, site: str, seg: SegmentSpec) -> list[Ca
     return licensed
 
 
-async def try_fallback(ctx: Context, seg: SegmentSpec) -> Optional[str]:
+async def try_fallback(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
     pool: list[Candidate] = []
     for site in ("pexels", "pixabay"):
         if site in ctx.exhausted_sites:
@@ -1354,12 +1392,12 @@ async def try_fallback(ctx: Context, seg: SegmentSpec) -> Optional[str]:
         )
         pool.extend(scored)
     if not pool:
-        return None
+        return None, None
     pool.sort(key=lambda c: c.similarity, reverse=True)
     return await try_claim_pool(ctx, pool)
 
 
-async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> Optional[str]:
+async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
     pool: list[Candidate] = []
     for site in seg.sites:
         if site in ctx.exhausted_sites:
@@ -1378,49 +1416,54 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> Optional[str]
         # иначе - similarity в [SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD), пробуем следующий сайт
 
     if pool:
-        url = await try_claim_pool(ctx, pool)
+        url, backup_url = await try_claim_pool(ctx, pool)
         if url:
-            return url
+            return url, backup_url
 
     if seg.fallback_query:
         return await try_fallback(ctx, seg)
 
-    return None
+    return None, None
 
 
-async def process_segment(ctx: Context, seg: SegmentSpec) -> tuple[int, Optional[str]]:
+async def process_segment(ctx: Context, seg: SegmentSpec) -> tuple[int, Optional[str], Optional[str]]:
     async with ctx.global_semaphore:
-        url = await process_segment_inner(ctx, seg)
-    return seg.index, url
+        url, backup_url = await process_segment_inner(ctx, seg)
+    return seg.index, url, backup_url
 
 
 # ---------------------------------------------------------------------------
 # Оркестрация запуска
 # ---------------------------------------------------------------------------
 
-async def run_search(ctx: Context, segments: list[SegmentSpec]) -> tuple[dict, list]:
+async def run_search(ctx: Context, segments: list[SegmentSpec]) -> tuple[dict, dict, list]:
     total = len(segments)
     done_count = 0
     results: dict = {}
+    backups: dict = {}
     missing: list = []
 
     async def wrapped(seg: SegmentSpec):
         nonlocal done_count
-        idx, url = await process_segment(ctx, seg)
+        idx, url, backup_url = await process_segment(ctx, seg)
         done_count += 1
         pct = done_count / total * 100
         logging.info(
-            "Сегмент %s обработан (%s/%s, %.0f%%): %s",
-            idx, done_count, total, pct, "найдено" if url else "НЕ найдено",
+            "Сегмент %s обработан (%s/%s, %.0f%%): %s%s",
+            idx, done_count, total, pct,
+            "найдено" if url else "НЕ найдено",
+            " (+backup)" if backup_url else "",
         )
-        return idx, url
+        return idx, url, backup_url
 
     tasks = [asyncio.ensure_future(wrapped(seg)) for seg in segments]
     try:
         for coro in asyncio.as_completed(tasks):
-            idx, url = await coro
+            idx, url, backup_url = await coro
             if url:
                 results[idx] = url
+                if backup_url:
+                    backups[idx] = backup_url
             else:
                 missing.append(idx)
     except FatalConfigError:
@@ -1428,7 +1471,7 @@ async def run_search(ctx: Context, segments: list[SegmentSpec]) -> tuple[dict, l
             t.cancel()
         raise
 
-    return results, missing
+    return results, backups, missing
 
 
 def load_requests(path: str) -> list[SegmentSpec]:
@@ -1527,7 +1570,7 @@ async def amain(args: argparse.Namespace) -> int:
         ctx.clip = ClipScorer(CLIP_MODEL_NAME, CLIP_PRETRAINED)
 
         try:
-            results, missing = await run_search(ctx, segments)
+            results, backups, missing = await run_search(ctx, segments)
         except FatalConfigError as e:
             logging.error("Структурная ошибка конфигурации: %s", e)
             log_site_stats_summary(ctx.site_stats)
@@ -1539,13 +1582,23 @@ async def amain(args: argparse.Namespace) -> int:
         for idx in sorted(results):
             f.write(f"{idx}: {results[idx]}\n")
 
+    # Тот же формат "номер: URL", что и links.txt (целые номера сегментов - см.
+    # ТЗ по резервным ссылкам). Строка пишется, только если backup для сегмента
+    # реально нашёлся - backup_links.txt не обязан покрывать все номера из
+    # links.txt, это нормально и ожидаемо.
+    with open(args.backup_links_output, "w", encoding="utf-8") as f:
+        for idx in sorted(backups):
+            f.write(f"{idx}: {backups[idx]}\n")
+
     with open(args.missing_output, "w", encoding="utf-8") as f:
         for idx in sorted(missing):
             f.write(f"{idx}\n")
 
     logging.info(
-        "Готово: найдено %s из %s сегментов, не найдено %s. Результаты: %s, пропуски: %s",
-        len(results), len(segments), len(missing), args.links_output, args.missing_output,
+        "Готово: найдено %s из %s сегментов (из них с backup - %s), не найдено %s. "
+        "Результаты: %s, backup: %s, пропуски: %s",
+        len(results), len(segments), len(backups), len(missing),
+        args.links_output, args.backup_links_output, args.missing_output,
     )
     return 0
 
@@ -1556,6 +1609,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Подбор медиа для сегментов requests.json")
     parser.add_argument("--input", default=os.environ.get("SEARCH_INPUT", DEFAULT_SEARCH_INPUT))
     parser.add_argument("--links-output", default=os.environ.get("SEARCH_LINKS_OUTPUT", DEFAULT_LINKS_OUTPUT))
+    parser.add_argument(
+        "--backup-links-output",
+        default=os.environ.get("SEARCH_BACKUP_LINKS_OUTPUT", DEFAULT_BACKUP_LINKS_OUTPUT),
+    )
     parser.add_argument("--missing-output", default=os.environ.get("SEARCH_MISSING_OUTPUT", DEFAULT_MISSING_OUTPUT))
     args = parser.parse_args()
 
