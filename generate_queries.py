@@ -99,16 +99,33 @@ with no tie to a specific real person, event, or place (b-roll: an office, natur
 an emotion, an everyday action, a UI/screen-recording style moment).
    - When genuinely unsure, include both, real/archival sources first.
 
-2. query - the primary search query, ALWAYS in English, 5-10 words, tailored to the FIRST site in \
-"sites":
-   - For wikimedia/loc/nasa: exact proper nouns, dates, and specific terms (e.g. a person's full \
-name, a place name, a year).
-   - For pexels/pixabay: ordinary stock-footage phrasing describing the visual action or mood, not \
-proper nouns.
+2. query - the primary search query, ALWAYS in English, tailored to the FIRST site in "sites" - \
+length and style depend on which site that is:
+   - For wikimedia/loc: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
+caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
+named event, optionally with a year appended (e.g. "Topkapi Palace", "Mehmed VI 1918", "Siege of \
+Vienna 1683"). Do NOT add descriptive or stylistic words such as "archive", "historical photo", \
+"vintage", "portrait of", "photograph of", "illustration of", "interior" - MediaWiki (wikimedia) and \
+LOC search match literal file titles/captions, which are short and factual; real captions almost \
+never contain these words, so adding them only dilutes the match instead of narrowing it. \
+BAD -> GOOD: "Villa Magnolia San Remo interior 1926 archive" -> "Villa Magnolia San Remo 1926"; \
+"Prince Ertugrul Ottoman prince historical photo" -> "Ertuğrul Osman" (or the exact name given in \
+the segment). If a place or person's real name genuinely needs more than 4 words, that's fine - the \
+limit is about cutting stylistic padding, not truncating a proper noun.
+   - For nasa: exact proper nouns, mission/object names, and dates, as concise as the name requires.
+   - For pexels/pixabay: 5-10 words of ordinary stock-footage phrasing describing the visual action \
+or mood, not proper nouns.
 
-3. fallback_query - a more general English query to fall back on for pexels/pixabay if the primary \
-search on the sites above fails entirely, or null if no fallback is needed (e.g. the segment is \
-already stock-only with no historical specificity).
+3. fallback_query - a more general English query for pexels/pixabay, used ONLY as a fallback if the \
+primary search (on the sites listed in "sites") fails entirely. Fill this in for the VAST MAJORITY \
+of segments, INCLUDING segments whose primary sites are already ["pexels", "pixabay"] (give a \
+broader/simpler rephrasing of "query" in that case) AND segments whose primary sites are \
+wikimedia/loc/nasa (give an ordinary stock-footage phrasing of the same visual scene, the way you \
+would for a pexels/pixabay "query" - see rule 2). Every segment that depicts SOME visible scene, \
+person, place, action, or mood has a plausible generic stock equivalent and should get one here. \
+Use null ONLY for segments with no visual scene to fall back to at all - e.g. silence, a black \
+screen, a title/credits card with no depicted content, or on-screen text with nothing else \
+happening. When in doubt, fill it in rather than returning null.
 
 4. type - "image" or "video", whichever fits the described scene better (a static portrait, \
 document, or map -> "image"; a dynamic action or general b-roll -> "video").
@@ -151,8 +168,24 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             type=types.Type.ARRAY,
             items=types.Schema(type=types.Type.STRING, enum=SITES),
         ),
-        "query": types.Schema(type=types.Type.STRING),
-        "fallback_query": types.Schema(type=types.Type.STRING, nullable=True),
+        "query": types.Schema(
+            type=types.Type.STRING,
+            description=(
+                "Primary query, English. For wikimedia/loc: SHORT, 2-4 words, only exact proper "
+                "nouns/place/event + optional year, NO stylistic words like 'archive'/'vintage'/"
+                "'historical photo'. For pexels/pixabay: 5-10 words, ordinary stock-footage phrasing."
+            ),
+        ),
+        "fallback_query": types.Schema(
+            type=types.Type.STRING,
+            nullable=True,
+            description=(
+                "Generic pexels/pixabay fallback query. Fill this in for the vast majority of "
+                "segments (including ones already using pexels/pixabay as primary sites). Use null "
+                "ONLY when the segment has no visible scene at all (silence, black screen, "
+                "title/credits card, bare on-screen text)."
+            ),
+        ),
         "type": types.Schema(type=types.Type.STRING, enum=["image", "video"]),
         "is_entity": types.Schema(type=types.Type.BOOLEAN),
         "entity_keywords": types.Schema(
