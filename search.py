@@ -20,6 +20,19 @@ search.py
     PEXELS_API_KEY, PIXABAY_API_KEY   - обязательны (в т.ч. для fallback_query)
     SEARCH_SEM_PEXELS / _PIXABAY / _WIKIMEDIA / _NASA / _LOC
         - per-site семафоры одновременных запросов (умолч. 5/5/10/10/10)
+    SEARCH_LOC_MIN_INTERVAL_SECONDS
+        - глобальный (на весь запуск, не per-задача) минимальный интервал между
+          ПОСЛЕДОВАТЕЛЬНЫМИ запросами к LOC, вне зависимости от того, сколько
+          сегментов обрабатывается параллельно. Это отдельный механизм от
+          SEARCH_SEM_LOC: семафор ограничивает только конкурентность (сколько
+          запросов летит ОДНОВРЕМЕННО), а не частоту (сколько запросов в секунду
+          в принципе уходит) - при высокой глобальной параллельности сегментов
+          семафор сам по себе не мешает 10 запросам уйти почти синхронно, а затем
+          ещё 10 через долю секунды, и LOC отвечает 429 почти на всё подряд.
+          Умолч. 2.0 сек - консервативное значение, НЕ ПРОВЕРЕНО эмпирически
+          (официальной точной цифры rate-limit у LOC search API нет в публичной
+          документации на момент написания). Если 429 всё равно продолжают
+          сыпаться после этого фикса - увеличивайте это значение (3-5 сек и выше).
     SEARCH_GLOBAL_CONCURRENCY  - сколько сегментов обрабатывать параллельно (умолч. 40)
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
@@ -45,6 +58,16 @@ search.py
 кандидата, не весь сайт" (изначально уточнено для видео на Wikimedia) применено ко ВСЕМ
 сайтам единообразно в fetch_preview_bytes/score_candidates - это строго безопаснее и
 не создаёт особых случаев.
+
+Третье допущение (rate-limiting LOC): семафор SEARCH_SEM_LOC и rate-limiter
+SEARCH_LOC_MIN_INTERVAL_SECONDS решают РАЗНЫЕ задачи и работают одновременно -
+семафор по-прежнему ограничивает, сколько запросов к LOC могут физически висеть
+в полёте одновременно, а rate-limiter поверх этого гарантирует минимальный зазор
+по времени между началом двух последовательных запросов (глобально по всему
+запуску, а не per-сегмент/per-задача). Если после этого фикса LOC всё равно
+исчерпывает лимит (например у него есть более строгий суточный лимит, а не только
+проблема с частотой) - существующая логика exhausted_sites/429 в http_get_json
+срабатывает как и раньше и ничего в ней не менялось.
 """
 
 from __future__ import annotations
@@ -112,6 +135,12 @@ SEMAPHORE_DEFAULTS = {
     "loc": int(os.environ.get("SEARCH_SEM_LOC", 10)),
 }
 GLOBAL_SEGMENT_CONCURRENCY = int(os.environ.get("SEARCH_GLOBAL_CONCURRENCY", 40))
+
+# Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье допущение".
+# НЕ ПРОВЕРЕНО эмпирически, консервативная оценка "по практике" для строгих
+# gov-API без официально опубликованного точного rate-limit; при повторных 429
+# после фикса - увеличивать в первую очередь именно это значение.
+LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 2.0))
 
 PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -185,6 +214,42 @@ class FatalConfigError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Глобальный rate-limiter (минимальный интервал между запросами)
+# ---------------------------------------------------------------------------
+
+class RateLimiter:
+    """Гарантирует минимальный интервал между НАЧАЛОМ двух последовательных запросов,
+    глобально на весь запуск - в отличие от asyncio.Semaphore, который ограничивает
+    только число одновременно летящих запросов, но не мешает им уйти пачкой один за
+    другим. Нужен для сайтов вроде LOC, которые банят по частоте (req/sec), а не
+    только по конкурентности.
+
+    Реализация: единый asyncio.Lock сериализует "вход" в лимитер, так что даже при
+    большом числе параллельных корутин (до GLOBAL_SEGMENT_CONCURRENCY штук) фактические
+    запросы к сайту физически не могут стартовать чаще, чем раз в min_interval секунд,
+    независимо от того, сколько сегментов обрабатывается одновременно."""
+
+    def __init__(self, min_interval_seconds: float):
+        self.min_interval = max(0.0, min_interval_seconds)
+        self._lock = asyncio.Lock()
+        self._last_start_ts: Optional[float] = None
+
+    async def wait_turn(self) -> None:
+        if self.min_interval <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            if self._last_start_ts is not None:
+                elapsed = now - self._last_start_ts
+                remaining = self.min_interval - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    now = loop.time()
+            self._last_start_ts = now
+
+
+# ---------------------------------------------------------------------------
 # Модели данных
 # ---------------------------------------------------------------------------
 
@@ -227,6 +292,11 @@ class Context:
     search_cache: dict = field(default_factory=dict)
     search_cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     clip: "ClipScorer" = None
+    # per-site глобальные rate-limiter'ы (минимальный интервал между запросами).
+    # По умолчанию заполнен только для "loc" - см. LOC_MIN_INTERVAL_SECONDS. Сайты,
+    # для которых лимитера нет в словаре, им попросту не ограничиваются (используют
+    # только семафор конкурентности, как и раньше).
+    rate_limiters: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +369,18 @@ async def http_get_json(
     if site in ctx.exhausted_sites:
         return None
 
+    rate_limiter = ctx.rate_limiters.get(site)
+
     last_error: Optional[BaseException] = None
     for attempt in range(1, MAX_RETRIES + 1):
         async with ctx.site_semaphores[site]:
+            # Семафор выше уже ограничил конкурентность (сколько запросов к этому
+            # сайту летят ОДНОВРЕМЕННО). rate_limiter, если задан для сайта, отдельно
+            # гарантирует минимальный интервал между СТАРТАМИ последовательных
+            # запросов - это защищает от ситуации, когда очередная "порция" из
+            # N параллельных задач всё равно уходит почти синхронно с предыдущей.
+            if rate_limiter is not None:
+                await rate_limiter.wait_turn()
             try:
                 async with ctx.session.get(
                     url, headers=headers, params=params,
@@ -854,6 +933,14 @@ async def amain(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if LOC_MIN_INTERVAL_SECONDS > 0:
+        logging.info(
+            "LOC rate-limiter активен: минимум %.2fs между последовательными запросами "
+            "(глобально на весь запуск, независимо от SEARCH_SEM_LOC и числа параллельных "
+            "сегментов). Настраивается через SEARCH_LOC_MIN_INTERVAL_SECONDS.",
+            LOC_MIN_INTERVAL_SECONDS,
+        )
+
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(
         connector=connector, headers={"User-Agent": SESSION_USER_AGENT},
@@ -866,6 +953,7 @@ async def amain(args: argparse.Namespace) -> int:
             global_semaphore=asyncio.Semaphore(GLOBAL_SEGMENT_CONCURRENCY),
             clip_semaphore=asyncio.Semaphore(CLIP_CONCURRENCY),
             used_files_lock=asyncio.Lock(),
+            rate_limiters={"loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS)},
         )
         ctx.clip = ClipScorer(CLIP_MODEL_NAME, CLIP_PRETRAINED)
 
