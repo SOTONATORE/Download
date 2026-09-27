@@ -29,10 +29,15 @@ search.py
           в принципе уходит) - при высокой глобальной параллельности сегментов
           семафор сам по себе не мешает 10 запросам уйти почти синхронно, а затем
           ещё 10 через долю секунды, и LOC отвечает 429 почти на всё подряд.
-          Умолч. 2.0 сек - консервативное значение, НЕ ПРОВЕРЕНО эмпирически
-          (официальной точной цифры rate-limit у LOC search API нет в публичной
-          документации на момент написания). Если 429 всё равно продолжают
-          сыпаться после этого фикса - увеличивайте это значение (3-5 сек и выше).
+          Умолч. 5.0 сек (~12 запросов/мин) - подобрано по ОФИЦИАЛЬНОЙ документации
+          LOC (https://www.loc.gov/apis/json-and-yaml/working-within-limits/):
+          лимит JSON/YAML API - 20 запросов/мин, при превышении - блокировка IP на
+          1 ЧАС (не на минуту!). 5с даёт ~40% запас против этого потолка - выбран
+          сознательно с большим запасом, а не впритык к 20/мин, т.к. сам LOC
+          предупреждает, что при высокой нагрузке на их стороне лимит может
+          эффективно снижаться и ниже заявленного, а цена ошибки - часовой бан,
+          а не просто лишняя секунда ожидания на сегмент. Если 429 всё равно
+          появляются - увеличивайте ещё (7-10 сек и выше).
     SEARCH_GLOBAL_CONCURRENCY  - сколько сегментов обрабатывать параллельно (умолч. 40)
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
@@ -64,10 +69,25 @@ SEARCH_LOC_MIN_INTERVAL_SECONDS решают РАЗНЫЕ задачи и раб
 семафор по-прежнему ограничивает, сколько запросов к LOC могут физически висеть
 в полёте одновременно, а rate-limiter поверх этого гарантирует минимальный зазор
 по времени между началом двух последовательных запросов (глобально по всему
-запуску, а не per-сегмент/per-задача). Если после этого фикса LOC всё равно
-исчерпывает лимит (например у него есть более строгий суточный лимит, а не только
-проблема с частотой) - существующая логика exhausted_sites/429 в http_get_json
-срабатывает как и раньше и ничего в ней не менялось.
+запуску, а не per-сегмент/per-задача).
+
+Четвёртое (важное) уточнение по LOC, добавленное после реального прогона: по
+официальной документации LOC (working-within-limits) превышение лимита JSON/YAML
+API (20 запросов/мин) приводит к блокировке IP на ЦЕЛЫЙ ЧАС, а не к обычному
+кратковременному 429. Это значит, что как только LOC один раз ответил 429,
+дальнейшие ретраи с exponential backoff (секунды-десятки секунд) внутри ТЕКУЩЕГО
+запуска бессмысленны - блокировка всё равно не снимется за время работы CI-джобы.
+Поэтому search_loc теперь вызывает http_get_json с treat_429_as_exhaustion=True
+(как pexels/pixabay) - первый же 429 сразу помечает "loc" исчерпанным на весь
+остаток запуска, вместо повторных попыток достучаться до сайта, который уже точно
+не ответит. Сегменты, где loc стоит не последним в sites, просто продолжают перебор
+остальных сайтов - это поведение уже было и не менялось.
+
+Также LOC может отдать вместо JSON html-страницу с CAPTCHA при перегрузке на своей
+стороне (см. ту же страницу документации: "users may encounter ... HTML pages with
+CAPTCHAs even when operating below the rates listed above") - это ловится отдельно
+как aiohttp.ContentTypeError при попытке resp.json() и обрабатывается так же, как
+429 (тот же treat_429_as_exhaustion), т.к. по сути это тот же сигнал "нас блокируют".
 """
 
 from __future__ import annotations
@@ -136,11 +156,12 @@ SEMAPHORE_DEFAULTS = {
 }
 GLOBAL_SEGMENT_CONCURRENCY = int(os.environ.get("SEARCH_GLOBAL_CONCURRENCY", 40))
 
-# Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье допущение".
-# НЕ ПРОВЕРЕНО эмпирически, консервативная оценка "по практике" для строгих
-# gov-API без официально опубликованного точного rate-limit; при повторных 429
-# после фикса - увеличивать в первую очередь именно это значение.
-LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 2.0))
+# Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье"/"Четвёртое"
+# допущение. Дефолт подобран по официальной документации LOC (working-within-limits:
+# 20 запросов/мин у JSON/YAML API, час блокировки при превышении), с большим запасом
+# (5с = 12 запросов/мин, ~40% ниже потолка) - цена ошибки высокая (часовой бан), поэтому
+# лучше перестраховаться, чем экономить секунды на сегмент.
+LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 5.0))
 
 PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -440,7 +461,33 @@ async def http_get_json(
                         await asyncio.sleep(delay)
                         continue
 
-                    return await resp.json(content_type=None)
+                    try:
+                        return await resp.json(content_type=None)
+                    except aiohttp.ContentTypeError:
+                        # Статус 200, но тело не парсится как JSON - на практике это
+                        # HTML-страница вместо ожидаемого ответа. У LOC это официально
+                        # задокументированный побочный эффект перегрузки на их стороне
+                        # ("HTML pages with CAPTCHAs even when operating below the rates
+                        # listed above") - по сути тот же сигнал блокировки, что и 429,
+                        # поэтому обрабатываем его так же (включая treat_429_as_exhaustion).
+                        text_preview = (await resp.text())[:200]
+                        if treat_429_as_exhaustion:
+                            logging.warning(
+                                "%s: получен не-JSON ответ (похоже на CAPTCHA/rate-limit "
+                                "страницу вместо API-ответа) - помечаю сайт исчерпанным до "
+                                "конца текущего запуска. Превью тела: %s",
+                                site, text_preview,
+                            )
+                            ctx.exhausted_sites.add(site)
+                            return None
+                        logging.warning(
+                            "%s: не-JSON ответ при статусе 200 (попытка %s/%s), похоже на "
+                            "CAPTCHA/перегрузку. Превью: %s", site, attempt, MAX_RETRIES, text_preview,
+                        )
+                        last_error = RuntimeError(f"non-JSON 200 response: {text_preview}")
+                        delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
+                        await asyncio.sleep(delay)
+                        continue
 
             except FatalConfigError:
                 raise
@@ -680,7 +727,14 @@ async def search_loc(ctx: Context, query: str, media_type: str) -> list[Candidat
             # официальной чистой поддержки "только видео" в search API нет, поэтому
             # это не строгая гарантия, а сужение выдачи (подтверждено как некритично).
             params["fa"] = "partof:online video"
-        data = await http_get_json(ctx, "loc", "https://www.loc.gov/search/", params=params)
+        # treat_429_as_exhaustion=True: у LOC превышение лимита JSON API (20/мин) даёт
+        # блокировку IP на 1 час (см. докстринг модуля, "Четвёртое уточнение"), поэтому
+        # ретраить 429 в рамках одного запуска CI бессмысленно - сразу помечаем сайт
+        # исчерпанным, как pexels/pixabay при их часовых/дневных лимитах.
+        data = await http_get_json(
+            ctx, "loc", "https://www.loc.gov/search/", params=params,
+            treat_429_as_exhaustion=True,
+        )
         result: list[Candidate] = []
         if not data:
             return result
@@ -936,9 +990,11 @@ async def amain(args: argparse.Namespace) -> int:
     if LOC_MIN_INTERVAL_SECONDS > 0:
         logging.info(
             "LOC rate-limiter активен: минимум %.2fs между последовательными запросами "
-            "(глобально на весь запуск, независимо от SEARCH_SEM_LOC и числа параллельных "
-            "сегментов). Настраивается через SEARCH_LOC_MIN_INTERVAL_SECONDS.",
-            LOC_MIN_INTERVAL_SECONDS,
+            "(%.1f запросов/мин; официальный лимит LOC - 20/мин с часовой блокировкой при "
+            "превышении). Настраивается через SEARCH_LOC_MIN_INTERVAL_SECONDS. При первом "
+            "же 429 (или CAPTCHA-ответе) сайт LOC помечается исчерпанным на весь остаток "
+            "запуска - повторные попытки в рамках часовой блокировки не имеют смысла.",
+            LOC_MIN_INTERVAL_SECONDS, 60.0 / LOC_MIN_INTERVAL_SECONDS,
         )
 
     connector = aiohttp.TCPConnector(limit=0)
