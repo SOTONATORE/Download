@@ -270,6 +270,44 @@ GLOBAL_SEGMENT_CONCURRENCY = int(os.environ.get("SEARCH_GLOBAL_CONCURRENCY", 40)
 # всего скрипта (104/126 сегментов трогали LOC), 5.0с был неоправданно консервативен.
 LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 3.2))
 
+# ---------------------------------------------------------------------------
+# Раунд 8 - отдельный лимитер для LOC-превью (fetch_preview_bytes), подтверждено
+# официальной документацией, та же методика расчёта, что и в download.py.
+#
+# LOC_MIN_INTERVAL_SECONDS выше применяется ТОЛЬКО к search_loc (запрос к
+# www.loc.gov/search/ - JSON/YAML API, лимит 20/мин). Превью-картинки кандидатов для
+# CLIP-скоринга (fetch_preview_bytes, cand.preview_url) физически отдаются с
+# tile.loc.gov/storage-services/... - той же самой категории "Media content", для
+# которой официальная документация (https://www.loc.gov/apis/json-and-yaml/working-within-limits/)
+# даёт отдельный, гораздо менее строгий лимит 150 запросов/мин (в 7.5 раза больше).
+#
+# ВАЖНО: до этой правки fetch_preview_bytes НЕ имела вообще НИКАКОГО интервального
+# ограничения для LOC (только общий SEARCH_SEM_LOC=10 конкурентности через
+# site_semaphores, да и то он реально применяется лишь внутри http_get_json - у самой
+# fetch_preview_bytes семафора нет вовсе, ни общего, ни LOC-специфичного). Проверка
+# на глаз (без реального прогона - сеть в этом окружении недоступна) показывает, что
+# полагаться на "и так маловероятно" здесь нельзя: score_candidates обрабатывает
+# кандидатов одного сегмента строго последовательно (простой for-await, без gather),
+# но РАЗНЫЕ сегменты идут параллельно до GLOBAL_SEGMENT_CONCURRENCY=40 штук
+# одновременно - т.е. реальная пиковая конкурентность LOC-превью зависит от того,
+# сколько из этих 40 параллельных сегментов одновременно попали на LOC-кандидата, а
+# не от SEARCH_SEM_LOC=10 (та цифра к превью не относится вообще). Это не подтверждено
+# логами прогона (их нет), поэтому решение - не гадать, а добавить лимитер той же
+# методикой, что и в LOC_FILE_MIN_INTERVAL_SECONDS из download.py: дешевле стоит
+# лишних 0.45с на превью, чем рисковать часовым баном IP по недоказанному допущению.
+#
+# Конкурентность SEARCH_SEM_LOC=10 (используется в http_get_json для search_loc) не
+# трогаем - она ограничивает другой запрос (сам поиск, не превью) и решает свою,
+# независимую задачу, как и для wikimedia в download.py (интервал + конкурентность
+# — два независимых ограничения, оба могут быть нужны одновременно).
+LOC_PREVIEW_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("SEARCH_LOC_PREVIEW_MIN_INTERVAL_SECONDS", 0.45)
+)
+# 0.45с (~133 запроса/мин, ~11% запас от официального потолка 150/мин) - идентичный
+# расчёт и то же обоснование запаса, что у LOC_FILE_MIN_INTERVAL_SECONDS в download.py
+# (см. его комментарий) - тот же самый эндпоинт /storage-services/, та же категория
+# лимита, поэтому и число то же самое, без отдельного пересчёта.
+
 PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -602,9 +640,11 @@ class Context:
     search_cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     clip: "ClipScorer" = None
     # per-site глобальные rate-limiter'ы (минимальный интервал между запросами).
-    # По умолчанию заполнен только для "loc" - см. LOC_MIN_INTERVAL_SECONDS. Сайты,
-    # для которых лимитера нет в словаре, им попросту не ограничиваются (используют
-    # только семафор конкурентности, как и раньше).
+    # По умолчанию заполнен для "loc" (search_loc, JSON/YAML API 20/мин) и отдельно
+    # "loc_preview" (fetch_preview_bytes для LOC-кандидатов, Media content
+    # /storage-services/ 150/мин) - см. LOC_MIN_INTERVAL_SECONDS и
+    # LOC_PREVIEW_MIN_INTERVAL_SECONDS. Сайты/эндпоинты, для которых лимитера нет в
+    # словаре, ничем не ограничиваются (используют только семафор конкурентности).
     rate_limiters: dict = field(default_factory=dict)
     # Диагностика воронки фильтрации по каждому сайту (и отдельно "<site>_fallback"
     # для запросов через try_fallback) - см. SiteStats/log_site_stats_summary.
@@ -1138,7 +1178,10 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
 
     last_status: Optional[int] = None
     last_body_preview = ""
+    loc_preview_limiter = ctx.rate_limiters.get("loc_preview") if cand.site == "loc" else None
     for attempt in range(1, 3):
+        if loc_preview_limiter is not None:
+            await loc_preview_limiter.wait_turn()
         try:
             async with ctx.session.get(
                 cand.preview_url, headers=headers,
@@ -1448,11 +1491,20 @@ async def amain(args: argparse.Namespace) -> int:
     if LOC_MIN_INTERVAL_SECONDS > 0:
         logging.info(
             "LOC rate-limiter активен: минимум %.2fs между последовательными запросами "
-            "(%.1f запросов/мин; официальный лимит LOC - 20/мин с часовой блокировкой при "
-            "превышении). Настраивается через SEARCH_LOC_MIN_INTERVAL_SECONDS. При первом "
-            "же 429 (или CAPTCHA-ответе) сайт LOC помечается исчерпанным на весь остаток "
-            "запуска - повторные попытки в рамках часовой блокировки не имеют смысла.",
+            "метаданных/поиска (%.1f запросов/мин; официальный лимит JSON/YAML API LOC - "
+            "20/мин с часовой блокировкой при превышении). Настраивается через "
+            "SEARCH_LOC_MIN_INTERVAL_SECONDS. При первом же 429 (или CAPTCHA-ответе) сайт "
+            "LOC помечается исчерпанным на весь остаток запуска - повторные попытки в "
+            "рамках часовой блокировки не имеют смысла.",
             LOC_MIN_INTERVAL_SECONDS, 60.0 / LOC_MIN_INTERVAL_SECONDS,
+        )
+    if LOC_PREVIEW_MIN_INTERVAL_SECONDS > 0:
+        logging.info(
+            "LOC-preview rate-limiter активен: минимум %.2fs между запросами превью-файлов "
+            "(%.1f запросов/мин; официальный лимит Media content /storage-services/ у LOC - "
+            "150/мин). Настраивается через SEARCH_LOC_PREVIEW_MIN_INTERVAL_SECONDS. Отдельный "
+            "от лимитера метаданных выше - разные эндпоинты, разные официальные лимиты.",
+            LOC_PREVIEW_MIN_INTERVAL_SECONDS, 60.0 / LOC_PREVIEW_MIN_INTERVAL_SECONDS,
         )
 
     connector = aiohttp.TCPConnector(limit=0)
@@ -1467,7 +1519,10 @@ async def amain(args: argparse.Namespace) -> int:
             global_semaphore=asyncio.Semaphore(GLOBAL_SEGMENT_CONCURRENCY),
             clip_semaphore=asyncio.Semaphore(CLIP_CONCURRENCY),
             used_files_lock=asyncio.Lock(),
-            rate_limiters={"loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS)},
+            rate_limiters={
+                "loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS),
+                "loc_preview": RateLimiter(LOC_PREVIEW_MIN_INTERVAL_SECONDS),
+            },
         )
         ctx.clip = ClipScorer(CLIP_MODEL_NAME, CLIP_PRETRAINED)
 
