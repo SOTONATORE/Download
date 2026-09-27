@@ -35,6 +35,30 @@ BROWSER_HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
+# Wikimedia — отдельный User-Agent, а НЕ общий BROWSER_HEADERS.
+#
+# Для остальных сайтов (loc.gov, coverr, generic-cffi) имитация браузера в
+# BROWSER_HEADERS - осознанный анти-antibot приём, там UA-браузер - это то, что
+# нужно. У Wikimedia наоборот: их API Etiquette прямо требует содержательный,
+# идентифицирующий User-Agent (https://www.mediawiki.org/wiki/API:Etiquette),
+# а не маскировку под браузер - этот урок уже был извлечён в search.py после
+# эпизода с 403 "Please set a user-agent and respect our robot policy" (см.
+# SESSION_USER_AGENT там же) и специального оверрайда для wikimedia в
+# PREVIEW_HEADERS. download.py этот урок не унаследовал: тут для wikimedia
+# по-прежнему шёл общий BROWSER_HEADERS с фейковым Chrome UA - т.е. ровно тот
+# профиль ("анонимный, замаскированный под браузер, скриптовый трафик"), по
+# которому новый anti-automation rate-limit Wikimedia 2026 года бьёт жёстче
+# (см. https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits). Используется
+# для ОБОИХ запросов - и к api.php, и к самому файлу (upload.wikimedia.org) -
+# т.к. в search.py генерик-UA на превью-запросах (тоже к upload/thumb.
+# wikimedia.org) уже давал 403 именно по этой причине.
+WIKIMEDIA_HEADERS = {
+    "User-Agent": "MediaSearchPipeline/1.0 "
+                  "(https://github.com/SOTONATORE/Download; contact: fordlababit@gmail.com)",
+    "Accept": "*/*",
+}
+
+# ---------------------------------------------------------------------------
 # Учёт провалов скачивания (см. download_failed.txt) - раньше каждый [ОШИБКА]
 # просто печатался в stdout CI-лога и терялся безвозвратно: чтобы узнать, что и
 # почему не скачалось, приходилось руками читать весь лог шага целиком. Теперь
@@ -56,6 +80,27 @@ def fail(number: int, message: str) -> None:
     print(f"[ОШИБКА] {message}")
     with _failed_items_lock:
         FAILED_ITEMS.append(f"{number}: {message}")
+
+
+def log_429_details(site: str, context: str, resp) -> None:
+    """Печатает Retry-After и обрезанное тело ответа при HTTP 429 - раньше на
+    прогоне с реальным 429 у Wikimedia в логе не было ничего, кроме самого факта
+    статус-кода: ни Retry-After, ни тела ответа код нигде не печатал, поэтому
+    нельзя было сказать по факту, что именно ответил сервер (частота по IP,
+    per-minute automation-лимит, что-то ещё). context - произвольная строка для
+    привязки к конкретному номеру/запросу (у LOC на уровне _loc_get номер файла
+    не всегда известен - это общая обёртка и для метаданных, и для файла, поэтому
+    здесь не жёстко number, а строка). Работает и для LOC (там та же прореха в
+    _loc_get), и для Wikimedia - единая точка, единый формат в логе."""
+    retry_after = resp.headers.get("Retry-After", "<нет заголовка>")
+    try:
+        body_snippet = resp.text[:300].replace("\n", " ")
+    except Exception:
+        body_snippet = "<не удалось прочитать тело>"
+    print(
+        f"[DEBUG] {site} 429 ({context}): Retry-After={retry_after!r}, "
+        f"тело (первые 300 симв.): {body_snippet!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +162,34 @@ LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
 #      бьёт по одному и тому же ключу все сразу. Добавлен отдельный, более
 #      узкий Semaphore именно для pexels+pixabay (не для видео/wikimedia/loc),
 #      чтобы не спалить их лимит запросов даже при большом общем пуле потоков.
+#
+# Раунд 6 - разбор реального 429 на прогоне с ThreadPoolExecutor(max_workers=8):
+# ThreadRateLimiter сам по себе оказался технически исправен (один инстанс на
+# процесс, лок честно охватывает read-modify-write), но он гасил только СТАРТ
+# самого первого запроса на файл (metadata api.php) - мимо него шли: а) ретраи
+# на 429 внутри retry-цикла metadata-запроса (свой time.sleep + новый запрос в
+# обход wait_turn), б) отдельный, вообще ничем не ограниченный второй запрос
+# за самим файлом на upload.wikimedia.org и его собственный retry-цикл. Т.е.
+# лимитер видел долю реального трафика к Wikimedia, а не весь. Плюс, по
+# официальной документации (https://wikitech.wikimedia.org/wiki/Robot_policy),
+# лимит Wikimedia для анонимов задан в первую очередь как КОНКУРЕНТНОСТЬ (не
+# больше 3 одновременных запросов к API, не больше 2 - для скачивания файлов),
+# а не только как частота стартов - ThreadRateLimiter конкурентность не
+# ограничивал вообще: сколько потоков одновременно держат открытое соединение к
+# Wikimedia, зависело только от DOWNLOAD_CONCURRENCY=8. Добавлен
+# _wikimedia_semaphore на WIKIMEDIA_CONCURRENCY=2 (официальный документированный
+# потолок для скачивания файлов у анонимов - взят как есть, без запаса сверху,
+# в отличие от LOC, где 3.2с была оценкой с запасом от заявленного лимита
+# запросов/мин), оборачивающий download_wikimedia_commons целиком (то есть
+# оба запроса на один номер), плюс wait_turn() перенесён внутрь ОБОИХ
+# retry-циклов, чтобы каждый фактический HTTP-запрос (включая ретраи и второй
+# запрос за файлом) проходил через общий rate-limiter, а не только первая
+# попытка первого запроса.
 # ---------------------------------------------------------------------------
 
 DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", 8))
 WIKIMEDIA_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS", 1.5))
+WIKIMEDIA_CONCURRENCY = int(os.environ.get("DOWNLOAD_WIKIMEDIA_CONCURRENCY", 2))
 PEXELS_PIXABAY_CONCURRENCY = int(os.environ.get("DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY", 3))
 
 
@@ -147,6 +216,7 @@ class ThreadRateLimiter:
 
 
 _wikimedia_rate_limiter = ThreadRateLimiter(WIKIMEDIA_MIN_INTERVAL_SECONDS)
+_wikimedia_semaphore = threading.Semaphore(WIKIMEDIA_CONCURRENCY)
 _pexels_pixabay_semaphore = threading.Semaphore(PEXELS_PIXABAY_CONCURRENCY)
 
 
@@ -201,6 +271,7 @@ def _loc_get(url: str, timeout: int = 30, **kwargs):
             continue
 
         if resp.status_code == 429:
+            log_429_details("LOC", url, resp)
             _loc_exhausted = True
             raise LocExhaustedError("HTTP 429 - LOC помечен исчерпанным до конца текущего запуска")
 
@@ -344,80 +415,94 @@ def download_media_item(number: int, url: str) -> None:
 
 
 def download_wikimedia_commons(number: int, url: str) -> None:
-    """Скачивание оригинального файла с Wikimedia Commons с паузами от лимита 429."""
-    # Раунд 5: раньше был просто time.sleep(1.5) - работало только при строго
-    # последовательном вызове. Теперь несколько потоков могут звать эту функцию
-    # одновременно, поэтому пауза стала общим thread-safe rate-limiter'ом (см.
-    # блок "Раунд 5" в начале файла) - интервал тот же (1.5с), но теперь он
-    # действительно минимальный интервал МЕЖДУ запросами всех потоков вместе,
-    # а не просто пауза перед каждым отдельным вызовом.
-    _wikimedia_rate_limiter.wait_turn()
+    """Скачивание оригинального файла с Wikimedia Commons с паузами от лимита 429.
 
-    try:
-        path = urlparse(url).path
-        file_part = path.split("/wiki/")[-1] if "/wiki/" in path else path.split("/")[-1]
-        file_title = urllib.parse.unquote(file_part)
+    Раунд 6 - разбор реального 429 на прогоне с ThreadPoolExecutor: раньше
+    _wikimedia_rate_limiter.wait_turn() вызывался РОВНО ОДИН РАЗ, перед первой
+    попыткой metadata-запроса - мимо него шли ретраи (свой time.sleep + новый
+    запрос без wait_turn) и целиком второй запрос (сам файл, upload.wikimedia.org)
+    вместе с его собственным retry-циклом. Т.е. лимитер видел лишь часть
+    реального трафика. Плюс официальная robot policy Wikimedia
+    (https://wikitech.wikimedia.org/wiki/Robot_policy) задаёт лимит для анонимов
+    в первую очередь как КОНКУРЕНТНОСТЬ (не больше 2 одновременных скачиваний
+    файла), а не только частоту стартов - для этого добавлен _wikimedia_semaphore,
+    оборачивающий всю функцию целиком (оба запроса на один номер - одна "единица"
+    конкурентности). Теперь: 1) семафор ограничивает, сколько номеров вообще
+    одновременно работают с Wikimedia (2, без запаса - официальный потолок, а не
+    оценка), 2) wait_turn() вызывается перед КАЖДЫМ фактическим HTTP-запросом
+    (обе retry-петли и fallback-запрос страницы), а не только один раз в начале."""
+    with _wikimedia_semaphore:
+        try:
+            path = urlparse(url).path
+            file_part = path.split("/wiki/")[-1] if "/wiki/" in path else path.split("/")[-1]
+            file_title = urllib.parse.unquote(file_part)
 
-        if not file_title.lower().startswith(("file:", "файл:")):
-            file_title = "File:" + file_title
+            if not file_title.lower().startswith(("file:", "файл:")):
+                file_title = "File:" + file_title
 
-        api_url = f"https://commons.wikimedia.org/w/api.php?action=query&titles={urllib.parse.quote(file_title)}&prop=imageinfo&iiprop=url&format=json"
+            api_url = f"https://commons.wikimedia.org/w/api.php?action=query&titles={urllib.parse.quote(file_title)}&prop=imageinfo&iiprop=url&format=json"
 
-        data = None
-        for attempt in range(3):
-            resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
-            if resp.status_code == 429:
-                print(f"[ИНФО] Wikimedia 429 limit, пауза {4 * (attempt + 1)} сек для {number}...")
-                time.sleep(4 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            break
-
-        if not data:
-            fail(number, f"Wikimedia {number}: лимит запросов 429 не сбросился")
-            return
-
-        pages = data.get("query", {}).get("pages", {})
-        direct_url = None
-        for _, page_data in pages.items():
-            imageinfo = page_data.get("imageinfo", [])
-            if imageinfo and "url" in imageinfo[0]:
-                direct_url = imageinfo[0]["url"]
+            data = None
+            for attempt in range(3):
+                _wikimedia_rate_limiter.wait_turn()
+                resp = cffi_requests.get(api_url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=20)
+                if resp.status_code == 429:
+                    log_429_details("Wikimedia", f"metadata, номер {number}, попытка {attempt + 1}", resp)
+                    print(f"[ИНФО] Wikimedia 429 limit, пауза {4 * (attempt + 1)} сек для {number}...")
+                    time.sleep(4 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
                 break
 
-        if not direct_url:
-            page_resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
-            page_resp.raise_for_status()
-            direct_url = extract_og_media_url(page_resp.text)
+            if not data:
+                fail(number, f"Wikimedia {number}: лимит запросов 429 не сбросился")
+                return
 
-        if not direct_url:
-            fail(number, f"Wikimedia {number}: не удалось извлечь ссылку ({url})")
-            return
+            pages = data.get("query", {}).get("pages", {})
+            direct_url = None
+            for _, page_data in pages.items():
+                imageinfo = page_data.get("imageinfo", [])
+                if imageinfo and "url" in imageinfo[0]:
+                    direct_url = imageinfo[0]["url"]
+                    break
 
-        # Скачивание файла с повторами
-        content = None
-        img_resp = None
-        for attempt in range(3):
-            img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
-            if img_resp.status_code == 429:
-                time.sleep(4 * (attempt + 1))
-                continue
-            img_resp.raise_for_status()
-            content = img_resp.content
-            break
+            if not direct_url:
+                _wikimedia_rate_limiter.wait_turn()
+                page_resp = cffi_requests.get(url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=30)
+                page_resp.raise_for_status()
+                direct_url = extract_og_media_url(page_resp.text)
 
-        if not content or looks_like_html(content):
-            fail(number, f"Wikimedia {number}: не удалось скачать файл изображения")
-            return
+            if not direct_url:
+                fail(number, f"Wikimedia {number}: не удалось извлечь ссылку ({url})")
+                return
 
-        ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
-        filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
-        with open(filepath, "wb") as f:
-            f.write(content)
-        print(f"[OK] WIKIMEDIA {number} ({number}{ext}) успешно скачано")
-    except Exception as e:
-        fail(number, f"Wikimedia ошибка {number}: {e}")
+            # Скачивание файла с повторами
+            content = None
+            img_resp = None
+            for attempt in range(3):
+                _wikimedia_rate_limiter.wait_turn()
+                img_resp = cffi_requests.get(direct_url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=60)
+                if img_resp.status_code == 429:
+                    log_429_details("Wikimedia", f"файл, номер {number}, попытка {attempt + 1}", img_resp)
+                    print(f"[ИНФО] Wikimedia 429 limit (файл), пауза {4 * (attempt + 1)} сек для {number}...")
+                    time.sleep(4 * (attempt + 1))
+                    continue
+                img_resp.raise_for_status()
+                content = img_resp.content
+                break
+
+            if not content or looks_like_html(content):
+                fail(number, f"Wikimedia {number}: не удалось скачать файл изображения")
+                return
+
+            ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
+            filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
+            with open(filepath, "wb") as f:
+                f.write(content)
+            print(f"[OK] WIKIMEDIA {number} ({number}{ext}) успешно скачано")
+        except Exception as e:
+            fail(number, f"Wikimedia ошибка {number}: {e}")
 
 
 def download_direct_via_cffi(number: int, url: str) -> None:
