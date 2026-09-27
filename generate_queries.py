@@ -644,11 +644,19 @@ def main() -> int:
         return 3
 
     if not args.skip_schema_preflight:
+        # Явный тайминг preflight-звонка (логику намеренно не трогаем - см. обсуждение):
+        # пока не ясно, разовая ли это задержка Gemini или повторяющаяся аномалия, поэтому
+        # просто фиксируем цифру на каждом прогоне и смотрим, повторяется ли она дальше.
+        preflight_start = time.monotonic()
         try:
             schema_preflight_check(client, current_model)
         except Exception as e:
-            logging.error("Preflight по response_schema не пройден: %s. Основной цикл не запускается.", e)
+            logging.error(
+                "Preflight по response_schema не пройден за %.2fs: %s. Основной цикл не запускается.",
+                time.monotonic() - preflight_start, e,
+            )
             return 1
+        logging.info("Preflight по response_schema занял %.2fs.", time.monotonic() - preflight_start)
 
     batches = make_batches(segments, args.batch_size, CONTEXT_WINDOW)
 
