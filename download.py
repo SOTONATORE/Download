@@ -353,20 +353,41 @@ def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwarg
     raise last_exc or RuntimeError("не удалось выполнить запрос к loc.gov")
 
 
-def parse_and_download_links(env_name: str) -> None:
+def parse_links(raw_text: str) -> dict:
+    """Общий разбор строк 'номер: URL' - используется и для links.txt/
+    INPUT_LINKS, и для backup_links.txt/INPUT_BACKUP_LINKS (тот же формат,
+    целые номера сегментов - см. докстринг search.py про backup_links.txt)."""
+    matches = re.findall(r'(\d+)\s*:\s*(https?://[^\s]+)', raw_text)
+    return {int(num_str): url for num_str, url in matches}
+
+
+def parse_and_download_links(env_name: str, backup_env_name: str = "") -> None:
     raw_text = os.environ.get(env_name, "")
     if not raw_text:
         print("Список ссылок пуст. Нечего скачивать.")
         return
 
     print("Начинаю разбор и скачивание файлов...")
-    matches = re.findall(r'(\d+)\s*:\s*(https?://[^\s]+)', raw_text)
+    links = parse_links(raw_text)
 
-    if not matches:
+    if not links:
         print("[ОШИБКА] Не удалось распознать ссылки формата 'номер: ссылка'")
         return
 
-    print(f"Найдено ссылок для скачивания: {len(matches)}")
+    # backup_env_name может быть пустой строкой (старый сценарий с ручными
+    # ссылками, где backup-файла нет вообще) - тогда backup_links остаётся
+    # пустым словарём, и download_number_with_backup для каждого номера просто
+    # не находит backup (backup_url="") - это нормальный случай, не ошибка.
+    backup_links = {}
+    if backup_env_name:
+        backup_raw_text = os.environ.get(backup_env_name, "")
+        if backup_raw_text:
+            backup_links = parse_links(backup_raw_text)
+
+    print(
+        f"Найдено ссылок для скачивания: {len(links)}"
+        + (f" (с backup-ссылкой: {len(backup_links)})" if backup_env_name else "")
+    )
 
     # Раунд 5: LOC остаётся полностью последовательным (не трогаем его rate-limiter
     # логику), всё остальное идёт через ThreadPoolExecutor - см. подробное обоснование
@@ -374,10 +395,16 @@ def parse_and_download_links(env_name: str) -> None:
     # СРАЗУ ПОСЛЕ submit() пула, а не после его завершения - это даёт перекрытие по
     # времени (пока LOC ждёт свои 3.2с между запросами, пул параллельно докачивает
     # всё остальное в фоне), а не сложение времени LOC + времени всего остального.
+    #
+    # Бакет (LOC-последовательный / параллельный пул) определяется ТОЛЬКО по сайту
+    # primary-ссылки, backup сюда не влияет - если backup окажется с другого сайта,
+    # он всё равно физически безопасен для вызова из любого потока (все rate-limiter'ы
+    # сайтов thread-safe сами по себе, см. ThreadRateLimiter/_wikimedia_semaphore/
+    # _pexels_pixabay_semaphore выше), просто пойдёт туда же, где обрабатывался
+    # provider primary для этого number.
     loc_items = []
     other_items = []
-    for num_str, url in matches:
-        number = int(num_str)
+    for number, url in links.items():
         if "loc.gov" in url.lower():
             loc_items.append((number, url))
         else:
@@ -392,13 +419,16 @@ def parse_and_download_links(env_name: str) -> None:
     )
 
     with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as executor:
-        futures = [executor.submit(download_media_item, number, url) for number, url in other_items]
+        futures = [
+            executor.submit(download_number_with_backup, number, url, backup_links.get(number, ""))
+            for number, url in other_items
+        ]
 
         for number, url in loc_items:
-            download_media_item(number, url)
+            download_number_with_backup(number, url, backup_links.get(number, ""))
 
         for future in as_completed(futures):
-            future.result()  # пробрасываем неожиданные исключения - download_media_item
+            future.result()  # пробрасываем неожиданные исключения - download_number_with_backup
                               # сам ловит и логирует всё ожидаемое через fail()
 
 
@@ -484,6 +514,157 @@ def download_media_item(number: int, url: str) -> None:
 
     # 8. ВСЁ ОСТАЛЬНОЕ - СКАЧИВАНИЕ ЧЕРЕЗ curl_cffi С ИМИТАЦИЕЙ БРАУЗЕРА
     download_direct_via_cffi(number, url)
+
+
+# ---------------------------------------------------------------------------
+# Backup-ссылки: retry на транзиентный сетевой сбой + переход на backup URL.
+#
+# Ни одна из 8 site-функций выше НЕ изменена: они как раньше сами решают,
+# получилось скачать или нет, и сами же зовут fail() при провале. Вместо того
+# чтобы переписывать восемь разных except-блоков на "бросай исключение вместо
+# fail()", успех/провал конкретного вызова определяется СНАРУЖИ - по тому,
+# появилась ли в FAILED_ITEMS новая запись с префиксом "{number}: " за время
+# вызова. Это безопасно при параллельных потоках (ThreadPoolExecutor): каждый
+# номер сегмента обрабатывается ровно одним вызовом download_number_with_backup
+# за весь прогон (parse_and_download_links вызывает его по одному разу на
+# number), поэтому записи с ЧУЖИМ number, добавляемые в это же время другими
+# потоками, никак не пересекаются с проверкой "по префиксу этого number" -
+# сравнивать пришлось бы длину всего списка, но не подмножество с нашим
+# префиксом.
+#
+# Классификация сбоя (для решения "делать быстрый повтор или сразу backup")
+# идёт по тексту сообщения, которое сама site-функция и так уже формирует в
+# fail(number, f"...: {e}") - т.е. по str() исходного исключения. Раз функции
+# не трогаем, точный тип исключения curl_cffi наружу не долетает, но текст
+# исключения (timeout/connection reset/HTTP-2 stream reset и т.п.) долетает
+# всегда - этого достаточно для грубой, но практичной классификации.
+# ---------------------------------------------------------------------------
+
+def classify_failure_message(message: str) -> str:
+    """"429" / "transient" / "other" по тексту сообщения об ошибке.
+
+    "429" - рейт-лимит, немедленный повтор того же запроса бессмысленен (ответ
+    будет тем же) - НЕ делаем внешний retry, сразу переходим к backup (если
+    есть). Это НЕ отменяет и не дублирует уже существующую 429-логику
+    LOC/Wikimedia - для их URL внешний retry в любом случае не применяется
+    (см. _url_gets_external_retry), этот случай здесь только на случай 429 у
+    pexels/pixabay/coverr/generic-cffi, где своей 429-логики нет вообще.
+
+    "transient" - именно то, ради чего затевалась вся задача: сетевой/
+    транспортный сбой (timeout, connection reset, HTTP/2 stream reset и
+    т.п.), который с большой вероятностью не повторится при немедленном
+    повторном запросе. Получает ровно 1 быстрый повтор той же ссылки.
+
+    "other" - логическая ошибка (нет нужного поля в ответе API, не нашли
+    ссылку на странице, пришла HTML-страница вместо файла и т.п.) - повторный
+    запрос даст тот же результат, поэтому сразу backup без бессмысленного
+    повтора."""
+    text = message.lower()
+    if "429" in text or "too many requests" in text:
+        return "429"
+    transient_markers = (
+        "timeout", "timed out", "connection reset", "connection aborted",
+        "connection refused", "stream reset", "rst_stream", "reset by peer",
+        "broken pipe", "eof occurred", "ssl error", "name or service not known",
+        "could not resolve host", "temporary failure in name resolution",
+        "failed to establish a new connection", "curl: (",
+        "connectionerror", "http/2 stream", "network is unreachable",
+        "socket.timeout", "connection closed",
+    )
+    if any(marker in text for marker in transient_markers):
+        return "transient"
+    return "other"
+
+
+def _url_gets_external_retry(url: str) -> bool:
+    """LOC/Wikimedia/yt-dlp-маршрут (см. те же условия, что и в
+    download_media_item выше) уже имеют СВОЮ, проверенную боем ретрай-логику
+    (429-ретраи у LOC/Wikimedia, --retries у yt-dlp) - модуль их не трогает
+    вообще, и добавлять поверх ещё один внешний retry было бы избыточно и
+    только тратило бы время. Для этих маршрутов backup применяется СРАЗУ по
+    итогу их (нетронутой) внутренней логики, без дополнительного повтора.
+    Всем остальным маршрутам (pexels/pixabay/coverr/generic-cffi - у них
+    сейчас 0 внутренних ретраев) - положен новый внешний "1 повтор на
+    транзиентный сбой"."""
+    url_lower = url.lower()
+    if "wikimedia.org" in url_lower or "wikipedia.org" in url_lower:
+        return False
+    if "loc.gov" in url_lower:
+        return False
+    if url_lower.endswith((".mp4", ".mov", ".avi")) or "mixkit.co" in url_lower:
+        return False
+    return True
+
+
+def _attempt_download(number: int, url: str) -> tuple[bool, str]:
+    """Один вызов существующего download_media_item (без изменений внутри
+    него) - возвращает (успех, текст_ошибки). Текст ошибки берётся из
+    последней записи FAILED_ITEMS с префиксом "{number}: ", появившейся за
+    время этого вызова."""
+    prefix = f"{number}: "
+    with _failed_items_lock:
+        before = sum(1 for item in FAILED_ITEMS if item.startswith(prefix))
+    download_media_item(number, url)
+    with _failed_items_lock:
+        entries = [item for item in FAILED_ITEMS if item.startswith(prefix)]
+    if len(entries) > before:
+        return False, entries[-1][len(prefix):]
+    return True, ""
+
+
+def _clear_failed_entries_for(number: int) -> None:
+    """Убирает из FAILED_ITEMS промежуточные записи об этом number (после
+    неудачного retry/перед переходом на backup) - в конце для этого number
+    должна остаться максимум ОДНА итоговая запись (если он так и не скачался),
+    а не по одной на каждую промежуточную попытку. Безопасно при параллельных
+    потоках - см. комментарий в начале блока: с этим номером в это время
+    работает только вызвавший поток."""
+    prefix = f"{number}: "
+    with _failed_items_lock:
+        FAILED_ITEMS[:] = [item for item in FAILED_ITEMS if not item.startswith(prefix)]
+
+
+def download_number_with_backup(number: int, primary_url: str, backup_url: str = "") -> None:
+    """Верхнеуровневая обёртка над download_media_item для одного сегмента:
+
+    1. Пробуем primary_url.
+    2. Если провал И маршрут без своей ретрай-логики (_url_gets_external_retry)
+       И сбой классифицирован как "transient" - делаем РОВНО ОДИН быстрый
+       повторный вызов той же primary_url (без долгого бэкоффа - сразу).
+    3. Если всё ещё провал - при наличии backup_url пробуем её (та же логика
+       диспетчеризации по сайту, что и для primary - LOC/Wikimedia/yt-dlp
+       маршрут для backup отработает своей внутренней логикой точно так же).
+    4. Если и backup не спас (или его не было) - одна итоговая запись в
+       FAILED_ITEMS через fail(), как раньше делал сам download_media_item.
+
+    Раздельная пометка в лог при успехе через backup - сама site-функция не в
+    курсе, что её вызвали как backup (её "[OK] ..." не трогаем), поэтому
+    отдельная строка печатается здесь."""
+    ok, message = _attempt_download(number, primary_url)
+
+    if not ok and _url_gets_external_retry(primary_url):
+        if classify_failure_message(message) == "transient":
+            print(
+                f"[ИНФО] {number}: похоже на транзиентный сбой соединения "
+                f"({message}) - один быстрый повтор той же ссылки перед backup..."
+            )
+            _clear_failed_entries_for(number)
+            ok, message = _attempt_download(number, primary_url)
+
+    if ok:
+        return
+
+    if backup_url:
+        _clear_failed_entries_for(number)
+        print(f"[ИНФО] {number}: primary-ссылка не скачалась ({message}) - пробую backup-ссылку...")
+        ok, backup_message = _attempt_download(number, backup_url)
+        if ok:
+            print(f"[OK] {number}: файл успешно скачан [через backup] ({backup_url})")
+            return
+        message = f"primary не скачался ({message}); backup тоже не скачался ({backup_message})"
+
+    _clear_failed_entries_for(number)
+    fail(number, message)
 
 
 def download_wikimedia_commons(number: int, url: str) -> None:
@@ -851,7 +1032,7 @@ def main():
         shutil.rmtree(OUTPUT_DIR)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    parse_and_download_links("INPUT_LINKS")
+    parse_and_download_links("INPUT_LINKS", "INPUT_BACKUP_LINKS")
     write_failed_report()
 
 
