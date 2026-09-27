@@ -18,6 +18,92 @@ BROWSER_HEADERS = {
     "Accept": "*/*",
 }
 
+# ---------------------------------------------------------------------------
+# Учёт провалов скачивания (см. download_failed.txt) - раньше каждый [ОШИБКА]
+# просто печатался в stdout CI-лога и терялся безвозвратно: чтобы узнать, что и
+# почему не скачалось, приходилось руками читать весь лог шага целиком. Теперь
+# каждый провал ещё и запоминается в FAILED_ITEMS через fail(), а в конце main()
+# при непустом списке пишется download_failed.txt ("номер: причина" построчно) -
+# его дальше workflow подмешивает в missing.txt и (только если он не пуст)
+# прикладывает к релизу.
+# ---------------------------------------------------------------------------
+
+FAILED_ITEMS: list[str] = []
+
+
+def fail(number: int, message: str) -> None:
+    print(f"[ОШИБКА] {message}")
+    FAILED_ITEMS.append(f"{number}: {message}")
+
+
+# ---------------------------------------------------------------------------
+# loc.gov: rate-limiter + "исчерпан после первого 429" + ретраи на сетевые сбои.
+#
+# См. реальный прогон на 108 файлах: с сегмента 27 (первый 429 от loc.gov) и до
+# самого конца ВСЕ последующие обращения к loc.gov (39 штук) проваливались тем же
+# 429 подряд, без единого успеха - потому что loc.gov, по официальной документации
+# (https://www.loc.gov/apis/json-and-yaml/working-within-limits/), при превышении
+# лимита JSON API (20 запросов/мин) банит IP на ЦЕЛЫЙ ЧАС, а не на минуту. download.py
+# качает файлы последовательно, без пауз между запросами, и на каждый LOC-айтем делает
+# ДВА запроса (сначала JSON-метаданные, потом сам файл) - на батче из нескольких
+# десятков LOC-ссылок лимит выбивается быстро, после чего скрипт продолжает впустую
+# долбиться в стену до конца прогона. Тот же принцип (rate-limiter + "не ретраить
+# 429, сразу считать сайт исчерпанным") уже применён в search.py - см. его докстринг,
+# "Четвёртое уточнение".
+# ---------------------------------------------------------------------------
+
+LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_MIN_INTERVAL_SECONDS", 5.0))
+LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
+
+_loc_last_request_ts = 0.0
+_loc_exhausted = False
+
+
+class LocExhaustedError(RuntimeError):
+    """LOC уже забанил нас в этом запуске (был 429) - дальнейшие попытки в рамках
+    текущего прогона гарантированно провалятся тем же способом, ретраить бессмысленно."""
+
+
+def _loc_wait_turn() -> None:
+    global _loc_last_request_ts
+    now = time.monotonic()
+    wait = LOC_MIN_INTERVAL_SECONDS - (now - _loc_last_request_ts)
+    if wait > 0:
+        time.sleep(wait)
+    _loc_last_request_ts = time.monotonic()
+
+
+def _loc_get(url: str, timeout: int = 30, **kwargs):
+    """Обёртка над cffi_requests.get специально для loc.gov: применяет rate-limiter
+    перед КАЖДЫМ запросом (метаданные и сам файл считаются в один и тот же бюджет -
+    оба домена loc.gov, дешевле перестраховаться, чем гадать про раздельные лимиты),
+    ретраит транзиентные сетевые ошибки/таймауты, и при первом же HTTP 429 сразу
+    помечает LOC исчерпанным до конца запуска - все следующие вызовы после этого
+    момента падают мгновенно с LocExhaustedError, не тратя лишних запросов и времени
+    сборки на заведомо бесполезные попытки."""
+    global _loc_exhausted
+    if _loc_exhausted:
+        raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
+
+    last_exc: Exception | None = None
+    for attempt in range(1, LOC_RETRIES + 1):
+        _loc_wait_turn()
+        try:
+            resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
+        except Exception as e:
+            last_exc = e
+            time.sleep(2 * attempt)
+            continue
+
+        if resp.status_code == 429:
+            _loc_exhausted = True
+            raise LocExhaustedError("HTTP 429 - LOC помечен исчерпанным до конца текущего запуска")
+
+        resp.raise_for_status()
+        return resp
+
+    raise last_exc or RuntimeError("не удалось выполнить запрос к loc.gov")
+
 
 def parse_and_download_links(env_name: str) -> None:
     raw_text = os.environ.get(env_name, "")
@@ -74,6 +160,8 @@ def download_media_item(number: int, url: str) -> None:
         video_id = extract_id(url)
         if video_id:
             download_pexels_video(number, video_id)
+        else:
+            fail(number, f"Pexels видео {number}: не удалось извлечь id из ссылки {url}")
         return
 
     # 2. PEXELS ФОТО
@@ -81,6 +169,8 @@ def download_media_item(number: int, url: str) -> None:
         photo_id = extract_id(url)
         if photo_id and PEXELS_API_KEY:
             download_pexels_photo(number, photo_id)
+        else:
+            fail(number, f"Pexels фото {number}: нет id ({photo_id!r}) или не задан PEXELS_API_KEY")
         return
 
     # 3. PIXABAY (ФОТО И ВИДЕО ЧЕРЕЗ ОФИЦИАЛЬНЫЙ API)
@@ -92,6 +182,8 @@ def download_media_item(number: int, url: str) -> None:
             else:
                 download_pixabay_photo(number, item_id)
             return
+        fail(number, f"Pixabay {number}: нет id ({item_id!r}) или не задан PIXABAY_API_KEY")
+        return
 
     # 4. COVERR ВИДЕО
     if "coverr.co" in url_lower:
@@ -143,7 +235,7 @@ def download_wikimedia_commons(number: int, url: str) -> None:
             break
 
         if not data:
-            print(f"[ОШИБКА] Wikimedia {number}: лимит запросов 429 не сбросился")
+            fail(number, f"Wikimedia {number}: лимит запросов 429 не сбросился")
             return
 
         pages = data.get("query", {}).get("pages", {})
@@ -160,7 +252,7 @@ def download_wikimedia_commons(number: int, url: str) -> None:
             direct_url = extract_og_media_url(page_resp.text)
 
         if not direct_url:
-            print(f"[ОШИБКА] Wikimedia {number}: не удалось извлечь ссылку ({url})")
+            fail(number, f"Wikimedia {number}: не удалось извлечь ссылку ({url})")
             return
 
         # Скачивание файла с повторами
@@ -176,7 +268,7 @@ def download_wikimedia_commons(number: int, url: str) -> None:
             break
 
         if not content or looks_like_html(content):
-            print(f"[ОШИБКА] Wikimedia {number}: не удалось скачать файл изображения")
+            fail(number, f"Wikimedia {number}: не удалось скачать файл изображения")
             return
 
         ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
@@ -185,7 +277,7 @@ def download_wikimedia_commons(number: int, url: str) -> None:
             f.write(content)
         print(f"[OK] WIKIMEDIA {number} ({number}{ext}) успешно скачано")
     except Exception as e:
-        print(f"[ОШИБКА] Wikimedia ошибка {number}: {e}")
+        fail(number, f"Wikimedia ошибка {number}: {e}")
 
 
 def download_direct_via_cffi(number: int, url: str) -> None:
@@ -209,7 +301,7 @@ def download_direct_via_cffi(number: int, url: str) -> None:
                     print(f"[OK] ФАЙЛ {number} ({filename}) извлечён из страницы")
                     return
 
-            print(f"[ОШИБКА] {number}: страница не содержит медиафайла ({url})")
+            fail(number, f"{number}: страница не содержит медиафайла ({url})")
             return
 
         content_type = resp.headers.get("Content-Type", "")
@@ -221,7 +313,7 @@ def download_direct_via_cffi(number: int, url: str) -> None:
             f.write(content)
         print(f"[OK] ФАЙЛ {number} ({filename}) успешно скачан")
     except Exception as e:
-        print(f"[ОШИБКА] Не удалось скачать {number}: {e}")
+        fail(number, f"Не удалось скачать {number}: {e}")
 
 
 def download_pixabay_photo(number: int, photo_id: str) -> None:
@@ -241,9 +333,9 @@ def download_pixabay_photo(number: int, photo_id: str) -> None:
                     f.write(img_resp.content)
                 print(f"[OK] ФОТО PIXABAY {number} (id={photo_id}) успешно скачано")
                 return
-        print(f"[ОШИБКА] Не удалось получить фото Pixabay {number}")
+        fail(number, f"Не удалось получить фото Pixabay {number}")
     except Exception as e:
-        print(f"[ОШИБКА] Pixabay API ошибка {number}: {e}")
+        fail(number, f"Pixabay API ошибка {number}: {e}")
 
 
 def download_pixabay_video(number: int, video_id: str) -> None:
@@ -265,9 +357,9 @@ def download_pixabay_video(number: int, video_id: str) -> None:
                     f.write(vid_resp.content)
                 print(f"[OK] ВИДЕО PIXABAY {number} (id={video_id}) успешно скачано")
                 return
-        print(f"[ОШИБКА] Не удалось получить видео Pixabay {number}")
+        fail(number, f"Не удалось получить видео Pixabay {number}")
     except Exception as e:
-        print(f"[ОШИБКА] Pixabay API ошибка {number}: {e}")
+        fail(number, f"Pixabay API ошибка {number}: {e}")
 
 
 def download_pexels_photo(number: int, photo_id: str) -> None:
@@ -285,13 +377,17 @@ def download_pexels_photo(number: int, photo_id: str) -> None:
             with open(filepath, "wb") as f:
                 f.write(img_resp.content)
             print(f"[OK] ФОТО PEXELS {number} (id={photo_id}) успешно скачано")
+        else:
+            # Раньше при пустом direct_url функция молча ничего не делала - провал
+            # терялся без единого слова в логе. Теперь хотя бы попадает в отчёт.
+            fail(number, f"Pexels фото {number} (id={photo_id}): в ответе API нет src.original/large")
     except Exception as e:
-        print(f"[ОШИБКА] Ошибка скачивания фото Pexels {number}: {e}")
+        fail(number, f"Ошибка скачивания фото Pexels {number}: {e}")
 
 
 def download_pexels_video(number: int, video_id: str) -> None:
     if not PEXELS_API_KEY:
-        print(f"[ОШИБКА] Видео {number}: нет PEXELS_API_KEY.")
+        fail(number, f"Видео {number}: нет PEXELS_API_KEY.")
         return
 
     api_url = f"https://api.pexels.com/v1/videos/videos/{video_id}"
@@ -301,12 +397,12 @@ def download_pexels_video(number: int, video_id: str) -> None:
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f"[ОШИБКА] Pexels API ошибка {number}: {e}")
+        fail(number, f"Pexels API ошибка {number}: {e}")
         return
 
     video_files = data.get("video_files", [])
     if not video_files:
-        print(f"[ОШИБКА] Pexels {number}: нет video_files в ответе API")
+        fail(number, f"Pexels {number}: нет video_files в ответе API")
         return
 
     mp4_files = [f for f in video_files if f.get("file_type") == "video/mp4"]
@@ -322,7 +418,7 @@ def download_pexels_video(number: int, video_id: str) -> None:
             f.write(resp.content)
         print(f"[OK] ВИДЕО PEXELS {number} (id={video_id}) успешно скачано")
     except Exception as e:
-        print(f"[ОШИБКА] Не удалось скачать файл видео {number}: {e}")
+        fail(number, f"Не удалось скачать файл видео {number}: {e}")
 
 
 def download_coverr_video(number: int, url: str) -> None:
@@ -333,7 +429,7 @@ def download_coverr_video(number: int, url: str) -> None:
 
         direct_url = extract_og_media_url(html)
         if not direct_url:
-            print(f"[ОШИБКА] Coverr {number}: не нашли og:video на странице {url}")
+            fail(number, f"Coverr {number}: не нашли og:video на странице {url}")
             return
 
         vid_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
@@ -341,7 +437,7 @@ def download_coverr_video(number: int, url: str) -> None:
         content = vid_resp.content
 
         if looks_like_html(content):
-            print(f"[ОШИБКА] Coverr {number}: по ссылке пришла HTML-страница, а не видео")
+            fail(number, f"Coverr {number}: по ссылке пришла HTML-страница, а не видео")
             return
 
         filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
@@ -349,7 +445,7 @@ def download_coverr_video(number: int, url: str) -> None:
             f.write(content)
         print(f"[OK] ВИДЕО COVERR {number} успешно скачано ({direct_url})")
     except Exception as e:
-        print(f"[ОШИБКА] Coverr ошибка {number}: {e}")
+        fail(number, f"Coverr ошибка {number}: {e}")
 
 
 def download_loc_gov(number: int, url: str) -> None:
@@ -359,8 +455,7 @@ def download_loc_gov(number: int, url: str) -> None:
     json_url = parsed._replace(query=urllib.parse.urlencode(query, doseq=True)).geturl()
 
     try:
-        resp = cffi_requests.get(json_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
-        resp.raise_for_status()
+        resp = _loc_get(json_url, headers=BROWSER_HEADERS)
         data = resp.json()
 
         direct_url = None
@@ -381,15 +476,14 @@ def download_loc_gov(number: int, url: str) -> None:
                 direct_url = image_url
 
         if not direct_url:
-            print(f"[ОШИБКА] loc.gov {number}: не удалось найти прямую ссылку на файл")
+            fail(number, f"loc.gov {number}: не удалось найти прямую ссылку на файл")
             return
 
-        file_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
-        file_resp.raise_for_status()
+        file_resp = _loc_get(direct_url, headers=BROWSER_HEADERS, timeout=60)
         content = file_resp.content
 
         if looks_like_html(content):
-            print(f"[ОШИБКА] loc.gov {number}: похоже, скачалась HTML-страница")
+            fail(number, f"loc.gov {number}: похоже, скачалась HTML-страница")
             return
 
         ext = guess_extension(direct_url, file_resp.headers.get("Content-Type", ""))
@@ -397,8 +491,10 @@ def download_loc_gov(number: int, url: str) -> None:
         with open(filepath, "wb") as f:
             f.write(content)
         print(f"[OK] LOC.GOV {number} успешно скачан")
+    except LocExhaustedError as e:
+        fail(number, f"loc.gov ошибка {number}: {e}")
     except Exception as e:
-        print(f"[ОШИБКА] loc.gov ошибка {number}: {e}")
+        fail(number, f"loc.gov ошибка {number}: {e}")
 
 
 def download_via_ytdlp(number: int, url: str) -> None:
@@ -416,9 +512,9 @@ def download_via_ytdlp(number: int, url: str) -> None:
         if result.returncode == 0:
             print(f"[OK] ВИДЕО {number} успешно скачано через yt-dlp")
         else:
-            print(f"[ОШИБКА] Ошибка yt-dlp {number}: {result.stderr}")
+            fail(number, f"Ошибка yt-dlp {number}: {result.stderr}")
     except Exception as ytdl_err:
-        print(f"[ОШИБКА] Не удалось запустить yt-dlp: {ytdl_err}")
+        fail(number, f"Не удалось запустить yt-dlp для {number}: {ytdl_err}")
 
 
 def guess_extension(url: str, content_type: str = "") -> str:
@@ -435,6 +531,19 @@ def guess_extension(url: str, content_type: str = "") -> str:
     return ".jpg"
 
 
+def write_failed_report(path: str = "download_failed.txt") -> None:
+    """Пишет download_failed.txt ТОЛЬКО если реально что-то не скачалось (FAILED_ITEMS
+    непустой) - если всё скачалось успешно, файл вообще не создаётся, чтобы workflow
+    мог проверять его существование/непустоту (`[ -s download_failed.txt ]`) и не
+    прикладывать к релизу пустой шум."""
+    if not FAILED_ITEMS:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        for line in FAILED_ITEMS:
+            f.write(line + "\n")
+    print(f"[ИНФО] Не удалось скачать {len(FAILED_ITEMS)} файлов - записано в {path}")
+
+
 def main():
     if os.path.exists(OUTPUT_DIR):
         import shutil
@@ -442,6 +551,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     parse_and_download_links("INPUT_LINKS")
+    write_failed_report()
 
 
 if __name__ == "__main__":
