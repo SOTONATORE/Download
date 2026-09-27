@@ -163,6 +163,23 @@ text_matches_keywords теперь токенизирует ключевую ф�
 нашлось в тексте кандидата точно или fuzzy-приближённо - короткие токены (римские цифры,
 инициалы) в этой пословной проверке пропускаются и не блокируют совпадение по остальным
 словам той же фразы, а не отбрасывают всю фразу целиком, как раньше.
+
+Десятое уточнение - найдено по DEBUG-логу реального прогона (round 4): у ПРЯМОГО pixabay
+(media_type="video") preview_url оказывался None у 100% кандидатов (105/105 во всех 21
+сегменте, где pixabay был первичным сайтом), при этом pixabay_fallback работал почти
+нормально (missing только 15/235). Причина - устаревшее допущение о структуре ответа
+Pixabay Video API: код брал hit.get("picture_id") и строил превью через vimeocdn
+(https://i.vimeocdn.com/video/{picture_id}_200x150.jpg), но проверка по актуальной
+официальной документации (https://pixabay.com/api/docs/) показала, что в СЕГОДНЯШНЕМ
+ответе /api/videos/ поля "picture_id" на верхнем уровне хита нет вообще - вместо этого
+у каждого видео есть "videos": {large/medium/small/tiny}, и превью-картинка лежит в
+videos.<size>.thumbnail. (Кандидаты, на которых это всплыло, по текстам тегов - явно
+видео, не фото: "time lapse", "aerial, drone, cinematic", "live wallpaper" и т.п. - это
+подтверждает, что 105/105 отказов пришлись именно на видео-ветку, а не на фото.) У фото
+(previewURL/webformatURL) структура ответа не менялась и совпадает с текущими доками -
+там всё было верно уже раньше. Исправлено: для video берём первый доступный thumbnail
+из videos.tiny -> small -> medium -> large (tiny предпочтителен - меньше трафика для
+CLIP, где точность превью не критична, важна только similarity с текстом).
 """
 
 from __future__ import annotations
@@ -856,8 +873,17 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
             page_url = hit.get("pageURL")
             tags = hit.get("tags", "")
             if media_type == "video":
-                picture_id = hit.get("picture_id")
-                preview = f"https://i.vimeocdn.com/video/{picture_id}_200x150.jpg" if picture_id else None
+                # См. "Десятое уточнение" в докстринге модуля: актуальный Pixabay
+                # Video API не отдаёт "picture_id" - превью нужно брать из
+                # videos.<size>.thumbnail. tiny предпочтителен (меньше трафика),
+                # но перебираем до large на случай, если у конкретного видео нет
+                # мелких рендеров (бывает у совсем новых загрузок).
+                videos = hit.get("videos") or {}
+                preview = None
+                for size in ("tiny", "small", "medium", "large"):
+                    preview = (videos.get(size) or {}).get("thumbnail")
+                    if preview:
+                        break
             else:
                 preview = hit.get("previewURL") or hit.get("webformatURL")
             result.append(Candidate(
