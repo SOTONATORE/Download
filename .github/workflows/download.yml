@@ -181,14 +181,29 @@ jobs:
         # DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY, не трогая остальной пул.
         # DOWNLOAD_CONCURRENCY: "8"
         # DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY: "3"
-        # DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS: "1.5"
+        # DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS: "0.25"
         # DOWNLOAD_WIKIMEDIA_CONCURRENCY: "2"
+        # DOWNLOAD_LOC_MIN_INTERVAL_SECONDS: "3.2"
+        # DOWNLOAD_LOC_FILE_MIN_INTERVAL_SECONDS: "0.45"
       run: python download.py
 
     # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
     # (см. write_failed_report в download.py). Здесь их номера подмешиваются в
     # missing.txt - если search_media не запускался (сценарий с ручными ссылками),
     # missing.txt ещё не существует, поэтому сначала touch, чтобы шаг не падал.
+    #
+    # Раунд 8: если после merge файл остаётся полностью пустым (нет пропущенных
+    # search.py, нет провалов download.py - именно такой прогон и вскрыл баг),
+    # подставляем одну явную строку-заглушку вместо оставления файла 0 байт. Не
+    # просто на всякий случай: GitHub REST API для загрузки release-ассетов
+    # (uploads.github.com) отвечает 400 "Bad Content-Length" именно на буквально
+    # 0-байтные файлы - это подтверждено реальным прогоном (см. обсуждение), шаг
+    # "Publish files as a GitHub Release" падал на строке gh release upload
+    # "$TAG" $UPLOAD_EXTRA именно на missing.txt, при том что download_failed.txt
+    # в этом же прогоне не создавался вовсе (0 провалов) - т.е. единственная
+    # причина падения технический нюанс API, а не что-то в generate_queries.py/
+    # search.py/download.py. Заглушка сохраняет исходный замысел ("пустой файл -
+    # тоже полезное явное подтверждение") без 0-байтного тела запроса.
     - name: Merge failed downloads into missing.txt
       run: |
         touch missing.txt
@@ -196,6 +211,9 @@ jobs:
           cut -d: -f1 download_failed.txt >> missing.txt
         fi
         sort -n -u -o missing.txt missing.txt
+        if [ ! -s missing.txt ]; then
+          echo "Пропущенных сегментов нет - все найдены и успешно скачаны." > missing.txt
+        fi
 
     - name: Show download failures summary
       run: |
@@ -224,10 +242,15 @@ jobs:
           --repo "${{ github.repository }}" \
           --clobber
 
-        # missing.txt (уже объединённый с провалами download.py) прикладываем всегда -
-        # даже пустой файл полезен как явное подтверждение "пропущенных нет". А вот
-        # download_failed.txt - только если он реально не пуст, чтобы не тащить в
-        # релиз шум, когда скачивание прошло без единого сбоя.
+        # missing.txt прикладываем всегда - после Раунда 8 он гарантированно не 0
+        # байт (см. шаг "Merge failed downloads into missing.txt": либо реальный
+        # список пропущенных номеров, либо явная строка-заглушка "пропущенных нет"),
+        # так что 400 "Bad Content-Length" от uploads.github.com на пустое тело
+        # здесь больше не воспроизводится. download_failed.txt - только если он
+        # реально не пуст, чтобы не тащить в релиз шум, когда скачивание прошло без
+        # единого сбоя (этот файл по-прежнему может быть 0 байт/не существовать -
+        # для него сохранена проверка [ -s ... ], т.к. его в релиз тогда не грузим
+        # вообще, в отличие от missing.txt).
         UPLOAD_EXTRA="missing.txt"
         if [ -s download_failed.txt ]; then
           UPLOAD_EXTRA="$UPLOAD_EXTRA download_failed.txt"
