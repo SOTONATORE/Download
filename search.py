@@ -41,7 +41,7 @@ search.py
     SEARCH_GLOBAL_CONCURRENCY  - сколько сегментов обрабатывать параллельно (умолч. 40)
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
-    SEARCH_CLIP_MODEL / SEARCH_CLIP_PRETRAINED - модель open_clip (умолч. ViT-B-32 / openai)
+    SEARCH_CLIP_MODEL / SEARCH_CLIP_PRETRAINED - модель open_clip (умолч. ViT-B-32-quickgelu / openai)
 
 Возвращаемые коды:
     0 - links.txt и missing.txt успешно записаны (даже если часть/все сегменты в missing)
@@ -88,6 +88,20 @@ API (20 запросов/мин) приводит к блокировке IP н�
 CAPTCHAs even when operating below the rates listed above") - это ловится отдельно
 как aiohttp.ContentTypeError при попытке resp.json() и обрабатывается так же, как
 429 (тот же treat_429_as_exhaustion), т.к. по сути это тот же сигнал "нас блокируют".
+
+Пятое (критичное) уточнение - баг конфигурации CLIP, найденный после прогона с
+0 найденных из 126 сегментов СРАЗУ ПО ВСЕМ сайтам (не только loc): модель бралась
+как SEARCH_CLIP_MODEL=ViT-B-32 (без суффикса) с pretrained=openai. Это известный
+баг open_clip (https://github.com/mlfoundations/open_clip/issues/771): чекпоинт
+"openai" для B/32 обучен с QuickGELU-активацией, но конфиг архитектуры "ViT-B-32"
+(без суффикса) по умолчанию использует обычный GELU - в логах это видно как warning
+"QuickGELU mismatch between final model config (quick_gelu=False) and pretrained tag
+'openai' (quick_gelu=True)". Из-за этого модель технически загружается и работает
+без ошибок, но выдаёт бессмысленные эмбеддинги - и КАЖДЫЙ кандидат на КАЖДОМ сайте
+получает around-случайный/заниженный similarity, падающий ниже SIM_MIN_THRESHOLD.
+Это системная причина сразу для всех сайтов одновременно, не связанная с лицензиями,
+запросами или сущностями. Исправлено: дефолт SEARCH_CLIP_MODEL сменён на
+ViT-B-32-quickgelu (тот же pretrained=openai, но с правильной активацией).
 """
 
 from __future__ import annotations
@@ -143,7 +157,7 @@ SIM_MIN_THRESHOLD = 0.5
 
 CANDIDATES_PER_SITE = int(os.environ.get("SEARCH_CANDIDATES_PER_SITE", 5))
 
-CLIP_MODEL_NAME = os.environ.get("SEARCH_CLIP_MODEL", "ViT-B-32")
+CLIP_MODEL_NAME = os.environ.get("SEARCH_CLIP_MODEL", "ViT-B-32-quickgelu")
 CLIP_PRETRAINED = os.environ.get("SEARCH_CLIP_PRETRAINED", "openai")
 CLIP_CONCURRENCY = int(os.environ.get("SEARCH_CLIP_CONCURRENCY", 2))
 
@@ -235,6 +249,77 @@ class FatalConfigError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Диагностика воронки (raw -> лицензия -> сущности -> CLIP) по каждому сайту
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SiteStats:
+    """Считает, сколько кандидатов на каждом этапе фильтрации осталось - чтобы по
+    финальной сводке было сразу видно, на каком именно шаге воронка обнуляется
+    (сырой поиск / лицензия / текстовый фильтр сущностей / отсутствие превью /
+    сам CLIP-скоринг), а не только итоговое "найдено 0 из N"."""
+
+    segments_attempted: int = 0
+    raw_total: int = 0
+    license_ok_total: int = 0
+    keyword_ok_total: int = 0
+    sent_to_clip_total: int = 0
+    preview_missing_total: int = 0
+    clip_error_total: int = 0
+    clip_scored_total: int = 0
+    clip_passed_total: int = 0   # similarity >= SIM_MIN_THRESHOLD (0.5)
+    clip_accept_total: int = 0  # similarity >= SIM_ACCEPT_THRESHOLD (0.85)
+    score_sum: float = 0.0
+    best_score: float = 0.0
+
+    def record_score(self, sim: float) -> None:
+        self.clip_scored_total += 1
+        self.score_sum += sim
+        if sim > self.best_score:
+            self.best_score = sim
+        if sim >= SIM_ACCEPT_THRESHOLD:
+            self.clip_accept_total += 1
+        if sim >= SIM_MIN_THRESHOLD:
+            self.clip_passed_total += 1
+
+    @property
+    def avg_score(self) -> float:
+        return (self.score_sum / self.clip_scored_total) if self.clip_scored_total else 0.0
+
+
+def log_site_stats_summary(site_stats: dict) -> None:
+    if not site_stats:
+        return
+    logging.info("=" * 100)
+    logging.info("СВОДКА ПО ВОРОНКЕ ФИЛЬТРАЦИИ (диагностика, откуда берутся нули):")
+    logging.info(
+        "%-18s %6s %7s %8s %9s %8s %9s %8s %8s %8s %7s %7s",
+        "сайт", "сегм.", "raw", "лиценз.", "keyword", "->CLIP", "нет прев.",
+        "scored", ">=0.50", ">=0.85", "avg", "best",
+    )
+    for key in sorted(site_stats.keys()):
+        s = site_stats[key]
+        logging.info(
+            "%-18s %6d %7d %8d %9d %8d %9d %8d %8d %8d %7.3f %7.3f",
+            key, s.segments_attempted, s.raw_total, s.license_ok_total,
+            s.keyword_ok_total, s.sent_to_clip_total, s.preview_missing_total,
+            s.clip_scored_total, s.clip_passed_total, s.clip_accept_total,
+            s.avg_score, s.best_score,
+        )
+    logging.info(
+        "Как читать: raw=0 -> сайт вообще ничего не вернул по запросу (сеть/сам API/лимит). "
+        "лиценз.=0 при raw>0 -> все кандидаты отсеяны лицензионным фильтром. "
+        "keyword=0 при лиценз.>0 -> entity_keywords/is_entity слишком узкие или не совпадают "
+        "с текстом кандидатов. нет_прев.=raw (или близко) -> превью не скачиваются (сайт "
+        "блокирует PREVIEW_HEADERS/хотлинкинг, а не проблема с содержимым). scored>0, но "
+        "avg/best низкие (<0.5) -> CLIP отрабатывает, но ничего не совпадает по смыслу - "
+        "либо сам CLIP настроен неверно (см. 'Пятое уточнение' в докстринге модуля про "
+        "QuickGELU), либо запросы от generate_queries.py слишком специфичны/не по делу."
+    )
+    logging.info("=" * 100)
+
+
+# ---------------------------------------------------------------------------
 # Глобальный rate-limiter (минимальный интервал между запросами)
 # ---------------------------------------------------------------------------
 
@@ -318,6 +403,9 @@ class Context:
     # для которых лимитера нет в словаре, им попросту не ограничиваются (используют
     # только семафор конкурентности, как и раньше).
     rate_limiters: dict = field(default_factory=dict)
+    # Диагностика воронки фильтрации по каждому сайту (и отдельно "<site>_fallback"
+    # для запросов через try_fallback) - см. SiteStats/log_site_stats_summary.
+    site_stats: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -788,23 +876,47 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     return None
 
 
-async def score_candidates(ctx: Context, candidates: list[Candidate], query_text: str) -> list[Candidate]:
+async def score_candidates(
+    ctx: Context, candidates: list[Candidate], query_text: str,
+    seg_index: Optional[int] = None, stats_key: Optional[str] = None,
+) -> list[Candidate]:
+    key = stats_key or (candidates[0].site if candidates else "unknown")
+    stats = ctx.site_stats.setdefault(key, SiteStats())
+
     scored: list[Candidate] = []
     for cand in candidates:
         preview_bytes = await fetch_preview_bytes(ctx, cand)
         if preview_bytes is None:
             # Превью недоступно - дисквалифицируем именно этого кандидата, идём дальше.
+            stats.preview_missing_total += 1
             continue
+        stats.sent_to_clip_total += 1
         async with ctx.clip_semaphore:
             try:
                 sim = await ctx.clip.score(preview_bytes, query_text)
             except Exception as e:
                 logging.debug("CLIP не смог оценить %s/%s: %s", cand.site, cand.cand_id, e)
+                stats.clip_error_total += 1
                 continue
+        stats.record_score(sim)
         if sim >= SIM_MIN_THRESHOLD:
             cand.similarity = sim
             scored.append(cand)
     scored.sort(key=lambda c: c.similarity, reverse=True)
+
+    if candidates and not scored:
+        if stats.sent_to_clip_total == 0:
+            logging.info(
+                "Сегмент %s/%s: %s кандидатов, но ни для одного не скачалось превью "
+                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью, а не проблема "
+                "со смыслом/CLIP.", seg_index, key, len(candidates),
+            )
+        else:
+            logging.info(
+                "Сегмент %s/%s: %s кандидатов ушло в CLIP, ни один не набрал >= %.2f "
+                "(лучший скор в этом сегменте см. в общей сводке по сайту в конце лога).",
+                seg_index, key, stats.sent_to_clip_total, SIM_MIN_THRESHOLD,
+            )
     return scored
 
 
@@ -834,15 +946,39 @@ async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> Optional[str]:
 
 
 async def fetch_and_filter(ctx: Context, site: str, seg: SegmentSpec) -> list[Candidate]:
+    stats = ctx.site_stats.setdefault(site, SiteStats())
+    stats.segments_attempted += 1
+
     raw = await SITE_SEARCH_FUNCS[site](ctx, seg.query, seg.type)
+    stats.raw_total += len(raw)
     if not raw:
+        logging.info(
+            "Сегмент %s/%s: 0 сырых кандидатов по запросу %r - сайт ничего не вернул "
+            "(проверьте сеть/сам API/лимиты для этого сайта).", seg.index, site, seg.query,
+        )
         return []
+
     licensed = [c for c in raw if c.license_ok]
+    stats.license_ok_total += len(licensed)
     if not licensed:
+        logging.info(
+            "Сегмент %s/%s: %s сырых кандидатов, но 0 прошло лицензионный фильтр.",
+            seg.index, site, len(raw),
+        )
         return []
+
     skip_keyword_filter = site == "pexels" and seg.type == "video"  # там нет текстовых полей
     if seg.is_entity and not skip_keyword_filter:
+        before = len(licensed)
         licensed = [c for c in licensed if text_matches_keywords(c.text, seg.entity_keywords)]
+        if not licensed:
+            logging.info(
+                "Сегмент %s/%s: %s кандидатов прошли лицензию, но 0 после фильтра сущностей "
+                "%r - ключевые слова слишком узкие/не совпадают с текстом кандидатов.",
+                seg.index, site, before, seg.entity_keywords,
+            )
+            return []
+    stats.keyword_ok_total += len(licensed)
     return licensed
 
 
@@ -851,11 +987,19 @@ async def try_fallback(ctx: Context, seg: SegmentSpec) -> Optional[str]:
     for site in ("pexels", "pixabay"):
         if site in ctx.exhausted_sites:
             continue
+        stats_key = f"{site}_fallback"
+        stats = ctx.site_stats.setdefault(stats_key, SiteStats())
+        stats.segments_attempted += 1
         raw = await SITE_SEARCH_FUNCS[site](ctx, seg.fallback_query, seg.type)
+        stats.raw_total += len(raw)
         if not raw:
             continue
         top = raw[:CANDIDATES_PER_SITE]
-        scored = await score_candidates(ctx, top, seg.fallback_query)
+        stats.license_ok_total += len(top)
+        stats.keyword_ok_total += len(top)
+        scored = await score_candidates(
+            ctx, top, seg.fallback_query, seg_index=seg.index, stats_key=stats_key,
+        )
         pool.extend(scored)
     if not pool:
         return None
@@ -872,7 +1016,7 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> Optional[str]
         if not licensed:
             continue  # сайт не дал ни одного кандидата после лицензии/ключевых слов
         top = licensed[:CANDIDATES_PER_SITE]
-        scored = await score_candidates(ctx, top, seg.query)
+        scored = await score_candidates(ctx, top, seg.query, seg_index=seg.index, stats_key=site)
         if not scored:
             continue  # сайт дал пустой результат по CLIP-порогу (< 0.5 либо все превью недоступны)
         pool.extend(scored)
@@ -1017,7 +1161,10 @@ async def amain(args: argparse.Namespace) -> int:
             results, missing = await run_search(ctx, segments)
         except FatalConfigError as e:
             logging.error("Структурная ошибка конфигурации: %s", e)
+            log_site_stats_summary(ctx.site_stats)
             return 1
+
+        log_site_stats_summary(ctx.site_stats)
 
     with open(args.links_output, "w", encoding="utf-8") as f:
         for idx in sorted(results):
