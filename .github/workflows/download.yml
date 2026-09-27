@@ -82,9 +82,9 @@ jobs:
           ~/.cache/torch
         key: clip-weights-${{ runner.os }}-${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32' }}-${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
 
-    - name: Install search deps (CPU-only torch first, чтобы не тянуть CUDA-сборку)
+    - name: Install search deps (CPU-only torch/torchvision first, чтобы не тянуть CUDA-сборку)
       run: |
-        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
         pip install aiohttp pillow open_clip_torch
 
     - name: Run search.py
