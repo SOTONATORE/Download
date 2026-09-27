@@ -42,6 +42,10 @@ search.py
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
     SEARCH_CLIP_MODEL / SEARCH_CLIP_PRETRAINED - модель open_clip (умолч. ViT-B-32-quickgelu / openai)
+    SEARCH_SIM_MIN_THRESHOLD   - минимальный raw CLIP cosine similarity, чтобы кандидат
+        вообще прошёл в пул (умолч. 0.21 - см. "Шестое уточнение" в докстринге ниже)
+    SEARCH_SIM_ACCEPT_THRESHOLD - similarity, при которой прекращаем перебор сайтов
+        и берём кандидата сразу (умолч. 0.30 - см. там же)
 
 Возвращаемые коды:
     0 - links.txt и missing.txt успешно записаны (даже если часть/все сегменты в missing)
@@ -52,12 +56,12 @@ search.py
     (torch лучше ставить отдельно, CPU-only wheel, см. комментарий в конце файла)
 
 ВАЖНОЕ ДОПУЩЕНИЕ по интерпретации п.6-7 исходного ТЗ (спецификация была неоднозначна
-в этом месте): "лучший кандидат сайта >= 0.85" останавливает перебор сайтов, но выбор
-и дедуп-бронирование всегда идёт по НАКОПЛЕННОМУ пулу кандидатов (>=0.5) со всех уже
-пройденных сайтов, отсортированному по убыванию similarity - а не только по кандидатам
-текущего (последнего) сайта. Это единственное прочтение, совместимое одновременно с
-"не пробовать остальные сайты" (п.6) и "среди кандидатов ПО ВСЕМ ПЕРЕБРАННЫМ САЙТАМ"
-(п.7). Если имелось в виду не так - легко поменять в try_claim_pool/process_segment.
+в этом месте): "лучший кандидат сайта >= порога accept" останавливает перебор сайтов, но
+выбор и дедуп-бронирование всегда идёт по НАКОПЛЕННОМУ пулу кандидатов (>= порога min) со
+всех уже пройденных сайтов, отсортированному по убыванию similarity - а не только по
+кандидатам текущего (последнего) сайта. Это единственное прочтение, совместимое одновременно
+с "не пробовать остальные сайты" (п.6) и "среди кандидатов ПО ВСЕМ ПЕРЕБРАННЫМ САЙТАМ" (п.7).
+Если имелось в виду не так - легко поменять в try_claim_pool/process_segment.
 
 Второе допущение: правило "нет превью для CLIP -> дисквалифицировать именно этого
 кандидата, не весь сайт" (изначально уточнено для видео на Wikimedia) применено ко ВСЕМ
@@ -98,16 +102,56 @@ CAPTCHAs even when operating below the rates listed above") - это ловит�
 "QuickGELU mismatch between final model config (quick_gelu=False) and pretrained tag
 'openai' (quick_gelu=True)". Из-за этого модель технически загружается и работает
 без ошибок, но выдаёт бессмысленные эмбеддинги - и КАЖДЫЙ кандидат на КАЖДОМ сайте
-получает around-случайный/заниженный similarity, падающий ниже SIM_MIN_THRESHOLD.
-Это системная причина сразу для всех сайтов одновременно, не связанная с лицензиями,
-запросами или сущностями. Исправлено: дефолт SEARCH_CLIP_MODEL сменён на
-ViT-B-32-quickgelu (тот же pretrained=openai, но с правильной активацией).
+получает around-случайный/заниженный similarity, падающий ниже порога. Это системная
+причина сразу для всех сайтов одновременно, не связанная с лицензиями, запросами или
+сущностями. Исправлено: дефолт SEARCH_CLIP_MODEL сменён на ViT-B-32-quickgelu (тот же
+pretrained=openai, но с правильной активацией).
+
+Шестое уточнение (по итогам прогона на 126 сегментах после фикса QuickGELU) - пороги
+similarity были подобраны "на глаз" и оказались нереалистично высокими для СЫРОГО (без
+температурного скейлинга/софтмакса) косинусного сходства CLIP: у настоящих релевантных
+пар текст-картинка raw cosine similarity типично лежит в диапазоне ~0.2-0.35, а не
+0.5-0.85, как было выставлено изначально. Сводка по прогону это подтвердила напрямую:
+pexels/loc присылали в CLIP сотни нормальных кандидатов с avg similarity 0.20-0.28 и
+best 0.33-0.36 - это здоровые значения для настоящих совпадений, просто ниже прежнего
+порога отсечения 0.5, из-за чего пул почти всегда оказывался пуст. Пороги пересчитаны
+под этот диапазон (SIM_MIN_THRESHOLD 0.5->0.21, SIM_ACCEPT_THRESHOLD 0.85->0.30) и
+вынесены в переменные окружения SEARCH_SIM_MIN_THRESHOLD / SEARCH_SIM_ACCEPT_THRESHOLD,
+чтобы их можно было донастроить по факту (например по перцентилю на своей выборке
+сегментов), не трогая код.
+
+Седьмое уточнение - у pixabay и wikimedia в тестовом прогоне 100% превью не скачивались
+(fetch_preview_bytes возвращал None для всех кандидатов, 0 ушло в CLIP), при этом сам
+поиск (raw/license/keyword) отрабатывал нормально. Причина - типичная защита CDN от
+хотлинкинга: запрос к самому медиафайлу без Referer (иногда и Origin), указывающего на
+страницу-источник, отклоняется (403/406 и т.п.), даже если User-Agent в порядке (User-
+Agent уже был поправлен раньше для API-запросов к Wikimedia, но не для скачивания самих
+превью-картинок). Исправлено: fetch_preview_bytes теперь подставляет Referer (и Origin,
+выведенный из него) по каждому сайту - для wikimedia используется page_url конкретного
+кандидата (страница файла), если он есть, иначе общий https://commons.wikimedia.org/;
+для остальных сайтов - их основной домен. Также при неуспехе (status != 200 или сетевая
+ошибка) теперь логируется DEBUG-строка с сайтом, id кандидата, HTTP-статусом и превью
+тела ответа - раньше fetch_preview_bytes молча возвращал None без единой детали, что и
+не давало отличить блокировку по Referer от любой другой причины.
+
+Восьмое уточнение - text_matches_keywords делал точное вхождение подстроки, из-за чего
+разные способы транслитерации одного и того же имени (например "Abdulmecid" в
+entity_keywords против "Abdülmecid" в тексте кандидата, или "Abdul Mejid" против
+"Abdulmecid") не совпадали, хотя семантически это один и тот же человек. Не подключая
+внешних fuzzy-библиотек, добавлены два дешёвых слоя поверх прежней точной проверки:
+(1) нормализация через unicodedata (NFKD + снятие комбинирующих диакритических знаков),
+которая сама по себе схлопывает "Abdülmecid" -> "abdulmecid"; (2) до-проверка на уровне
+отдельных слов текста через стандартный difflib.SequenceMatcher (стандартная библиотека,
+без новых зависимостей) с порогом схожести - ловит близкие, но не идентичные варианты
+написания вроде "Mejid"/"Mecid". Это осознанно не полноценный fuzzy-matching (без
+rapidfuzz и т.п.) - как и просили, достаточно "чего-то попроще" поверх точного совпадения.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import functools
 import io
 import json
@@ -116,8 +160,10 @@ import os
 import random
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlparse
 
 try:
     import aiohttp
@@ -152,8 +198,12 @@ MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
 MAX_BACKOFF_SECONDS = 60
 
-SIM_ACCEPT_THRESHOLD = 0.85
-SIM_MIN_THRESHOLD = 0.5
+# См. "Шестое уточнение" в докстринге модуля: raw CLIP cosine similarity для реально
+# релевантных пар текст-картинка типично лежит в диапазоне ~0.2-0.35, а не 0.5-0.85 -
+# пороги пересчитаны под это и вынесены в окружение, чтобы их можно было донастроить
+# без правки кода (например по перцентилю на собственной выборке сегментов).
+SIM_ACCEPT_THRESHOLD = float(os.environ.get("SEARCH_SIM_ACCEPT_THRESHOLD", 0.30))
+SIM_MIN_THRESHOLD = float(os.environ.get("SEARCH_SIM_MIN_THRESHOLD", 0.21))
 
 CANDIDATES_PER_SITE = int(os.environ.get("SEARCH_CANDIDATES_PER_SITE", 5))
 
@@ -181,6 +231,19 @@ PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "*/*",
+}
+
+# См. "Седьмое уточнение" в докстринге модуля: без Referer (и часто Origin) многие CDN
+# отдают 403/406 на запрос к самому медиафайлу, даже если User-Agent в порядке. Значения
+# ниже - "страница-источник по умолчанию" для сайтов, где у кандидата нет собственного
+# page_url; для wikimedia в fetch_preview_bytes используется page_url конкретного
+# кандидата, если он задан (это надёжнее общего домена).
+PREVIEW_REFERERS = {
+    "pexels": "https://www.pexels.com/",
+    "pixabay": "https://pixabay.com/",
+    "wikimedia": "https://commons.wikimedia.org/",
+    "nasa": "https://images.nasa.gov/",
+    "loc": "https://www.loc.gov/",
 }
 
 # Wikimedia (и вообще большинство API) с некоторых пор жёстко требуют внятный
@@ -236,11 +299,67 @@ def strip_html(s: str) -> str:
     return re.sub(r"<[^>]+>", " ", s or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# Текстовый фильтр по сущностям (см. "Восьмое уточнение" в докстринге модуля)
+# ---------------------------------------------------------------------------
+
+# Порог схожести слов для difflib.SequenceMatcher.ratio(). Подобран консервативно (не
+# слишком низко, чтобы не плодить ложные совпадения на коротких словах): ловит замены
+# 1-2 символов в словах длиной от ~5 символов (например "mecid"/"mejid" -> ratio 0.80),
+# но не сводит вместе произвольные разные короткие слова.
+_FUZZY_WORD_RATIO_THRESHOLD = float(os.environ.get("SEARCH_FUZZY_KEYWORD_RATIO", 0.78))
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _normalize_for_match(s: str) -> str:
+    """NFKD + снятие комбинирующих диакритических знаков - схлопывает разные способы
+    записи одного и того же имени (например "Abdülmecid" -> "abdulmecid"), плюс lower()."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.lower()
+
+
+_MIN_FUZZY_WORD_LEN = 3  # короче - слишком много случайных подстрочных совпадений (например "a", "i", "тон")
+
+
+def _fuzzy_word_match(keyword_norm: str, text_words: list[str]) -> bool:
+    if len(keyword_norm) < _MIN_FUZZY_WORD_LEN:
+        return False
+    for w in text_words:
+        if len(w) < _MIN_FUZZY_WORD_LEN:
+            continue
+        if keyword_norm in w or w in keyword_norm:
+            return True
+        if difflib.SequenceMatcher(None, keyword_norm, w).ratio() >= _FUZZY_WORD_RATIO_THRESHOLD:
+            return True
+    return False
+
+
 def text_matches_keywords(text: str, keywords: list[str]) -> bool:
+    """Сначала точное вхождение подстроки (как раньше, самый дешёвый и надёжный случай),
+    затем - если оно не сработало - два дешёвых fuzzy-слоя поверх нормализованного текста:
+    снятие диакритики и приблизительное совпадение отдельных слов через difflib. Осознанно
+    без внешних библиотек (rapidfuzz и т.п.) - см. "Восьмое уточнение" в докстринге модуля."""
     if not keywords:
         return True
-    t = (text or "").lower()
-    return any(kw.lower() in t for kw in keywords if kw)
+    t_raw = (text or "").lower()
+    if any(kw.lower() in t_raw for kw in keywords if kw):
+        return True
+
+    norm_text = _normalize_for_match(text)
+    if not norm_text:
+        return False
+    text_words = _WORD_RE.findall(norm_text)
+
+    for kw in keywords:
+        if not kw:
+            continue
+        kw_norm = _normalize_for_match(kw)
+        if len(kw_norm) >= _MIN_FUZZY_WORD_LEN and kw_norm in norm_text:
+            return True
+        if _fuzzy_word_match(kw_norm, text_words):
+            return True
+    return False
 
 
 class FatalConfigError(RuntimeError):
@@ -267,8 +386,8 @@ class SiteStats:
     preview_missing_total: int = 0
     clip_error_total: int = 0
     clip_scored_total: int = 0
-    clip_passed_total: int = 0   # similarity >= SIM_MIN_THRESHOLD (0.5)
-    clip_accept_total: int = 0  # similarity >= SIM_ACCEPT_THRESHOLD (0.85)
+    clip_passed_total: int = 0   # similarity >= SIM_MIN_THRESHOLD
+    clip_accept_total: int = 0  # similarity >= SIM_ACCEPT_THRESHOLD
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -295,7 +414,7 @@ def log_site_stats_summary(site_stats: dict) -> None:
     logging.info(
         "%-18s %6s %7s %8s %9s %8s %9s %8s %8s %8s %7s %7s",
         "сайт", "сегм.", "raw", "лиценз.", "keyword", "->CLIP", "нет прев.",
-        "scored", ">=0.50", ">=0.85", "avg", "best",
+        "scored", f">={SIM_MIN_THRESHOLD:.2f}", f">={SIM_ACCEPT_THRESHOLD:.2f}", "avg", "best",
     )
     for key in sorted(site_stats.keys()):
         s = site_stats[key]
@@ -311,10 +430,14 @@ def log_site_stats_summary(site_stats: dict) -> None:
         "лиценз.=0 при raw>0 -> все кандидаты отсеяны лицензионным фильтром. "
         "keyword=0 при лиценз.>0 -> entity_keywords/is_entity слишком узкие или не совпадают "
         "с текстом кандидатов. нет_прев.=raw (или близко) -> превью не скачиваются (сайт "
-        "блокирует PREVIEW_HEADERS/хотлинкинг, а не проблема с содержимым). scored>0, но "
-        "avg/best низкие (<0.5) -> CLIP отрабатывает, но ничего не совпадает по смыслу - "
-        "либо сам CLIP настроен неверно (см. 'Пятое уточнение' в докстринге модуля про "
-        "QuickGELU), либо запросы от generate_queries.py слишком специфичны/не по делу."
+        "блокирует PREVIEW_HEADERS/Referer/хотлинкинг - включите DEBUG-логирование, чтобы "
+        "увидеть точный статус-код и тело ответа по каждому провалу). scored>0, но "
+        "avg/best низкие (ниже SIM_MIN_THRESHOLD) -> CLIP отрабатывает, но ничего не "
+        "совпадает по смыслу - либо сам CLIP настроен неверно (см. 'Пятое уточнение' в "
+        "докстринге модуля про QuickGELU), либо запросы от generate_queries.py слишком "
+        "специфичны/не по делу. Учтите: raw CLIP similarity для здоровых совпадений обычно "
+        "лежит в диапазоне ~0.2-0.35 (см. 'Шестое уточнение') - это НЕ то же самое, что "
+        "similarity софтмакса/температурного скейлинга."
     )
     logging.info("=" * 100)
 
@@ -724,10 +847,16 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
             license_short = (extm.get("LicenseShortName") or {}).get("value", "")
             description = strip_html((extm.get("ImageDescription") or {}).get("value", ""))
             text = " ".join(filter(None, [title, snippet_by_title.get(title, ""), description]))
+            # page_url здесь - страница описания файла на Commons (index.php?...),
+            # используется в т.ч. как Referer при скачивании превью - см. "Седьмое
+            # уточнение" в докстринге модуля. Формируем её отдельно от direct_url
+            # (прямая ссылка на сам файл на upload.wikimedia.org - её Referer'ом
+            # ставить бессмысленно, это не HTML-страница).
+            wiki_page_url = "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
             result.append(Candidate(
                 site="wikimedia", cand_id=title, text=text,
                 license_ok=wikimedia_license_ok(license_short),
-                preview_url=thumb_url or direct_url, page_url=direct_url,
+                preview_url=thumb_url or direct_url, page_url=wiki_page_url,
             ))
         return result
 
@@ -862,17 +991,53 @@ SITE_SEARCH_FUNCS: dict = {
 async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     if not cand.preview_url:
         return None
+
+    # См. "Седьмое уточнение" в докстринге модуля: без Referer (часто и Origin) CDN
+    # многих сайтов отдают 403/406 на прямой запрос к медиафайлу (защита от хотлинкинга),
+    # даже когда User-Agent в порядке. Для wikimedia предпочитаем page_url конкретного
+    # кандидата (страница файла на Commons) - он надёжнее общего домена, т.к. некоторые
+    # CDN сверяют не только домен, но и правдоподобие самой страницы-источника.
+    headers = dict(PREVIEW_HEADERS)
+    referer = cand.page_url if (cand.site == "wikimedia" and cand.page_url) else PREVIEW_REFERERS.get(cand.site)
+    if referer:
+        headers["Referer"] = referer
+        parsed = urlparse(referer)
+        if parsed.scheme and parsed.netloc:
+            headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+
+    last_status: Optional[int] = None
+    last_body_preview = ""
     for attempt in range(1, 3):
         try:
             async with ctx.session.get(
-                cand.preview_url, headers=PREVIEW_HEADERS,
+                cand.preview_url, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=20),
             ) as resp:
                 if resp.status != 200:
+                    last_status = resp.status
+                    try:
+                        last_body_preview = (await resp.text())[:200]
+                    except Exception:
+                        last_body_preview = "<не текст/не удалось прочитать тело>"
+                    logging.debug(
+                        "Превью %s/%s: HTTP %s при GET %s (попытка %s/2, Referer=%s). Тело: %s",
+                        cand.site, cand.cand_id, resp.status, cand.preview_url,
+                        attempt, referer, last_body_preview,
+                    )
                     return None
                 return await resp.read()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logging.debug(
+                "Превью %s/%s: сетевая ошибка (попытка %s/2) при GET %s: %s",
+                cand.site, cand.cand_id, attempt, cand.preview_url, e,
+            )
             await asyncio.sleep(1.0 * attempt)
+
+    if last_status is not None:
+        logging.debug(
+            "Превью %s/%s: не удалось скачать после всех попыток, последний статус %s, тело: %s",
+            cand.site, cand.cand_id, last_status, last_body_preview,
+        )
     return None
 
 
@@ -908,8 +1073,9 @@ async def score_candidates(
         if stats.sent_to_clip_total == 0:
             logging.info(
                 "Сегмент %s/%s: %s кандидатов, но ни для одного не скачалось превью "
-                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью, а не проблема "
-                "со смыслом/CLIP.", seg_index, key, len(candidates),
+                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью (см. DEBUG-лог "
+                "с точным статусом/телом ответа выше), а не проблема со смыслом/CLIP.",
+                seg_index, key, len(candidates),
             )
         else:
             logging.info(
@@ -1018,12 +1184,12 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> Optional[str]
         top = licensed[:CANDIDATES_PER_SITE]
         scored = await score_candidates(ctx, top, seg.query, seg_index=seg.index, stats_key=site)
         if not scored:
-            continue  # сайт дал пустой результат по CLIP-порогу (< 0.5 либо все превью недоступны)
+            continue  # сайт дал пустой результат по CLIP-порогу (< SIM_MIN_THRESHOLD либо все превью недоступны)
         pool.extend(scored)
         pool.sort(key=lambda c: c.similarity, reverse=True)
         if scored[0].similarity >= SIM_ACCEPT_THRESHOLD:
             break  # ранний выход - дальше сайты не пробуем (см. допущение в докстринге)
-        # иначе - similarity в [0.5, 0.85), пробуем следующий сайт из списка
+        # иначе - similarity в [SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD), пробуем следующий сайт
 
     if pool:
         url = await try_claim_pool(ctx, pool)
@@ -1121,6 +1287,11 @@ async def amain(args: argparse.Namespace) -> int:
         return 1
 
     logging.info("Загружено сегментов: %s", len(segments))
+    logging.info(
+        "Пороги CLIP similarity: SIM_MIN_THRESHOLD=%.3f, SIM_ACCEPT_THRESHOLD=%.3f "
+        "(настраиваются через SEARCH_SIM_MIN_THRESHOLD / SEARCH_SIM_ACCEPT_THRESHOLD).",
+        SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD,
+    )
 
     pexels_key = os.environ.get("PEXELS_API_KEY", "")
     pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
