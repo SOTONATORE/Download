@@ -124,10 +124,43 @@ LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_MIN_INTERVAL_SECON
 # пересчёт и то же обоснование округления В БОЛЬШУЮ сторону (не ровно 3.158с=5% запаса,
 # чтобы дрожание таймингов не утащило фактическую частоту выше 19/мин), что и у
 # SEARCH_LOC_MIN_INTERVAL_SECONDS в search.py - см. его докстринг. Раньше здесь тоже
-# стояло 5.0с/~40% запаса; тронуто по итогам того же реального прогона (см. обсуждение),
-# применяется к _loc_wait_turn() ПЕРЕД каждым запросом (включая ретраи внутри _loc_get),
-# поэтому ретраи на сетевые сбои/таймауты по-прежнему сериализуются этим же интервалом,
-# просто сам интервал теперь короче.
+# стояло 5.0с/~40% запаса; тронуто по итогам того же реального прогона (см. обсуждение).
+# Применяется ТОЛЬКО к запросу метаданных (?fo=json на www.loc.gov) - см.
+# LOC_FILE_MIN_INTERVAL_SECONDS ниже про второй, отдельный запрос (сам файл).
+
+# ---------------------------------------------------------------------------
+# Раунд 7 - разделение LOC-лимитера на metadata и file, подтверждено официальной
+# документацией (не оценкой на глаз).
+#
+# До этой правки ОБА запроса на один LOC-айтем (сначала ?fo=json метаданные на
+# www.loc.gov, потом сам файл) шли через ОДИН И ТОТ ЖЕ интервал LOC_MIN_INTERVAL_SECONDS
+# (3.2с), рассчитанный из лимита JSON/YAML API - 20 запросов/мин. Но по той же
+# официальной документации (https://www.loc.gov/apis/json-and-yaml/working-within-limits/)
+# у LOC есть ВТОРОЙ, отдельный и гораздо менее строгий лимит: "Media content" на
+# эндпоинте /storage-services/ - 150 запросов/мин (в 7.5 раза больше 20/мин). Файловый
+# запрос (direct_url из resource.files / item.image_url) физически отдаётся именно с
+# tile.loc.gov/storage-services/... - т.е. попадает в ЭТУ, менее ограниченную категорию,
+# а не в JSON/YAML API, хотя раньше искусственно тормозился тем же самым интервалом 3.2с.
+# На критическом пути (LOC - строго последовательный сайт, единственный без параллелизма
+# в download.py - см. блок "Раунд 5" ниже) это давало прямые потери: на каждый LOC-айтем
+# лишние ~2.75с (3.2с - 0.45с) простоя без всякой необходимости.
+#
+# Разделено на два независимых rate-limiter'а (два разных таймстемпа, две константы):
+#   - LOC_MIN_INTERVAL_SECONDS (3.2с, как было) - для запроса метаданных.
+#   - LOC_FILE_MIN_INTERVAL_SECONDS (ниже) - для запроса самого файла.
+# Оба по-прежнему полностью последовательны (не трогаем это допущение - LOC остаётся
+# единственным строго sequential сайтом в пуле, см. "Раунд 5"), просто с разными
+# паузами между стартами запросов каждого из двух типов.
+# ---------------------------------------------------------------------------
+
+LOC_FILE_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_FILE_MIN_INTERVAL_SECONDS", 0.45))
+# 0.45с (~133 запроса/мин, ~11% запас от официального потолка 150/мин) - та же методика
+# округления В БОЛЬШУЮ сторону от точного значения (60/150=0.4с ровно), что и у
+# LOC_MIN_INTERVAL_SECONDS выше, просто с более широким запасом в процентах (11% против
+# 6.25%): при 20 запросах/мин 6.25% - это уже ~1.25 запроса/мин буфера, а при 150/мин
+# такой же абсолютный буфер (~9 запросов/мин) даёт ~6%, но при высокой частоте (150/мин =
+# запрос каждые 0.4с) дрожание таймингов в относительных величинах бьёт заметнее, чем при
+# низкой (3с) - поэтому запас взят чуть шире, а не ровно тот же процент.
 LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
 
 # ---------------------------------------------------------------------------
@@ -188,7 +221,24 @@ LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
 # ---------------------------------------------------------------------------
 
 DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", 8))
-WIKIMEDIA_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS", 1.5))
+
+# ---------------------------------------------------------------------------
+# Раунд 7 - интервал Wikimedia вниз, тоже подтверждено официальной документацией.
+#
+# Официальный лимит для анонимных запросов - 5 запросов/сек (robot policy,
+# https://wikitech.wikimedia.org/wiki/Robot_policy). Прежнее значение 1.5с давало
+# эффективный темп всего 0.667 запр/сек - меньше 15% от разрешённого бюджета: интервал
+# был подобран ещё в раунде 6 "на глаз" как консервативная защита от 429, ДО того как
+# в этом же раунде 6 был отдельно добавлен _wikimedia_semaphore (WIKIMEDIA_CONCURRENCY=2) -
+# т.е. конкурентность (вторая, отдельная официальная граница) уже покрыта им, а интервал
+# ниже неё избыточно душил ещё и частоту стартов запросов поверх лимита конкурентности.
+# 0.25с (4 запр/сек, ~20% запас от 5/сек) - та же методика округления В БОЛЬШУЮ сторону
+# от точного значения (1/5=0.2с ровно), что у LOC_MIN_INTERVAL_SECONDS/
+# LOC_FILE_MIN_INTERVAL_SECONDS выше, с запасом ближе к верхней границе по вкладу
+# WIKIMEDIA_CONCURRENCY=2 - несколько потоков одновременно ждут этот же общий
+# ThreadRateLimiter, и любая просадка сети чуть смещает моменты wait_turn() у каждого,
+# поэтому взят более широкий запас, чем можно было бы при строго одиночном потоке.
+WIKIMEDIA_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS", 0.25))
 WIKIMEDIA_CONCURRENCY = int(os.environ.get("DOWNLOAD_WIKIMEDIA_CONCURRENCY", 2))
 PEXELS_PIXABAY_CONCURRENCY = int(os.environ.get("DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY", 3))
 
@@ -230,8 +280,15 @@ def _pexels_pixabay_throttled(func):
     wrapper.__name__ = func.__name__
     return wrapper
 
-_loc_last_request_ts = 0.0
+_loc_last_request_ts = 0.0       # метаданные (?fo=json, www.loc.gov) - лимит 20/мин
+_loc_file_last_request_ts = 0.0  # сам файл (tile.loc.gov/storage-services/...) - лимит 150/мин
 _loc_exhausted = False
+# ПРИМЕЧАНИЕ: флаг "исчерпан" по-прежнему ОДИН на оба типа запроса, не разделяем -
+# официальная документация явно подтверждает раздельные ЛИМИТЫ ЧАСТОТЫ (20/мин и
+# 150/мин), но НЕ подтверждает раздельную длительность/область бана при 429 для
+# каждого эндпоинта по отдельности. Раз это не подтверждённый факт, а предположение -
+# перестраховываемся и при 429 на ЛЮБОМ из двух эндпоинтов считаем исчерпанным весь LOC
+# целиком, как и раньше.
 
 
 class LocExhaustedError(RuntimeError):
@@ -239,30 +296,45 @@ class LocExhaustedError(RuntimeError):
     текущего прогона гарантированно провалятся тем же способом, ретраить бессмысленно."""
 
 
-def _loc_wait_turn() -> None:
-    global _loc_last_request_ts
-    now = time.monotonic()
-    wait = LOC_MIN_INTERVAL_SECONDS - (now - _loc_last_request_ts)
-    if wait > 0:
-        time.sleep(wait)
-    _loc_last_request_ts = time.monotonic()
+def _loc_wait_turn(is_file_request: bool = False) -> None:
+    """Раунд 7: два независимых интервала вместо одного общего - см. блок комментариев
+    у LOC_FILE_MIN_INTERVAL_SECONDS выше. is_file_request=False (по умолчанию) - запрос
+    метаданных, тормозится LOC_MIN_INTERVAL_SECONDS (3.2с); is_file_request=True - запрос
+    самого файла, тормозится отдельным, гораздо более коротким LOC_FILE_MIN_INTERVAL_SECONDS
+    (0.45с). Каждый интервал считается от своего собственного последнего старта - т.е.
+    один медленный запрос метаданных не задерживает следующий файловый запрос и наоборот."""
+    global _loc_last_request_ts, _loc_file_last_request_ts
+    if is_file_request:
+        now = time.monotonic()
+        wait = LOC_FILE_MIN_INTERVAL_SECONDS - (now - _loc_file_last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _loc_file_last_request_ts = time.monotonic()
+    else:
+        now = time.monotonic()
+        wait = LOC_MIN_INTERVAL_SECONDS - (now - _loc_last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _loc_last_request_ts = time.monotonic()
 
 
-def _loc_get(url: str, timeout: int = 30, **kwargs):
-    """Обёртка над cffi_requests.get специально для loc.gov: применяет rate-limiter
-    перед КАЖДЫМ запросом (метаданные и сам файл считаются в один и тот же бюджет -
-    оба домена loc.gov, дешевле перестраховаться, чем гадать про раздельные лимиты),
-    ретраит транзиентные сетевые ошибки/таймауты, и при первом же HTTP 429 сразу
-    помечает LOC исчерпанным до конца запуска - все следующие вызовы после этого
-    момента падают мгновенно с LocExhaustedError, не тратя лишних запросов и времени
-    сборки на заведомо бесполезные попытки."""
+def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwargs):
+    """Обёртка над cffi_requests.get специально для loc.gov: применяет соответствующий
+    rate-limiter (metadata или file - см. _loc_wait_turn) перед КАЖДЫМ запросом, включая
+    все ретраи внутри этой же функции, ретраит транзиентные сетевые ошибки/таймауты, и
+    при первом же HTTP 429 (на любом из двух эндпоинтов) сразу помечает LOC исчерпанным
+    до конца запуска - все следующие вызовы после этого момента падают мгновенно с
+    LocExhaustedError, не тратя лишних запросов и времени сборки на заведомо бесполезные
+    попытки. is_file_request прокидывается вызывающим кодом явно (download_loc_gov точно
+    знает, какой из двух запросов сейчас делает), а не определяется по URL - надёжнее,
+    чем гадать по паттерну ссылки."""
     global _loc_exhausted
     if _loc_exhausted:
         raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
 
     last_exc: Exception | None = None
     for attempt in range(1, LOC_RETRIES + 1):
-        _loc_wait_turn()
+        _loc_wait_turn(is_file_request)
         try:
             resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
         except Exception as e:
@@ -708,7 +780,7 @@ def download_loc_gov(number: int, url: str) -> None:
             fail(number, f"loc.gov {number}: не удалось найти прямую ссылку на файл")
             return
 
-        file_resp = _loc_get(direct_url, headers=BROWSER_HEADERS, timeout=60)
+        file_resp = _loc_get(direct_url, headers=BROWSER_HEADERS, timeout=60, is_file_request=True)
         content = file_resp.content
 
         if looks_like_html(content):
