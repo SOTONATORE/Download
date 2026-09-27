@@ -182,6 +182,7 @@ jobs:
         # DOWNLOAD_CONCURRENCY: "8"
         # DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY: "3"
         # DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS: "1.5"
+        # DOWNLOAD_WIKIMEDIA_CONCURRENCY: "2"
       run: python download.py
 
     # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
@@ -255,4 +256,3 @@ jobs:
       run: |
         echo "Релиз со всеми файлами:"
         echo "https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}"
-        
