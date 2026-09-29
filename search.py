@@ -743,20 +743,55 @@ async def http_get_json(
 
     rate_limiter = ctx.rate_limiters.get(site)
 
+    def _request_id() -> str:
+        # url + значение q/query/srsearch. params целиком НЕ логируем (у Pixabay там ключ).
+        for k in ("q", "query", "srsearch"):
+            if params and params.get(k) is not None:
+                return f"{url} {k}={str(params[k])[:80]}"
+        return url
+
+    def _redact(text: str) -> str:
+        # Страховка для repr исключения: вырезаем значения ключей/токенов, если попали в текст.
+        for k in ("key", "api_key", "apikey", "token", "access_token"):
+            v = (params or {}).get(k)
+            if v:
+                text = text.replace(str(v), "***")
+        for k, v in (headers or {}).items():
+            if k.lower() in ("authorization", "x-api-key", "api-key") and v:
+                text = text.replace(str(v), "***")
+        return re.sub(r"(?i)\b(key|api_key|apikey|token|access_token)=[^&\s'\"]+", r"\1=***", text)
+
+    # Параметры ретраев/таймаута зависят от сайта: LOC подвисает до таймаута, а повтор
+    # через несколько секунд обычно проходит - ему нужны короткий таймаут и меньше попыток.
+    if site == "loc":
+        max_attempts = max(1, int(os.environ.get("SEARCH_LOC_MAX_RETRIES", 3)))
+        timeout_seconds = float(os.environ.get("SEARCH_LOC_TIMEOUT_SECONDS", 15))
+    else:
+        max_attempts = MAX_RETRIES
+        timeout_seconds = 30
+
+    request_id = _request_id()
     last_error: Optional[BaseException] = None
-    for attempt in range(1, MAX_RETRIES + 1):
+
+    for attempt in range(1, max_attempts + 1):
+        has_next = attempt < max_attempts
+        backoff = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
+        # Если не None - попытка неудачна, после выхода из семафора спим backoff (+джиттер)
+        # и идём на следующую. Сам sleep стоит ВНЕ семафора, чтобы слот не был занят паузой.
+        retry_after: Optional[float] = None
+
         async with ctx.site_semaphores[site]:
-            # Семафор выше уже ограничил конкурентность (сколько запросов к этому
-            # сайту летят ОДНОВРЕМЕННО). rate_limiter, если задан для сайта, отдельно
-            # гарантирует минимальный интервал между СТАРТАМИ последовательных
-            # запросов - это защищает от ситуации, когда очередная "порция" из
-            # N параллельных задач всё равно уходит почти синхронно с предыдущей.
+            # Семафор ограничивает конкурентность (сколько запросов к сайту летят
+            # ОДНОВРЕМЕННО). rate_limiter отдельно гарантирует минимальный интервал между
+            # СТАРТАМИ запросов и вызывается перед КАЖДОЙ попыткой, включая повторные
+            # (LOC считает каждый запрос).
             if rate_limiter is not None:
                 await rate_limiter.wait_turn()
+            attempt_started = time.monotonic()
             try:
                 async with ctx.session.get(
                     url, headers=headers, params=params,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                 ) as resp:
                     status = resp.status
 
@@ -768,15 +803,14 @@ async def http_get_json(
                             )
                             ctx.exhausted_sites.add(site)
                             return None
-                        delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
                         logging.warning(
-                            "%s: 429, попытка %s/%s, жду %.1fs.", site, attempt, MAX_RETRIES, delay,
+                            "%s: 429, попытка %s/%s, %s.", site, attempt, max_attempts,
+                            f"жду {backoff:.1f}s" if has_next else "попыток больше нет",
                         )
-                        await asyncio.sleep(delay + random.uniform(0, 1))
                         last_error = RuntimeError("429 Too Many Requests")
-                        continue
+                        retry_after = backoff
 
-                    if status in (401, 403):
+                    elif status in (401, 403):
                         text = await resp.text()
                         if site in ("pexels", "pixabay"):
                             raise FatalConfigError(
@@ -785,74 +819,90 @@ async def http_get_json(
                             )
                         # Для остальных сайтов 401/403 - НЕ транзиентная ошибка (неверный
                         # User-Agent, política робота и т.п.) - ретраить бессмысленно,
-                        # отдаём пустой результат сразу, чтобы не жечь минуты на 5 попыток.
+                        # отдаём пустой результат сразу, чтобы не жечь минуты на попытки.
                         logging.error(
                             "%s: HTTP %s - не ретраю (не временная ошибка). Тело: %s",
                             site, status, text[:300],
                         )
                         return None
 
-                    if status >= 500:
-                        delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
+                    elif status >= 500:
                         logging.warning(
-                            "%s: HTTP %s (попытка %s/%s), жду %.1fs.", site, status, attempt, MAX_RETRIES, delay,
+                            "%s: HTTP %s (попытка %s/%s), %s.", site, status, attempt, max_attempts,
+                            f"жду {backoff:.1f}s" if has_next else "попыток больше нет",
                         )
                         last_error = RuntimeError(f"HTTP {status}")
-                        await asyncio.sleep(delay)
-                        continue
+                        retry_after = backoff
 
-                    if status != 200:
+                    elif status != 200:
                         text = await resp.text()
                         logging.warning(
                             "%s: неожиданный статус %s (попытка %s/%s): %s",
-                            site, status, attempt, MAX_RETRIES, text[:200],
+                            site, status, attempt, max_attempts, text[:200],
                         )
                         last_error = RuntimeError(f"HTTP {status}: {text[:300]}")
-                        delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
-                        await asyncio.sleep(delay)
-                        continue
+                        retry_after = backoff
 
-                    try:
-                        return await resp.json(content_type=None)
-                    except aiohttp.ContentTypeError:
-                        # Статус 200, но тело не парсится как JSON - на практике это
-                        # HTML-страница вместо ожидаемого ответа. У LOC это официально
-                        # задокументированный побочный эффект перегрузки на их стороне
-                        # ("HTML pages with CAPTCHAs even when operating below the rates
-                        # listed above") - по сути тот же сигнал блокировки, что и 429,
-                        # поэтому обрабатываем его так же (включая treat_429_as_exhaustion).
-                        text_preview = (await resp.text())[:200]
-                        if treat_429_as_exhaustion:
+                    else:
+                        try:
+                            data = await resp.json(content_type=None)
+                        except aiohttp.ContentTypeError:
+                            # Статус 200, но тело не парсится как JSON - на практике это
+                            # HTML-страница вместо ожидаемого ответа. У LOC это официально
+                            # задокументированный побочный эффект перегрузки на их стороне
+                            # ("HTML pages with CAPTCHAs even when operating below the rates
+                            # listed above") - по сути тот же сигнал блокировки, что и 429,
+                            # поэтому обрабатываем его так же (включая treat_429_as_exhaustion).
+                            text_preview = (await resp.text())[:200]
+                            if treat_429_as_exhaustion:
+                                logging.warning(
+                                    "%s: получен не-JSON ответ (похоже на CAPTCHA/rate-limit "
+                                    "страницу вместо API-ответа) - помечаю сайт исчерпанным до "
+                                    "конца текущего запуска. Превью тела: %s",
+                                    site, text_preview,
+                                )
+                                ctx.exhausted_sites.add(site)
+                                return None
                             logging.warning(
-                                "%s: получен не-JSON ответ (похоже на CAPTCHA/rate-limit "
-                                "страницу вместо API-ответа) - помечаю сайт исчерпанным до "
-                                "конца текущего запуска. Превью тела: %s",
-                                site, text_preview,
+                                "%s: не-JSON ответ при статусе 200 (попытка %s/%s), похоже на "
+                                "CAPTCHA/перегрузку. Превью: %s", site, attempt, max_attempts, text_preview,
                             )
-                            ctx.exhausted_sites.add(site)
-                            return None
-                        logging.warning(
-                            "%s: не-JSON ответ при статусе 200 (попытка %s/%s), похоже на "
-                            "CAPTCHA/перегрузку. Превью: %s", site, attempt, MAX_RETRIES, text_preview,
-                        )
-                        last_error = RuntimeError(f"non-JSON 200 response: {text_preview}")
-                        delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
-                        await asyncio.sleep(delay)
-                        continue
+                            last_error = RuntimeError(f"non-JSON 200 response: {text_preview}")
+                            retry_after = backoff
+                        else:
+                            if attempt > 1:
+                                logging.info(
+                                    "%s: успех с попытки %s/%s (%s)",
+                                    site, attempt, max_attempts, request_id,
+                                )
+                            return data
 
             except FatalConfigError:
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                # Таймаут/сетевая ошибка - НЕ признак исчерпания сайта (exhausted_sites не
+                # трогаем), только ретрай. У asyncio.TimeoutError str() пустой, поэтому
+                # пишем тип и repr. В лог идут только безопасные поля (см. _request_id);
+                # repr дополнительно прогоняется через _redact.
                 last_error = e
-                delay = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
+                elapsed = time.monotonic() - attempt_started
                 logging.warning(
-                    "%s: сетевая ошибка (попытка %s/%s): %s. Жду %.1fs.",
-                    site, attempt, MAX_RETRIES, e, delay,
+                    "%s: сетевая ошибка (попытка %s/%s) [%s: %s] запрос=%s, длительность попытки %.1fs. %s",
+                    site, attempt, max_attempts, type(e).__name__,
+                    _redact(repr(e)), request_id, elapsed,
+                    f"Жду {backoff:.1f}s." if has_next else "Попыток больше нет.",
                 )
-                await asyncio.sleep(delay)
-                continue
+                retry_after = backoff
 
-    logging.error("%s: запрос не удался после %s попыток: %s", site, MAX_RETRIES, last_error)
+        # Вне семафора: пауза только если есть следующая попытка.
+        if retry_after is not None and has_next:
+            await asyncio.sleep(retry_after + random.uniform(0, 1))
+
+    logging.error(
+        "%s: запрос не удался после %s попыток (%s): %s",
+        site, max_attempts, request_id,
+        _redact(f"{type(last_error).__name__}: {last_error!r}"),
+    )
     return None
 
 
@@ -1212,10 +1262,11 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
                 return await resp.read()
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             PREVIEW_DEBUG_LOGGER.debug(
-                "Превью %s/%s: сетевая ошибка (попытка %s/2) при GET %s: %s",
-                cand.site, cand.cand_id, attempt, cand.preview_url, e,
+                "Превью %s/%s: сетевая ошибка (попытка %s/2) при GET %s: %s: %s",
+                cand.site, cand.cand_id, attempt, cand.preview_url, type(e).__name__, e,
             )
-            await asyncio.sleep(1.0 * attempt)
+            if attempt < 2:
+                await asyncio.sleep(1.0 * attempt)
 
     if last_status is not None:
         PREVIEW_DEBUG_LOGGER.debug(
