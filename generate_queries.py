@@ -18,15 +18,24 @@ response_schema).
                            аккаунте; gemini-3.8-flash из цепочки исключена намеренно -
                            у неё RPD всего 20, что слишком мало для батчевой генерации)
     GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
+    GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
+                           (по умолчанию 60; в SDK передаётся в миллисекундах)
 
 Возвращаемые коды:
     0 - requests.json успешно записан целиком
     1 - структурная ошибка (битый SRT, невалидный запрос/schema, ключ) - НЕ связана
         с дневной квотой, требует разбора кода/данных
-    3 - дневной лимит исчерпан у всех моделей из списка (основной + fallback) - НЕ баг,
+    3 - дневной лимит ПОДТВЕРЖДЁН у всех моделей из списка (основной + fallback) - НЕ баг,
         нужно либо подождать сброса квоты (полночь по тихоокеанскому времени), либо
         включить billing, либо добавить ещё моделей в --fallback-models. Прогресс
         сохранён в чекпоинте, повторный запуск продолжит с прерванного места.
+        Возвращается ТОЛЬКО когда pick_working_model подтвердила квоту у каждой модели.
+    4 - preflight: ни одна модель не отвечает по ВРЕМЕННОЙ причине (5xx, таймаут, сетевой
+        сбой - после 3 попыток с бэкоффом), либо часть моделей без квоты, а остальные
+        недоступны. Это НЕ квота и НЕ структурная ошибка: достаточно перезапустить позже.
+        Чекпоинт сохранён.
+    Любой иной сбой preflight (неверное имя модели/ключ, неожиданное исключение) - код 1,
+    с полным traceback в логе.
 
 Зависимости:
     pip install google-genai
@@ -39,6 +48,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -46,6 +56,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
@@ -74,6 +85,12 @@ MAX_RATE_LIMIT_SLEEP_SECONDS = 90
 # в UTC зависит от сезона/DST, поэтому берём консервативные 20 часов).
 EXHAUSTED_MODEL_TTL_HOURS = 20
 CHECKPOINT_SUFFIX = ".checkpoint.json"
+# Таймаут HTTP-запроса к Gemini (сек). В google-genai HttpOptions.timeout задаётся в
+# МИЛЛИСЕКУНДАХ, поэтому при создании клиента переводим секунды в мс.
+DEFAULT_HTTP_TIMEOUT_SECONDS = 60
+# Preflight: ретраи транзиентных сбоев (5xx/таймаут/сеть) на одной модели.
+PREFLIGHT_MAX_ATTEMPTS = 3
+PREFLIGHT_BACKOFF_BASE_SECONDS = 2
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
 
 SYSTEM_INSTRUCTION = """\
@@ -221,6 +238,34 @@ class DailyQuotaExceededError(RuntimeError):
     def __init__(self, model: str, message: str):
         super().__init__(message)
         self.model = model
+
+
+class AllModelsQuotaExhaustedError(RuntimeError):
+    """pick_working_model: у КАЖДОЙ модели из списка подтверждена исчерпанная дневная квота."""
+
+
+class ModelUnavailableError(Exception):
+    """pick_working_model: рабочей модели не нашлось, но причина не (только) квота -
+    5xx/таймаут/сеть после ретраев. reasons: model -> описание последней ошибки."""
+
+    def __init__(self, reasons: dict[str, str], quota_models: list[str]):
+        self.reasons = reasons
+        self.quota_models = quota_models
+        super().__init__(
+            "Модели недоступны по временной причине: "
+            + "; ".join(f"{m}: {r}" for m, r in reasons.items())
+            + (f". Квота исчерпана у: {', '.join(quota_models)}" if quota_models else "")
+        )
+
+
+# Транзиентные сбои preflight: 5xx, таймауты, сетевые ошибки, пустой ответ.
+_PREFLIGHT_TRANSIENT_ERRORS = (
+    genai_errors.ServerError,
+    httpx.HTTPError,  # TimeoutException, TransportError и т.п.
+    TimeoutError,
+    OSError,  # ConnectionError, ssl.SSLError
+    ValueError,  # пустой ответ на проверочный запрос
+)
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +438,7 @@ def call_gemini_batch(
         system_instruction=SYSTEM_INSTRUCTION,
         response_mime_type="application/json",
         response_schema=RESPONSE_SCHEMA,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
     expected_indices = {s.index for s in batch}
@@ -487,8 +533,20 @@ def pick_working_model(
 ) -> tuple[str, list[str]]:
     """Пробует модели по очереди (основная + fallback), пропуская без лишнего запроса
     те, что уже отмечены исчерпанными сегодня. Возвращает (рабочая_модель, остаток_очереди).
-    Мутирует exhausted_models при обнаружении новой исчерпанной модели."""
+    Мутирует exhausted_models при обнаружении новой исчерпанной модели.
+
+    Транзиентные сбои (5xx/таймаут/сеть) ретраятся PREFLIGHT_MAX_ATTEMPTS раз с
+    экспоненциальным бэкоффом и джиттером; если не помогло - модель считается временно
+    недоступной и берётся следующая. ClientError с дневной 429 - без ретраев.
+
+    Исключения:
+      AllModelsQuotaExhaustedError - у ВСЕХ моделей подтверждена дневная квота (код 3);
+      ModelUnavailableError - рабочей модели нет, и не только из-за квоты (код 4);
+      genai_errors.ClientError (не дневная 429) - ключ/имя модели/доступ, пробрасывается (код 1).
+    """
     remaining = list(candidates)
+    quota_models: list[str] = []
+    unavailable: dict[str, str] = {}
     while remaining:
         model = remaining[0]
         known_exhausted_at = exhausted_models.get(model)
@@ -497,30 +555,72 @@ def pick_working_model(
                 "Модель %s уже отмечена исчерпанной %.1fч назад - пропускаю без запроса.",
                 model, _hours_since(known_exhausted_at),
             )
+            quota_models.append(model)
             remaining.pop(0)
             continue
 
         logging.info("Preflight: проверяю модель %s (без response_schema)...", model)
-        try:
-            response = client.models.generate_content(model=model, contents="Ответь одним словом: OK")
-            if not response.text:
-                raise ValueError("Пустой ответ на проверочный запрос без schema")
-            logging.info("Модель %s доступна. Ответ: %r", model, response.text.strip()[:50])
-            return model, remaining[1:]
-        except genai_errors.ClientError as e:
-            if _extract_status_code(e) == 429 and _is_daily_quota_error(e):
-                logging.warning("У модели %s уже исчерпан дневной лимит: %s", model, e)
-                exhausted_models[model] = _now_iso()
-                remaining.pop(0)
-                continue
-            logging.error(
-                "Preflight не пройден для модели %s (код %s, НЕ дневная квота) - похоже "
-                "проблема в ключе/доступе, а не в лимитах. Полный ответ: %s",
-                model, _extract_status_code(e), e,
-            )
-            raise
+        quota_hit = False
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, PREFLIGHT_MAX_ATTEMPTS + 1):
+            attempt_start = time.monotonic()
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents="Ответь одним словом: OK",
+                    config=types.GenerateContentConfig(
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    ),
+                )
+                if not response.text:
+                    raise ValueError("Пустой ответ на проверочный запрос без schema")
+                logging.info(
+                    "Модель %s доступна (preflight-вызов %.2fs, попытка %s/%s). Ответ: %r",
+                    model, time.monotonic() - attempt_start, attempt, PREFLIGHT_MAX_ATTEMPTS,
+                    response.text.strip()[:50],
+                )
+                return model, remaining[1:]
+            except genai_errors.ClientError as e:
+                elapsed = time.monotonic() - attempt_start
+                if _extract_status_code(e) == 429 and _is_daily_quota_error(e):
+                    logging.warning(
+                        "У модели %s уже исчерпан дневной лимит (preflight-вызов %.2fs): %s",
+                        model, elapsed, e,
+                    )
+                    exhausted_models[model] = _now_iso()
+                    quota_hit = True
+                    break
+                logging.error(
+                    "Preflight не пройден для модели %s (код %s, НЕ дневная квота, %.2fs) - "
+                    "похоже проблема в ключе/имени модели/доступе, а не в лимитах. "
+                    "Полный ответ: %s",
+                    model, _extract_status_code(e), elapsed, e,
+                )
+                raise
+            except _PREFLIGHT_TRANSIENT_ERRORS as e:
+                last_error = e
+                logging.warning(
+                    "Preflight модели %s: попытка %s/%s не удалась за %.2fs (%s: %s).",
+                    model, attempt, PREFLIGHT_MAX_ATTEMPTS, time.monotonic() - attempt_start,
+                    type(e).__name__, e,
+                )
+                if attempt < PREFLIGHT_MAX_ATTEMPTS:
+                    base = PREFLIGHT_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                    time.sleep(base * random.uniform(0.5, 1.5))  # джиттер +-50%
 
-    raise RuntimeError(
+        remaining.pop(0)
+        if quota_hit:
+            quota_models.append(model)
+            continue
+        unavailable[model] = f"{type(last_error).__name__}: {last_error}"
+        logging.error(
+            "Модель %s временно недоступна после %s попыток (%s) - пробую следующую, если есть.",
+            model, PREFLIGHT_MAX_ATTEMPTS, unavailable[model],
+        )
+
+    if unavailable:
+        raise ModelUnavailableError(unavailable, quota_models)
+    raise AllModelsQuotaExhaustedError(
         f"У всех моделей из списка ({', '.join(candidates)}) на сегодня исчерпан дневной лимит."
     )
 
@@ -658,23 +758,54 @@ def main() -> int:
         logging.error("%s", e)
         return 1
 
-    client = genai.Client(api_key=api_key)
+    try:
+        http_timeout_s = float(
+            os.environ.get("GENQ_HTTP_TIMEOUT_SECONDS", DEFAULT_HTTP_TIMEOUT_SECONDS)
+        )
+        if http_timeout_s <= 0:
+            raise ValueError("должен быть > 0")
+    except ValueError as e:
+        logging.error("Некорректный GENQ_HTTP_TIMEOUT_SECONDS: %s", e)
+        return 1
+    # HttpOptions.timeout в google-genai - миллисекунды. Действует на все вызовы клиента,
+    # включая call_gemini_batch.
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=int(http_timeout_s * 1000)),
+    )
+    logging.info("HTTP-таймаут запроса к Gemini: %.1fs", http_timeout_s)
 
     fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
     candidates = [args.model] + [m for m in fallback_models if m != args.model]
 
     try:
         current_model, fallback_queue = pick_working_model(client, candidates, exhausted_models)
-    except Exception:
+    except AllModelsQuotaExhaustedError as e:
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
         logging.error(
-            "Не удалось найти рабочую модель среди %s - дневной лимит исчерпан у всех. "
+            "Не удалось найти рабочую модель среди %s - дневной лимит исчерпан у всех (%s). "
             "Прогресс (%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
             "повторно позже (лимит сбрасывается в полночь по тихоокеанскому времени) или "
             "добавьте больше моделей в --fallback-models / GENQ_FALLBACK_MODELS.",
-            candidates, len(results), len(segments), checkpoint_path,
+            candidates, e, len(results), len(segments), checkpoint_path,
         )
         return 3
+    except ModelUnavailableError as e:
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+        logging.error(
+            "Не удалось найти рабочую модель среди %s - это НЕ подтверждённая дневная квота, "
+            "а временная недоступность: %s. Прогресс (%s из %s сегментов) сохранён в "
+            "чекпоинте %s. Повторите запуск позже.",
+            candidates, e, len(results), len(segments), checkpoint_path,
+        )
+        return 4
+    except Exception:
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+        logging.exception(
+            "Preflight модели завершился неожиданной ошибкой (не квота). Чекпоинт сохранён в %s.",
+            checkpoint_path,
+        )
+        return 1
 
     if not args.skip_schema_preflight:
         # Явный тайминг preflight-звонка (логику намеренно не трогаем - см. обсуждение):
