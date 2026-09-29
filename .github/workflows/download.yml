@@ -37,6 +37,7 @@ jobs:
     - name: Generate search queries via Gemini
       env:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GENQ_HTTP_TIMEOUT_SECONDS: "180"
       run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
 
     - name: Upload requests.json as artifact
