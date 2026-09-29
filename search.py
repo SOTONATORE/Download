@@ -1010,7 +1010,11 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
         if media_type == "video":
             hits = [h for h in hits if video_ext_re.search(h.get("title", ""))]
         else:
-            hits = [h for h in hits if not video_ext_re.search(h.get("title", ""))]
+            # Для фото берём только реальные растровые картинки: раньше сюда проходили
+            # PDF/DjVu/TIFF/SVG/аудио, у них есть превью-миниатюра, они набирали CLIP-балл,
+            # а потом скачивались как "N.jpg" и не открывались (сегмент 46).
+            photo_ext_re = re.compile(r"\.(jpe?g|png|webp|gif)$", re.IGNORECASE)
+            hits = [h for h in hits if photo_ext_re.search(h.get("title", ""))]
         if not hits:
             return []
 
