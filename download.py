@@ -749,6 +749,10 @@ def download_wikimedia_commons(number: int, url: str) -> None:
                 fail(number, f"Wikimedia {number}: не удалось скачать файл изображения")
                 return
 
+            if content[:4] == b"%PDF" or re.search(r"\.(pdf|djvu?|tiff?|svg|ogg|oga|opus|flac|wav|mp3)$", urlparse(direct_url).path, re.IGNORECASE):
+                fail(number, f"Wikimedia {number}: файл не является картинкой/видео ({direct_url})")
+                return
+
             ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
             filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
             with open(filepath, "wb") as f:
