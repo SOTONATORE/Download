@@ -34,11 +34,30 @@ jobs:
     - name: Install query-generation deps
       run: pip install -U google-genai
 
+    # Чекпоинт между запусками: если прошлый прогон упал (квота/сбой Gemini), подтягиваем
+    # его из кэша (тот же SRT -> тот же хэш), и генерация продолжится с прерванного места.
+    # Для другого SRT/содержимого префикс не совпадёт, а скрипт дополнительно сверяет хэш.
+    - name: Restore Gemini checkpoint from previous run
+      uses: actions/cache/restore@v4
+      with:
+        path: requests.json.checkpoint.json
+        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
+        restore-keys: |
+          genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-
+
     - name: Generate search queries via Gemini
       env:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
       run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
+
+    # При успехе скрипт сам удаляет чекпоинт, поэтому сохраняем его только при падении шага.
+    - name: Save Gemini checkpoint (only if generation failed)
+      if: failure()
+      uses: actions/cache/save@v4
+      with:
+        path: requests.json.checkpoint.json
+        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
 
     - name: Upload requests.json as artifact
       uses: actions/upload-artifact@v4
