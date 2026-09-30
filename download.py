@@ -102,15 +102,29 @@ def log_429_details(site: str, context: str, resp) -> None:
     не всегда известен - это общая обёртка и для метаданных, и для файла, поэтому
     здесь не жёстко number, а строка). Работает и для LOC (там та же прореха в
     _loc_get), и для Wikimedia - единая точка, единый формат в логе."""
-    retry_after = resp.headers.get("Retry-After", "<нет заголовка>")
+    retry_after = resp.headers.get("Retry-After", "<нет заголовка>") if resp is not None else "<нет ответа>"
     try:
-        body_snippet = resp.text[:300].replace("\n", " ")
+        body_snippet = resp.text[:300].replace("\n", " ") if resp is not None else "<нет тела>"
     except Exception:
         body_snippet = "<не удалось прочитать тело>"
     print(
         f"[DEBUG] {site} 429 ({context}): Retry-After={retry_after!r}, "
         f"тело (первые 300 симв.): {body_snippet!r}"
     )
+
+
+def _extract_retry_after_seconds(resp, default_backoff: float) -> float:
+    """Извлекает Retry-After (в секундах) из заголовка ответа при 429.
+    Если заголовок есть и корректен, спим max(retry_after + 1.0, default_backoff),
+    добавляя 1 секунду запаса от дрожания таймингов."""
+    raw = resp.headers.get("Retry-After") if resp is not None else None
+    if raw:
+        try:
+            val = float(raw)
+            return max(val + 1.0, default_backoff)
+        except (ValueError, TypeError):
+            pass
+    return default_backoff
 
 
 # ---------------------------------------------------------------------------
@@ -135,42 +149,44 @@ LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_MIN_INTERVAL_SECON
 # чтобы дрожание таймингов не утащило фактическую частоту выше 19/мин), что и у
 # SEARCH_LOC_MIN_INTERVAL_SECONDS в search.py - см. его докстринг. Раньше здесь тоже
 # стояло 5.0с/~40% запаса; тронуто по итогам того же реального прогона (см. обсуждение).
-# Применяется ТОЛЬКО к запросу метаданных (?fo=json на www.loc.gov) - см.
-# LOC_FILE_MIN_INTERVAL_SECONDS ниже про второй, отдельный запрос (сам файл).
 
 # ---------------------------------------------------------------------------
-# Раунд 7 - разделение LOC-лимитера на metadata и file, подтверждено официальной
-# документацией (не оценкой на глаз).
+# Раунд 7 (история) и Раунд 10 (Этап 2) — отмена разделения интервалов,
+# единый интервал LOC от момента ЗАВЕРШЕНИЯ запроса и полная потокобезопасность.
 #
-# До этой правки ОБА запроса на один LOC-айтем (сначала ?fo=json метаданные на
-# www.loc.gov, потом сам файл) шли через ОДИН И ТОТ ЖЕ интервал LOC_MIN_INTERVAL_SECONDS
-# (3.2с), рассчитанный из лимита JSON/YAML API - 20 запросов/мин. Но по той же
-# официальной документации (https://www.loc.gov/apis/json-and-yaml/working-within-limits/)
-# у LOC есть ВТОРОЙ, отдельный и гораздо менее строгий лимит: "Media content" на
-# эндпоинте /storage-services/ - 150 запросов/мин (в 7.5 раза больше 20/мин). Файловый
-# запрос (direct_url из resource.files / item.image_url) физически отдаётся именно с
-# tile.loc.gov/storage-services/... - т.е. попадает в ЭТУ, менее ограниченную категорию,
-# а не в JSON/YAML API, хотя раньше искусственно тормозился тем же самым интервалом 3.2с.
-# На критическом пути (LOC - строго последовательный сайт, единственный без параллелизма
-# в download.py - см. блок "Раунд 5" ниже) это давало прямые потери: на каждый LOC-айтем
-# лишние ~2.75с (3.2с - 0.45с) простоя без всякой необходимости.
+# В Раунде 7 попытались разделить лимитер на metadata (3.2с) и file (0.45с) на основе
+# официальной документации (20 запр/мин против 150 запр/мин для /storage-services/).
+# Однако реальный прогон на 126 сегментах показал катастрофический побочный эффект:
+# интервалы отсчитывались от СТАРТА каждого типа запроса. Скачивание тяжелого медиафайла
+# занимало несколько секунд (> 3.2с). Когда скрипт переходил к следующему сегменту,
+# лимитер метаданных смотрел на таймстемп старта прошлого JSON, видел, что прошло > 3.2с,
+# и стрелял следующим JSON через 0.003 секунды после завершения загрузки картинки!
+# В итоге Cloudflare на внешнем периметре loc.gov (который защищает все домены loc.gov
+# суммарно по IP) зафиксировал всплеск частоты (20 запросов за 38 секунд) и забанил
+# IP раннера капчей HTTP 429 ("<title>Just a moment...</title>"). Скрипт выставил
+# _loc_exhausted = True, и все последующие файлы с primary на LOC упали (потеряно 8 файлов).
 #
-# Разделено на два независимых rate-limiter'а (два разных таймстемпа, две константы):
-#   - LOC_MIN_INTERVAL_SECONDS (3.2с, как было) - для запроса метаданных.
-#   - LOC_FILE_MIN_INTERVAL_SECONDS (ниже) - для запроса самого файла.
-# Оба по-прежнему полностью последовательны (не трогаем это допущение - LOC остаётся
-# единственным строго sequential сайтом в пуле, см. "Раунд 5"), просто с разными
-# паузами между стартами запросов каждого из двух типов.
+# Вторая проблема: у сегментов из параллельного пула backup мог вести на LOC (15 таких
+# сегментов). При падении primary рабочий поток из пула обращался к LOC параллельно
+# с основным последовательным циклом, вызывая гонки данных по таймстемпам и одновременные
+# запросы к LOC.
+#
+# Решение Раунда 10:
+#   1) Отмена разделения: единый интервал LOC_MIN_INTERVAL_SECONDS (3.2с) применяется
+#      ко ВСЕМ сетевым операциям с loc.gov (и к метаданным ?fo=json, и к файлам).
+#   2) Интервал отсчитывается строго от момента ЗАВЕРШЕНИЯ (finally: _loc_last_finish_ts)
+#      предыдущего запроса, исключая любые нулевые паузы после долгих скачиваний.
+#   3) Все операции с LOC защищены мьютексом _loc_lock (concurrency = 1 гарантирована
+#      на уровне процесса, даже если фоновые потоки обращаются к backup на LOC).
+#   4) При получении не-JSON ответа (HTML) детектируется капча/Cloudflare (бан), а для
+#      обычных статических страниц (выставки /exhibits/, блоги) сразу генерируется
+#      ошибка без 3 пустых ретраев, мгновенно переводя сегмент на backup.
 # ---------------------------------------------------------------------------
 
-LOC_FILE_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_LOC_FILE_MIN_INTERVAL_SECONDS", 0.45))
-# 0.45с (~133 запроса/мин, ~11% запас от официального потолка 150/мин) - та же методика
-# округления В БОЛЬШУЮ сторону от точного значения (60/150=0.4с ровно), что и у
-# LOC_MIN_INTERVAL_SECONDS выше, просто с более широким запасом в процентах (11% против
-# 6.25%): при 20 запросах/мин 6.25% - это уже ~1.25 запроса/мин буфера, а при 150/мин
-# такой же абсолютный буфер (~9 запросов/мин) даёт ~6%, но при высокой частоте (150/мин =
-# запрос каждые 0.4с) дрожание таймингов в относительных величинах бьёт заметнее, чем при
-# низкой (3с) - поэтому запас взят чуть шире, а не ровно тот же процент.
+# Константа сохранена для обратной совместимости, но приравнена к LOC_MIN_INTERVAL_SECONDS:
+LOC_FILE_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("DOWNLOAD_LOC_FILE_MIN_INTERVAL_SECONDS", LOC_MIN_INTERVAL_SECONDS)
+)
 LOC_RETRIES = int(os.environ.get("DOWNLOAD_LOC_RETRIES", 3))
 
 # ---------------------------------------------------------------------------
@@ -243,11 +259,10 @@ DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", 8))
 # т.е. конкурентность (вторая, отдельная официальная граница) уже покрыта им, а интервал
 # ниже неё избыточно душил ещё и частоту стартов запросов поверх лимита конкурентности.
 # 0.25с (4 запр/сек, ~20% запас от 5/сек) - та же методика округления В БОЛЬШУЮ сторону
-# от точного значения (1/5=0.2с ровно), что у LOC_MIN_INTERVAL_SECONDS/
-# LOC_FILE_MIN_INTERVAL_SECONDS выше, с запасом ближе к верхней границе по вкладу
-# WIKIMEDIA_CONCURRENCY=2 - несколько потоков одновременно ждут этот же общий
-# ThreadRateLimiter, и любая просадка сети чуть смещает моменты wait_turn() у каждого,
-# поэтому взят более широкий запас, чем можно было бы при строго одиночном потоке.
+# от точного значения (1/5=0.2с ровно), что у LOC_MIN_INTERVAL_SECONDS выше, с запасом
+# ближе к верхней границе по вкладу WIKIMEDIA_CONCURRENCY=2 - несколько потоков одновременно
+# ждут этот же общий ThreadRateLimiter, и любая просадка сети чуть смещает моменты wait_turn()
+# у каждого, поэтому взят более широкий запас, чем можно было бы при строго одиночном потоке.
 WIKIMEDIA_MIN_INTERVAL_SECONDS = float(os.environ.get("DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS", 0.25))
 WIKIMEDIA_CONCURRENCY = int(os.environ.get("DOWNLOAD_WIKIMEDIA_CONCURRENCY", 2))
 PEXELS_PIXABAY_CONCURRENCY = int(os.environ.get("DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY", 3))
@@ -290,8 +305,10 @@ def _pexels_pixabay_throttled(func):
     wrapper.__name__ = func.__name__
     return wrapper
 
-_loc_last_request_ts = 0.0       # метаданные (?fo=json, www.loc.gov) - лимит 20/мин
-_loc_file_last_request_ts = 0.0  # сам файл (tile.loc.gov/storage-services/...) - лимит 150/мин
+# Состояние LOC: лок гарантирует строгую последовательность (concurrency=1) даже
+# если фоновые потоки ThreadPoolExecutor обращаются к backup на loc.gov.
+_loc_lock = threading.Lock()
+_loc_last_finish_ts = 0.0  # Раунд 10: интервал считаем строго от ЗАВЕРШЕНИЯ запроса
 _loc_exhausted = False
 # ПРИМЕЧАНИЕ: флаг "исчерпан" по-прежнему ОДИН на оба типа запроса, не разделяем -
 # официальная документация явно подтверждает раздельные ЛИМИТЫ ЧАСТОТЫ (20/мин и
@@ -307,58 +324,62 @@ class LocExhaustedError(RuntimeError):
 
 
 def _loc_wait_turn(is_file_request: bool = False) -> None:
-    """Раунд 7: два независимых интервала вместо одного общего - см. блок комментариев
-    у LOC_FILE_MIN_INTERVAL_SECONDS выше. is_file_request=False (по умолчанию) - запрос
-    метаданных, тормозится LOC_MIN_INTERVAL_SECONDS (3.2с); is_file_request=True - запрос
-    самого файла, тормозится отдельным, гораздо более коротким LOC_FILE_MIN_INTERVAL_SECONDS
-    (0.45с). Каждый интервал считается от своего собственного последнего старта - т.е.
-    один медленный запрос метаданных не задерживает следующий файловый запрос и наоборот."""
-    global _loc_last_request_ts, _loc_file_last_request_ts
-    if is_file_request:
-        now = time.monotonic()
-        wait = LOC_FILE_MIN_INTERVAL_SECONDS - (now - _loc_file_last_request_ts)
-        if wait > 0:
-            time.sleep(wait)
-        _loc_file_last_request_ts = time.monotonic()
-    else:
-        now = time.monotonic()
-        wait = LOC_MIN_INTERVAL_SECONDS - (now - _loc_last_request_ts)
-        if wait > 0:
-            time.sleep(wait)
-        _loc_last_request_ts = time.monotonic()
+    """Раунд 10: единый интервал для ВСЕХ сетевых запросов к loc.gov (и метаданных,
+    и файлов), отсчитываемый от момента ЗАВЕРШЕНИЯ прошлого запроса.
+    Вызывается строго под _loc_lock."""
+    global _loc_last_finish_ts
+    now = time.monotonic()
+    wait = LOC_MIN_INTERVAL_SECONDS - (now - _loc_last_finish_ts)
+    if wait > 0:
+        time.sleep(wait)
+
+
+def _loc_raw_get(url: str, timeout: int = 30, **kwargs):
+    """Выполняет один фактический HTTP-запрос к loc.gov строго под _loc_lock
+    с соблюдением минимального интервала от момента ЗАВЕРШЕНИЯ прошлого сетевого
+    запроса (finally: _loc_last_finish_ts = time.monotonic())."""
+    global _loc_last_finish_ts, _loc_exhausted
+    with _loc_lock:
+        if _loc_exhausted:
+            raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
+        _loc_wait_turn()
+        try:
+            return cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
+        finally:
+            _loc_last_finish_ts = time.monotonic()
 
 
 def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwargs):
-    """Обёртка над cffi_requests.get специально для loc.gov: применяет соответствующий
-    rate-limiter (metadata или file - см. _loc_wait_turn) перед КАЖДЫМ запросом, включая
-    все ретраи внутри этой же функции, ретраит транзиентные сетевые ошибки/таймауты, и
-    при первом же HTTP 429 (на любом из двух эндпоинтов) сразу помечает LOC исчерпанным
-    до конца запуска - все следующие вызовы после этого момента падают мгновенно с
-    LocExhaustedError, не тратя лишних запросов и времени сборки на заведомо бесполезные
-    попытки. is_file_request прокидывается вызывающим кодом явно (download_loc_gov точно
-    знает, какой из двух запросов сейчас делает), а не определяется по URL - надёжнее,
-    чем гадать по паттерну ссылки."""
-    global _loc_exhausted
-    if _loc_exhausted:
-        raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
+    """Обёртка над cffi_requests.get специально для loc.gov: выполняет сетевые
+    запросы строго последовательно через _loc_raw_get под _loc_lock с единым
+    интервалом LOC_MIN_INTERVAL_SECONDS от момента ЗАВЕРШЕНИЯ прошлого запроса.
+    Ретраит транзиентные сетевые ошибки/таймауты. При первом же HTTP 429 сразу
+    помечает LOC исчерпанным до конца запуска (_loc_exhausted = True)."""
+    with _loc_lock:
+        if _loc_exhausted:
+            raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
 
     last_exc: Exception | None = None
     for attempt in range(1, LOC_RETRIES + 1):
-        _loc_wait_turn(is_file_request)
+        has_next = attempt < LOC_RETRIES
         try:
-            resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
+            resp = _loc_raw_get(url, timeout=timeout, **kwargs)
+        except LocExhaustedError:
+            raise
         except Exception as e:
             last_exc = e
             print(
                 f"[WARN] LOC: сбой запроса, попытка {attempt}/{LOC_RETRIES} "
                 f"[{type(e).__name__}: {_loc_redact(str(e))[:200]}] {_loc_redact(url)}"
             )
-            time.sleep(2 * attempt)
+            if has_next:
+                time.sleep(2 * attempt)
             continue
 
         if resp.status_code == 429:
             log_429_details("LOC", url, resp)
-            _loc_exhausted = True
+            with _loc_lock:
+                _loc_exhausted = True
             raise LocExhaustedError("HTTP 429 - LOC помечен исчерпанным до конца текущего запуска")
 
         resp.raise_for_status()
@@ -373,21 +394,25 @@ def _loc_redact(text: str) -> str:
 
 
 def _loc_get_json(url: str, **kwargs) -> dict:
-    """Как _loc_get, но JSON парсится ВНУТРИ цикла ретраев (LOC_RETRIES). Не-JSON при
-    статусе 200 (пустое тело/HTML/CAPTCHA) - временная ошибка: пауза 2*попытка + джиттер
-    0..1с и повтор; LOC НЕ помечается исчерпанным. Rate-limiter метаданных - перед КАЖДОЙ
-    попыткой. 429 - как в _loc_get (LocExhaustedError). После последней попытки паузы нет."""
-    global _loc_exhausted
-    if _loc_exhausted:
-        raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
+    """Как _loc_get, но JSON парсится ВНУТРИ цикла ретраев (LOC_RETRIES).
+    Все сетевые запросы выполняются строго последовательно через _loc_raw_get
+    под _loc_lock с единым интервалом LOC_MIN_INTERVAL_SECONDS от ЗАВЕРШЕНИЯ прошлого.
+    При получении страницы CAPTCHA/Cloudflare выставляет _loc_exhausted = True.
+    При получении статического HTML (выставки, блоги, порталы вместо API) сразу
+    выбрасывает исключение без бессмысленных ретраев, мгновенно переводя сегмент
+    на backup без сжигания лимитов. 429 - LocExhaustedError."""
+    with _loc_lock:
+        if _loc_exhausted:
+            raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
 
     timeout = kwargs.pop("timeout", 30)
     last_exc: Exception | None = None
     for attempt in range(1, LOC_RETRIES + 1):
         has_next = attempt < LOC_RETRIES
-        _loc_wait_turn(False)
         try:
-            resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
+            resp = _loc_raw_get(url, timeout=timeout, **kwargs)
+        except LocExhaustedError:
+            raise
         except Exception as e:
             last_exc = e
             print(
@@ -400,7 +425,8 @@ def _loc_get_json(url: str, **kwargs) -> dict:
 
         if resp.status_code == 429:
             log_429_details("LOC", url, resp)
-            _loc_exhausted = True
+            with _loc_lock:
+                _loc_exhausted = True
             raise LocExhaustedError("HTTP 429 - LOC помечен исчерпанным до конца текущего запуска")
 
         if resp.status_code in (500, 502, 503, 504):
@@ -412,16 +438,35 @@ def _loc_get_json(url: str, **kwargs) -> dict:
 
         resp.raise_for_status()
 
+        # Проверка ответа: сначала ищем признаки капчи / Cloudflare challenge
+        raw_text = resp.text or ""
+        lower_text = raw_text.lower()
+        if any(marker in lower_text for marker in (
+            "just a moment...", "cf-chl", "cloudflare", "attention required", "captcha", "security check"
+        )):
+            log_429_details("LOC", f"CAPTCHA/Cloudflare ({url})", resp)
+            with _loc_lock:
+                _loc_exhausted = True
+            raise LocExhaustedError(
+                f"loc.gov вернул страницу проверки/CAPTCHA (Cloudflare) при статусе {resp.status_code} - "
+                f"LOC помечен исчерпанным до конца текущего запуска"
+            )
+
+        # Проверяем, не является ли ответ статической HTML-страницей (выставки, блоги, порталы)
+        ctype = resp.headers.get("Content-Type", "").lower()
+        if ctype.startswith("text/html") or looks_like_html(resp.content):
+            print(f"[WARN] LOC: страница отдаёт HTML вместо JSON (не API-эндпоинт): {_loc_redact(url)}")
+            raise ValueError(f"loc.gov вернул HTML-страницу вместо JSON-метаданных (URL={_loc_redact(url)})")
+
         try:
             data = resp.json()
             if not isinstance(data, dict):
                 raise ValueError(f"JSON не объект, а {type(data).__name__}")
         except Exception as e:
             try:
-                body = _loc_redact((resp.text or "")[:200].replace("\n", " "))
+                body = _loc_redact(raw_text[:200].replace("\n", " "))
             except Exception:
                 body = "<не удалось прочитать тело>"
-            ctype = resp.headers.get("Content-Type", "<нет>")
             last_exc = RuntimeError(
                 f"loc.gov: не-JSON ответ (status={resp.status_code}, Content-Type={ctype!r}): {type(e).__name__}"
             )
@@ -488,8 +533,8 @@ def parse_and_download_links(env_name: str, backup_env_name: str = "") -> None:
     # primary-ссылки, backup сюда не влияет - если backup окажется с другого сайта,
     # он всё равно физически безопасен для вызова из любого потока (все rate-limiter'ы
     # сайтов thread-safe сами по себе, см. ThreadRateLimiter/_wikimedia_semaphore/
-    # _pexels_pixabay_semaphore выше), просто пойдёт туда же, где обрабатывался
-    # provider primary для этого number.
+    # _pexels_pixabay_semaphore выше, а LOC защищён _loc_lock), просто пойдёт туда же,
+    # где обрабатывался provider primary для этого number.
     loc_items = []
     other_items = []
     for number, url in links.items():
@@ -798,7 +843,12 @@ def download_wikimedia_commons(number: int, url: str) -> None:
     конкурентности). Теперь: 1) семафор ограничивает, сколько номеров вообще
     одновременно работают с Wikimedia (2, без запаса - официальный потолок, а не
     оценка), 2) wait_turn() вызывается перед КАЖДЫМ фактическим HTTP-запросом
-    (обе retry-петли и fallback-запрос страницы), а не только один раз в начале."""
+    (обе retry-петли и fallback-запрос страницы), а не только один раз в начале.
+
+    Раунд 10 (Этап 2) — честный учет заголовка Retry-After: при получении 429 от
+    Wikimedia время сна вычисляется через _extract_retry_after_seconds как
+    max(Retry-After + 1.0, backoff), предотвращая преждевременное пробуждение
+    потоков до истечения окна блокировки."""
     with _wikimedia_semaphore:
         try:
             path = urlparse(url).path
@@ -816,8 +866,9 @@ def download_wikimedia_commons(number: int, url: str) -> None:
                 resp = cffi_requests.get(api_url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=20)
                 if resp.status_code == 429:
                     log_429_details("Wikimedia", f"metadata, номер {number}, попытка {attempt + 1}", resp)
-                    print(f"[ИНФО] Wikimedia 429 limit, пауза {4 * (attempt + 1)} сек для {number}...")
-                    time.sleep(4 * (attempt + 1))
+                    sleep_sec = _extract_retry_after_seconds(resp, float(4 * (attempt + 1)))
+                    print(f"[ИНФО] Wikimedia 429 limit, пауза {sleep_sec:.1f} сек для {number}...")
+                    time.sleep(sleep_sec)
                     continue
                 resp.raise_for_status()
                 data = resp.json()
@@ -838,6 +889,13 @@ def download_wikimedia_commons(number: int, url: str) -> None:
             if not direct_url:
                 _wikimedia_rate_limiter.wait_turn()
                 page_resp = cffi_requests.get(url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=30)
+                if page_resp.status_code == 429:
+                    log_429_details("Wikimedia", f"page_fallback, номер {number}", page_resp)
+                    sleep_sec = _extract_retry_after_seconds(page_resp, 5.0)
+                    print(f"[ИНФО] Wikimedia 429 limit (page), пауза {sleep_sec:.1f} сек для {number}...")
+                    time.sleep(sleep_sec)
+                    _wikimedia_rate_limiter.wait_turn()
+                    page_resp = cffi_requests.get(url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=30)
                 page_resp.raise_for_status()
                 direct_url = extract_og_media_url(page_resp.text)
 
@@ -853,8 +911,9 @@ def download_wikimedia_commons(number: int, url: str) -> None:
                 img_resp = cffi_requests.get(direct_url, headers=WIKIMEDIA_HEADERS, impersonate="chrome", timeout=60)
                 if img_resp.status_code == 429:
                     log_429_details("Wikimedia", f"файл, номер {number}, попытка {attempt + 1}", img_resp)
-                    print(f"[ИНФО] Wikimedia 429 limit (файл), пауза {4 * (attempt + 1)} сек для {number}...")
-                    time.sleep(4 * (attempt + 1))
+                    sleep_sec = _extract_retry_after_seconds(img_resp, float(4 * (attempt + 1)))
+                    print(f"[ИНФО] Wikimedia 429 limit (файл), пауза {sleep_sec:.1f} сек для {number}...")
+                    time.sleep(sleep_sec)
                     continue
                 img_resp.raise_for_status()
                 content = img_resp.content
@@ -1078,6 +1137,13 @@ def download_loc_gov(number: int, url: str) -> None:
         content = file_resp.content
 
         if looks_like_html(content):
+            # Проверяем, не скачалась ли капча Cloudflare вместо файла
+            if any(m in content.lower() for m in (b"just a moment...", b"cf-chl", b"cloudflare", b"captcha")):
+                log_429_details("LOC", f"file CAPTCHA ({direct_url})", file_resp)
+                with _loc_lock:
+                    global _loc_exhausted
+                    _loc_exhausted = True
+                raise LocExhaustedError("HTTP 429 / CAPTCHA при скачивании файла LOC - LOC помечен исчерпанным до конца запуска")
             fail(number, f"loc.gov {number}: похоже, скачалась HTML-страница")
             return
 
