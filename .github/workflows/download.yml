@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
@@ -38,7 +38,7 @@ jobs:
     # его из кэша (тот же SRT -> тот же хэш), и генерация продолжится с прерванного места.
     # Для другого SRT/содержимого префикс не совпадёт, а скрипт дополнительно сверяет хэш.
     - name: Restore Gemini checkpoint from previous run
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: requests.json.checkpoint.json
         key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
@@ -49,18 +49,19 @@ jobs:
       env:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
+        PYTHONUNBUFFERED: "1"
       run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
 
     # При успехе скрипт сам удаляет чекпоинт, поэтому сохраняем его только при падении шага.
     - name: Save Gemini checkpoint (only if generation failed)
       if: failure()
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: requests.json.checkpoint.json
         key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
 
     - name: Upload requests.json as artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: requests-json
         path: requests.json
@@ -76,31 +77,35 @@ jobs:
     needs: generate_queries
     if: ${{ !cancelled() && inputs.srt_path != '' && needs.generate_queries.result == 'success' }}
     runs-on: ubuntu-latest
+    env:
+      SEARCH_CLIP_MODEL: "ViT-B-32-quickgelu"
+      SEARCH_CLIP_PRETRAINED: "openai"
+      PYTHONUNBUFFERED: "1"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
     - name: Download requests.json artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: requests-json
 
     # Кэш весов CLIP (open_clip тянет их через huggingface_hub) - без кэша каждый
-    # запуск заново качает ~350МБ для ViT-B-32. Ключ включает модель/pretrained,
+    # запуск заново качает ~350МБ для ViT-B-32-quickgelu. Ключ включает модель/pretrained,
     # чтобы смена SEARCH_CLIP_MODEL/_PRETRAINED не подсунула чужой кэш.
     - name: Cache CLIP weights
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cache/huggingface
           ~/.cache/clip
           ~/.cache/torch
-        key: clip-weights-${{ runner.os }}-${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32' }}-${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
+        key: clip-weights-${{ runner.os }}-${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32-quickgelu' }}-${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
 
     - name: Install search deps (CPU-only torch/torchvision first, чтобы не тянуть CUDA-сборку)
       run: |
@@ -111,6 +116,15 @@ jobs:
       env:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        SEARCH_CLIP_MODEL: ${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32-quickgelu' }}
+        SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
+        # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
+        # SEARCH_SIM_MIN_THRESHOLD: "0.21"
+        # SEARCH_SIM_ACCEPT_THRESHOLD: "0.30"
+        # SEARCH_LOC_MIN_INTERVAL_SECONDS: "3.2"
+        # SEARCH_LOC_TIMEOUT_SECONDS: "30"
+        # SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS: "0.35"
+        # SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY: "3"
       run: >
         python search.py --input requests.json --links-output links.txt
         --backup-links-output backup_links.txt --missing-output missing.txt
@@ -129,7 +143,7 @@ jobs:
         fi
 
     - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt as artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: search-links
         path: |
@@ -159,10 +173,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.12'
 
@@ -172,7 +186,7 @@ jobs:
 
     - name: Download search-links artifact (если ссылки пришли из search.py)
       if: needs.search_media.result == 'success'
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: search-links
 
@@ -207,17 +221,18 @@ jobs:
         # в download.py рядом с sys.stdout.reconfigure - это то же самое, но раньше:
         # отключает буферизацию ДО того, как интерпретатор вообще начал выполнять код).
         PYTHONUNBUFFERED: "1"
-        # Раунд 5: не-LOC скачивания теперь идут через ThreadPoolExecutor - см. блок
-        # "Раунд 5" в начале download.py. Оставлены как env, а не хардкод в коде, чтобы
-        # подкрутить без правки скрипта, если после прогона на полном файле вылезут
-        # 429 у pexels/pixabay (общий ключ, риск отдельно обсуждался) - тогда снизить
-        # DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY, не трогая остальной пул.
+        # Раунд 5 и Раунд 10 (Этап 2): не-LOC скачивания идут через ThreadPoolExecutor,
+        # а все запросы к LOC (метаданные и файлы) защищены единым rate-limiter'ом
+        # (DOWNLOAD_LOC_MIN_INTERVAL_SECONDS=3.2с от момента ЗАВЕРШЕНИЯ прошлого сетевого
+        # запроса) и мьютексом _loc_lock (concurrency=1). Разделение интервалов из Раунда 7
+        # отменено, чтобы исключить всплески запросов и бан Cloudflare (см. download.py).
+        # Оставлены как env, а не хардкод в коде, для удобной подстройки при необходимости:
         # DOWNLOAD_CONCURRENCY: "8"
         # DOWNLOAD_PEXELS_PIXABAY_CONCURRENCY: "3"
         # DOWNLOAD_WIKIMEDIA_MIN_INTERVAL_SECONDS: "0.25"
         # DOWNLOAD_WIKIMEDIA_CONCURRENCY: "2"
         # DOWNLOAD_LOC_MIN_INTERVAL_SECONDS: "3.2"
-        # DOWNLOAD_LOC_FILE_MIN_INTERVAL_SECONDS: "0.45"
+        # DOWNLOAD_LOC_RETRIES: "3"
       run: python download.py
 
     # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
@@ -271,9 +286,11 @@ jobs:
           --title "Медиафайлы от $(date -u +'%Y-%m-%d %H:%M UTC')" \
           --notes "Автоматическая публикация из workflow. Файлов: $(ls downloaded_media | wc -l)"
 
-        gh release upload "$TAG" downloaded_media/* \
-          --repo "${{ github.repository }}" \
-          --clobber
+        if ls downloaded_media/* 1> /dev/null 2>&1; then
+          gh release upload "$TAG" downloaded_media/* \
+            --repo "${{ github.repository }}" \
+            --clobber
+        fi
 
         # missing.txt прикладываем всегда - после Раунда 8 он гарантированно не 0
         # байт (см. шаг "Merge failed downloads into missing.txt": либо реальный
@@ -299,6 +316,7 @@ jobs:
         TAG="${{ steps.release.outputs.tag }}"
         > release_links.txt
         for f in downloaded_media/*; do
+          [ -e "$f" ] || continue
           filename=$(basename "$f")
           echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$filename" >> release_links.txt
         done
