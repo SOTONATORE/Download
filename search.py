@@ -210,6 +210,13 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
+from media_formats import (
+    VIDEO_EXTENSIONS,
+    FormatRejectStats,
+    ext_from_name,
+    is_allowed_ext,
+)
+
 try:
     import aiohttp
 except ImportError:
@@ -239,6 +246,13 @@ DEFAULT_SEARCH_INPUT = "requests.json"
 DEFAULT_LINKS_OUTPUT = "links.txt"
 DEFAULT_MISSING_OUTPUT = "missing.txt"
 DEFAULT_BACKUP_LINKS_OUTPUT = "backup_links.txt"
+DEFAULT_BACKUP_MISSING_OUTPUT = "backup_missing.txt"
+# Задел на будущее: доп. сайты для перебора backup (B1), после seg.sites. По умолчанию пусто.
+BACKUP_EXTRA_SITES = [
+    x.strip().lower()
+    for x in os.environ.get("SEARCH_BACKUP_EXTRA_SITES", "").split(",")
+    if x.strip()
+]
 
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
@@ -659,6 +673,10 @@ class Context:
     # Диагностика воронки фильтрации по каждому сайту (и отдельно "<site>_fallback"
     # для запросов через try_fallback) - см. SiteStats/log_site_stats_summary.
     site_stats: dict = field(default_factory=dict)
+    # Отсев кандидатов по формату (сайт -> расширение -> число), см. media_formats.
+    format_rejects: FormatRejectStats = field(default_factory=FormatRejectStats)
+    # seg_index -> Candidate, выбранный как primary (нужен проходу по backup)
+    primary_cands: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -879,7 +897,8 @@ async def http_get_json(
 
             except FatalConfigError:
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            except (aiohttp.ClientError, aiohttp.ClientPayloadError,
+                    aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
                 # Таймаут/сетевая ошибка - НЕ признак исчерпания сайта (exhausted_sites не
                 # трогаем), только ретрай. У asyncio.TimeoutError str() пустой, поэтому
                 # пишем тип и repr. В лог идут только безопасные поля (см. _request_id);
@@ -995,7 +1014,24 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
     return await cached_search(ctx, "pixabay", media_type, query, _do)
 
 
+# На Commons нет mp4/mov/avi - только эти видео-форматы.
+COMMONS_VIDEO_EXTENSIONS = frozenset({"webm", "ogv", "mpg", "mpeg"})
+_commons_video_skip_logged = False
+
+
 async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Candidate]:
+    global _commons_video_skip_logged
+    if media_type == "video" and not (COMMONS_VIDEO_EXTENSIONS & VIDEO_EXTENSIONS):
+        # Ни один видео-формат Commons не входит в белый список - API не трогаем.
+        if not _commons_video_skip_logged:
+            _commons_video_skip_logged = True
+            logging.info(
+                "wikimedia: видео пропускается целиком - форматы Commons (%s) не входят в "
+                "белый список видео (%s)",
+                ", ".join(sorted(COMMONS_VIDEO_EXTENSIONS)), ", ".join(sorted(VIDEO_EXTENSIONS)),
+            )
+        return []
+
     async def _do() -> list[Candidate]:
         search_query = f"{query} filetype:video" if media_type == "video" else query
         params = {
@@ -1006,15 +1042,17 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
         if not data:
             return []
         hits = data.get("query", {}).get("search", [])
-        video_ext_re = re.compile(r"\.(ogv|webm|mp4|mpg|mpeg)$", re.IGNORECASE)
-        if media_type == "video":
-            hits = [h for h in hits if video_ext_re.search(h.get("title", ""))]
-        else:
-            # Для фото берём только реальные растровые картинки: раньше сюда проходили
-            # PDF/DjVu/TIFF/SVG/аудио, у них есть превью-миниатюра, они набирали CLIP-балл,
-            # а потом скачивались как "N.jpg" и не открывались (сегмент 46).
-            photo_ext_re = re.compile(r"\.(jpe?g|png|webp|gif)$", re.IGNORECASE)
-            hits = [h for h in hits if photo_ext_re.search(h.get("title", ""))]
+        # Формат файла - только по белому списку media_formats (раньше сюда проходили
+        # PDF/DjVu/TIFF/SVG/аудио, а потом они скачивались как "N.jpg" и не открывались).
+        kind = "video" if media_type == "video" else "photo"
+        kept = []
+        for h in hits:
+            ext = ext_from_name(h.get("title", ""))
+            if is_allowed_ext(ext, kind):
+                kept.append(h)
+            else:
+                ctx.format_rejects.add("wikimedia", ext)
+        hits = kept
         if not hits:
             return []
 
@@ -1074,15 +1112,9 @@ def _nasa_manifest_resolver(manifest_href: Optional[str], media_type: str):
         files = await http_get_json(ctx, "nasa", manifest_href)
         if not files or not isinstance(files, list):
             return None
-        if media_type == "video":
-            candidates = [f for f in files if isinstance(f, str) and f.lower().endswith(".mp4")]
-        else:
-            candidates = [
-                f for f in files
-                if isinstance(f, str) and re.search(r"\.(jpg|jpeg|png|tif|tiff)$", f, re.IGNORECASE)
-            ]
-        if not candidates:
-            return None
+        kind = "video" if media_type == "video" else "photo"
+        files = [f for f in files if isinstance(f, str)]
+        candidates = [f for f in files if is_allowed_ext(ext_from_name(f), kind)]
 
         def rank(f: str) -> int:
             fl = f.lower()
@@ -1093,6 +1125,15 @@ def _nasa_manifest_resolver(manifest_href: Optional[str], media_type: str):
             if "~medium" in fl:
                 return 1
             return 0
+
+        if not candidates:
+            # Элемент потерян по формату: считаем расширение лучшего (по rank) файла
+            # с расширением (в манифесте есть и .json/.srt - по одному на элемент, не по файлу).
+            with_ext = [f for f in files if ext_from_name(f)]
+            if with_ext:
+                best = max(with_ext, key=rank)
+                ctx.format_rejects.add("nasa", ext_from_name(best))
+            return None
 
         candidates.sort(key=rank, reverse=True)
         return candidates[0]
@@ -1168,7 +1209,15 @@ async def search_loc(ctx: Context, query: str, media_type: str) -> list[Candidat
                 desc = " ".join(str(x) for x in desc)
             text = " ".join(filter(None, [title, desc or ""]))
             images = item.get("image_url") or []
-            preview = images[0] if images else None
+            # Приближённая проверка формата: нужен хотя бы один URL с разрешённым
+            # фото-расширением (итоговый файл выбирает download.py).
+            if not any(isinstance(u, str) and is_allowed_ext(ext_from_name(u), "photo") for u in images):
+                first = next((u for u in images if isinstance(u, str)), "")
+                ctx.format_rejects.add("loc", ext_from_name(first))
+                continue
+            preview = next(
+                u for u in images if isinstance(u, str) and is_allowed_ext(ext_from_name(u), "photo")
+            )
             result.append(Candidate(
                 site="loc", cand_id=item_id, text=text,
                 license_ok=loc_license_ok(item), preview_url=preview, page_url=item_id,
@@ -1264,7 +1313,8 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
                     )
                     return None
                 return await resp.read()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        except (aiohttp.ClientError, aiohttp.ClientPayloadError,
+                aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
             PREVIEW_DEBUG_LOGGER.debug(
                 "Превью %s/%s: сетевая ошибка (попытка %s/2) при GET %s: %s: %s",
                 cand.site, cand.cand_id, attempt, cand.preview_url, type(e).__name__, e,
@@ -1374,7 +1424,9 @@ async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: st
     return await finalize_candidate(ctx, backup_cand)
 
 
-async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> tuple[Optional[str], Optional[str]]:
+async def try_claim_pool(
+    ctx: Context, pool: list[Candidate], seg_index: Optional[int] = None,
+) -> tuple[Optional[str], Optional[str]]:
     for i, cand in enumerate(pool):  # уже отсортирован по убыванию similarity
         key = (cand.site, cand.cand_id)
         async with ctx.used_files_lock:
@@ -1383,6 +1435,8 @@ async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> tuple[Optional[
             ctx.used_files.add(key)  # бронируем сразу внутри лока, в момент выбора
         final_url = await finalize_candidate(ctx, cand)
         if final_url:
+            if seg_index is not None:
+                ctx.primary_cands[seg_index] = cand
             backup_url = await try_claim_backup(ctx, pool[i + 1:], cand.site)
             return final_url, backup_url
         # Финализация не удалась (например NASA-манифест не дал нужного файла) -
@@ -1390,16 +1444,21 @@ async def try_claim_pool(ctx: Context, pool: list[Candidate]) -> tuple[Optional[
     return None, None
 
 
-async def fetch_and_filter(ctx: Context, site: str, seg: SegmentSpec) -> list[Candidate]:
-    stats = ctx.site_stats.setdefault(site, SiteStats())
+async def fetch_and_filter(
+    ctx: Context, site: str, seg: SegmentSpec,
+    query: Optional[str] = None, apply_entity: bool = True,
+    stats_key: Optional[str] = None,
+) -> list[Candidate]:
+    q = query or seg.query
+    stats = ctx.site_stats.setdefault(stats_key or site, SiteStats())
     stats.segments_attempted += 1
 
-    raw = await SITE_SEARCH_FUNCS[site](ctx, seg.query, seg.type)
+    raw = await SITE_SEARCH_FUNCS[site](ctx, q, seg.type)
     stats.raw_total += len(raw)
     if not raw:
         logging.info(
             "Сегмент %s/%s: 0 сырых кандидатов по запросу %r - сайт ничего не вернул "
-            "(проверьте сеть/сам API/лимиты для этого сайта).", seg.index, site, seg.query,
+            "(проверьте сеть/сам API/лимиты для этого сайта).", seg.index, site, q,
         )
         return []
 
@@ -1413,7 +1472,7 @@ async def fetch_and_filter(ctx: Context, site: str, seg: SegmentSpec) -> list[Ca
         return []
 
     skip_keyword_filter = site == "pexels" and seg.type == "video"  # там нет текстовых полей
-    if seg.is_entity and not skip_keyword_filter:
+    if seg.is_entity and apply_entity and not skip_keyword_filter:
         before = len(licensed)
         licensed = [c for c in licensed if text_matches_keywords(c.text, seg.entity_keywords)]
         if not licensed:
@@ -1449,7 +1508,7 @@ async def try_fallback(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], O
     if not pool:
         return None, None
     pool.sort(key=lambda c: c.similarity, reverse=True)
-    return await try_claim_pool(ctx, pool)
+    return await try_claim_pool(ctx, pool, seg.index)
 
 
 async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
@@ -1471,7 +1530,7 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optiona
         # иначе - similarity в [SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD), пробуем следующий сайт
 
     if pool:
-        url, backup_url = await try_claim_pool(ctx, pool)
+        url, backup_url = await try_claim_pool(ctx, pool, seg.index)
         if url:
             return url, backup_url
 
@@ -1485,6 +1544,136 @@ async def process_segment(ctx: Context, seg: SegmentSpec) -> tuple[int, Optional
     async with ctx.global_semaphore:
         url, backup_url = await process_segment_inner(ctx, seg)
     return seg.index, url, backup_url
+
+
+async def _backup_pool(
+    ctx: Context, site: str, seg: SegmentSpec, query: str,
+    apply_entity: bool, exclude_key: tuple,
+) -> list[Candidate]:
+    """Поиск -> лицензия/сущности -> отсев занятых и primary -> превью+CLIP (>= SIM_MIN)."""
+    licensed = await fetch_and_filter(
+        ctx, site, seg, query=query, apply_entity=apply_entity,
+        stats_key=f"{site}_backup",
+    )
+    if not licensed:
+        return []
+    async with ctx.used_files_lock:
+        fresh = [
+            c for c in licensed
+            if (c.site, c.cand_id) not in ctx.used_files
+            and (c.site, c.cand_id) != exclude_key
+        ]
+    top = fresh[:CANDIDATES_PER_SITE]
+    if not top:
+        return []
+    return await score_candidates(
+        ctx, top, query, seg_index=seg.index, stats_key=f"{site}_backup",
+    )
+
+
+async def _claim_first(ctx: Context, pool: list[Candidate]) -> Optional[str]:
+    """Бронирует лучшего свободного кандидата (без backup-хвоста)."""
+    for cand in sorted(pool, key=lambda c: c.similarity, reverse=True):
+        key = (cand.site, cand.cand_id)
+        async with ctx.used_files_lock:
+            if key in ctx.used_files:
+                continue
+            ctx.used_files.add(key)
+        url = await finalize_candidate(ctx, cand)
+        if url:
+            return url
+    return None
+
+
+async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+    """B1 (другие сайты) -> B2 (тот же сайт). Возвращает (url, 'other'|'same') или (None, None).
+    Тип video/photo гарантирован: поиск идёт с seg.type."""
+    primary = ctx.primary_cands.get(seg.index)
+    if primary is None:
+        return None, None
+    pkey = (primary.site, primary.cand_id)
+
+    # fallback_query обобщённый: фильтр сущностей к нему не применяем (как в try_fallback)
+    queries: list[tuple[str, bool]] = [(seg.query, True)]
+    if seg.fallback_query and seg.fallback_query != seg.query:
+        queries.append((seg.fallback_query, False))
+
+    ordered: list[str] = []
+    for site in list(seg.sites) + BACKUP_EXTRA_SITES:
+        if site in SITE_SEARCH_FUNCS and site != primary.site and site not in ordered:
+            ordered.append(site)
+    # LOC всегда последним и только если больше нигде не нашлось
+    groups = ([x for x in ordered if x != "loc"], [x for x in ordered if x == "loc"])
+
+    # B1
+    for group in groups:
+        if not group:
+            continue
+        for q, ent in queries:
+            pool: list[Candidate] = []
+            for site in group:
+                if site in ctx.exhausted_sites:
+                    continue
+                scored = await _backup_pool(ctx, site, seg, q, ent, pkey)
+                pool.extend(scored)
+                if scored and scored[0].similarity >= SIM_ACCEPT_THRESHOLD:
+                    break
+            if pool:
+                url = await _claim_first(ctx, pool)
+                if url:
+                    return url, "other"
+
+    # B2: тот же сайт, другой cand_id (результаты поиска - из cached_search)
+    if primary.site not in ctx.exhausted_sites:
+        for q, ent in queries:
+            pool = await _backup_pool(ctx, primary.site, seg, q, ent, pkey)
+            if pool:
+                url = await _claim_first(ctx, pool)
+                if url:
+                    return url, "same"
+    return None, None
+
+
+async def run_backup_pass(
+    ctx: Context, segments: list[SegmentSpec], results: dict, backups: dict,
+) -> list[int]:
+    """Отдельный проход после run_search. Дополняет backups, возвращает номера без backup (B3)."""
+    t0 = time.monotonic()
+    by_idx = {sg.index: sg for sg in segments}
+    todo = [by_idx[i] for i in sorted(results) if i not in backups and i in by_idx]
+    n_tail = len(backups)
+
+    async def one(seg: SegmentSpec):
+        try:
+            async with ctx.global_semaphore:
+                url, src = await find_backup(ctx, seg)
+        except Exception as e:  # проход backup не должен ронять прогон
+            logging.warning("Сегмент %s: ошибка поиска backup: %s", seg.index, e)
+            return seg.index, None, None
+        return seg.index, url, src
+
+    n_other = n_same = 0
+    still: list[int] = []
+    for coro in asyncio.as_completed([one(sg) for sg in todo]):
+        idx, url, src = await coro
+        if url:
+            backups[idx] = url
+            if src == "other":
+                n_other += 1
+            else:
+                n_same += 1
+        else:
+            still.append(idx)
+            logging.warning("Сегмент %s: backup не найден (B1/B2 пусты)", idx)
+    still.sort()
+    logging.info(
+        "Backup: из хвоста %s, из другого сайта %s, из того же сайта %s, не найден %s%s. "
+        "Проход занял %.1fs",
+        n_tail, n_other, n_same, len(still),
+        f" (сегменты: {', '.join(map(str, still))})" if still else "",
+        time.monotonic() - t0,
+    )
+    return still
 
 
 # ---------------------------------------------------------------------------
@@ -1631,6 +1820,8 @@ async def amain(args: argparse.Namespace) -> int:
             log_site_stats_summary(ctx.site_stats)
             return 1
 
+        backup_missing = await run_backup_pass(ctx, segments, results, backups)
+
         log_site_stats_summary(ctx.site_stats)
 
     with open(args.links_output, "w", encoding="utf-8") as f:
@@ -1649,11 +1840,20 @@ async def amain(args: argparse.Namespace) -> int:
         for idx in sorted(missing):
             f.write(f"{idx}\n")
 
+    with open(args.backup_missing_output, "w", encoding="utf-8") as f:
+        for idx in backup_missing:
+            f.write(f"{idx}\n")
+
+    reject_line = ctx.format_rejects.summary_line()
+    if reject_line:
+        logging.info(reject_line)
+
     logging.info(
-        "Готово: найдено %s из %s сегментов (из них с backup - %s), не найдено %s. "
-        "Результаты: %s, backup: %s, пропуски: %s",
-        len(results), len(segments), len(backups), len(missing),
+        "Готово: найдено %s из %s сегментов (из них с backup - %s), не найдено %s, "
+        "backup_missing %s. Результаты: %s, backup: %s, пропуски: %s, без backup: %s",
+        len(results), len(segments), len(backups), len(missing), len(backup_missing),
         args.links_output, args.backup_links_output, args.missing_output,
+        args.backup_missing_output,
     )
     return 0
 
@@ -1669,6 +1869,10 @@ def main() -> int:
         default=os.environ.get("SEARCH_BACKUP_LINKS_OUTPUT", DEFAULT_BACKUP_LINKS_OUTPUT),
     )
     parser.add_argument("--missing-output", default=os.environ.get("SEARCH_MISSING_OUTPUT", DEFAULT_MISSING_OUTPUT))
+    parser.add_argument(
+        "--backup-missing-output",
+        default=os.environ.get("SEARCH_BACKUP_MISSING_OUTPUT", DEFAULT_BACKUP_MISSING_OUTPUT),
+    )
     args = parser.parse_args()
 
     try:
