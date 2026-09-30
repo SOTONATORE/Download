@@ -37,18 +37,13 @@ jobs:
     # Чекпоинт между запусками: если прошлый прогон упал (квота/сбой Gemini), подтягиваем
     # его из кэша (тот же SRT -> тот же хэш), и генерация продолжится с прерванного места.
     # Для другого SRT/содержимого префикс не совпадёт, а скрипт дополнительно сверяет хэш.
-    - name: Compute SRT hash for checkpoint cache key
-      id: srt_hash
-      env:
-        SRT_PATH: ${{ inputs.srt_path }}
-      run: echo "value=$(sha256sum "$SRT_PATH" | cut -c1-32)" >> "$GITHUB_OUTPUT"
-
     - name: Restore Gemini checkpoint from previous run
       uses: actions/cache/restore@v5
       with:
         path: requests.json.checkpoint.json
-        key: genq-checkpoint-${{ steps.srt_hash.outputs.value }}-${{ github.run_id }}
-        restore-keys: genq-checkpoint-${{ steps.srt_hash.outputs.value }}-
+        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
+        restore-keys: |
+          genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-
 
     - name: Generate search queries via Gemini
       env:
@@ -63,7 +58,7 @@ jobs:
       uses: actions/cache/save@v5
       with:
         path: requests.json.checkpoint.json
-        key: genq-checkpoint-${{ steps.srt_hash.outputs.value }}-${{ github.run_id }}
+        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
 
     - name: Upload requests.json as artifact
       uses: actions/upload-artifact@v6
