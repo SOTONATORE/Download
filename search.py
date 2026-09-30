@@ -50,6 +50,16 @@ search.py
           фактическую частоту выше 19 запросов/мин и не спровоцировало тот самый часовой
           бан, который вся эта конструкция должна предотвращать. Если 429 всё равно
           появляются - увеличивайте (сначала обратно к 5с, если совсем плохо - выше).
+    SEARCH_LOC_PREVIEW_MIN_INTERVAL_SECONDS
+        - лимитер для скачивания превью LOC (tile.loc.gov, лимит 150/мин). Умолч. 0.45с.
+    SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS
+        - глобальный лимитер между последовательными запросами превью Wikimedia Commons
+          (upload.wikimedia.org) для защиты от 429 при высокой конкурентности (умолч. 0.35с).
+    SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY
+        - семафор одновременных загрузок превью Wikimedia Commons (умолч. 3).
+    SEARCH_LOC_TIMEOUT_SECONDS
+        - таймаут поискового запроса к LOC (умолч. 30с; увеличено с 15с, чтобы устранить
+          постоянные таймауты на 1-й попытке из-за медленного холодного поиска LOC).
     SEARCH_GLOBAL_CONCURRENCY  - сколько сегментов обрабатывать параллельно (умолч. 40)
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
@@ -189,6 +199,25 @@ videos.<size>.thumbnail. (Кандидаты, на которых это всп�
 там всё было верно уже раньше. Исправлено: для video берём первый доступный thumbnail
 из videos.tiny -> small -> medium -> large (tiny предпочтителен - меньше трафика для
 CLIP, где точность превью не критична, важна только similarity с текстом).
+
+Одиннадцатое уточнение (Этап 1 стабилизации):
+1. CDN превью Wikimedia Commons (upload.wikimedia.org) банил скрипт по 429 из-за
+   одновременных запросов от 40 параллельных сегментов (в логе было 43 отсеянных кандидата).
+   Добавлены WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS (0.35с) и WIKIMEDIA_PREVIEW_CONCURRENCY (3),
+   а в fetch_preview_bytes добавлена честная обработка 429 с учетом заголовка Retry-After
+   и паузой перед попыткой 2 вместо прежнего мгновенного return None.
+2. Защита от связки "primary LOC + backup LOC": если primary взят с LOC, try_claim_backup
+   больше НЕ берет дубликат с LOC (возвращает None). В find_backup для LOC primary принудительно
+   подключаются pexels и pixabay, что позволяет найти независимый кросс-сайтовый backup по
+   fallback_query и спасает файл при часовом бане LOC на этапе download.py.
+3. Фильтрация URL в search_loc: исключены страницы виртуальных выставок (/exhibits/), блогов
+   и порталов, которые возвращают HTML при запросе ?fo=json (баг сегмента 6). Принимаются только
+   оцифрованные каталожные объекты (/item/ и /resource/).
+4. Обогащение текста LOC: поле subject/subjects включено в text кандидата, что спасает до 44%
+   кандидатов от ложного отсева фильтром сущностей (Анкара, Мехмед VI, Сан-Ремо и др.).
+5. Поиск Wikimedia Commons дополнен filetype:bitmap для картинок, исключая 500+ сканов PDF/DjVu.
+6. Таймаут поиска LOC увеличен до 30 секунд (SEARCH_LOC_TIMEOUT_SECONDS=30) для устранения
+   постоянных таймаутов на первой попытке холодного поиска.
 """
 
 from __future__ import annotations
@@ -247,7 +276,6 @@ DEFAULT_LINKS_OUTPUT = "links.txt"
 DEFAULT_MISSING_OUTPUT = "missing.txt"
 DEFAULT_BACKUP_LINKS_OUTPUT = "backup_links.txt"
 DEFAULT_BACKUP_MISSING_OUTPUT = "backup_missing.txt"
-# Задел на будущее: доп. сайты для перебора backup (B1), после seg.sites. По умолчанию пусто.
 BACKUP_EXTRA_SITES = [
     x.strip().lower()
     for x in os.environ.get("SEARCH_BACKUP_EXTRA_SITES", "").split(",")
@@ -281,17 +309,10 @@ SEMAPHORE_DEFAULTS = {
 GLOBAL_SEGMENT_CONCURRENCY = int(os.environ.get("SEARCH_GLOBAL_CONCURRENCY", 40))
 
 # Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье"/"Четвёртое"
-# допущение. Дефолт подобран по официальной документации LOC (working-within-limits:
-# 20 запросов/мин у JSON/YAML API, час блокировки при превышении), с большим запасом
-# (5с = 12 запросов/мин, ~40% ниже потолка) - цена ошибки высокая (часовой бан), поэтому
-# лучше перестраховаться, чем экономить секунды на сегмент.
-# Отдельный от семафора механизм - см. докстринг модуля, раздел "Третье"/"Четвёртое"
 # допущение. Официальный лимит LOC - 20 запросов/мин у JSON/YAML API, час блокировки
 # при превышении (working-within-limits). Умолч. 3.2с (~18.75/мин, ~6% запас от потолка,
 # намеренно округлено В БОЛЬШУЮ сторону от математических 3.158с=5% запаса - см. подробное
-# обоснование выше в SEARCH_LOC_MIN_INTERVAL_SECONDS) - пересчитано с прежних 5.0с/~40%
-# запаса по факту: в реальном прогоне этот интервал оказался доминирующим узким местом
-# всего скрипта (104/126 сегментов трогали LOC), 5.0с был неоправданно консервативен.
+# обоснование выше в SEARCH_LOC_MIN_INTERVAL_SECONDS).
 LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS", 3.2))
 
 # ---------------------------------------------------------------------------
@@ -327,10 +348,27 @@ LOC_MIN_INTERVAL_SECONDS = float(os.environ.get("SEARCH_LOC_MIN_INTERVAL_SECONDS
 LOC_PREVIEW_MIN_INTERVAL_SECONDS = float(
     os.environ.get("SEARCH_LOC_PREVIEW_MIN_INTERVAL_SECONDS", 0.45)
 )
-# 0.45с (~133 запроса/мин, ~11% запас от официального потолка 150/мин) - идентичный
-# расчёт и то же обоснование запаса, что у LOC_FILE_MIN_INTERVAL_SECONDS в download.py
-# (см. его комментарий) - тот же самый эндпоинт /storage-services/, та же категория
-# лимита, поэтому и число то же самое, без отдельного пересчёта.
+# 0.45с (~133 запроса/мин, ~11% запас от официального потолка 150/мин).
+
+# ---------------------------------------------------------------------------
+# Раунд 9 (Этап 1) - лимитер и семафор для превью Wikimedia Commons.
+#
+# По логу реального прогона 43 кандидата Wikimedia Commons были потеряны из-за 429
+# на этапе скачивания превью картинок (upload.wikimedia.org). При глобальной
+# параллельности 40 сегментов запросы картинок летели пачками без каких-либо
+# ограничений (у Wikimedia в fetch_preview_bytes не было ни семафора, ни лимитера).
+# Добавлены: интервал 0.35с (~170 запросов/мин) и семафор конкурентности на 3 слота.
+# ---------------------------------------------------------------------------
+WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS", 0.35)
+)
+WIKIMEDIA_PREVIEW_CONCURRENCY = int(
+    os.environ.get("SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY", 3)
+)
+
+# Таймаут поиска LOC: 30с предотвращает таймауты на холодных запросах (было 15с)
+SEARCH_LOC_TIMEOUT_SECONDS = float(os.environ.get("SEARCH_LOC_TIMEOUT_SECONDS", 30))
+SEARCH_LOC_MAX_RETRIES = max(1, int(os.environ.get("SEARCH_LOC_MAX_RETRIES", 3)))
 
 PREVIEW_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -338,11 +376,6 @@ PREVIEW_HEADERS = {
     "Accept": "*/*",
 }
 
-# См. "Седьмое уточнение" в докстринге модуля: без Referer (и часто Origin) многие CDN
-# отдают 403/406 на запрос к самому медиафайлу, даже если User-Agent в порядке. Значения
-# ниже - "страница-источник по умолчанию" для сайтов, где у кандидата нет собственного
-# page_url; для wikimedia в fetch_preview_bytes используется page_url конкретного
-# кандидата, если он задан (это надёжнее общего домена).
 PREVIEW_REFERERS = {
     "pexels": "https://www.pexels.com/",
     "pixabay": "https://pixabay.com/",
@@ -351,20 +384,12 @@ PREVIEW_REFERERS = {
     "loc": "https://www.loc.gov/",
 }
 
-# Wikimedia (и вообще большинство API) с некоторых пор жёстко требуют внятный
-# User-Agent с указанием, что это за инструмент и как с ним связаться - иначе 403
-# ("Please set a user-agent and respect our robot policy"). Это НЕ временная ошибка,
-# ретраить её бессмысленно - см. правку в http_get_json ниже. Подставьте сюда свой
-# реальный контакт/ссылку на репозиторий - Wikimedia может ужесточить проверку и на
-# осмысленность значения, не только на его наличие.
 SESSION_USER_AGENT = (
     "MediaSearchPipeline/1.0 "
     "(https://github.com/SOTONATORE/Download; contact: fordlababit@gmail.com)"
 )
 
 # Белый список LicenseShortName для Wikimedia Commons (регистронезависимо, по префиксу).
-# "pd" матчится только как отдельное "слово" (PD, PD-old, PD-US, ...), чтобы не словить
-# случайные ложные совпадения.
 _WM_PD_RE = re.compile(r"^pd([-\s]|$)", re.IGNORECASE)
 _WM_FREE_PREFIXES = ("cc0", "cc-zero", "cc by", "public domain", "fal", "gfdl")
 
@@ -405,26 +430,21 @@ def strip_html(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Текстовый фильтр по сущностям (см. "Восьмое уточнение" в докстринге модуля)
+# Текстовый фильтр по сущностям (см. "Восьмое/Девятое уточнение" в докстринге)
 # ---------------------------------------------------------------------------
 
-# Порог схожести слов для difflib.SequenceMatcher.ratio(). Подобран консервативно (не
-# слишком низко, чтобы не плодить ложные совпадения на коротких словах): ловит замены
-# 1-2 символов в словах длиной от ~5 символов (например "mecid"/"mejid" -> ratio 0.80),
-# но не сводит вместе произвольные разные короткие слова.
 _FUZZY_WORD_RATIO_THRESHOLD = float(os.environ.get("SEARCH_FUZZY_KEYWORD_RATIO", 0.78))
 _WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
 def _normalize_for_match(s: str) -> str:
-    """NFKD + снятие комбинирующих диакритических знаков - схлопывает разные способы
-    записи одного и того же имени (например "Abdülmecid" -> "abdulmecid"), плюс lower()."""
+    """NFKD + снятие комбинирующих диакритических знаков, плюс lower()."""
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.lower()
 
 
-_MIN_FUZZY_WORD_LEN = 3  # короче - слишком много случайных подстрочных совпадений (например "a", "i", "тон")
+_MIN_FUZZY_WORD_LEN = 3
 
 
 def _fuzzy_word_match(keyword_norm: str, text_words: list[str]) -> bool:
@@ -441,13 +461,8 @@ def _fuzzy_word_match(keyword_norm: str, text_words: list[str]) -> bool:
 
 
 def text_matches_keywords(text: str, keywords: list[str]) -> bool:
-    """Сначала точное вхождение подстроки на всю фразу целиком (как раньше, самый
-    дешёвый и надёжный случай), затем - если оно не сработало - два дешёвых fuzzy-слоя
-    поверх нормализованного текста: снятие диакритики и приблизительное совпадение
-    ОТДЕЛЬНЫХ СЛОВ ключевой фразы через difflib (см. "Девятое уточнение" в докстринге
-    модуля - ключевая фраза здесь токенизируется точно так же, как текст, а не
-    сравнивается с текстом целиком). Осознанно без внешних библиотек (rapidfuzz и
-    т.п.) - см. "Восьмое уточнение" в докстринге модуля."""
+    """Точное совпадение фразы -> нормализация NFKD -> пословное приближенное
+    совпадение через difflib для слов длиннее _MIN_FUZZY_WORD_LEN."""
     if not keywords:
         return True
     t_raw = (text or "").lower()
@@ -465,14 +480,8 @@ def text_matches_keywords(text: str, keywords: list[str]) -> bool:
         kw_words = _WORD_RE.findall(_normalize_for_match(kw))
         if not kw_words:
             continue
-        # "Содержательные" слова фразы - без коротких токенов вроде римских цифр
-        # ("II", "VI") и инициалов: они слишком неоднозначны для отдельного
-        # fuzzy-сравнения (см. _MIN_FUZZY_WORD_LEN), но не должны блокировать
-        # совпадение по остальным словам той же фразы.
         content_words = [w for w in kw_words if len(w) >= _MIN_FUZZY_WORD_LEN]
         if not content_words:
-            # Вся фраза состоит из коротких токенов - fuzzy тут бессмысленен и
-            # опасен ложными совпадениями, требуем точное вхождение фразы целиком.
             if _normalize_for_match(kw) in norm_text:
                 return True
             continue
@@ -482,8 +491,7 @@ def text_matches_keywords(text: str, keywords: list[str]) -> bool:
 
 
 class FatalConfigError(RuntimeError):
-    """Структурная ошибка конфигурации (невалидный API-ключ и т.п.) - не ретраится,
-    приводит к остановке всего скрипта с кодом 1."""
+    """Структурная ошибка конфигурации - приводит к остановке с кодом 1."""
 
 
 # ---------------------------------------------------------------------------
@@ -492,11 +500,6 @@ class FatalConfigError(RuntimeError):
 
 @dataclass
 class SiteStats:
-    """Считает, сколько кандидатов на каждом этапе фильтрации осталось - чтобы по
-    финальной сводке было сразу видно, на каком именно шаге воронка обнуляется
-    (сырой поиск / лицензия / текстовый фильтр сущностей / отсутствие превью /
-    сам CLIP-скоринг), а не только итоговое "найдено 0 из N"."""
-
     segments_attempted: int = 0
     raw_total: int = 0
     license_ok_total: int = 0
@@ -505,8 +508,8 @@ class SiteStats:
     preview_missing_total: int = 0
     clip_error_total: int = 0
     clip_scored_total: int = 0
-    clip_passed_total: int = 0   # similarity >= SIM_MIN_THRESHOLD
-    clip_accept_total: int = 0  # similarity >= SIM_ACCEPT_THRESHOLD
+    clip_passed_total: int = 0
+    clip_accept_total: int = 0
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -566,11 +569,6 @@ def log_site_stats_summary(site_stats: dict) -> None:
 # Глобальный rate-limiter (минимальный интервал между запросами)
 # ---------------------------------------------------------------------------
 
-# Точечные DEBUG-логгеры для тайминга (тот же принцип, что и PREVIEW_DEBUG_LOGGER выше по
-# файлу - отдельный логгер со своим уровнем DEBUG, не завязанный на глобальный уровень root,
-# который остаётся INFO). Без этого logging.debug(...) внутри RateLimiter.wait_turn/ClipScorer
-# просто не печатался бы вообще - что и произошло в первом прогоне с этим тайммингом (см.
-# обсуждение).
 RATE_LIMITER_DEBUG_LOGGER = logging.getLogger("search.rate_limiter")
 RATE_LIMITER_DEBUG_LOGGER.setLevel(logging.DEBUG)
 CLIP_TIMING_DEBUG_LOGGER = logging.getLogger("search.clip_timing")
@@ -580,14 +578,7 @@ CLIP_TIMING_DEBUG_LOGGER.setLevel(logging.DEBUG)
 class RateLimiter:
     """Гарантирует минимальный интервал между НАЧАЛОМ двух последовательных запросов,
     глобально на весь запуск - в отличие от asyncio.Semaphore, который ограничивает
-    только число одновременно летящих запросов, но не мешает им уйти пачкой один за
-    другим. Нужен для сайтов вроде LOC, которые банят по частоте (req/sec), а не
-    только по конкурентности.
-
-    Реализация: единый asyncio.Lock сериализует "вход" в лимитер, так что даже при
-    большом числе параллельных корутин (до GLOBAL_SEGMENT_CONCURRENCY штук) фактические
-    запросы к сайту физически не могут стартовать чаще, чем раз в min_interval секунд,
-    независимо от того, сколько сегментов обрабатывается одновременно."""
+    только число одновременно летящих запросов."""
 
     def __init__(self, min_interval_seconds: float):
         self.min_interval = max(0.0, min_interval_seconds)
@@ -604,11 +595,6 @@ class RateLimiter:
                 elapsed = now - self._last_start_ts
                 remaining = self.min_interval - elapsed
                 if remaining > 0:
-                    # Явный тайминг ожидания в rate-limiter'е (см. договорённость по итогам
-                    # предыдущего прогона) - те же соображения, что и у тайминга CLIP выше:
-                    # если каскад на LOC уйдёт после фикса превью (пункт 1), нагрузка на LOC
-                    # может кардинально измениться, и текущие цифры "сколько реально ждём
-                    # здесь" нужны как точка отсчёта ДО, а не только после этого изменения.
                     wait_start = time.monotonic()
                     await asyncio.sleep(remaining)
                     actual_wait = time.monotonic() - wait_start
@@ -643,8 +629,6 @@ class Candidate:
     license_ok: bool
     preview_url: Optional[str]
     page_url: Optional[str]
-    # Если задан - вызывается для получения финального URL (для сайтов, где
-    # найденный на этапе поиска URL ещё не тот, что нужно download.py, например NASA).
     final_url_resolver: Optional[Callable[["Context"], Awaitable[Optional[str]]]] = None
     similarity: float = 0.0
 
@@ -663,19 +647,9 @@ class Context:
     search_cache: dict = field(default_factory=dict)
     search_cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     clip: "ClipScorer" = None
-    # per-site глобальные rate-limiter'ы (минимальный интервал между запросами).
-    # По умолчанию заполнен для "loc" (search_loc, JSON/YAML API 20/мин) и отдельно
-    # "loc_preview" (fetch_preview_bytes для LOC-кандидатов, Media content
-    # /storage-services/ 150/мин) - см. LOC_MIN_INTERVAL_SECONDS и
-    # LOC_PREVIEW_MIN_INTERVAL_SECONDS. Сайты/эндпоинты, для которых лимитера нет в
-    # словаре, ничем не ограничиваются (используют только семафор конкурентности).
     rate_limiters: dict = field(default_factory=dict)
-    # Диагностика воронки фильтрации по каждому сайту (и отдельно "<site>_fallback"
-    # для запросов через try_fallback) - см. SiteStats/log_site_stats_summary.
     site_stats: dict = field(default_factory=dict)
-    # Отсев кандидатов по формату (сайт -> расширение -> число), см. media_formats.
     format_rejects: FormatRejectStats = field(default_factory=FormatRejectStats)
-    # seg_index -> Candidate, выбранный как primary (нужен проходу по backup)
     primary_cands: dict = field(default_factory=dict)
 
 
@@ -719,11 +693,6 @@ class ClipScorer:
     async def score(self, image_bytes: bytes, text: str) -> float:
         await self.ensure_loaded()
         loop = asyncio.get_running_loop()
-        # Явный тайминг CLIP-инференса (см. договорённость по итогам предыдущего прогона):
-        # пока не подтверждено, что каскад на LOC ушёл после фикса превью (см. пункт 1 этой
-        # правки), непонятно, где реально узкое место - в CLIP (CPU-bound, SEARCH_CLIP_CONCURRENCY
-        # ограничивает параллелизм) или в самом ожидании превью/сети. Замер отдельно от общего
-        # времени сегмента, чтобы не гадать, а увидеть цифру напрямую.
         start = time.monotonic()
         try:
             return await loop.run_in_executor(None, self._score_sync, image_bytes, text)
@@ -745,7 +714,7 @@ class ClipScorer:
 
 
 # ---------------------------------------------------------------------------
-# HTTP-хелпер с ретраями/бэкоффом (в духе generate_queries.py) + учёт 429-исчерпания
+# HTTP-хелпер с ретраями/бэкоффом + учёт 429-исчерпания
 # ---------------------------------------------------------------------------
 
 async def http_get_json(
@@ -762,14 +731,12 @@ async def http_get_json(
     rate_limiter = ctx.rate_limiters.get(site)
 
     def _request_id() -> str:
-        # url + значение q/query/srsearch. params целиком НЕ логируем (у Pixabay там ключ).
         for k in ("q", "query", "srsearch"):
             if params and params.get(k) is not None:
                 return f"{url} {k}={str(params[k])[:80]}"
         return url
 
     def _redact(text: str) -> str:
-        # Страховка для repr исключения: вырезаем значения ключей/токенов, если попали в текст.
         for k in ("key", "api_key", "apikey", "token", "access_token"):
             v = (params or {}).get(k)
             if v:
@@ -779,11 +746,10 @@ async def http_get_json(
                 text = text.replace(str(v), "***")
         return re.sub(r"(?i)\b(key|api_key|apikey|token|access_token)=[^&\s'\"]+", r"\1=***", text)
 
-    # Параметры ретраев/таймаута зависят от сайта: LOC подвисает до таймаута, а повтор
-    # через несколько секунд обычно проходит - ему нужны короткий таймаут и меньше попыток.
+    # Таймаут поиска LOC: 30с по умолчанию (раньше 15с приводило к постоянным TimeoutError)
     if site == "loc":
-        max_attempts = max(1, int(os.environ.get("SEARCH_LOC_MAX_RETRIES", 3)))
-        timeout_seconds = float(os.environ.get("SEARCH_LOC_TIMEOUT_SECONDS", 15))
+        max_attempts = SEARCH_LOC_MAX_RETRIES
+        timeout_seconds = SEARCH_LOC_TIMEOUT_SECONDS
     else:
         max_attempts = MAX_RETRIES
         timeout_seconds = 30
@@ -794,15 +760,9 @@ async def http_get_json(
     for attempt in range(1, max_attempts + 1):
         has_next = attempt < max_attempts
         backoff = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
-        # Если не None - попытка неудачна, после выхода из семафора спим backoff (+джиттер)
-        # и идём на следующую. Сам sleep стоит ВНЕ семафора, чтобы слот не был занят паузой.
         retry_after: Optional[float] = None
 
         async with ctx.site_semaphores[site]:
-            # Семафор ограничивает конкурентность (сколько запросов к сайту летят
-            # ОДНОВРЕМЕННО). rate_limiter отдельно гарантирует минимальный интервал между
-            # СТАРТАМИ запросов и вызывается перед КАЖДОЙ попыткой, включая повторные
-            # (LOC считает каждый запрос).
             if rate_limiter is not None:
                 await rate_limiter.wait_turn()
             attempt_started = time.monotonic()
@@ -835,9 +795,6 @@ async def http_get_json(
                                 f"{site}: HTTP {status} - похоже на невалидный API-ключ. "
                                 f"Тело ответа: {text[:300]}"
                             )
-                        # Для остальных сайтов 401/403 - НЕ транзиентная ошибка (неверный
-                        # User-Agent, política робота и т.п.) - ретраить бессмысленно,
-                        # отдаём пустой результат сразу, чтобы не жечь минуты на попытки.
                         logging.error(
                             "%s: HTTP %s - не ретраю (не временная ошибка). Тело: %s",
                             site, status, text[:300],
@@ -865,12 +822,6 @@ async def http_get_json(
                         try:
                             data = await resp.json(content_type=None)
                         except aiohttp.ContentTypeError:
-                            # Статус 200, но тело не парсится как JSON - на практике это
-                            # HTML-страница вместо ожидаемого ответа. У LOC это официально
-                            # задокументированный побочный эффект перегрузки на их стороне
-                            # ("HTML pages with CAPTCHAs even when operating below the rates
-                            # listed above") - по сути тот же сигнал блокировки, что и 429,
-                            # поэтому обрабатываем его так же (включая treat_429_as_exhaustion).
                             text_preview = (await resp.text())[:200]
                             if treat_429_as_exhaustion:
                                 logging.warning(
@@ -899,10 +850,6 @@ async def http_get_json(
                 raise
             except (aiohttp.ClientError, aiohttp.ClientPayloadError,
                     aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
-                # Таймаут/сетевая ошибка - НЕ признак исчерпания сайта (exhausted_sites не
-                # трогаем), только ретрай. У asyncio.TimeoutError str() пустой, поэтому
-                # пишем тип и repr. В лог идут только безопасные поля (см. _request_id);
-                # repr дополнительно прогоняется через _redact.
                 last_error = e
                 elapsed = time.monotonic() - attempt_started
                 logging.warning(
@@ -913,7 +860,6 @@ async def http_get_json(
                 )
                 retry_after = backoff
 
-        # Вне семафора: пауза только если есть следующая попытка.
         if retry_after is not None and has_next:
             await asyncio.sleep(retry_after + random.uniform(0, 1))
 
@@ -930,7 +876,7 @@ async def cached_search(
     fetch_coro_factory: Callable[[], Awaitable[list]],
 ) -> list:
     """Single-flight кэш по (site, media_type, query): если запрос уже в процессе -
-    ждём его же, а не дублируем (важно для узких лимитов вроде Pexels 200/час)."""
+    ждём его же, а не дублируем."""
     key = (site, media_type, query)
     async with ctx.search_cache_lock:
         task = ctx.search_cache.get(key)
@@ -992,11 +938,6 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
             page_url = hit.get("pageURL")
             tags = hit.get("tags", "")
             if media_type == "video":
-                # См. "Десятое уточнение" в докстринге модуля: актуальный Pixabay
-                # Video API не отдаёт "picture_id" - превью нужно брать из
-                # videos.<size>.thumbnail. tiny предпочтителен (меньше трафика),
-                # но перебираем до large на случай, если у конкретного видео нет
-                # мелких рендеров (бывает у совсем новых загрузок).
                 videos = hit.get("videos") or {}
                 preview = None
                 for size in ("tiny", "small", "medium", "large"):
@@ -1014,7 +955,6 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
     return await cached_search(ctx, "pixabay", media_type, query, _do)
 
 
-# На Commons нет mp4/mov/avi - только эти видео-форматы.
 COMMONS_VIDEO_EXTENSIONS = frozenset({"webm", "ogv", "mpg", "mpeg"})
 _commons_video_skip_logged = False
 
@@ -1022,7 +962,6 @@ _commons_video_skip_logged = False
 async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Candidate]:
     global _commons_video_skip_logged
     if media_type == "video" and not (COMMONS_VIDEO_EXTENSIONS & VIDEO_EXTENSIONS):
-        # Ни один видео-формат Commons не входит в белый список - API не трогаем.
         if not _commons_video_skip_logged:
             _commons_video_skip_logged = True
             logging.info(
@@ -1033,7 +972,13 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
         return []
 
     async def _do() -> list[Candidate]:
-        search_query = f"{query} filetype:video" if media_type == "video" else query
+        if media_type == "video":
+            search_query = f"{query} filetype:video"
+        else:
+            # filetype:bitmap исключает сканы документов (PDF, DjVu), аудио и векторные SVG,
+            # экономя квоту выдачи srlimit=20 под реальные изображения
+            search_query = f"{query} filetype:bitmap"
+
         params = {
             "action": "query", "list": "search", "srsearch": search_query,
             "srnamespace": 6, "srlimit": 20, "format": "json",
@@ -1042,8 +987,7 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
         if not data:
             return []
         hits = data.get("query", {}).get("search", [])
-        # Формат файла - только по белому списку media_formats (раньше сюда проходили
-        # PDF/DjVu/TIFF/SVG/аудио, а потом они скачивались как "N.jpg" и не открывались).
+
         kind = "video" if media_type == "video" else "photo"
         kept = []
         for h in hits:
@@ -1081,18 +1025,11 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
             if not direct_url:
                 continue
             if media_type == "video" and not thumb_url:
-                # Не удалось получить превью для CLIP у этого конкретного файла -
-                # дисквалифицируем именно его, не весь сайт (см. уточнение в докстринге).
                 continue
             extm = info.get("extmetadata", {}) or {}
             license_short = (extm.get("LicenseShortName") or {}).get("value", "")
             description = strip_html((extm.get("ImageDescription") or {}).get("value", ""))
             text = " ".join(filter(None, [title, snippet_by_title.get(title, ""), description]))
-            # page_url здесь - страница описания файла на Commons (index.php?...),
-            # используется в т.ч. как Referer при скачивании превью - см. "Седьмое
-            # уточнение" в докстринге модуля. Формируем её отдельно от direct_url
-            # (прямая ссылка на сам файл на upload.wikimedia.org - её Referer'ом
-            # ставить бессмысленно, это не HTML-страница).
             wiki_page_url = "https://commons.wikimedia.org/wiki/" + title.replace(" ", "_")
             result.append(Candidate(
                 site="wikimedia", cand_id=title, text=text,
@@ -1127,8 +1064,6 @@ def _nasa_manifest_resolver(manifest_href: Optional[str], media_type: str):
             return 0
 
         if not candidates:
-            # Элемент потерян по формату: считаем расширение лучшего (по rank) файла
-            # с расширением (в манифесте есть и .json/.srt - по одному на элемент, не по файлу).
             with_ext = [f for f in files if ext_from_name(f)]
             if with_ext:
                 best = max(with_ext, key=rank)
@@ -1184,14 +1119,7 @@ async def search_loc(ctx: Context, query: str, media_type: str) -> list[Candidat
     async def _do() -> list[Candidate]:
         params: dict = {"q": query, "fo": "json", "c": 20}
         if media_type == "video":
-            # Best-effort фильтр LOC по формату - на практике видео на LOC редки и
-            # официальной чистой поддержки "только видео" в search API нет, поэтому
-            # это не строгая гарантия, а сужение выдачи (подтверждено как некритично).
             params["fa"] = "partof:online video"
-        # treat_429_as_exhaustion=True: у LOC превышение лимита JSON API (20/мин) даёт
-        # блокировку IP на 1 час (см. докстринг модуля, "Четвёртое уточнение"), поэтому
-        # ретраить 429 в рамках одного запуска CI бессмысленно - сразу помечаем сайт
-        # исчерпанным, как pexels/pixabay при их часовых/дневных лимитах.
         data = await http_get_json(
             ctx, "loc", "https://www.loc.gov/search/", params=params,
             treat_429_as_exhaustion=True,
@@ -1203,14 +1131,27 @@ async def search_loc(ctx: Context, query: str, media_type: str) -> list[Candidat
             item_id = item.get("id")
             if not item_id:
                 continue
+
+            # Фильтрация не-айтемов: отсекаем виртуальные выставки (/exhibits/), блоги (/blogs/)
+            # и служебные страницы, оставляя только оцифрованные каталожные объекты (/item/, /resource/).
+            if not ("/item/" in item_id or "/resource/" in item_id):
+                continue
+
             title = item.get("title", "")
             desc = item.get("description")
             if isinstance(desc, list):
                 desc = " ".join(str(x) for x in desc)
-            text = " ".join(filter(None, [title, desc or ""]))
+
+            # Обогащение текста для фильтра сущностей рубриками subject
+            subjects = item.get("subject") or []
+            if isinstance(subjects, list):
+                subj_text = " ".join(str(s) for s in subjects)
+            else:
+                subj_text = str(subjects or "")
+
+            text = " ".join(filter(None, [title, desc or "", subj_text]))
             images = item.get("image_url") or []
-            # Приближённая проверка формата: нужен хотя бы один URL с разрешённым
-            # фото-расширением (итоговый файл выбирает download.py).
+
             if not any(isinstance(u, str) and is_allowed_ext(ext_from_name(u), "photo") for u in images):
                 first = next((u for u in images if isinstance(u, str)), "")
                 ctx.format_rejects.add("loc", ext_from_name(first))
@@ -1240,26 +1181,12 @@ SITE_SEARCH_FUNCS: dict = {
 # Превью + CLIP-скоринг + финализация URL
 # ---------------------------------------------------------------------------
 
-# Точечный DEBUG-логгер для fetch_preview_bytes (не глобальный root-level DEBUG,
-# чтобы не залить лог всем подряд - CLIP/aiohttp и т.п. тоже используют logging).
-# Дочерний логгер со своим уровнем DEBUG эмитит записи независимо от уровня root-
-# логгера (root задаёт уровень ТОЛЬКО себе через basicConfig(level=logging.INFO)),
-# а сам StreamHandler, который повесил basicConfig на root, уровня не фильтрует
-# (NOTSET) - записи от этого логгера всё равно долетят до консоли/CI-лога. Нужно
-# сейчас, чтобы наконец увидеть реальный статус-код/тело ответа wikimedia/pixabay
-# при провале превью (см. "Седьмое уточнение" в докстринге модуля) - это блокирует
-# всё остальное в диагностике каскада на LOC.
 PREVIEW_DEBUG_LOGGER = logging.getLogger("search.fetch_preview_bytes")
 PREVIEW_DEBUG_LOGGER.setLevel(logging.DEBUG)
 
 
 async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     if not cand.preview_url:
-        # Раньше этот путь ничего не логировал - выглядело как "0 ушло в CLIP", неотличимо
-        # от HTTP-провала ниже, хотя причина другая: сайт вообще не дал URL превью в самом
-        # ответе поиска (см. search_pixabay/search_wikimedia/etc.) - до сети дело не доходит.
-        # Пиксабай в реальном прогоне ни разу не дошёл до HTTP-попытки ниже - это как раз
-        # тот случай, который эта строка теперь делает видимым.
         PREVIEW_DEBUG_LOGGER.debug(
             "Превью %s/%s: у кандидата нет preview_url вообще (текст кандидата: %r) - "
             "запрос в сеть не уходит, поиск на своей стороне не вернул URL превью.",
@@ -1267,20 +1194,8 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
         )
         return None
 
-    # См. "Седьмое уточнение" в докстринге модуля: без Referer (часто и Origin) CDN
-    # многих сайтов отдают 403/406 на прямой запрос к медиафайлу (защита от хотлинкинга),
-    # даже когда User-Agent в порядке. Для wikimedia предпочитаем page_url конкретного
-    # кандидата (страница файла на Commons) - он надёжнее общего домена, т.к. некоторые
-    # CDN сверяют не только домен, но и правдоподобие самой страницы-источника.
     headers = dict(PREVIEW_HEADERS)
     if cand.site == "wikimedia":
-        # ПОДТВЕРЖДЕНО DEBUG-логом реального прогона: CDN превью Wikimedia
-        # (thumb./upload.wikimedia.org) отдаёт 403 "Please respect our robot policy"
-        # именно на браузерный User-Agent из PREVIEW_HEADERS - Wikimedia требует
-        # описательный UA с контактом на ЛЮБОМ запросе, не только к API (см. "Седьмое
-        # уточнение" в докстринге модуля - этот хвост там был явно не закрыт). Для
-        # остальных сайтов браузерный UA наоборот нужен (обход хотлинк-защиты CDN),
-        # поэтому переопределяем только для wikimedia, не трогая PREVIEW_HEADERS глобально.
         headers["User-Agent"] = SESSION_USER_AGENT
     referer = cand.page_url if (cand.site == "wikimedia" and cand.page_url) else PREVIEW_REFERERS.get(cand.site)
     if referer:
@@ -1292,27 +1207,69 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
     last_status: Optional[int] = None
     last_body_preview = ""
     loc_preview_limiter = ctx.rate_limiters.get("loc_preview") if cand.site == "loc" else None
+    wm_preview_limiter = ctx.rate_limiters.get("wikimedia_preview") if cand.site == "wikimedia" else None
+    wm_preview_sem = ctx.site_semaphores.get("wikimedia_preview") if cand.site == "wikimedia" else None
+
     for attempt in range(1, 3):
         if loc_preview_limiter is not None:
             await loc_preview_limiter.wait_turn()
+        if wm_preview_limiter is not None:
+            await wm_preview_limiter.wait_turn()
+
         try:
-            async with ctx.session.get(
-                cand.preview_url, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=20),
-            ) as resp:
-                if resp.status != 200:
-                    last_status = resp.status
-                    try:
-                        last_body_preview = (await resp.text())[:200]
-                    except Exception:
-                        last_body_preview = "<не текст/не удалось прочитать тело>"
-                    PREVIEW_DEBUG_LOGGER.debug(
-                        "Превью %s/%s: HTTP %s при GET %s (попытка %s/2, Referer=%s). Тело: %s",
-                        cand.site, cand.cand_id, resp.status, cand.preview_url,
-                        attempt, referer, last_body_preview,
-                    )
-                    return None
-                return await resp.read()
+            async def _do_req():
+                async with ctx.session.get(
+                    cand.preview_url, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    raw_bytes = await resp.read()
+                    return resp.status, resp.headers.get("Retry-After"), raw_bytes
+
+            if wm_preview_sem is not None:
+                async with wm_preview_sem:
+                    status, retry_after, body = await _do_req()
+            else:
+                status, retry_after, body = await _do_req()
+
+            if status == 200:
+                return body
+
+            last_status = status
+            try:
+                last_body_preview = body[:200].decode("utf-8", errors="replace").replace("\n", " ")
+            except Exception:
+                last_body_preview = "<не удалось декодировать тело>"
+
+            if status == 429:
+                try:
+                    sleep_sec = float(retry_after) if retry_after else (3.0 * attempt + random.uniform(0.5, 1.5))
+                except ValueError:
+                    sleep_sec = 3.0 * attempt + random.uniform(0.5, 1.5)
+                PREVIEW_DEBUG_LOGGER.debug(
+                    "Превью %s/%s: HTTP 429 при GET %s (попытка %s/2, Retry-After=%s, жду %.1fs). Тело: %s",
+                    cand.site, cand.cand_id, cand.preview_url, attempt, retry_after, sleep_sec, last_body_preview,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(sleep_sec)
+                    continue
+                return None
+
+            elif status in (500, 502, 503, 504):
+                PREVIEW_DEBUG_LOGGER.debug(
+                    "Превью %s/%s: HTTP %s при GET %s (попытка %s/2). Тело: %s",
+                    cand.site, cand.cand_id, status, cand.preview_url, attempt, last_body_preview,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2.0 * attempt)
+                    continue
+                return None
+            else:
+                PREVIEW_DEBUG_LOGGER.debug(
+                    "Превью %s/%s: HTTP %s при GET %s (попытка %s/2, Referer=%s). Тело: %s",
+                    cand.site, cand.cand_id, status, cand.preview_url, attempt, referer, last_body_preview,
+                )
+                return None
+
         except (aiohttp.ClientError, aiohttp.ClientPayloadError,
                 aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
             PREVIEW_DEBUG_LOGGER.debug(
@@ -1320,7 +1277,7 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
                 cand.site, cand.cand_id, attempt, cand.preview_url, type(e).__name__, e,
             )
             if attempt < 2:
-                await asyncio.sleep(1.0 * attempt)
+                await asyncio.sleep(1.5 * attempt + random.uniform(0, 0.5))
 
     if last_status is not None:
         PREVIEW_DEBUG_LOGGER.debug(
@@ -1336,22 +1293,12 @@ async def score_candidates(
 ) -> list[Candidate]:
     key = stats_key or (candidates[0].site if candidates else "unknown")
     stats = ctx.site_stats.setdefault(key, SiteStats())
-
-    # ВАЖНО: stats.sent_to_clip_total - это НАКОПИТЕЛЬНЫЙ счётчик на весь сайт (site_stats
-    # хранится по ключу "сайт", а не "сайт+сегмент" - см. log_site_stats_summary), он растёт
-    # по мере обработки ВСЕХ сегментов этого сайта. Раньше он же использовался ниже в
-    # per-сегментном info-логе ("Сегмент %s/%s: %s кандидатов ушло в CLIP...") - из-за чего
-    # там печаталось общее число по сайту на момент вызова, а не число кандидатов ИМЕННО
-    # этого сегмента, что вводило в заблуждение при чтении лога по ходу прогона. Заведён
-    # отдельный локальный счётчик для текущего вызова (текущего сегмента) - глобальный
-    # stats.sent_to_clip_total по-прежнему копится как было, для итоговой сводки по сайту.
     sent_to_clip_this_segment = 0
 
     scored: list[Candidate] = []
     for cand in candidates:
         preview_bytes = await fetch_preview_bytes(ctx, cand)
         if preview_bytes is None:
-            # Превью недоступно - дисквалифицируем именно этого кандидата, идём дальше.
             stats.preview_missing_total += 1
             continue
         stats.sent_to_clip_total += 1
@@ -1373,15 +1320,12 @@ async def score_candidates(
         if sent_to_clip_this_segment == 0:
             logging.info(
                 "Сегмент %s/%s: %s кандидатов, но ни для одного не скачалось превью "
-                "(0 ушло в CLIP) - похоже, сайт блокирует запросы превью (см. лог "
-                "'search.fetch_preview_bytes' на уровне DEBUG с точным статусом/телом "
-                "ответа выше), а не проблема со смыслом/CLIP.",
+                "(0 ушло в CLIP) - проверьте лог 'search.fetch_preview_bytes' на уровне DEBUG.",
                 seg_index, key, len(candidates),
             )
         else:
             logging.info(
-                "Сегмент %s/%s: %s кандидатов ушло в CLIP, ни один не набрал >= %.2f "
-                "(лучший скор в этом сегменте см. в общей сводке по сайту в конце лога).",
+                "Сегмент %s/%s: %s кандидатов ушло в CLIP, ни один не набрал >= %.2f.",
                 seg_index, key, sent_to_clip_this_segment, SIM_MIN_THRESHOLD,
             )
     return scored
@@ -1398,17 +1342,13 @@ async def finalize_candidate(ctx: Context, cand: Candidate) -> Optional[str]:
 
 
 async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: str) -> Optional[str]:
-    """Выбирает и финализирует РОВНО ОДНОГО backup-кандидата (без каскада на
-    следующего, если этот не финализировался). tail - хвост пула ПОСЛЕ позиции
-    primary (всё ещё по убыванию similarity): кандидаты до этой позиции либо уже
-    заняты (кем-то другим), либо провалили финализацию и по тому же правилу, что
-    и для primary, считаются непригодными никому - их backup тоже не рассматривает.
-
-    Приоритет: лучший по similarity кандидат с сайта, ОТЛИЧНОГО от сайта primary.
-    Если таких в tail нет - второй по similarity кандидат с ТЕМ ЖЕ сайтом, что и
-    primary. Если и этого нет - backup отсутствует (нормальный случай, не ошибка)."""
+    """Выбирает РОВНО ОДНОГО backup-кандидата.
+    Приоритет: кандидат с сайта, ОТЛИЧНОГО от сайта primary.
+    Для LOC брать backup с того же сайта строго запрещено: при часовом бане IP
+    оба кандидата гарантированно погибнут. Возвращаем None, чтобы независимый
+    backup нашел run_backup_pass."""
     backup_cand = next((c for c in tail if c.site != primary_site), None)
-    if backup_cand is None:
+    if backup_cand is None and primary_site != "loc":
         backup_cand = next((c for c in tail if c.site == primary_site), None)
     if backup_cand is None:
         return None
@@ -1416,9 +1356,6 @@ async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: st
     key = (backup_cand.site, backup_cand.cand_id)
     async with ctx.used_files_lock:
         if key in ctx.used_files:
-            # Забрали конкурентно другим сегментом между составлением tail и этим
-            # моментом - по правилу "не каскад" НЕ ищем следующего кандидата,
-            # backup для этого сегмента просто отсутствует.
             return None
         ctx.used_files.add(key)
     return await finalize_candidate(ctx, backup_cand)
@@ -1427,20 +1364,18 @@ async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: st
 async def try_claim_pool(
     ctx: Context, pool: list[Candidate], seg_index: Optional[int] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    for i, cand in enumerate(pool):  # уже отсортирован по убыванию similarity
+    for i, cand in enumerate(pool):
         key = (cand.site, cand.cand_id)
         async with ctx.used_files_lock:
             if key in ctx.used_files:
                 continue
-            ctx.used_files.add(key)  # бронируем сразу внутри лока, в момент выбора
+            ctx.used_files.add(key)
         final_url = await finalize_candidate(ctx, cand)
         if final_url:
             if seg_index is not None:
                 ctx.primary_cands[seg_index] = cand
             backup_url = await try_claim_backup(ctx, pool[i + 1:], cand.site)
             return final_url, backup_url
-        # Финализация не удалась (например NASA-манифест не дал нужного файла) -
-        # кандидат уже забронирован, но он всё равно непригоден никому - пробуем следующего.
     return None, None
 
 
@@ -1457,8 +1392,8 @@ async def fetch_and_filter(
     stats.raw_total += len(raw)
     if not raw:
         logging.info(
-            "Сегмент %s/%s: 0 сырых кандидатов по запросу %r - сайт ничего не вернул "
-            "(проверьте сеть/сам API/лимиты для этого сайта).", seg.index, site, q,
+            "Сегмент %s/%s: 0 сырых кандидатов по запросу %r - сайт ничего не вернул.",
+            seg.index, site, q,
         )
         return []
 
@@ -1471,14 +1406,13 @@ async def fetch_and_filter(
         )
         return []
 
-    skip_keyword_filter = site == "pexels" and seg.type == "video"  # там нет текстовых полей
+    skip_keyword_filter = site == "pexels" and seg.type == "video"
     if seg.is_entity and apply_entity and not skip_keyword_filter:
         before = len(licensed)
         licensed = [c for c in licensed if text_matches_keywords(c.text, seg.entity_keywords)]
         if not licensed:
             logging.info(
-                "Сегмент %s/%s: %s кандидатов прошли лицензию, но 0 после фильтра сущностей "
-                "%r - ключевые слова слишком узкие/не совпадают с текстом кандидатов.",
+                "Сегмент %s/%s: %s кандидатов прошли лицензию, но 0 после фильтра сущностей %r.",
                 seg.index, site, before, seg.entity_keywords,
             )
             return []
@@ -1518,16 +1452,15 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optiona
             continue
         licensed = await fetch_and_filter(ctx, site, seg)
         if not licensed:
-            continue  # сайт не дал ни одного кандидата после лицензии/ключевых слов
+            continue
         top = licensed[:CANDIDATES_PER_SITE]
         scored = await score_candidates(ctx, top, seg.query, seg_index=seg.index, stats_key=site)
         if not scored:
-            continue  # сайт дал пустой результат по CLIP-порогу (< SIM_MIN_THRESHOLD либо все превью недоступны)
+            continue
         pool.extend(scored)
         pool.sort(key=lambda c: c.similarity, reverse=True)
         if scored[0].similarity >= SIM_ACCEPT_THRESHOLD:
-            break  # ранний выход - дальше сайты не пробуем (см. допущение в докстринге)
-        # иначе - similarity в [SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD), пробуем следующий сайт
+            break
 
     if pool:
         url, backup_url = await try_claim_pool(ctx, pool, seg.index)
@@ -1550,7 +1483,6 @@ async def _backup_pool(
     ctx: Context, site: str, seg: SegmentSpec, query: str,
     apply_entity: bool, exclude_key: tuple,
 ) -> list[Candidate]:
-    """Поиск -> лицензия/сущности -> отсев занятых и primary -> превью+CLIP (>= SIM_MIN)."""
     licensed = await fetch_and_filter(
         ctx, site, seg, query=query, apply_entity=apply_entity,
         stats_key=f"{site}_backup",
@@ -1572,7 +1504,6 @@ async def _backup_pool(
 
 
 async def _claim_first(ctx: Context, pool: list[Candidate]) -> Optional[str]:
-    """Бронирует лучшего свободного кандидата (без backup-хвоста)."""
     for cand in sorted(pool, key=lambda c: c.similarity, reverse=True):
         key = (cand.site, cand.cand_id)
         async with ctx.used_files_lock:
@@ -1586,26 +1517,30 @@ async def _claim_first(ctx: Context, pool: list[Candidate]) -> Optional[str]:
 
 
 async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
-    """B1 (другие сайты) -> B2 (тот же сайт). Возвращает (url, 'other'|'same') или (None, None).
-    Тип video/photo гарантирован: поиск идёт с seg.type."""
+    """B1 (другие сайты) -> B2 (тот же сайт). Возвращает (url, 'other'|'same') или (None, None)."""
     primary = ctx.primary_cands.get(seg.index)
     if primary is None:
         return None, None
     pkey = (primary.site, primary.cand_id)
 
-    # fallback_query обобщённый: фильтр сущностей к нему не применяем (как в try_fallback)
     queries: list[tuple[str, bool]] = [(seg.query, True)]
     if seg.fallback_query and seg.fallback_query != seg.query:
         queries.append((seg.fallback_query, False))
 
+    candidate_sites = list(seg.sites) + BACKUP_EXTRA_SITES
+    # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
+    if primary.site == "loc":
+        for stock_site in ("pexels", "pixabay"):
+            if stock_site not in candidate_sites:
+                candidate_sites.append(stock_site)
+
     ordered: list[str] = []
-    for site in list(seg.sites) + BACKUP_EXTRA_SITES:
+    for site in candidate_sites:
         if site in SITE_SEARCH_FUNCS and site != primary.site and site not in ordered:
             ordered.append(site)
-    # LOC всегда последним и только если больше нигде не нашлось
     groups = ([x for x in ordered if x != "loc"], [x for x in ordered if x == "loc"])
 
-    # B1
+    # B1: поиск по другим сайтам
     for group in groups:
         if not group:
             continue
@@ -1623,8 +1558,8 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
                 if url:
                     return url, "other"
 
-    # B2: тот же сайт, другой cand_id (результаты поиска - из cached_search)
-    if primary.site not in ctx.exhausted_sites:
+    # B2: тот же сайт (для LOC полностью запрещено, чтобы не создать двойной отказ)
+    if primary.site not in ctx.exhausted_sites and primary.site != "loc":
         for q, ent in queries:
             pool = await _backup_pool(ctx, primary.site, seg, q, ent, pkey)
             if pool:
@@ -1637,7 +1572,6 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
 async def run_backup_pass(
     ctx: Context, segments: list[SegmentSpec], results: dict, backups: dict,
 ) -> list[int]:
-    """Отдельный проход после run_search. Дополняет backups, возвращает номера без backup (B3)."""
     t0 = time.monotonic()
     by_idx = {sg.index: sg for sg in segments}
     todo = [by_idx[i] for i in sorted(results) if i not in backups and i in by_idx]
@@ -1647,7 +1581,7 @@ async def run_backup_pass(
         try:
             async with ctx.global_semaphore:
                 url, src = await find_backup(ctx, seg)
-        except Exception as e:  # проход backup не должен ронять прогон
+        except Exception as e:
             logging.warning("Сегмент %s: ошибка поиска backup: %s", seg.index, e)
             return seg.index, None, None
         return seg.index, url, src
@@ -1793,6 +1727,16 @@ async def amain(args: argparse.Namespace) -> int:
             "от лимитера метаданных выше - разные эндпоинты, разные официальные лимиты.",
             LOC_PREVIEW_MIN_INTERVAL_SECONDS, 60.0 / LOC_PREVIEW_MIN_INTERVAL_SECONDS,
         )
+    if WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS > 0:
+        logging.info(
+            "Wikimedia-preview rate-limiter активен: минимум %.2fs между превью "
+            "(конкурентность: %d). Настраивается через SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS / "
+            "SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY. Защищает CDN от 429 при высокой сегментной параллельности.",
+            WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS, WIKIMEDIA_PREVIEW_CONCURRENCY,
+        )
+
+    site_semaphores = {s: asyncio.Semaphore(v) for s, v in SEMAPHORE_DEFAULTS.items()}
+    site_semaphores["wikimedia_preview"] = asyncio.Semaphore(WIKIMEDIA_PREVIEW_CONCURRENCY)
 
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(
@@ -1802,13 +1746,14 @@ async def amain(args: argparse.Namespace) -> int:
             session=session,
             pexels_api_key=pexels_key,
             pixabay_api_key=pixabay_key,
-            site_semaphores={s: asyncio.Semaphore(v) for s, v in SEMAPHORE_DEFAULTS.items()},
+            site_semaphores=site_semaphores,
             global_semaphore=asyncio.Semaphore(GLOBAL_SEGMENT_CONCURRENCY),
             clip_semaphore=asyncio.Semaphore(CLIP_CONCURRENCY),
             used_files_lock=asyncio.Lock(),
             rate_limiters={
                 "loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS),
                 "loc_preview": RateLimiter(LOC_PREVIEW_MIN_INTERVAL_SECONDS),
+                "wikimedia_preview": RateLimiter(WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS),
             },
         )
         ctx.clip = ClipScorer(CLIP_MODEL_NAME, CLIP_PRETRAINED)
@@ -1828,10 +1773,6 @@ async def amain(args: argparse.Namespace) -> int:
         for idx in sorted(results):
             f.write(f"{idx}: {results[idx]}\n")
 
-    # Тот же формат "номер: URL", что и links.txt (целые номера сегментов - см.
-    # ТЗ по резервным ссылкам). Строка пишется, только если backup для сегмента
-    # реально нашёлся - backup_links.txt не обязан покрывать все номера из
-    # links.txt, это нормально и ожидаемо.
     with open(args.backup_links_output, "w", encoding="utf-8") as f:
         for idx in sorted(backups):
             f.write(f"{idx}: {backups[idx]}\n")
