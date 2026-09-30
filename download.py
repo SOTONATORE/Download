@@ -1,7 +1,9 @@
 import os
 import re
+import glob
 import json
 import sys
+import random
 import time
 import threading
 import urllib.parse
@@ -9,6 +11,9 @@ from urllib.parse import urlparse
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests as cffi_requests
+from media_formats import (
+    ext_from_name, is_allowed_ext, kind_of_ext, sniff_format, describe_rejected, FormatRejectStats,
+)
 
 # Живой прогресс в CI-логе: без этого stdout буферизуется блоками (не построчно, т.к.
 # он не привязан к терминалу в GitHub Actions), и все print() из скрипта, скачивающего
@@ -24,6 +29,11 @@ from curl_cffi import requests as cffi_requests
 sys.stdout.reconfigure(line_buffering=True)
 
 OUTPUT_DIR = "downloaded_media"
+FORMAT_REJECTS = FormatRejectStats()
+# Расширения в URL, которым мы "верим" как заявке формата: если оно есть и не согласуется
+# с содержимым (sniff_format) - отказ.
+_KNOWN_HINT_EXTS = frozenset({"jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "pdf",
+                              "mp4", "mov", "avi", "webm", "ogv", "mpg", "mpeg", "svg"})
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
 COVERR_API_KEY = os.environ.get("COVERR_API_KEY", "")
@@ -339,6 +349,10 @@ def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwarg
             resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
         except Exception as e:
             last_exc = e
+            print(
+                f"[WARN] LOC: сбой запроса, попытка {attempt}/{LOC_RETRIES} "
+                f"[{type(e).__name__}: {_loc_redact(str(e))[:200]}] {_loc_redact(url)}"
+            )
             time.sleep(2 * attempt)
             continue
 
@@ -351,6 +365,80 @@ def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwarg
         return resp
 
     raise last_exc or RuntimeError("не удалось выполнить запрос к loc.gov")
+
+
+def _loc_redact(text: str) -> str:
+    """Вырезает значения key/api_key/token из текста перед выводом в лог."""
+    return re.sub(r"(?i)\b(key|api_key|apikey|token|access_token)=[^&\s'\"]+", r"\1=***", text or "")
+
+
+def _loc_get_json(url: str, **kwargs) -> dict:
+    """Как _loc_get, но JSON парсится ВНУТРИ цикла ретраев (LOC_RETRIES). Не-JSON при
+    статусе 200 (пустое тело/HTML/CAPTCHA) - временная ошибка: пауза 2*попытка + джиттер
+    0..1с и повтор; LOC НЕ помечается исчерпанным. Rate-limiter метаданных - перед КАЖДОЙ
+    попыткой. 429 - как в _loc_get (LocExhaustedError). После последней попытки паузы нет."""
+    global _loc_exhausted
+    if _loc_exhausted:
+        raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
+
+    timeout = kwargs.pop("timeout", 30)
+    last_exc: Exception | None = None
+    for attempt in range(1, LOC_RETRIES + 1):
+        has_next = attempt < LOC_RETRIES
+        _loc_wait_turn(False)
+        try:
+            resp = cffi_requests.get(url, impersonate="chrome", timeout=timeout, **kwargs)
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[WARN] LOC: сбой запроса, попытка {attempt}/{LOC_RETRIES} "
+                f"[{type(e).__name__}: {_loc_redact(str(e))[:200]}] {_loc_redact(url)}"
+            )
+            if has_next:
+                time.sleep(2 * attempt)
+            continue
+
+        if resp.status_code == 429:
+            log_429_details("LOC", url, resp)
+            _loc_exhausted = True
+            raise LocExhaustedError("HTTP 429 - LOC помечен исчерпанным до конца текущего запуска")
+
+        if resp.status_code in (500, 502, 503, 504):
+            last_exc = RuntimeError(f"loc.gov: HTTP {resp.status_code}")
+            print(f"[WARN] LOC: HTTP {resp.status_code}, попытка {attempt}/{LOC_RETRIES}")
+            if has_next:
+                time.sleep(2 * attempt + random.uniform(0, 1))
+            continue
+
+        resp.raise_for_status()
+
+        try:
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError(f"JSON не объект, а {type(data).__name__}")
+        except Exception as e:
+            try:
+                body = _loc_redact((resp.text or "")[:200].replace("\n", " "))
+            except Exception:
+                body = "<не удалось прочитать тело>"
+            ctype = resp.headers.get("Content-Type", "<нет>")
+            last_exc = RuntimeError(
+                f"loc.gov: не-JSON ответ (status={resp.status_code}, Content-Type={ctype!r}): {type(e).__name__}"
+            )
+            print(
+                f"[WARN] LOC: не-JSON ответ, попытка {attempt}/{LOC_RETRIES}, "
+                f"status={resp.status_code}, Content-Type={ctype!r}, "
+                f"тело (первые 200 симв.): {body!r}"
+            )
+            if has_next:
+                time.sleep(2 * attempt + random.uniform(0, 1))
+            continue
+
+        if attempt > 1:
+            print(f"[INFO] LOC: успех с попытки {attempt}/{LOC_RETRIES} ({_loc_redact(url)})")
+        return data
+
+    raise last_exc or RuntimeError("не удалось получить JSON от loc.gov")
 
 
 def parse_links(raw_text: str) -> dict:
@@ -458,6 +546,33 @@ def looks_like_html(content: bytes) -> bool:
     return snippet.startswith(b"<!doctype") or snippet.startswith(b"<html") or b"<head>" in snippet[:1024]
 
 
+def save_media(number: int, content: bytes, hint_url: str = "", content_type: str = "",
+               site: str = "") -> bool:
+    """Единственная точка записи N.<ext>. Формат - ТОЛЬКО по содержимому (sniff_format).
+    True - файл сохранён; False - отказ (fail() уже вызван, файл не записан)."""
+    fmt = sniff_format(content)
+    if fmt is None:
+        desc = describe_rejected(content)
+        fail(number, f"неподдерживаемый формат: {desc}")
+        FORMAT_REJECTS.add(site, desc)
+        return False
+
+    hint = ext_from_name(hint_url)
+    hint_norm = "jpg" if hint == "jpeg" else hint
+    # mp4/mov/avi между собой совместимы (бренд ftyp ненадёжен): сохраняем по содержимому.
+    both_video = kind_of_ext(hint_norm) == "video" and kind_of_ext(fmt) == "video"
+    if hint in _KNOWN_HINT_EXTS and hint_norm != fmt and not both_video:
+        fail(number, f"неподдерживаемый формат: расширение .{hint} не совпадает с содержимым ({fmt})")
+        FORMAT_REJECTS.add(site, hint)
+        return False
+
+    filename = f"{number}.{fmt}"
+    with open(os.path.join(OUTPUT_DIR, filename), "wb") as f:
+        f.write(content)
+    print(f"[OK] {(site or 'файл').upper()} {number} ({filename}) успешно скачано")
+    return True
+
+
 def download_media_item(number: int, url: str) -> None:
     url = url.strip()
     url_lower = url.lower()
@@ -507,8 +622,8 @@ def download_media_item(number: int, url: str) -> None:
         download_loc_gov(number, url)
         return
 
-    # 7. ПРЯМЫЕ ССЫЛКИ НА ВИДЕОФАЙЛЫ + СТРАНИЦЫ MIXKIT -> ЧЕРЕЗ yt-dlp
-    if url_lower.endswith((".mp4", ".mov", ".avi")) or "mixkit.co" in url_lower:
+    # 7. ПРЯМЫЕ ССЫЛКИ .mp4/.mov + СТРАНИЦЫ MIXKIT -> ЧЕРЕЗ yt-dlp
+    if url_lower.endswith((".mp4", ".mov")) or "mixkit.co" in url_lower:
         download_via_ytdlp(number, url)
         return
 
@@ -591,7 +706,7 @@ def _url_gets_external_retry(url: str) -> bool:
         return False
     if "loc.gov" in url_lower:
         return False
-    if url_lower.endswith((".mp4", ".mov", ".avi")) or "mixkit.co" in url_lower:
+    if url_lower.endswith((".mp4", ".mov")) or "mixkit.co" in url_lower:
         return False
     return True
 
@@ -749,20 +864,13 @@ def download_wikimedia_commons(number: int, url: str) -> None:
                 fail(number, f"Wikimedia {number}: не удалось скачать файл изображения")
                 return
 
-            if content[:4] == b"%PDF" or re.search(r"\.(pdf|djvu?|tiff?|svg|ogg|oga|opus|flac|wav|mp3)$", urlparse(direct_url).path, re.IGNORECASE):
-                fail(number, f"Wikimedia {number}: файл не является картинкой/видео ({direct_url})")
-                return
-
-            ext = guess_extension(direct_url, img_resp.headers.get("Content-Type", ""))
-            filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
-            with open(filepath, "wb") as f:
-                f.write(content)
-            print(f"[OK] WIKIMEDIA {number} ({number}{ext}) успешно скачано")
+            save_media(number, content, direct_url, img_resp.headers.get("Content-Type", ""), "wikimedia")
         except Exception as e:
             fail(number, f"Wikimedia ошибка {number}: {e}")
 
 
 def download_direct_via_cffi(number: int, url: str) -> None:
+    site = "nasa" if "nasa.gov" in url.lower() else "generic"
     try:
         resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
         resp.raise_for_status()
@@ -775,25 +883,15 @@ def download_direct_via_cffi(number: int, url: str) -> None:
                 media_resp.raise_for_status()
                 media_content = media_resp.content
                 if not looks_like_html(media_content):
-                    ext = guess_extension(media_url, media_resp.headers.get("Content-Type", ""))
-                    filename = f"{number}{ext}"
-                    filepath = os.path.join(OUTPUT_DIR, filename)
-                    with open(filepath, "wb") as f:
-                        f.write(media_content)
-                    print(f"[OK] ФАЙЛ {number} ({filename}) извлечён из страницы")
+                    save_media(number, media_content, media_url,
+                               media_resp.headers.get("Content-Type", ""), site)
                     return
 
             fail(number, f"{number}: страница не содержит медиафайла ({url})")
             return
 
         content_type = resp.headers.get("Content-Type", "")
-        ext = guess_extension(url, content_type)
-        filename = f"{number}{ext}"
-        filepath = os.path.join(OUTPUT_DIR, filename)
-
-        with open(filepath, "wb") as f:
-            f.write(content)
-        print(f"[OK] ФАЙЛ {number} ({filename}) успешно скачан")
+        save_media(number, content, url, content_type, site)
     except Exception as e:
         fail(number, f"Не удалось скачать {number}: {e}")
 
@@ -811,10 +909,8 @@ def download_pixabay_photo(number: int, photo_id: str) -> None:
             if direct_url:
                 img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
                 img_resp.raise_for_status()
-                filepath = os.path.join(OUTPUT_DIR, f"{number}.jpg")
-                with open(filepath, "wb") as f:
-                    f.write(img_resp.content)
-                print(f"[OK] ФОТО PIXABAY {number} (id={photo_id}) успешно скачано")
+                save_media(number, img_resp.content, direct_url,
+                           img_resp.headers.get("Content-Type", ""), "pixabay")
                 return
         fail(number, f"Не удалось получить фото Pixabay {number}")
     except Exception as e:
@@ -836,10 +932,8 @@ def download_pixabay_video(number: int, video_id: str) -> None:
                 direct_url = best_video["url"]
                 vid_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
                 vid_resp.raise_for_status()
-                filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
-                with open(filepath, "wb") as f:
-                    f.write(vid_resp.content)
-                print(f"[OK] ВИДЕО PIXABAY {number} (id={video_id}) успешно скачано")
+                save_media(number, vid_resp.content, direct_url,
+                           vid_resp.headers.get("Content-Type", ""), "pixabay")
                 return
         fail(number, f"Не удалось получить видео Pixabay {number}")
     except Exception as e:
@@ -858,10 +952,8 @@ def download_pexels_photo(number: int, photo_id: str) -> None:
         if direct_url:
             img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
             img_resp.raise_for_status()
-            filepath = os.path.join(OUTPUT_DIR, f"{number}.jpg")
-            with open(filepath, "wb") as f:
-                f.write(img_resp.content)
-            print(f"[OK] ФОТО PEXELS {number} (id={photo_id}) успешно скачано")
+            save_media(number, img_resp.content, direct_url,
+                       img_resp.headers.get("Content-Type", ""), "pexels")
         else:
             # Раньше при пустом direct_url функция молча ничего не делала - провал
             # терялся без единого слова в логе. Теперь хотя бы попадает в отчёт.
@@ -891,18 +983,17 @@ def download_pexels_video(number: int, video_id: str) -> None:
         fail(number, f"Pexels {number}: нет video_files в ответе API")
         return
 
-    mp4_files = [f for f in video_files if f.get("file_type") == "video/mp4"]
-    candidates = mp4_files if mp4_files else video_files
-    best = max(candidates, key=lambda f: f.get("width") or 0)
+    mp4_files = [f for f in video_files if f.get("file_type") == "video/mp4" and f.get("link")]
+    if not mp4_files:
+        fail(number, f"Pexels {number}: в video_files нет video/mp4")
+        return
+    best = max(mp4_files, key=lambda f: f.get("width") or 0)
     direct_url = best["link"]
 
     try:
         resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
         resp.raise_for_status()
-        filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
-        with open(filepath, "wb") as f:
-            f.write(resp.content)
-        print(f"[OK] ВИДЕО PEXELS {number} (id={video_id}) успешно скачано")
+        save_media(number, resp.content, direct_url, resp.headers.get("Content-Type", ""), "pexels")
     except Exception as e:
         fail(number, f"Не удалось скачать файл видео {number}: {e}")
 
@@ -926,12 +1017,29 @@ def download_coverr_video(number: int, url: str) -> None:
             fail(number, f"Coverr {number}: по ссылке пришла HTML-страница, а не видео")
             return
 
-        filepath = os.path.join(OUTPUT_DIR, f"{number}.mp4")
-        with open(filepath, "wb") as f:
-            f.write(content)
-        print(f"[OK] ВИДЕО COVERR {number} успешно скачано ({direct_url})")
+        save_media(number, content, direct_url, vid_resp.headers.get("Content-Type", ""), "coverr")
     except Exception as e:
         fail(number, f"Coverr ошибка {number}: {e}")
+
+
+def _loc_num(v) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _loc_is_photo(entry: dict) -> bool:
+    """Файл LOC годен, если и расширение URL, и mimetype (когда они есть) - jpg/png."""
+    ext = ext_from_name(entry.get("url") or "")
+    mime = str(entry.get("mimetype") or "").lower().strip()
+    if not ext and not mime:
+        return False
+    if ext and not is_allowed_ext(ext, "photo"):
+        return False
+    if mime and mime not in ("image/jpeg", "image/jpg", "image/png"):
+        return False
+    return True
 
 
 def download_loc_gov(number: int, url: str) -> None:
@@ -941,28 +1049,29 @@ def download_loc_gov(number: int, url: str) -> None:
     json_url = parsed._replace(query=urllib.parse.urlencode(query, doseq=True)).geturl()
 
     try:
-        resp = _loc_get(json_url, headers=BROWSER_HEADERS)
-        data = resp.json()
+        data = _loc_get_json(json_url, headers=BROWSER_HEADERS)
 
         direct_url = None
         resource = data.get("resource", {}) or {}
+        candidates = []
         if isinstance(resource.get("files"), list):
             for file_group in resource["files"]:
-                if isinstance(file_group, list) and file_group:
-                    candidate = max(file_group, key=lambda f: f.get("height", 0) if isinstance(f, dict) else 0)
-                    if isinstance(candidate, dict) and candidate.get("url"):
-                        direct_url = candidate["url"]
-                        break
-        if not direct_url:
+                if isinstance(file_group, list):
+                    candidates += [f for f in file_group if isinstance(f, dict) and _loc_is_photo(f)]
+        if candidates:
+            best = max(candidates, key=lambda f: (_loc_num(f.get("height")), _loc_num(f.get("width")),
+                                                  _loc_num(f.get("size"))))
+            direct_url = best["url"]
+        else:
             item = data.get("item", {}) or {}
             image_url = item.get("image_url")
-            if isinstance(image_url, list) and image_url:
-                direct_url = image_url[-1]
-            elif isinstance(image_url, str):
-                direct_url = image_url
+            urls = image_url if isinstance(image_url, list) else ([image_url] if isinstance(image_url, str) else [])
+            urls = [u for u in urls if isinstance(u, str) and is_allowed_ext(ext_from_name(u), "photo")]
+            if urls:
+                direct_url = urls[-1]  # в image_url последний элемент - самый большой
 
         if not direct_url:
-            fail(number, f"loc.gov {number}: не удалось найти прямую ссылку на файл")
+            fail(number, "loc.gov: нет jpg/png")
             return
 
         file_resp = _loc_get(direct_url, headers=BROWSER_HEADERS, timeout=60, is_file_request=True)
@@ -972,11 +1081,7 @@ def download_loc_gov(number: int, url: str) -> None:
             fail(number, f"loc.gov {number}: похоже, скачалась HTML-страница")
             return
 
-        ext = guess_extension(direct_url, file_resp.headers.get("Content-Type", ""))
-        filepath = os.path.join(OUTPUT_DIR, f"{number}{ext}")
-        with open(filepath, "wb") as f:
-            f.write(content)
-        print(f"[OK] LOC.GOV {number} успешно скачан")
+        save_media(number, content, direct_url, file_resp.headers.get("Content-Type", ""), "loc.gov")
     except LocExhaustedError as e:
         fail(number, f"loc.gov ошибка {number}: {e}")
     except Exception as e:
@@ -989,32 +1094,37 @@ def download_via_ytdlp(number: int, url: str) -> None:
             "yt-dlp",
             "--extractor-args", "generic:impersonate=chrome",
             "-o", f"{OUTPUT_DIR}/{number}.%(ext)s",
-            "--format", "mp4/best",
+            "--format", "b[ext=mp4]/mp4",
             "--no-check-certificate",
             "--retries", "3",
             url
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"[OK] ВИДЕО {number} успешно скачано через yt-dlp")
-        else:
+        if result.returncode != 0:
             fail(number, f"Ошибка yt-dlp {number}: {result.stderr}")
+            return
+        produced = [p for p in glob.glob(os.path.join(OUTPUT_DIR, f"{number}.*"))
+                    if not p.endswith((".part", ".ytdl", ".temp"))]
+        if not produced:
+            fail(number, f"yt-dlp {number}: файл не появился")
+            return
+        path = produced[0]
+        with open(path, "rb") as f:
+            head = f.read(16)
+        fmt = sniff_format(head)
+        if fmt is None:
+            desc = describe_rejected(head)
+            for p in glob.glob(os.path.join(OUTPUT_DIR, f"{number}.*")):
+                os.remove(p)
+            fail(number, f"неподдерживаемый формат: {desc}")
+            FORMAT_REJECTS.add("yt-dlp", desc)
+            return
+        final = os.path.join(OUTPUT_DIR, f"{number}.{fmt}")
+        if path != final:
+            os.replace(path, final)
+        print(f"[OK] ВИДЕО {number} ({number}.{fmt}) успешно скачано через yt-dlp")
     except Exception as ytdl_err:
         fail(number, f"Не удалось запустить yt-dlp для {number}: {ytdl_err}")
-
-
-def guess_extension(url: str, content_type: str = "") -> str:
-    path = urlparse(url).path
-    match = re.search(r"\.(jpg|jpeg|png|webp|gif|mp4|mov)$", path, re.IGNORECASE)
-    if match:
-        return "." + match.group(1).lower()
-    if "jpeg" in content_type or "jpg" in content_type:
-        return ".jpg"
-    if "png" in content_type:
-        return ".png"
-    if "mp4" in content_type:
-        return ".mp4"
-    return ".jpg"
 
 
 def write_failed_report(path: str = "download_failed.txt") -> None:
@@ -1038,6 +1148,14 @@ def main():
 
     parse_and_download_links("INPUT_LINKS", "INPUT_BACKUP_LINKS")
     write_failed_report()
+
+    counts = {}
+    for name in os.listdir(OUTPUT_DIR):
+        e = ext_from_name(name)
+        counts[e] = counts.get(e, 0) + 1
+    saved = ", ".join(f"{e}: {counts.get(e, 0)}" for e in ("jpg", "png", "mp4", "mov", "avi"))
+    rejects = FORMAT_REJECTS.summary_line()
+    print("[ИНФО] " + (f"(до backup) {rejects}. " if rejects else "") + f"Сохранено: {saved}")
 
 
 if __name__ == "__main__":
