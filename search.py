@@ -26,7 +26,7 @@ search.py
         --backup-links-output backup_links.txt --missing-output missing.txt
 
 Переменные окружения:
-    PEXELS_API_KEY, PIXABAY_API_KEY   - обязательны (в т.ч. для fallback_query)
+    PEXELS_API_KEY, PIXABAY_API_KEY   - обязательны (в т.ч. для broad-варианта каскада)
     SEARCH_SEM_PEXELS / _PIXABAY / _WIKIMEDIA / _NASA / _LOC
         - per-site семафоры одновременных запросов (умолч. 5/5/10/10/10)
     SEARCH_LOC_MIN_INTERVAL_SECONDS
@@ -64,10 +64,11 @@ search.py
     SEARCH_CLIP_CONCURRENCY   - сколько CLIP-инференсов одновременно (умолч. 2, CPU-bound)
     SEARCH_CANDIDATES_PER_SITE - сколько топ-кандидатов с сайта пускать под CLIP (умолч. 5)
     SEARCH_CLIP_MODEL / SEARCH_CLIP_PRETRAINED - модель open_clip (умолч. ViT-B-32-quickgelu / openai)
-    SEARCH_SIM_MIN_THRESHOLD   - минимальный raw CLIP cosine similarity, чтобы кандидат
-        вообще прошёл в пул (умолч. 0.21 - см. "Шестое уточнение" в докстринге ниже)
-    SEARCH_SIM_ACCEPT_THRESHOLD - similarity, при которой прекращаем перебор сайтов
-        и берём кандидата сразу (умолч. 0.30 - см. там же)
+    SEARCH_SIM_MIN_THRESHOLD   - нижняя страховка: кандидат с own_sim ниже не принимается
+        ни по какому критерию (умолч. 0.21 - см. "Шестое уточнение" в докстринге ниже)
+    SEARCH_SIM_ACCEPT_THRESHOLD - абсолютный критерий принятия (умолч. 0.30 - см. там же)
+    SEARCH_REL_TOP_N (умолч. 10 - потолок), SEARCH_REL_MARGIN (0.03), SEARCH_FLAT_SPREAD (0.03)
+        - относительная оценка, см. раздел "Относительная оценка CLIP" ниже
 
 Возвращаемые коды:
     0 - links.txt и missing.txt успешно записаны (даже если часть/все сегменты в missing)
@@ -185,7 +186,7 @@ text_matches_keywords теперь токенизирует ключевую ф�
 
 Десятое уточнение - найдено по DEBUG-логу реального прогона (round 4): у ПРЯМОГО pixabay
 (media_type="video") preview_url оказывался None у 100% кандидатов (105/105 во всех 21
-сегменте, где pixabay был первичным сайтом), при этом pixabay_fallback работал почти
+сегменте, где pixabay был первичным сайтом), при этом pixabay_broad (тогда ещё pixabay_fallback) работал почти
 нормально (missing только 15/235). Причина - устаревшее допущение о структуре ответа
 Pixabay Video API: код брал hit.get("picture_id") и строил превью через vimeocdn
 (https://i.vimeocdn.com/video/{picture_id}_200x150.jpg), но проверка по актуальной
@@ -209,7 +210,7 @@ CLIP, где точность превью не критична, важна т�
 2. Защита от связки "primary LOC + backup LOC": если primary взят с LOC, try_claim_backup
    больше НЕ берет дубликат с LOC (возвращает None). В find_backup для LOC primary принудительно
    подключаются pexels и pixabay, что позволяет найти независимый кросс-сайтовый backup по
-   fallback_query и спасает файл при часовом бане LOC на этапе download.py.
+   каскаду запросов (broad идёт на pexels/pixabay) и спасает файл при часовом бане LOC на этапе download.py.
 3. Фильтрация URL в search_loc: исключены страницы виртуальных выставок (/exhibits/), блогов
    и порталов, которые возвращают HTML при запросе ?fo=json (баг сегмента 6). Принимаются только
    оцифрованные каталожные объекты (/item/ и /resource/).
@@ -218,6 +219,41 @@ CLIP, где точность превью не критична, важна т�
 5. Поиск Wikimedia Commons дополнен filetype:bitmap для картинок, исключая 500+ сканов PDF/DjVu.
 6. Таймаут поиска LOC увеличен до 30 секунд (SEARCH_LOC_TIMEOUT_SECONDS=30) для устранения
    постоянных таймаутов на первой попытке холодного поиска.
+
+Относительная оценка CLIP:
+ - Перед поиском scene всех сегментов кодируются ОДИН раз (батчи по 64) в матрицу нормализованных
+   векторов. Превью кандидата кодируется один раз (кэш по (site, cand_id), только вектор ~2 КБ);
+   сходство со всеми scene - одно матричное умножение. Текст запроса в CLIP больше не кодируется.
+ - Принят, если own_sim >= SIM_MIN_THRESHOLD (0.21) И (а) его сегмент в топ-N сходств среди всех
+   сегментов, или (б) own_sim >= SIM_ACCEPT_THRESHOLD (0.30). N без явного SEARCH_REL_TOP_N =
+   max(3, min(10, ceil(5% сегментов))); явное значение берётся как есть.
+ - "Чужой": другая scene выше собственной больше чем на SEARCH_REL_MARGIN (0.03) - не принимается
+   по рангу (а); абсолютный критерий (б) остаётся в силе.
+ - Однотемные ролики: если разброс сходств кандидата по scene меньше SEARCH_FLAT_SPREAD (0.03),
+   ранг неинформативен - решает только (б) и нижняя страховка.
+ - Порядок best-effort: сначала кандидаты не "чужие" (по убыванию own_sim), потом "чужие".
+ - Для калибровки смотрите строки "Сегмент N: выбран site/id [вариант] own_sim rank причина" и
+   итоги "Итог выбора primary/backup" (по рангу / абс. порогу / best-effort по причинам, min/median/max
+   own_sim). Пороги 0.21 / 0.30 / margin 0.03 заданы по оценке и подбираются по этому итогу.
+ - Режим "лучший из найденного": если по всему каскаду никто не принят, берётся лучший по own_sim
+   (ключ статистики best-eff); так же и для backup. Ручной проверки нет.
+
+Каскад запросов (requests.json: query_narrow / query_medium / query_broad):
+ - Порядок вариантов: первый сайт сегмента архивный (wikimedia/loc/nasa) -> narrow, medium,
+   broad; первый сайт сток (pexels/pixabay) -> medium, narrow, broad. Каскад ленивый:
+   следующий вариант запускается, только если предыдущий не дал принятого и
+   заклеймленного кандидата (build_cascade - чистая функция, run_variant - оценка варианта).
+ - Сайты: при архивном первом сайте narrow/medium идут ТОЛЬКО на архивные сайты из seg.sites
+   (имена собственные не уходят на Pexels, лимит 200/час не тратится); при стоковом первом
+   сайте - на все сайты из seg.sites; broad всегда только на pixabay и pexels.
+ - Pixabay в любом списке сайтов стоит ПЕРЕД Pexels (лимит Pixabay щедрее); дублей нет.
+ - Фильтр сущностей (entity_filter_applies): только narrow/medium и только архивные сайты;
+   для broad и стоковых сайтов никогда. Исключение skip_keyword_filter (pexels+video) сохранено.
+ - Дедупликация: вариант пропускается, если запрос пуст/None или совпадает (без регистра, с
+   схлопнутыми пробелами) с уже включённым вариантом на пересекающихся сайтах.
+ - Ключи статистики: narrow/medium - имя сайта, broad - "<сайт>_broad", backup - "<сайт>_backup".
+ - Backup использует тот же каскад; сайты варианта пересекаются с допустимыми для backup.
+ - Проверка без сети: python search.py --selftest
 """
 
 from __future__ import annotations
@@ -229,14 +265,17 @@ import functools
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
+import statistics
 import sys
 import time
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from collections import Counter
+from dataclasses import dataclass, field, replace as dc_replace
+from typing import Any, Awaitable, Callable, Optional, Sequence
 from urllib.parse import urlparse
 
 from media_formats import (
@@ -292,6 +331,15 @@ MAX_BACKOFF_SECONDS = 60
 # без правки кода (например по перцентилю на собственной выборке сегментов).
 SIM_ACCEPT_THRESHOLD = float(os.environ.get("SEARCH_SIM_ACCEPT_THRESHOLD", 0.30))
 SIM_MIN_THRESHOLD = float(os.environ.get("SEARCH_SIM_MIN_THRESHOLD", 0.21))
+
+# Относительная оценка (см. раздел "Относительная оценка CLIP" в докстринге модуля).
+_REL_TOP_N_ENV = os.environ.get("SEARCH_REL_TOP_N")
+REL_TOP_N_EXPLICIT = bool(_REL_TOP_N_ENV)
+REL_TOP_N = int(_REL_TOP_N_ENV) if _REL_TOP_N_ENV else 10  # без явной установки - потолок
+REL_TOP_N_FRACTION = 0.05
+REL_MARGIN = float(os.environ.get("SEARCH_REL_MARGIN", 0.03))
+FLAT_SPREAD = float(os.environ.get("SEARCH_FLAT_SPREAD", 0.03))
+SCENE_ENCODE_BATCH = 64
 
 CANDIDATES_PER_SITE = int(os.environ.get("SEARCH_CANDIDATES_PER_SITE", 5))
 
@@ -510,6 +558,9 @@ class SiteStats:
     clip_scored_total: int = 0
     clip_passed_total: int = 0
     clip_accept_total: int = 0
+    accepted_total: int = 0
+    rejected_foreign_total: int = 0
+    best_effort_total: int = 0
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -534,18 +585,20 @@ def log_site_stats_summary(site_stats: dict) -> None:
     logging.info("=" * 100)
     logging.info("СВОДКА ПО ВОРОНКЕ ФИЛЬТРАЦИИ (диагностика, откуда берутся нули):")
     logging.info(
-        "%-18s %6s %7s %8s %9s %8s %9s %8s %8s %8s %7s %7s",
+        "%-18s %6s %7s %8s %9s %8s %9s %8s %8s %8s %7s %7s %8s %7s %8s",
         "сайт", "сегм.", "raw", "лиценз.", "keyword", "->CLIP", "нет прев.",
         "scored", f">={SIM_MIN_THRESHOLD:.2f}", f">={SIM_ACCEPT_THRESHOLD:.2f}", "avg", "best",
+        "принято", "чужие", "best-eff",
     )
     for key in sorted(site_stats.keys()):
         s = site_stats[key]
         logging.info(
-            "%-18s %6d %7d %8d %9d %8d %9d %8d %8d %8d %7.3f %7.3f",
+            "%-18s %6d %7d %8d %9d %8d %9d %8d %8d %8d %7.3f %7.3f %8d %7d %8d",
             key, s.segments_attempted, s.raw_total, s.license_ok_total,
             s.keyword_ok_total, s.sent_to_clip_total, s.preview_missing_total,
             s.clip_scored_total, s.clip_passed_total, s.clip_accept_total,
             s.avg_score, s.best_score,
+            s.accepted_total, s.rejected_foreign_total, s.best_effort_total,
         )
     logging.info(
         "Как читать: raw=0 -> сайт вообще ничего не вернул по запросу (сеть/сам API/лимит). "
@@ -555,7 +608,10 @@ def log_site_stats_summary(site_stats: dict) -> None:
         "блокирует PREVIEW_HEADERS/Referer/хотлинкинг - точный статус-код и тело ответа по "
         "каждому провалу теперь всегда пишется отдельным логгером 'search.fetch_preview_bytes' "
         "на уровне DEBUG, см. его вывод выше). scored>0, но "
-        "avg/best низкие (ниже SIM_MIN_THRESHOLD) -> CLIP отрабатывает, но ничего не "
+        "принято = кандидаты, принятые по рангу своей сцены среди всех сегментов или по "
+        "абсолютному порогу; чужие = отсеяны, т.к. другая сцена подходит им заметно лучше "
+        "своей; best-eff = никто не принят, взят лучший по own_sim (полный автомат). "
+        "avg/best - это сходство со СВОЕЙ сценой; низкие значения -> CLIP отрабатывает, но ничего не "
         "совпадает по смыслу - либо сам CLIP настроен неверно (см. 'Пятое уточнение' в "
         "докстринге модуля про QuickGELU), либо запросы от generate_queries.py слишком "
         "специфичны/не по делу. Учтите: raw CLIP similarity для здоровых совпадений обычно "
@@ -613,9 +669,11 @@ class RateLimiter:
 @dataclass
 class SegmentSpec:
     index: int
+    scene: str
     sites: list[str]
-    query: str
-    fallback_query: Optional[str]
+    query_narrow: str
+    query_medium: str
+    query_broad: Optional[str]
     type: str  # "image" | "video"
     is_entity: bool
     entity_keywords: list[str]
@@ -630,7 +688,13 @@ class Candidate:
     preview_url: Optional[str]
     page_url: Optional[str]
     final_url_resolver: Optional[Callable[["Context"], Awaitable[Optional[str]]]] = None
-    similarity: float = 0.0
+    similarity: float = 0.0  # = own_sim (для сортировки)
+    own_sim: float = 0.0
+    rank: int = 0
+    accepted: bool = False
+    reject_reason: str = ""
+    stats_key: Optional[str] = None
+    variant: Optional[str] = None  # narrow | medium | broad
 
 
 @dataclass
@@ -651,11 +715,113 @@ class Context:
     site_stats: dict = field(default_factory=dict)
     format_rejects: FormatRejectStats = field(default_factory=FormatRejectStats)
     primary_cands: dict = field(default_factory=dict)
+    rel_top_n: int = 3
+    choice_reasons: Counter = field(default_factory=Counter)
+    choice_own_sims: list = field(default_factory=list)
+    backup_reasons: Counter = field(default_factory=Counter)
+    backup_own_sims: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # CLIP
 # ---------------------------------------------------------------------------
+
+@dataclass
+class RankResult:
+    accepted: bool
+    own_sim: float
+    rank: int
+    reason: str  # rank | abs | floor | foreign | flat | rank_miss
+
+
+def effective_top_n(n_segments: int, top_n: int = REL_TOP_N, explicit: bool = REL_TOP_N_EXPLICIT) -> int:
+    """Явный SEARCH_REL_TOP_N берётся как есть; иначе max(3, min(top_n, ceil(5% сегментов)))."""
+    if explicit:
+        return max(1, top_n)
+    return max(3, min(top_n, math.ceil(REL_TOP_N_FRACTION * max(1, n_segments))))
+
+
+def rank_decision(
+    sims_all: Sequence[float], own_row: int, top_n: int,
+    margin: float = REL_MARGIN, min_abs: float = SIM_MIN_THRESHOLD,
+    flat_spread: float = FLAT_SPREAD, accept_abs: float = SIM_ACCEPT_THRESHOLD,
+) -> RankResult:
+    """Ядро относительной оценки, без сети и ctx. sims_all - сходства кандидата со scene
+    всех сегментов, own_row - строка его собственного сегмента."""
+    own = float(sims_all[own_row])
+    rank = 1 + sum(1 for i, x in enumerate(sims_all) if i != own_row and x > own)
+    if own < min_abs:
+        return RankResult(False, own, rank, "floor")
+    if len(sims_all) > 1 and (max(sims_all) - min(sims_all)) < flat_spread:
+        # однотемный ролик: относительный критерий неинформативен, решает только абсолютный
+        ok = own >= accept_abs
+        return RankResult(ok, own, rank, "abs" if ok else "flat")
+    if own >= accept_abs:
+        return RankResult(True, own, rank, "abs")
+    max_other = max((x for i, x in enumerate(sims_all) if i != own_row), default=None)
+    if max_other is not None and own + margin < max_other:
+        return RankResult(False, own, rank, "foreign")
+    if rank <= top_n:
+        return RankResult(True, own, rank, "rank")
+    return RankResult(False, own, rank, "rank_miss")
+
+
+def rank_candidate(
+    sims_all: Sequence[float], own_row: int, top_n: int,
+    margin: float = REL_MARGIN, min_abs: float = SIM_MIN_THRESHOLD,
+    flat_spread: float = FLAT_SPREAD, accept_abs: float = SIM_ACCEPT_THRESHOLD,
+) -> tuple[bool, float, int]:
+    r = rank_decision(sims_all, own_row, top_n, margin, min_abs, flat_spread, accept_abs)
+    return r.accepted, r.own_sim, r.rank
+
+
+def compute_sims(scene_matrix: Any, image_vec: Any) -> list[float]:
+    """Косинусные сходства (векторы нормализованы) картинки со всеми scene."""
+    return (scene_matrix @ image_vec).tolist()
+
+
+class EmbeddingCache:
+    """Кэш нормализованных векторов превью по ключу (site, cand_id). Один и тот же ключ
+    кодируется один раз даже при параллельных запросах (общий future на ключ).
+    Хранит только вектор (512 float32 ~ 2 КБ), не картинку и не байты."""
+
+    def __init__(self) -> None:
+        self._store: dict = {}
+        self._pending: dict = {}
+        self.hits = 0
+        self.computed = 0
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    async def get_or_compute(self, key: tuple, compute: Callable[[], Awaitable[Any]]) -> Any:
+        if key in self._store:
+            self.hits += 1
+            return self._store[key]
+        fut = self._pending.get(key)
+        if fut is not None:
+            self.hits += 1
+            return await fut
+        fut = asyncio.get_running_loop().create_future()
+        self._pending[key] = fut
+        try:
+            val = await compute()
+            if val is not None:
+                self._store[key] = val
+                self.computed += 1
+            fut.set_result(val)
+            return val
+        except BaseException:
+            if not fut.done():
+                fut.set_result(None)
+            raise
+        finally:
+            self._pending.pop(key, None)
+
+
+class _ClipEncodeError(Exception):
+    pass
+
 
 class ClipScorer:
     def __init__(self, model_name: str, pretrained: str):
@@ -665,6 +831,9 @@ class ClipScorer:
         self._preprocess = None
         self._tokenizer = None
         self._load_lock = asyncio.Lock()
+        self.scene_matrix = None  # torch float32 [n_segments, dim], строки нормализованы
+        self.scene_rows: dict[int, int] = {}
+        self.cache = EmbeddingCache()
 
     async def ensure_loaded(self) -> None:
         if self._model is not None:
@@ -690,27 +859,46 @@ class ClipScorer:
             self._model, self._preprocess, self._tokenizer = model, preprocess, tokenizer
             logging.info("CLIP-модель загружена.")
 
-    async def score(self, image_bytes: bytes, text: str) -> float:
+    def _encode_texts_sync(self, texts: list[str]):
+        tokens = self._tokenizer([t[:300] for t in texts])
+        with torch.no_grad():
+            feats = self._model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        return feats.float()
+
+    async def encode_scenes(self, scenes: list[tuple[int, str]]) -> None:
+        """Один раз кодирует scene всех сегментов батчами и строит матрицу + индекс строк."""
+        await self.ensure_loaded()
+        loop = asyncio.get_running_loop()
+        parts = []
+        for i in range(0, len(scenes), SCENE_ENCODE_BATCH):
+            batch = [t for _, t in scenes[i:i + SCENE_ENCODE_BATCH]]
+            parts.append(await loop.run_in_executor(None, self._encode_texts_sync, batch))
+        self.scene_matrix = torch.cat(parts, dim=0).float().contiguous()
+        self.scene_rows = {idx: row for row, (idx, _) in enumerate(scenes)}
+        logging.info("CLIP: закодировано scene: %s (батчи по %s).", len(scenes), SCENE_ENCODE_BATCH)
+
+    def encode_image_sync(self, image_bytes: bytes):
+        """Только кодирует и нормализует картинку (текст здесь не кодируется)."""
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        image_input = self._preprocess(image).unsqueeze(0)
+        with torch.no_grad():
+            feats = self._model.encode_image(image_input)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        return feats.squeeze(0).float().cpu()
+
+    async def encode_image(self, image_bytes: bytes):
         await self.ensure_loaded()
         loop = asyncio.get_running_loop()
         start = time.monotonic()
         try:
-            return await loop.run_in_executor(None, self._score_sync, image_bytes, text)
+            return await loop.run_in_executor(None, self.encode_image_sync, image_bytes)
         finally:
             elapsed = time.monotonic() - start
-            CLIP_TIMING_DEBUG_LOGGER.debug("CLIP-инференс (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
+            CLIP_TIMING_DEBUG_LOGGER.debug("CLIP-кодирование картинки (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
 
-    def _score_sync(self, image_bytes: bytes, text: str) -> float:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        image_input = self._preprocess(image).unsqueeze(0)
-        text_input = self._tokenizer([text[:300]])
-        with torch.no_grad():
-            image_features = self._model.encode_image(image_input)
-            text_features = self._model.encode_text(text_input)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            similarity = (image_features @ text_features.T).item()
-        return similarity
+    def similarities(self, image_vec) -> list[float]:
+        return compute_sims(self.scene_matrix, image_vec)
 
 
 # ---------------------------------------------------------------------------
@@ -1288,46 +1476,68 @@ async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
 
 
 async def score_candidates(
-    ctx: Context, candidates: list[Candidate], query_text: str,
+    ctx: Context, candidates: list[Candidate],
     seg_index: Optional[int] = None, stats_key: Optional[str] = None,
+    variant_name: Optional[str] = None,
 ) -> list[Candidate]:
+    """Оценивает ВСЕХ кандидатов с превью относительно scene всех сегментов. Никого не
+    отбрасывает по порогу: решение принято/не принято записано в копию Candidate
+    (accepted, own_sim, rank, reject_reason); similarity = own_sim. Возвращает по убыванию own_sim."""
     key = stats_key or (candidates[0].site if candidates else "unknown")
     stats = ctx.site_stats.setdefault(key, SiteStats())
-    sent_to_clip_this_segment = 0
+    own_row = ctx.clip.scene_rows[seg_index]
+    n_with_preview = 0
 
     scored: list[Candidate] = []
     for cand in candidates:
-        preview_bytes = await fetch_preview_bytes(ctx, cand)
-        if preview_bytes is None:
+        async def compute(cand=cand):
+            preview_bytes = await fetch_preview_bytes(ctx, cand)
+            if preview_bytes is None:
+                return None
+            async with ctx.clip_semaphore:
+                try:
+                    return await ctx.clip.encode_image(preview_bytes)
+                except Exception as e:
+                    raise _ClipEncodeError(str(e)) from e
+
+        try:
+            vec = await ctx.clip.cache.get_or_compute((cand.site, cand.cand_id), compute)
+        except _ClipEncodeError as e:
+            logging.debug("CLIP не смог закодировать %s/%s: %s", cand.site, cand.cand_id, e)
+            stats.clip_error_total += 1
+            continue
+        if vec is None:
             stats.preview_missing_total += 1
             continue
         stats.sent_to_clip_total += 1
-        sent_to_clip_this_segment += 1
-        async with ctx.clip_semaphore:
-            try:
-                sim = await ctx.clip.score(preview_bytes, query_text)
-            except Exception as e:
-                logging.debug("CLIP не смог оценить %s/%s: %s", cand.site, cand.cand_id, e)
-                stats.clip_error_total += 1
-                continue
-        stats.record_score(sim)
-        if sim >= SIM_MIN_THRESHOLD:
-            cand.similarity = sim
-            scored.append(cand)
-    scored.sort(key=lambda c: c.similarity, reverse=True)
+        n_with_preview += 1
+        res = rank_decision(
+            ctx.clip.similarities(vec), own_row, ctx.rel_top_n,
+            REL_MARGIN, SIM_MIN_THRESHOLD, FLAT_SPREAD, SIM_ACCEPT_THRESHOLD,
+        )
+        stats.record_score(res.own_sim)
+        if res.accepted:
+            stats.accepted_total += 1
+        elif res.reason == "foreign":
+            stats.rejected_foreign_total += 1
+        # копия: Candidate может лежать в общем search_cache и оцениваться разными сегментами
+        scored.append(dc_replace(
+            cand, similarity=res.own_sim, own_sim=res.own_sim, rank=res.rank,
+            accepted=res.accepted, reject_reason=res.reason, stats_key=key, variant=variant_name,
+        ))
+    scored.sort(key=lambda c: c.own_sim, reverse=True)
 
     if candidates and not scored:
-        if sent_to_clip_this_segment == 0:
-            logging.info(
-                "Сегмент %s/%s: %s кандидатов, но ни для одного не скачалось превью "
-                "(0 ушло в CLIP) - проверьте лог 'search.fetch_preview_bytes' на уровне DEBUG.",
-                seg_index, key, len(candidates),
-            )
-        else:
-            logging.info(
-                "Сегмент %s/%s: %s кандидатов ушло в CLIP, ни один не набрал >= %.2f.",
-                seg_index, key, sent_to_clip_this_segment, SIM_MIN_THRESHOLD,
-            )
+        logging.info(
+            "Сегмент %s/%s: %s кандидатов, но ни для одного не удалось получить вектор превью "
+            "(скачивание/кодирование) - проверьте лог 'search.fetch_preview_bytes' на уровне DEBUG.",
+            seg_index, key, len(candidates),
+        )
+    elif scored and not any(c.accepted for c in scored):
+        logging.info(
+            "Сегмент %s/%s: %s кандидатов оценено, принятых нет (лучший own_sim=%.3f, rank=%s, причина: %s).",
+            seg_index, key, len(scored), scored[0].own_sim, scored[0].rank, scored[0].reject_reason,
+        )
     return scored
 
 
@@ -1358,7 +1568,10 @@ async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: st
         if key in ctx.used_files:
             return None
         ctx.used_files.add(key)
-    return await finalize_candidate(ctx, backup_cand)
+    url = await finalize_candidate(ctx, backup_cand)
+    if url:
+        _record_choice(ctx, backup_cand, backup=True)
+    return url
 
 
 async def try_claim_pool(
@@ -1379,21 +1592,94 @@ async def try_claim_pool(
     return None, None
 
 
+ARCHIVE_SITES = ("wikimedia", "loc", "nasa")
+STOCK_SITES = ("pexels", "pixabay")
+
+
+@dataclass
+class Variant:
+    name: str  # "narrow" | "medium" | "broad"
+    query: str
+    sites: list[str]
+    apply_entity_filter: bool
+
+
+def _norm_query(q: str) -> str:
+    return " ".join(q.lower().split())
+
+
+def _pixabay_first(sites: list[str]) -> list[str]:
+    out: list[str] = []
+    for x in sites:
+        x = x.strip().lower()
+        if x and x not in out:
+            out.append(x)
+    if "pixabay" in out and "pexels" in out and out.index("pixabay") > out.index("pexels"):
+        out.remove("pixabay")
+        out.insert(out.index("pexels"), "pixabay")
+    return out
+
+
+def entity_filter_applies(seg: SegmentSpec, variant_name: str, site: str) -> bool:
+    """Фильтр сущностей: только narrow/medium и только архивные сайты.
+    (seg.is_entity и skip_keyword_filter проверяются в fetch_and_filter.)"""
+    return variant_name in ("narrow", "medium") and site in ARCHIVE_SITES
+
+
+def build_cascade(seg: SegmentSpec) -> list[Variant]:
+    """Чистая функция (без сети и ctx): упорядоченный список вариантов запроса."""
+    seg_sites = [x for x in _pixabay_first(list(seg.sites)) if x in SITE_SEARCH_FUNCS]
+    archive_first = bool(seg_sites) and seg_sites[0] in ARCHIVE_SITES
+
+    if archive_first:
+        order = ("narrow", "medium", "broad")
+        narrow_medium_sites = [x for x in seg_sites if x in ARCHIVE_SITES]
+    else:
+        order = ("medium", "narrow", "broad")
+        narrow_medium_sites = seg_sites
+    queries = {
+        "narrow": seg.query_narrow, "medium": seg.query_medium, "broad": seg.query_broad,
+    }
+    broad_sites = _pixabay_first(list(STOCK_SITES))
+
+    cascade: list[Variant] = []
+    seen: list[tuple[str, set]] = []
+    for name in order:
+        q = queries[name]
+        if not q or not q.strip():
+            continue
+        sites = broad_sites if name == "broad" else list(narrow_medium_sites)
+        if not sites:
+            continue
+        nq = _norm_query(q)
+        if any(nq == sq and set(sites) & ss for sq, ss in seen):
+            continue
+        seen.append((nq, set(sites)))
+        cascade.append(Variant(
+            name=name, query=q.strip(), sites=sites,
+            apply_entity_filter=any(entity_filter_applies(seg, name, x) for x in sites),
+        ))
+    return cascade
+
+
+def _stats_key(site: str, variant_name: str) -> str:
+    return f"{site}_broad" if variant_name == "broad" else site
+
+
 async def fetch_and_filter(
-    ctx: Context, site: str, seg: SegmentSpec,
-    query: Optional[str] = None, apply_entity: bool = True,
+    ctx: Context, site: str, seg: SegmentSpec, query: str, variant_name: str,
     stats_key: Optional[str] = None,
 ) -> list[Candidate]:
-    q = query or seg.query
-    stats = ctx.site_stats.setdefault(stats_key or site, SiteStats())
+    q = query
+    stats = ctx.site_stats.setdefault(stats_key or _stats_key(site, variant_name), SiteStats())
     stats.segments_attempted += 1
 
     raw = await SITE_SEARCH_FUNCS[site](ctx, q, seg.type)
     stats.raw_total += len(raw)
     if not raw:
         logging.info(
-            "Сегмент %s/%s: 0 сырых кандидатов по запросу %r - сайт ничего не вернул.",
-            seg.index, site, q,
+            "Сегмент %s/%s [%s]: 0 сырых кандидатов по запросу %r - сайт ничего не вернул.",
+            seg.index, site, variant_name, q,
         )
         return []
 
@@ -1401,75 +1687,123 @@ async def fetch_and_filter(
     stats.license_ok_total += len(licensed)
     if not licensed:
         logging.info(
-            "Сегмент %s/%s: %s сырых кандидатов, но 0 прошло лицензионный фильтр.",
-            seg.index, site, len(raw),
+            "Сегмент %s/%s [%s]: %s сырых кандидатов, но 0 прошло лицензионный фильтр.",
+            seg.index, site, variant_name, len(raw),
         )
         return []
 
+    apply_entity = entity_filter_applies(seg, variant_name, site)
     skip_keyword_filter = site == "pexels" and seg.type == "video"
     if seg.is_entity and apply_entity and not skip_keyword_filter:
         before = len(licensed)
         licensed = [c for c in licensed if text_matches_keywords(c.text, seg.entity_keywords)]
         if not licensed:
             logging.info(
-                "Сегмент %s/%s: %s кандидатов прошли лицензию, но 0 после фильтра сущностей %r.",
-                seg.index, site, before, seg.entity_keywords,
+                "Сегмент %s/%s [%s]: %s кандидатов прошли лицензию, но 0 после фильтра сущностей %r.",
+                seg.index, site, variant_name, before, seg.entity_keywords,
             )
             return []
     stats.keyword_ok_total += len(licensed)
     return licensed
 
 
-async def try_fallback(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
-    pool: list[Candidate] = []
-    for site in ("pexels", "pixabay"):
-        if site in ctx.exhausted_sites:
-            continue
-        stats_key = f"{site}_fallback"
-        stats = ctx.site_stats.setdefault(stats_key, SiteStats())
-        stats.segments_attempted += 1
-        raw = await SITE_SEARCH_FUNCS[site](ctx, seg.fallback_query, seg.type)
-        stats.raw_total += len(raw)
-        if not raw:
-            continue
-        top = raw[:CANDIDATES_PER_SITE]
-        stats.license_ok_total += len(top)
-        stats.keyword_ok_total += len(top)
-        scored = await score_candidates(
-            ctx, top, seg.fallback_query, seg_index=seg.index, stats_key=stats_key,
+def best_effort_order(pool: list[Candidate]) -> list[Candidate]:
+    """Порядок для режима "лучший из найденного": сначала не "чужие", затем "чужие";
+    внутри групп по убыванию own_sim."""
+    neutral = [c for c in pool if c.reject_reason != "foreign"]
+    foreign = [c for c in pool if c.reject_reason == "foreign"]
+    key = lambda c: c.own_sim
+    return sorted(neutral, key=key, reverse=True) + sorted(foreign, key=key, reverse=True)
+
+
+def _choice_key(cand: Candidate) -> str:
+    return cand.reject_reason if cand.accepted else f"best_effort_{cand.reject_reason}"
+
+
+def _record_choice(ctx: Context, cand: Candidate, seg_index: Optional[int] = None, backup: bool = False) -> None:
+    key = _choice_key(cand)
+    if backup:
+        ctx.backup_reasons[key] += 1
+        ctx.backup_own_sims.append(cand.own_sim)
+        return
+    ctx.choice_reasons[key] += 1
+    ctx.choice_own_sims.append(cand.own_sim)
+    logging.info(
+        "Сегмент %s: выбран %s/%s [%s] own_sim=%.3f rank=%s причина=%s (%s)",
+        seg_index, cand.site, cand.cand_id, cand.variant, cand.own_sim, cand.rank,
+        cand.reject_reason, "принят" if cand.accepted else "best-effort",
+    )
+
+
+def summarize_choices(reasons, own_sims: list, label: str = "primary") -> str:
+    g = lambda k: int(reasons.get(k, 0))
+    be = {k: g(f"best_effort_{k}") for k in ("floor", "foreign", "rank_miss", "flat")}
+    total = sum(int(v) for v in reasons.values())
+    line = (
+        f"Итог выбора {label}: всего {total}; по рангу {g('rank')}; по абсолютному порогу {g('abs')}; "
+        f"best-effort {sum(be.values())} (floor {be['floor']}, foreign {be['foreign']}, "
+        f"rank_miss {be['rank_miss']}, flat {be['flat']})"
+    )
+    if own_sims:
+        line += (
+            f"; own_sim выбранных: min {min(own_sims):.3f}, "
+            f"median {statistics.median(own_sims):.3f}, max {max(own_sims):.3f}"
         )
-        pool.extend(scored)
-    if not pool:
-        return None, None
-    pool.sort(key=lambda c: c.similarity, reverse=True)
-    return await try_claim_pool(ctx, pool, seg.index)
+    return line
 
 
-async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+def select_accepted(seg: SegmentSpec, scored: list[Candidate]) -> list[Candidate]:
+    """Единая точка решения: кого принять из оценённых. Сейчас - принятые
+    относительной оценкой (Candidate.accepted), по убыванию own_sim."""
+    return sorted((c for c in scored if c.accepted), key=lambda c: c.own_sim, reverse=True)
+
+
+async def run_variant(ctx: Context, seg: SegmentSpec, variant: Variant) -> list[Candidate]:
+    """Оценивает вариант; возвращает ВСЕХ оценённых (принятых и нет), по убыванию own_sim."""
     pool: list[Candidate] = []
-    for site in seg.sites:
-        if site in ctx.exhausted_sites:
+    for site in variant.sites:
+        if site in ctx.exhausted_sites or site not in SITE_SEARCH_FUNCS:
             continue
-        licensed = await fetch_and_filter(ctx, site, seg)
+        key = _stats_key(site, variant.name)
+        licensed = await fetch_and_filter(ctx, site, seg, variant.query, variant.name, stats_key=key)
         if not licensed:
             continue
         top = licensed[:CANDIDATES_PER_SITE]
-        scored = await score_candidates(ctx, top, seg.query, seg_index=seg.index, stats_key=site)
+        scored = await score_candidates(
+            ctx, top, seg_index=seg.index, stats_key=key, variant_name=variant.name,
+        )
         if not scored:
             continue
         pool.extend(scored)
-        pool.sort(key=lambda c: c.similarity, reverse=True)
-        if scored[0].similarity >= SIM_ACCEPT_THRESHOLD:
+        pool.sort(key=lambda c: c.own_sim, reverse=True)
+        if any(c.accepted for c in scored):
             break
+    return pool
 
-    if pool:
-        url, backup_url = await try_claim_pool(ctx, pool, seg.index)
+
+async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+    rejected_pool: list[Candidate] = []
+    for variant in build_cascade(seg):
+        scored = await run_variant(ctx, seg, variant)
+        accepted = select_accepted(seg, scored)
+        if accepted:
+            url, backup_url = await try_claim_pool(ctx, accepted, seg.index)
+            if url:
+                chosen = ctx.primary_cands.get(seg.index)
+                if chosen is not None:
+                    _record_choice(ctx, chosen, seg.index)
+                return url, backup_url
+        rejected_pool.extend(c for c in scored if not c.accepted)
+
+    # Никто не принят (или принятых не удалось заклеймить): берём лучшего по own_sim.
+    if rejected_pool:
+        url, backup_url = await try_claim_pool(ctx, best_effort_order(rejected_pool), seg.index)
         if url:
+            chosen = ctx.primary_cands.get(seg.index)
+            if chosen is not None:
+                ctx.site_stats.setdefault(chosen.stats_key or chosen.site, SiteStats()).best_effort_total += 1
+                _record_choice(ctx, chosen, seg.index)
             return url, backup_url
-
-    if seg.fallback_query:
-        return await try_fallback(ctx, seg)
-
     return None, None
 
 
@@ -1480,12 +1814,10 @@ async def process_segment(ctx: Context, seg: SegmentSpec) -> tuple[int, Optional
 
 
 async def _backup_pool(
-    ctx: Context, site: str, seg: SegmentSpec, query: str,
-    apply_entity: bool, exclude_key: tuple,
+    ctx: Context, site: str, seg: SegmentSpec, variant: Variant, exclude_key: tuple,
 ) -> list[Candidate]:
     licensed = await fetch_and_filter(
-        ctx, site, seg, query=query, apply_entity=apply_entity,
-        stats_key=f"{site}_backup",
+        ctx, site, seg, variant.query, variant.name, stats_key=f"{site}_backup",
     )
     if not licensed:
         return []
@@ -1499,12 +1831,15 @@ async def _backup_pool(
     if not top:
         return []
     return await score_candidates(
-        ctx, top, query, seg_index=seg.index, stats_key=f"{site}_backup",
+        ctx, top, seg_index=seg.index, stats_key=f"{site}_backup", variant_name=variant.name,
     )
 
 
-async def _claim_first(ctx: Context, pool: list[Candidate]) -> Optional[str]:
-    for cand in sorted(pool, key=lambda c: c.similarity, reverse=True):
+async def _claim_first(
+    ctx: Context, pool: list[Candidate],
+) -> tuple[Optional[str], Optional[Candidate]]:
+    """pool уже упорядочен (select_accepted или по own_sim)."""
+    for cand in pool:
         key = (cand.site, cand.cand_id)
         async with ctx.used_files_lock:
             if key in ctx.used_files:
@@ -1512,8 +1847,8 @@ async def _claim_first(ctx: Context, pool: list[Candidate]) -> Optional[str]:
             ctx.used_files.add(key)
         url = await finalize_candidate(ctx, cand)
         if url:
-            return url
-    return None
+            return url, cand
+    return None, None
 
 
 async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
@@ -1523,9 +1858,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
         return None, None
     pkey = (primary.site, primary.cand_id)
 
-    queries: list[tuple[str, bool]] = [(seg.query, True)]
-    if seg.fallback_query and seg.fallback_query != seg.query:
-        queries.append((seg.fallback_query, False))
+    cascade = build_cascade(seg)
 
     candidate_sites = list(seg.sites) + BACKUP_EXTRA_SITES
     # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
@@ -1540,32 +1873,54 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
             ordered.append(site)
     groups = ([x for x in ordered if x != "loc"], [x for x in ordered if x == "loc"])
 
+    rejected: list[Candidate] = []  # оценённые, но не принятые: запас "лучший из найденного"
+
     # B1: поиск по другим сайтам
     for group in groups:
         if not group:
             continue
-        for q, ent in queries:
+        for variant in cascade:
             pool: list[Candidate] = []
-            for site in group:
+            for site in (x for x in variant.sites if x in group):
                 if site in ctx.exhausted_sites:
                     continue
-                scored = await _backup_pool(ctx, site, seg, q, ent, pkey)
+                scored = await _backup_pool(ctx, site, seg, variant, pkey)
                 pool.extend(scored)
-                if scored and scored[0].similarity >= SIM_ACCEPT_THRESHOLD:
+                if any(c.accepted for c in scored):
                     break
             if pool:
-                url = await _claim_first(ctx, pool)
+                url, _c = await _claim_first(ctx, select_accepted(seg, pool))
                 if url:
+                    if _c is not None:
+                        _record_choice(ctx, _c, backup=True)
                     return url, "other"
+                rejected.extend(c for c in pool if not c.accepted)
 
     # B2: тот же сайт (для LOC полностью запрещено, чтобы не создать двойной отказ)
     if primary.site not in ctx.exhausted_sites and primary.site != "loc":
-        for q, ent in queries:
-            pool = await _backup_pool(ctx, primary.site, seg, q, ent, pkey)
+        for variant in cascade:
+            if primary.site not in variant.sites:
+                continue
+            pool = await _backup_pool(ctx, primary.site, seg, variant, pkey)
             if pool:
-                url = await _claim_first(ctx, pool)
+                url, _c = await _claim_first(ctx, select_accepted(seg, pool))
                 if url:
+                    if _c is not None:
+                        _record_choice(ctx, _c, backup=True)
                     return url, "same"
+                rejected.extend(c for c in pool if not c.accepted)
+
+    # Принятых бэкапов нет: бэкап лучше иметь, чем нет - берём лучшего по own_sim.
+    if rejected:
+        url, cand = await _claim_first(ctx, best_effort_order(rejected))
+        if url and cand is not None:
+            _record_choice(ctx, cand, backup=True)
+            ctx.site_stats.setdefault(cand.stats_key or cand.site, SiteStats()).best_effort_total += 1
+            logging.info(
+                "Сегмент %s: принятых backup нет, выбран лучший без принятия: %s/%s (own_sim=%.3f).",
+                seg.index, cand.site, cand.cand_id, cand.own_sim,
+            )
+            return url, ("same" if cand.site == primary.site else "other")
     return None, None
 
 
@@ -1659,19 +2014,57 @@ def load_requests(path: str) -> list[SegmentSpec]:
     if not isinstance(data, dict) or not data:
         raise ValueError("requests.json пуст или имеет неверную структуру (ожидался объект-словарь)")
 
+    def bad(k, field, what):
+        return ValueError(f"Сегмент {k!r} в requests.json: поле {field!r} {what}")
+
     specs: list[SegmentSpec] = []
     for k, v in data.items():
         try:
             idx = int(k)
-            sites = list(v["sites"])
-            if not sites:
-                raise ValueError("пустой список sites")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Ключ сегмента {k!r} в requests.json не является номером") from e
+        if not isinstance(v, dict):
+            raise ValueError(f"Сегмент {k!r} в requests.json: ожидался объект")
+        if "query" in v or any(f not in v for f in ("scene", "query_narrow", "query_medium")):
+            raise ValueError(
+                f"Сегмент {k!r}: requests.json старого формата, "
+                "перегенерируйте его generate_queries.py"
+            )
+        strs = {}
+        for field in ("scene", "query_narrow", "query_medium"):
+            val = v[field]
+            if not isinstance(val, str) or not val.strip():
+                raise bad(k, field, "должно быть непустой строкой")
+            strs[field] = val.strip()
+        broad = v.get("query_broad")
+        if broad is not None and not isinstance(broad, str):
+            raise bad(k, "query_broad", "должно быть строкой или null")
+        broad = broad.strip() if isinstance(broad, str) else None
+        broad = broad or None
+        sites = v.get("sites")
+        if not isinstance(sites, list) or not sites or not all(isinstance(x, str) for x in sites):
+            raise bad(k, "sites", "должно быть непустым списком строк")
+        raw_type = v.get("type")
+        if not isinstance(raw_type, str):
+            raise bad(k, "type", "должно быть строкой \"image\" или \"video\"")
+        seg_type = raw_type.strip().lower()
+        if seg_type not in ("image", "video"):
+            raise bad(k, "type", f"должно быть \"image\" или \"video\", получено {raw_type!r}")
+        norm_sites = [x.strip().lower() for x in sites]
+        unknown = [x for x in norm_sites if x not in SITE_SEARCH_FUNCS]
+        if unknown:
+            logging.warning(
+                "Сегмент %s: неизвестные сайты в sites %s - они будут проигнорированы.", k, unknown,
+            )
+        try:
             specs.append(SegmentSpec(
                 index=idx,
-                sites=sites,
-                query=str(v["query"]),
-                fallback_query=v.get("fallback_query"),
-                type=str(v["type"]),
+                scene=strs["scene"],
+                sites=norm_sites,
+                query_narrow=strs["query_narrow"],
+                query_medium=strs["query_medium"],
+                query_broad=broad,
+                type=seg_type,
                 is_entity=bool(v["is_entity"]),
                 entity_keywords=list(v.get("entity_keywords") or []),
             ))
@@ -1694,10 +2087,15 @@ async def amain(args: argparse.Namespace) -> int:
         return 1
 
     logging.info("Загружено сегментов: %s", len(segments))
+    rel_top_n = effective_top_n(len(segments))
     logging.info(
-        "Пороги CLIP similarity: SIM_MIN_THRESHOLD=%.3f, SIM_ACCEPT_THRESHOLD=%.3f "
-        "(настраиваются через SEARCH_SIM_MIN_THRESHOLD / SEARCH_SIM_ACCEPT_THRESHOLD).",
-        SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD,
+        "Относительная оценка CLIP: SIM_MIN_THRESHOLD(floor)=%.3f, SIM_ACCEPT_THRESHOLD(abs)=%.3f, "
+        "REL_TOP_N=%s (%s, эффективное для %s сегментов: %s), REL_MARGIN=%.3f, FLAT_SPREAD=%.3f "
+        "(SEARCH_SIM_MIN_THRESHOLD / SEARCH_SIM_ACCEPT_THRESHOLD / SEARCH_REL_TOP_N / "
+        "SEARCH_REL_MARGIN / SEARCH_FLAT_SPREAD).",
+        SIM_MIN_THRESHOLD, SIM_ACCEPT_THRESHOLD, REL_TOP_N,
+        "задано явно" if REL_TOP_N_EXPLICIT else "потолок по умолчанию",
+        len(segments), rel_top_n, REL_MARGIN, FLAT_SPREAD,
     )
 
     pexels_key = os.environ.get("PEXELS_API_KEY", "")
@@ -1705,7 +2103,7 @@ async def amain(args: argparse.Namespace) -> int:
     if not pexels_key or not pixabay_key:
         logging.error(
             "PEXELS_API_KEY и/или PIXABAY_API_KEY не заданы - без них поиск невозможен "
-            "(в т.ч. fallback_query всегда идёт через pexels/pixabay)."
+            "(в т.ч. broad-вариант каскада всегда идёт через pixabay/pexels)."
         )
         return 1
 
@@ -1757,6 +2155,27 @@ async def amain(args: argparse.Namespace) -> int:
             },
         )
         ctx.clip = ClipScorer(CLIP_MODEL_NAME, CLIP_PRETRAINED)
+        ctx.rel_top_n = rel_top_n
+        try:
+            t0 = time.monotonic()
+            await ctx.clip.ensure_loaded()
+            t_load = time.monotonic() - t0
+            t1 = time.monotonic()
+            await ctx.clip.encode_scenes([(sg.index, sg.scene) for sg in segments])
+            logging.info(
+                "CLIP: загрузка модели %.1fs, кодирование scene (%s шт.) %.1fs.",
+                t_load, len(segments), time.monotonic() - t1,
+            )
+        except FatalConfigError:
+            raise
+        except Exception as e:
+            logging.error(
+                "Не удалось загрузить CLIP (%s / %s) или закодировать scene: %s. Проверьте "
+                "SEARCH_CLIP_MODEL / SEARCH_CLIP_PRETRAINED, доступ к интернету для первой загрузки "
+                "весов и кэш actions/cache.",
+                CLIP_MODEL_NAME, CLIP_PRETRAINED, e,
+            )
+            return 1
 
         try:
             results, backups, missing = await run_search(ctx, segments)
@@ -1766,6 +2185,9 @@ async def amain(args: argparse.Namespace) -> int:
             return 1
 
         backup_missing = await run_backup_pass(ctx, segments, results, backups)
+
+        logging.info(summarize_choices(ctx.choice_reasons, ctx.choice_own_sims, "primary"))
+        logging.info(summarize_choices(ctx.backup_reasons, ctx.backup_own_sims, "backup"))
 
         log_site_stats_summary(ctx.site_stats)
 
@@ -1799,6 +2221,156 @@ async def amain(args: argparse.Namespace) -> int:
     return 0
 
 
+def _selftest() -> int:
+    import tempfile
+
+    def mk(sites, n="wiki narrow", m="wiki medium", b="city street", **kw):
+        return SegmentSpec(index=1, scene="s", sites=sites, query_narrow=n, query_medium=m,
+                           query_broad=b, type="image", is_entity=True, entity_keywords=["x"])
+
+    def view(seg):
+        return [(v.name, v.sites) for v in build_cascade(seg)]
+
+    # архивный первый
+    assert view(mk(["wikimedia", "pexels"])) == [
+        ("narrow", ["wikimedia"]), ("medium", ["wikimedia"]), ("broad", ["pixabay", "pexels"])]
+    # сток первый
+    assert view(mk(["pexels", "wikimedia"])) == [
+        ("medium", ["pexels", "wikimedia"]), ("narrow", ["pexels", "wikimedia"]),
+        ("broad", ["pixabay", "pexels"])]
+    c = view(mk(["pexels", "pixabay"]))
+    assert [n for n, _ in c] == ["medium", "narrow", "broad"], c
+    assert c[0][1] == ["pixabay", "pexels"], c  # Pixabay перед Pexels
+    # смешанный
+    assert view(mk(["wikimedia", "loc", "pexels", "pixabay"])) == [
+        ("narrow", ["wikimedia", "loc"]), ("medium", ["wikimedia", "loc"]),
+        ("broad", ["pixabay", "pexels"])]
+    # дубли narrow == medium (регистр/пробелы)
+    c = view(mk(["wikimedia"], n="Hagia  Sophia", m="hagia sophia"))
+    assert [n for n, _ in c] == ["narrow", "broad"], c
+    # broad=None
+    assert [n for n, _ in view(mk(["wikimedia"], b=None))] == ["narrow", "medium"]
+    # broad совпал с medium, но сайты не пересекаются -> не отбрасывается
+    assert [n for n, _ in view(mk(["wikimedia"], n="a b", m="c d", b="C D"))] == [
+        "narrow", "medium", "broad"]
+    # фильтр сущностей
+    seg = mk(["wikimedia"])
+    assert entity_filter_applies(seg, "narrow", "wikimedia") is True
+    assert entity_filter_applies(seg, "medium", "loc") is True
+    assert entity_filter_applies(seg, "broad", "pixabay") is False
+    assert entity_filter_applies(seg, "medium", "pexels") is False
+    assert entity_filter_applies(seg, "broad", "wikimedia") is False
+    # неизвестные сайты
+    c = view(mk(["flickr", "pexels"]))
+    assert all("flickr" not in st for _, st in c), c
+    assert view(mk(["flickr", "wikimedia", "pexels"])) == [
+        ("narrow", ["wikimedia"]), ("medium", ["wikimedia"]), ("broad", ["pixabay", "pexels"])]
+    assert view(mk(["flickr", "foo"])) == [("broad", ["pixabay", "pexels"])]
+    # load_requests
+    good = {"1": {"scene": "s", "sites": ["Pexels"], "query_narrow": "a b c", "query_medium": "a b",
+                  "query_broad": "", "type": "video", "is_entity": False, "entity_keywords": []}}
+    old = {"1": {"sites": ["pexels"], "query": "a", "type": "image",
+                 "is_entity": False}}
+    badtype = {"2": dict(good["1"], query_medium="  ")}
+
+    def load(obj):
+        with tempfile.TemporaryDirectory() as d:
+            fp = os.path.join(d, "requests.json")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(obj, f)
+            return load_requests(fp)
+
+    specs = load(good)
+    assert specs[0].query_broad is None and specs[0].sites == ["pexels"]
+    notype = {"3": {k2: v2 for k2, v2 in good["1"].items() if k2 != "type"}}
+    gif = {"4": dict(good["1"], type="gif")}
+    assert load({"1": dict(good["1"], type="Video", sites=["flickr", "pexels"])})[0].type == "video"
+    for obj, needle in ((old, "старого формата"), (badtype, "query_medium"),
+                        (notype, "'type'"), (gif, "'type'")):
+        try:
+            load(obj)
+        except ValueError as e:
+            assert needle in str(e) and "Сегмент" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError")
+    # --- относительная оценка (без CLIP, на искусственных векторах) ---
+    import numpy as np
+    kw = dict(top_n=2, margin=0.03, min_abs=0.21, flat_spread=0.03, accept_abs=0.30)
+    # своя сцена явно лучшая -> принят по рангу
+    r = rank_decision([0.28, 0.22, 0.20, 0.15, 0.12], 0, **kw)
+    assert (r.accepted, r.rank, r.reason) == (True, 1, "rank"), r
+    assert rank_candidate([0.28, 0.22, 0.20, 0.15, 0.12], 0, **kw) == (True, 0.28, 1)
+    # чужая сцена выше на margin -> чужой, даже при ранге 2 <= top_n
+    r = rank_decision([0.24, 0.30 - 0.0001, 0.15, 0.12], 0, **kw)
+    assert (r.accepted, r.rank, r.reason) == (False, 2, "foreign"), r
+    # плоское распределение: решает абсолютный критерий
+    assert rank_decision([0.25, 0.26, 0.255, 0.25], 0, **kw).accepted is False
+    assert rank_decision([0.31, 0.305, 0.30, 0.31], 0, **kw).reason == "abs"
+    # ниже нижней страховки -> не принят
+    r = rank_decision([0.20, 0.10, 0.05], 0, **kw)
+    assert (r.accepted, r.reason) == (False, "floor"), r
+    # абсолютный критерий не блокируется "чужим"
+    assert rank_decision([0.31, 0.35, 0.34, 0.33, 0.32], 0, **kw).reason == "abs"
+    # вне топ-N и не чужой по margin -> rank_miss
+    assert rank_decision([0.22, 0.23, 0.235, 0.24, 0.245, 0.10], 0, **kw).accepted is False
+    # матрица сходств на искусственных нормализованных векторах
+    m = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0.6, 0.8, 0, 0]], dtype=np.float32)
+    v = np.array([0.6, 0.8, 0, 0], dtype=np.float32)
+    sims = compute_sims(m, v)
+    assert np.allclose(sims, [0.6, 0.8, 1.0], atol=1e-6), sims
+    # эффективное N
+    assert effective_top_n(50, 10, False) == 3
+    assert effective_top_n(126, 10, False) == 7
+    assert effective_top_n(1000, 10, False) == 10
+    assert effective_top_n(1000, 5, True) == 5
+    # кэш: один ключ кодируется один раз, в т.ч. при параллельных запросах
+    import asyncio as _a
+    calls = {"n": 0}
+
+    async def fake_encode():
+        calls["n"] += 1
+        await _a.sleep(0.01)
+        return np.ones(4, dtype=np.float32)
+
+    async def cache_test():
+        c = EmbeddingCache()
+        await _a.gather(*[c.get_or_compute(("pexels", "1"), fake_encode) for _ in range(5)])
+        await c.get_or_compute(("pexels", "1"), fake_encode)
+        assert calls["n"] == 1, calls
+        await c.get_or_compute(("pexels", "2"), fake_encode)
+        assert calls["n"] == 2 and len(c) == 2
+
+        async def none_enc():
+            calls["n"] += 1
+            return None
+        await c.get_or_compute(("x", "3"), none_enc)
+        await c.get_or_compute(("x", "3"), none_enc)
+        assert len(c) == 2  # None не кэшируется
+    _a.run(cache_test())
+    # select_accepted
+    cs = [Candidate("p", str(i), "", True, None, None, own_sim=x, similarity=x, accepted=a)
+          for i, (x, a) in enumerate([(0.25, True), (0.3, False), (0.28, True)])]
+    assert [c.cand_id for c in select_accepted(mk(["pexels"]), cs)] == ["2", "0"]
+    # best_effort_order / summarize_choices / Candidate.variant
+    mkc = lambda i, x, r: Candidate("p", str(i), "", True, None, None, own_sim=x, similarity=x, reject_reason=r)
+    order = best_effort_order([mkc(1, 0.26, "foreign"), mkc(2, 0.24, "rank_miss"), mkc(3, 0.22, "floor")])
+    assert [(c.cand_id) for c in order] == ["2", "3", "1"], order
+    assert [c.cand_id for c in best_effort_order([mkc(1, 0.2, "foreign"), mkc(2, 0.25, "foreign")])] == ["2", "1"]
+    assert best_effort_order([]) == []
+    assert "всего 0" in summarize_choices(Counter(), []) and "min" not in summarize_choices({}, [])
+    line = summarize_choices(
+        Counter({"rank": 2, "abs": 1, "best_effort_foreign": 1, "best_effort_floor": 1}),
+        [0.20, 0.30, 0.25, 0.40], "primary")
+    for part in ("всего 5", "по рангу 2", "по абсолютному порогу 1", "best-effort 2", "floor 1",
+                 "foreign 1", "min 0.200", "median 0.275", "max 0.400"):
+        assert part in line, (part, line)
+    c0 = mkc(9, 0.3, "rank")
+    assert c0.variant is None and dc_replace(c0, variant="narrow").variant == "narrow"
+    assert dc_replace(dc_replace(c0, variant="broad"), own_sim=0.1).variant == "broad"
+    print("selftest OK")
+    return 0
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -1814,7 +2386,10 @@ def main() -> int:
         "--backup-missing-output",
         default=os.environ.get("SEARCH_BACKUP_MISSING_OUTPUT", DEFAULT_BACKUP_MISSING_OUTPUT),
     )
+    parser.add_argument("--selftest", action="store_true", help="тесты чистых функций без сети")
     args = parser.parse_args()
+    if args.selftest:
+        return _selftest()
 
     try:
         return asyncio.run(amain(args))
