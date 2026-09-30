@@ -21,6 +21,14 @@ response_schema).
     GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
                            (по умолчанию 60; в SDK передаётся в миллисекундах)
 
+Формат requests.json:
+    Словарь "номер сегмента" (строка) -> запись с полями: scene (одно английское предложение
+    о том, что видно в кадре), sites (список источников в порядке приоритета), query_narrow,
+    query_medium, query_broad (строка или null), type ("image"/"video"), is_entity (bool),
+    entity_keywords (список строк). Старых полей query и fallback_query в записи НЕТ.
+    Записи перед сохранением проходят _normalize_entry (детерминированная починка без
+    повторных вызовов Gemini).
+
 Возвращаемые коды:
     0 - requests.json успешно записан целиком
     1 - структурная ошибка (битый SRT, невалидный запрос/schema, ключ) - НЕ связана
@@ -52,6 +60,7 @@ import random
 import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -85,6 +94,11 @@ MAX_RATE_LIMIT_SLEEP_SECONDS = 90
 # в UTC зависит от сезона/DST, поэтому берём консервативные 20 часов).
 EXHAUSTED_MODEL_TTL_HOURS = 20
 CHECKPOINT_SUFFIX = ".checkpoint.json"
+# Версия формата записи сегмента (набор полей ответа модели). Пишется в чекпоинт; при
+# несовпадении старый чекпоинт игнорируется, чтобы записи разных схем не смешались в
+# одном requests.json. ПОВЫШАТЬ при любом изменении полей SEGMENT_ENTRY_SCHEMA.
+# 1 - query/fallback_query; 2 - scene + query_narrow/medium/broad.
+SCHEMA_VERSION = 2
 # Таймаут HTTP-запроса к Gemini (сек). В google-genai HttpOptions.timeout задаётся в
 # МИЛЛИСЕКУНДАХ, поэтому при создании клиента переводим секунды в мс.
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
@@ -92,6 +106,35 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 60
 PREFLIGHT_MAX_ATTEMPTS = 3
 PREFLIGHT_BACKOFF_BASE_SECONDS = 2
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
+# Слова-наполнители, которые безусловно вырезаются из запросов (см. _normalize_entry).
+# video/stock/historic/vintage сюда НЕ входят: они допустимы, если часть предмета
+# ("stock market", "video game", "vintage car"). Фразы идут раньше одиночных слов.
+FORBIDDEN_QUERY_PHRASES = [
+    "stock footage", "stock photos", "stock photo", "stock images", "stock image",
+    "b-roll", "broll", "cinematic", "footage", "HD", "4K",
+]
+# Пробел во фразе матчится и как дефис ("stock-photo"); границы слов - чтобы не задеть,
+# например, "hd" внутри другого слова.
+FORBIDDEN_QUERY_RE = re.compile(
+    r"\b(?:"
+    + "|".join(r"[\s-]+".join(re.escape(w) for w in p.split()) for p in FORBIDDEN_QUERY_PHRASES)
+    + r")\b",
+    re.IGNORECASE,
+)
+# Чистка краёв запроса после вырезания наполнителей (см. _strip_forbidden): остаются
+# висящие предлоги/союзы и знаки препинания ("footage of crowd" -> "of crowd").
+# Наборы для начала и конца РАЗНЫЕ: артикли the/a/an в начале не трогаем, они бывают
+# частью названий ("The Hague", "The Beatles"), а в конце висящий артикль - всегда мусор.
+EDGE_STRIP_CHARS = ",;:.-" + " \t\r\n"
+LEADING_STOP_WORDS = frozenset({"of", "in", "on", "at", "with", "for", "and", "to"})
+TRAILING_STOP_WORDS = LEADING_STOP_WORDS | {"the", "a", "an"}
+# Обязательные ключи записи ответа модели (после извлечения segment_index).
+REQUIRED_ENTRY_KEYS = [
+    "scene", "sites", "query_narrow", "query_medium", "query_broad",
+    "type", "is_entity", "entity_keywords",
+]
+# Потолок отдельных warning нормализации за весь запуск, дальше - только итоговые счётчики.
+MAX_NORMALIZE_WARNINGS = 20
 
 SYSTEM_INSTRUCTION = """\
 You generate search-query instructions for stock/archival video and photo sourcing for a video's \
@@ -105,58 +148,65 @@ the remaining fields defined by the schema. The order of objects in the array do
 
 FIELD RULES:
 
-1. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
+1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Write it \
+BEFORE the queries and derive all three queries from it. For abstract phrases, pick concrete \
+objects/places that belong to the topic instead of emotions (e.g. "economy" -> a factory, a cargo \
+port, banknotes). Do NOT invent details that are not in the segment's text (no extra people, moods, weather, \
+time of day, or settings the text does not mention).
+
+2. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
 "pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources.
    - Use sites = ["wikimedia", "loc"] when the segment is about a specific named real person, a \
 specific real historical event with a date/place, a specific historical document, artifact, or \
 building. Add "nasa" first only when the scene is explicitly about space, astronomy, or a NASA \
 mission.
    - Use sites = ["pexels", "pixabay"] when the segment is a generic, modern, or abstract scene \
-with no tie to a specific real person, event, or place (b-roll: an office, nature, a city street, \
-an emotion, an everyday action, a UI/screen-recording style moment).
+with no tie to a specific real person, event, or place (for example an office, nature, a city \
+street, an everyday action, a UI/screen-recording style moment).
    - When genuinely unsure, include both, real/archival sources first.
 
-2. query - the primary search query, ALWAYS in English, tailored to the FIRST site in "sites" - \
-length and style depend on which site that is:
-   - For wikimedia/loc: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
+3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene, from \
+most specific to most general. They are tried in this order, so each must be a realistic search \
+phrase on its own. The style depends on the FIRST site in "sites":
+   - If the first site is an archive (wikimedia / loc / nasa):
+     * query_narrow: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
 caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
-named event, optionally with a year appended (e.g. "Topkapi Palace", "Mehmed VI 1918", "Siege of \
-Vienna 1683"). Do NOT add descriptive or stylistic words such as "archive", "historical photo", \
-"vintage", "portrait of", "photograph of", "illustration of", "interior" - MediaWiki (wikimedia) and \
-LOC search match literal file titles/captions, which are short and factual; real captions almost \
-never contain these words, so adding them only dilutes the match instead of narrowing it. \
-BAD -> GOOD: "Villa Magnolia San Remo interior 1926 archive" -> "Villa Magnolia San Remo 1926"; \
-"Prince Ertugrul Ottoman prince historical photo" -> "Ertuğrul Osman" (or the exact name given in \
-the segment). If a place or person's real name genuinely needs more than 4 words, that's fine - the \
-limit is about cutting stylistic padding, not truncating a proper noun.
-   - For nasa: exact proper nouns, mission/object names, and dates, as concise as the name requires.
-   - For pexels/pixabay: 5-10 words of ordinary stock-footage phrasing describing the visual action \
-or mood, not proper nouns.
-
-3. fallback_query - a more general English query for pexels/pixabay, used ONLY as a fallback if the \
-primary search (on the sites listed in "sites") fails entirely. Fill this in for the VAST MAJORITY \
-of segments, INCLUDING segments whose primary sites are already ["pexels", "pixabay"] (give a \
-broader/simpler rephrasing of "query" in that case) AND segments whose primary sites are \
-wikimedia/loc/nasa (give an ordinary stock-footage phrasing of the same visual scene, the way you \
-would for a pexels/pixabay "query" - see rule 2). Every segment that depicts SOME visible scene, \
-person, place, action, or mood has a plausible generic stock equivalent and should get one here. \
-Use null ONLY for segments with no visual scene to fall back to at all - e.g. silence, a black \
+named event, plus a year appended when the segment gives one (e.g. "Topkapi Palace", "Mehmed VI \
+1918", "Siege of Vienna 1683"). If a real name genuinely needs more than 4 words, that's fine - the \
+limit is about cutting padding, not truncating a proper noun. For nasa: exact mission/object names \
+and dates, as concise as the name requires.
+     * query_medium: ONLY the name OR ONLY the place, WITHOUT a year (e.g. "Mehmed VI", "Vienna").
+     * query_broad: an ordinary plain-language phrasing of the same visual scene for \
+pexels/pixabay, 2-4 words, no proper nouns (e.g. "old harbor", "wooden desk").
+     MediaWiki (wikimedia) and LOC search match literal file titles/captions, which are short and \
+factual, so descriptive or stylistic padding only dilutes the match. BAD -> GOOD: "Villa Magnolia \
+San Remo interior 1926 archive" -> "Villa Magnolia San Remo 1926"; "Prince Ertugrul Ottoman prince \
+historical photo" -> "Ertuğrul Osman" (or the exact name given in the segment).
+   - If the first site is stock (pexels / pixabay):
+     * query_medium: 2-4 words, main object + context (e.g. "winding mountain road").
+     * query_narrow: slightly more specific than medium, 4-6 words (e.g. "winding mountain road \
+with pines").
+     * query_broad: 1-2 words, the general image (e.g. "mountains").
+   - query_broad = null ONLY for segments with no visual scene at all - e.g. silence, a black \
 screen, a title/credits card with no depicted content, or on-screen text with nothing else \
-happening. When in doubt, fill it in rather than returning null.
+happening. When in doubt, fill it in rather than returning null. query_narrow and query_medium are \
+never null.
 
 4. type - "image" or "video", whichever fits the described scene better (a static portrait, \
-document, or map -> "image"; a dynamic action or general b-roll -> "video").
+document, or map -> "image"; a dynamic action or a generic/modern/abstract scene -> "video").
 
-5. is_entity - true ONLY if the segment is about ONE OR MORE SPECIFIC, NAMEABLE real-world \
-entities that a database text search could match against: a specific person's name (e.g. "Mehmed \
-VI", "Peter the Great"), a specific place name (e.g. "Topkapi Palace", "Vienna"), or a specific \
-dated historical event (e.g. "Siege of Vienna 1683"). Set is_entity = false for anything broader or \
-more abstract, even if it sounds historical or important: general religions, ideologies, \
-nationalities, empires-as-a-whole-concept, professions, emotions, or generic historical themes (for \
-example "Islam", "the Ottoman dynasty" used generically, "war", "monarchy", "tradition") are NOT \
-entities - they cannot be verified by a text-metadata match the way a specific proper name can, so \
-they must get is_entity = false and an empty entity_keywords list, even if sites still points to \
-wikimedia/loc for the visual style of the scene.
+5. is_entity - true when the segment text names ONE OR MORE SPECIFIC, NAMEABLE real-world entities \
+that a database text search could match against: a specific person (e.g. "Mehmed VI", "Peter the \
+Great"), a specific place - city, country, sea, region, building (e.g. "Vienna", "Persian Gulf", \
+"Istanbul", "Topkapi Palace") - or a specific historical event (e.g. "Siege of Vienna 1683"). If \
+such a name is present, is_entity MUST be true, regardless of how ordinary or generic the resulting \
+frame looks (a plain city view, a coastline, or a street is still an entity scene when the text \
+names the city or coast) and regardless of which sites you chose. Set is_entity = false only when \
+the text names nothing specific: general religions, ideologies, nationalities, empires-as-a-whole-\
+concept, professions, titles without a name, emotions, or generic historical themes (for example \
+"Islam", "the Ottoman dynasty" used generically, "a caliph", "war", "monarchy", "tradition") - these \
+cannot be verified by a text-metadata match, so they get is_entity = false and an empty \
+entity_keywords list.
 
 6. entity_keywords - only populated when is_entity = true. Give 2-4 spelling variants (English AND \
 Russian) of ALL the specific named entities mentioned in the segment - if the segment names several \
@@ -164,11 +214,20 @@ distinct people/places/events, merge all of their variants into this single list
 picking only the most important one. Empty list [] when is_entity = false.
 
 GENERAL RULES:
-- Never include "creative commons", "free", or "no copyright" in query - these are not effective \
+- Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
+words.
+- NEVER use these filler words in any query: b-roll, cinematic, footage, HD, 4K, and the phrases \
+"stock footage", "stock photo", "stock image". The words video, stock, historic, vintage are also \
+banned as filler (style padding added to a query), but ALLOWED when they are part of the depicted \
+subject itself (e.g. "stock market", "video game", "video call", "vintage car", "historic \
+building").
+- NEVER use mood adjectives (sad, empty, mysterious, dramatic, lonely, gloomy, etc.) in a query \
+unless that exact mood is stated in the segment's text.
+- Never include "creative commons", "free", or "no copyright" in a query - these are not effective \
 search terms; licensing is filtered separately downstream, not through the query text.
 - Do not invent scene details beyond what the segment's text actually says.
-- Always include silent/empty segments in the output with a neutral query inferred from \
-neighboring segments' context - never skip a segment number.
+- Always include silent/empty segments in the output with a neutral scene and queries inferred from \
+neighboring segments' context (query_broad may be null for them) - never skip a segment number.
 
 You may also be given extra CONTEXT - neighboring segments before and/or after the main list, under \
 separate "Context BEFORE" / "Context AFTER" headers. Use this context only to understand the \
@@ -177,43 +236,86 @@ NOT create response objects for these context segment numbers. Only answer for t
 under "Segments that need a response", each marked as "### Segment N".
 """
 
+# Порядок полей важен: scene идёт первым после segment_index, чтобы модель сначала
+# описывала кадр, а уже потом строила по нему запросы. Gemini не гарантирует порядок по
+# порядку ключей в dict, поэтому он задан явно через property_ordering.
 SEGMENT_ENTRY_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
         "segment_index": types.Schema(type=types.Type.INTEGER),
+        "scene": types.Schema(
+            type=types.Type.STRING,
+            description=(
+                "ONE English sentence: what the viewer should see in the frame. For abstract "
+                "phrases use concrete objects/places of the topic (economy -> factory, cargo "
+                "port, banknotes), not emotions. Do not invent details that are not in the segment text."
+            ),
+        ),
         "sites": types.Schema(
             type=types.Type.ARRAY,
             items=types.Schema(type=types.Type.STRING, enum=SITES),
         ),
-        "query": types.Schema(
+        "query_narrow": types.Schema(
             type=types.Type.STRING,
             description=(
-                "Primary query, English. For wikimedia/loc: SHORT, 2-4 words, only exact proper "
-                "nouns/place/event + optional year, NO stylistic words like 'archive'/'vintage'/"
-                "'historical photo'. For pexels/pixabay: 5-10 words, ordinary stock-footage phrasing."
+                "Most specific query, English. First site archive (wikimedia/loc/nasa): exact "
+                "name/place/event + year, 2-4 words (a proper name that needs more than 4 words "
+                "is fine - the limit is about padding, not truncating a name). First site stock "
+                "(pexels/pixabay): 4-6 words, a bit more specific than query_medium. No filler "
+                "b-roll/cinematic/footage/HD/4K or 'stock footage/photo/image'; video/stock/"
+                "historic/vintage only when part of the subject itself (e.g. 'stock market'); no "
+                "mood adjectives absent from the text."
             ),
         ),
-        "fallback_query": types.Schema(
+        "query_medium": types.Schema(
+            type=types.Type.STRING,
+            description=(
+                "Medium query, English. First site archive: ONLY the name or ONLY the place, no "
+                "year. First site stock: 2-4 words, object + context. Same filler-word rules as "
+                "query_narrow."
+            ),
+        ),
+        "query_broad": types.Schema(
             type=types.Type.STRING,
             nullable=True,
             description=(
-                "Generic pexels/pixabay fallback query. Fill this in for the vast majority of "
-                "segments (including ones already using pexels/pixabay as primary sites). Use null "
-                "ONLY when the segment has no visible scene at all (silence, black screen, "
-                "title/credits card, bare on-screen text)."
+                "Broadest query, English. First site archive: ordinary stock phrasing of the same "
+                "scene for pexels/pixabay, 2-4 words. First site stock: 1-2 words, the general "
+                "image. null ONLY when the segment has no visible scene at all (silence, black "
+                "screen, title/credits card, bare on-screen text)."
             ),
         ),
         "type": types.Schema(type=types.Type.STRING, enum=["image", "video"]),
-        "is_entity": types.Schema(type=types.Type.BOOLEAN),
+        "is_entity": types.Schema(
+            type=types.Type.BOOLEAN,
+            description=(
+                "true if the text names a specific real person, place (city, country, sea, "
+                "building) or event - even if the frame looks generic. false only for abstract or "
+                "generic topics with no specific name."
+            ),
+        ),
         "entity_keywords": types.Schema(
             type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)
         ),
     },
+    property_ordering=[
+        "segment_index",
+        "scene",
+        "sites",
+        "query_narrow",
+        "query_medium",
+        "query_broad",
+        "type",
+        "is_entity",
+        "entity_keywords",
+    ],
     required=[
         "segment_index",
+        "scene",
         "sites",
-        "query",
-        "fallback_query",
+        "query_narrow",
+        "query_medium",
+        "query_broad",
         "type",
         "is_entity",
         "entity_keywords",
@@ -422,6 +524,157 @@ def _hours_since(iso_ts: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Нормализация записей ответа модели
+# ---------------------------------------------------------------------------
+
+# Остаток лимита отдельных warning (список - чтобы менять без global).
+_normalize_warn_left = [MAX_NORMALIZE_WARNINGS]
+
+
+def _warn_limited(msg: str, *args) -> None:
+    """Warning с общим потолком на запуск, чтобы на 1000+ сегментов лог не заспамился."""
+    if _normalize_warn_left[0] <= 0:
+        return
+    _normalize_warn_left[0] -= 1
+    logging.warning(msg, *args)
+    if _normalize_warn_left[0] == 0:
+        logging.warning(
+            "Достигнут лимит отдельных предупреждений нормализации (%s) - дальше только "
+            "итоговые счётчики по батчам.", MAX_NORMALIZE_WARNINGS,
+        )
+
+
+def _trim_query_edges(text: str) -> str:
+    """Чистит края запроса после вырезания наполнителей.
+
+    В цикле до стабильного результата: обрезает пробелы и ",;:.-" по краям, убирает
+    первое слово из LEADING_STOP_WORDS и последнее из TRAILING_STOP_WORDS (без учёта
+    регистра). Регистр остальных слов не меняется; результат может стать пустым."""
+    # внутри запроса: пробел перед запятой и двойные запятые ("crowd , , street")
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",(?:\s*,)+", ",", text)
+    while True:
+        prev = text
+        text = text.strip(EDGE_STRIP_CHARS)
+        words = text.split(" ")
+        if words and words[0].lower() in LEADING_STOP_WORDS:
+            words = words[1:]
+        if words and words[-1].lower() in TRAILING_STOP_WORDS:
+            words = words[:-1]
+        text = " ".join(words)
+        if text == prev:
+            return text
+
+
+def _strip_forbidden(text: str) -> str:
+    """Вырезает слова-наполнители, схлопывает пробелы, обрезает края.
+
+    Если что-то реально вырезано, дополнительно чистит края от висящих предлогов и
+    знаков препинания ("footage of crowd" -> "crowd"). Если ничего не вырезано,
+    запрос не трогается, кроме схлопывания пробелов (чтобы не портить нормальные)."""
+    cut, n_cut = FORBIDDEN_QUERY_RE.subn(" ", text)
+    cut = re.sub(r"\s+", " ", cut).strip()
+    return _trim_query_edges(cut) if n_cut else cut
+
+
+def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None) -> dict:
+    """Детерминированно проверяет и чинит запись сегмента (без новых вызовов Gemini).
+
+    Структурно битая запись (не объект / нет обязательных ключей) - ValueError, чтобы
+    сработали ретраи батча. Остальное чинится на месте; причины правок копятся в stats
+    (Counter): по каждой причине - число записей, плюс "_entries" - сколько записей
+    исправлено хотя бы раз. Замечания без правки идут в stats с префиксом "note:"."""
+    if not isinstance(item, dict):
+        raise ValueError(f"Сегмент {seg_index}: запись ответа не объект: {str(item)[:200]}")
+    missing = [k for k in REQUIRED_ENTRY_KEYS if k not in item]
+    if missing:
+        raise ValueError(f"Сегмент {seg_index}: в записи нет обязательных полей {missing}")
+
+    fixes: list[str] = []
+    notes: list[str] = []
+
+    # sites: только значения из SITES, без дублей, порядок сохраняется
+    raw_sites = item["sites"] if isinstance(item["sites"], list) else []
+    sites: list[str] = []
+    for site in raw_sites:
+        if site in SITES and site not in sites:
+            sites.append(site)
+    if not sites:
+        sites = ["pexels", "pixabay"]
+        fixes.append("sites_empty")
+        _warn_limited("Сегмент %s: пустой/невалидный sites %r - поставил %s.", seg_index, item["sites"], sites)
+    elif sites != raw_sites:
+        fixes.append("sites_cleaned")
+
+    # запросы: вырезаем слова-наполнители
+    scene = item["scene"].strip() if isinstance(item["scene"], str) else ""
+    queries: dict[str, Optional[str]] = {}
+    for key in ("query_narrow", "query_medium", "query_broad"):
+        raw = item[key]
+        if raw is None and key == "query_broad":
+            queries[key] = None
+            continue
+        if not isinstance(raw, str):
+            raw = ""
+        if FORBIDDEN_QUERY_RE.search(raw):
+            fixes.append("forbidden_words_removed")
+        queries[key] = _strip_forbidden(raw)
+
+    narrow, medium, broad = queries["query_narrow"], queries["query_medium"], queries["query_broad"]
+    if not narrow or not medium:
+        if not narrow and not medium:
+            narrow = medium = _strip_forbidden(scene)
+            if not narrow:
+                raise ValueError(f"Сегмент {seg_index}: пусты query_narrow, query_medium и scene")
+        elif not narrow:
+            narrow = medium
+        else:
+            medium = narrow
+        fixes.append("narrow_medium_empty")
+        _warn_limited("Сегмент %s: пустой query_narrow/query_medium - подставил замену.", seg_index)
+    if broad is not None and not broad:
+        broad = None
+        fixes.append("broad_emptied")
+
+    # is_entity / entity_keywords
+    is_entity = item["is_entity"]
+    keywords = item["entity_keywords"] if isinstance(item["entity_keywords"], list) else []
+    if is_entity is False:
+        if keywords:
+            keywords = []
+            fixes.append("keywords_cleared")
+    elif is_entity is True and not keywords:
+        notes.append("note:entity_without_keywords")
+        _warn_limited("Сегмент %s: is_entity=true, но entity_keywords пуст - оставляю как есть.", seg_index)
+
+    # type
+    seg_type = item["type"]
+    if seg_type not in ("image", "video"):
+        _warn_limited("Сегмент %s: недопустимый type %r - поставил 'video'.", seg_index, seg_type)
+        seg_type = "video"
+        fixes.append("type_fixed")
+
+    if stats is not None:
+        for reason in set(fixes):
+            stats[reason] += 1
+        for note in set(notes):
+            stats[note] += 1
+        if fixes:
+            stats["_entries"] += 1
+
+    return {
+        "scene": scene,
+        "sites": sites,
+        "query_narrow": narrow,
+        "query_medium": medium,
+        "query_broad": broad,
+        "type": seg_type,
+        "is_entity": is_entity,
+        "entity_keywords": keywords,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Вызов Gemini с ретраями
 # ---------------------------------------------------------------------------
 
@@ -457,11 +710,12 @@ def call_gemini_batch(
                 )
 
             result: dict[str, dict] = {}
+            fix_stats: Counter = Counter()
             for item in parsed:
-                if "segment_index" not in item:
+                if not isinstance(item, dict) or "segment_index" not in item:
                     raise ValueError(f"В элементе ответа нет segment_index: {item}")
                 idx = item.pop("segment_index")
-                result[str(idx)] = item
+                result[str(idx)] = _normalize_entry(item, idx, fix_stats)
 
             got_indices = {int(k) for k in result.keys()}
             missing = expected_indices - got_indices
@@ -472,6 +726,13 @@ def call_gemini_batch(
                     f"{batch[-1].index}]: не хватает {sorted(missing)}, лишние {sorted(extra)}"
                 )
 
+            fixed_entries = fix_stats.pop("_entries", 0)
+            logging.info(
+                "Нормализация батча [%s..%s]: исправлено записей %s из %s%s",
+                batch[0].index, batch[-1].index, fixed_entries, len(result),
+                ("; причины: " + ", ".join(f"{k}={v}" for k, v in sorted(fix_stats.items())))
+                if fix_stats else "",
+            )
             return result
 
         except genai_errors.ClientError as e:
@@ -661,8 +922,18 @@ def load_checkpoint(path: str, expected_hash: str) -> tuple[dict[str, dict], dic
             f"Если это ожидаемо (SRT намеренно изменился) - удалите файл чекпоинта вручную "
             f"и запустите заново. Продолжать с несовпадающим чекпоинтом небезопасно."
         )
-    results = data.get("results", {})
     exhausted = data.get("exhausted_models", {})
+    if data.get("schema_version") != SCHEMA_VERSION:
+        # Формат записей изменился (или чекпоинт старый, без версии) - результаты из него
+        # не подходят. Отбрасываем их, но помеченные исчерпанные модели сохраняем: квота
+        # от формата не зависит.
+        logging.warning(
+            "Чекпоинт %s сохранён со схемой v%s, текущая схема v%s - старые результаты "
+            "(%s сегментов) игнорирую, генерация начнётся с нуля.",
+            path, data.get("schema_version", "?"), SCHEMA_VERSION, len(data.get("results", {})),
+        )
+        return {}, exhausted
+    results = data.get("results", {})
     if results:
         logging.info("Найден чекпоинт: %s сегментов уже обработано ранее.", len(results))
     return results, exhausted
@@ -672,7 +943,12 @@ def save_checkpoint(path: str, src_hash: str, results: dict, exhausted_models: d
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(
-            {"source_hash": src_hash, "results": results, "exhausted_models": exhausted_models},
+            {
+                "source_hash": src_hash,
+                "schema_version": SCHEMA_VERSION,
+                "results": results,
+                "exhausted_models": exhausted_models,
+            },
             f, ensure_ascii=False,
         )
     os.replace(tmp_path, path)  # атомарная замена, не оставляет битый файл при сбое на записи
