@@ -114,6 +114,7 @@ jobs:
       run: >
         python search.py --input requests.json --links-output links.txt
         --backup-links-output backup_links.txt --missing-output missing.txt
+        --backup-missing-output backup_missing.txt
 
     - name: Show missing segments summary
       run: |
@@ -127,7 +128,7 @@ jobs:
           echo "Нет пропущенных сегментов." >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    - name: Upload links.txt / backup_links.txt / missing.txt as artifact
+    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt as artifact
       uses: actions/upload-artifact@v4
       with:
         name: search-links
@@ -135,6 +136,7 @@ jobs:
           links.txt
           backup_links.txt
           missing.txt
+          backup_missing.txt
         retention-days: 14
 
   # -------------------------------------------------------------------------
