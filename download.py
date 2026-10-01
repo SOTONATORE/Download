@@ -494,6 +494,54 @@ def parse_links(raw_text: str) -> dict:
     return {int(num_str): url for num_str, url in matches}
 
 
+class ProgressCounter:
+    """Счётчик прогресса скачивания для ОДНОГО вызова parse_and_download_links
+    (создаётся внутри неё, глобального состояния не держит). Общий для пула и
+    LOC-цикла: один Lock, печать и инкремент под ним - порядок строк совпадает
+    с порядком счётчика, проценты не убывают."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.done = 0
+        self.ok = 0
+        self.failed = 0
+        self._lock = threading.Lock()
+
+    def run(self, number: int, primary_url: str, backup_url: str = "") -> None:
+        """Обёртка вокруг download_number_with_backup: счётчик растёт в finally,
+        исключение пробрасывается как раньше."""
+        raised = True
+        try:
+            download_number_with_backup(number, primary_url, backup_url)
+            raised = False
+        finally:
+            prefix = f"{number}: "
+            with _failed_items_lock:
+                is_failed = raised or any(item.startswith(prefix) for item in FAILED_ITEMS)
+            with self._lock:
+                self.done += 1
+                if is_failed:
+                    self.failed += 1
+                else:
+                    self.ok += 1
+                status = "ОШИБКА" if is_failed else "скачан"
+                print(
+                    f"[ПРОГРЕСС] {self.done}/{self.total} "
+                    f"({self.done * 100 / self.total:.0f}%) номер {number}: {status}",
+                    flush=True,
+                )
+
+    def print_summary(self) -> None:
+        if self.total == 0:
+            return
+        with self._lock:
+            print(
+                f"[ПРОГРЕСС] Готово: скачано {self.ok}, с ошибкой {self.failed} "
+                f"из {self.total}",
+                flush=True,
+            )
+
+
 def parse_and_download_links(env_name: str, backup_env_name: str = "") -> None:
     raw_text = os.environ.get(env_name, "")
     if not raw_text:
@@ -551,18 +599,22 @@ def parse_and_download_links(env_name: str, backup_env_name: str = "") -> None:
         f"ОДНОВРЕМЕННО с пулом (не после него)."
     )
 
+    progress = ProgressCounter(len(other_items) + len(loc_items))
+
     with ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as executor:
         futures = [
-            executor.submit(download_number_with_backup, number, url, backup_links.get(number, ""))
+            executor.submit(progress.run, number, url, backup_links.get(number, ""))
             for number, url in other_items
         ]
 
         for number, url in loc_items:
-            download_number_with_backup(number, url, backup_links.get(number, ""))
+            progress.run(number, url, backup_links.get(number, ""))
 
         for future in as_completed(futures):
             future.result()  # пробрасываем неожиданные исключения - download_number_with_backup
                               # сам ловит и логирует всё ожидаемое через fail()
+
+    progress.print_summary()
 
 
 def extract_id(url: str) -> str:
