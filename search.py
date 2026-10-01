@@ -254,6 +254,21 @@ CLIP, где точность превью не критична, важна т�
  - Ключи статистики: narrow/medium - имя сайта, broad - "<сайт>_broad", backup - "<сайт>_backup".
  - Backup использует тот же каскад; сайты варианта пересекаются с допустимыми для backup.
  - Проверка без сети: python search.py --selftest
+
+Слабое/сильное принятие, вариант name, потолки кандидатов, блок-лист Wikimedia:
+ - Сильное принятие (is_strong): причина "abs" либо (ранг <= 2 и own_sim >= STRONG_OWN_SIM,
+   env SEARCH_STRONG_OWN_SIM, умолч. 0.24). Если принятые есть, но все слабые, каскад идёт дальше;
+   после последнего варианта клеймится лучший по own_sim из всех слабых (в логе "принят, слабый").
+   Ранний выход по сайтам внутри варианта - только при сильном принятом.
+ - Вариант "name" (только для is_entity и архивного первого сайта): после medium, перед broad;
+   запрос - первый латинский элемент entity_keywords; сайты и фильтр сущностей как у medium;
+   ключ статистики - имя сайта; дедупликация прежняя. Имена вариантов: narrow, medium, name, broad.
+ - Потолки кандидатов под CLIP: SEARCH_CANDIDATES_STOCK (15; pexels, pixabay) и
+   SEARCH_CANDIDATES_ARCHIVE (8; wikimedia, loc, nasa). Явно заданный SEARCH_CANDIDATES_PER_SITE
+   перекрывает оба для всех сайтов (candidates_cap).
+ - Блок-лист Wikimedia (WIKIMEDIA_BLOCKLIST_WORDS; env SEARCH_WIKIMEDIA_BLOCKLIST - слова через
+   запятую, пустая строка отключает): кандидат отсеивается до CLIP, если в его тексте есть слово
+   блок-листа, которого нет в scene (wikimedia_blocked); счётчик - blocked_total в сводке по воронке.
 """
 
 from __future__ import annotations
@@ -341,7 +356,27 @@ REL_MARGIN = float(os.environ.get("SEARCH_REL_MARGIN", 0.03))
 FLAT_SPREAD = float(os.environ.get("SEARCH_FLAT_SPREAD", 0.03))
 SCENE_ENCODE_BATCH = 64
 
-CANDIDATES_PER_SITE = int(os.environ.get("SEARCH_CANDIDATES_PER_SITE", 5))
+# Потолки кандидатов под CLIP: сток дешёвый (превью без лимитеров), архивы дороги (лимитеры превью).
+# SEARCH_CANDIDATES_PER_SITE, если задан явно, перекрывает оба потолка для всех сайтов.
+_CAND_PER_SITE_ENV = os.environ.get("SEARCH_CANDIDATES_PER_SITE")
+CANDIDATES_OVERRIDE: Optional[int] = int(_CAND_PER_SITE_ENV) if _CAND_PER_SITE_ENV else None
+CANDIDATES_STOCK = int(os.environ.get("SEARCH_CANDIDATES_STOCK", 15))
+CANDIDATES_ARCHIVE = int(os.environ.get("SEARCH_CANDIDATES_ARCHIVE", 8))
+
+# "Сильное" принятие: см. is_strong.
+STRONG_OWN_SIM = float(os.environ.get("SEARCH_STRONG_OWN_SIM", 0.24))
+
+# Блок-лист типов контента Wikimedia (марки, карты, сканы...). Пустая строка в env - отключить.
+_DEFAULT_WM_BLOCKLIST = (
+    "stamp", "stamps", "coin", "coins", "banknote", "banknotes", "map", "maps", "poster",
+    "logo", "flag", "flags", "coat of arms", "diagram", "newspaper", "book cover",
+    "title page", "page",
+)
+_WM_BLOCKLIST_ENV = os.environ.get("SEARCH_WIKIMEDIA_BLOCKLIST")
+WIKIMEDIA_BLOCKLIST_WORDS: tuple = (
+    _DEFAULT_WM_BLOCKLIST if _WM_BLOCKLIST_ENV is None
+    else tuple(w.strip().lower() for w in _WM_BLOCKLIST_ENV.split(",") if w.strip())
+)
 
 CLIP_MODEL_NAME = os.environ.get("SEARCH_CLIP_MODEL", "ViT-B-32-quickgelu")
 CLIP_PRETRAINED = os.environ.get("SEARCH_CLIP_PRETRAINED", "openai")
@@ -449,6 +484,33 @@ def wikimedia_license_ok(license_short_name: str) -> bool:
     if _WM_PD_RE.match(v):
         return True
     return any(v.startswith(p) for p in _WM_FREE_PREFIXES)
+
+
+def _wm_word_in(word: str, text: str) -> bool:
+    """Слово - по границам слов; многословная фраза - по вхождению."""
+    if " " in word:
+        return word in text
+    return re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text) is not None
+
+
+def wikimedia_blocked(candidate_text: str, scene: str, blocklist) -> bool:
+    """True, если в тексте кандидата есть слово блок-листа, которого нет в сцене сегмента
+    (в сцене учитываются форма единственного/множественного числа)."""
+    if not blocklist:
+        return False
+    text = (candidate_text or "").lower()
+    sc = (scene or "").lower()
+    for w in blocklist:
+        w = (w or "").strip().lower()
+        if not w or not _wm_word_in(w, text):
+            continue
+        forms = {w, w + "s"}
+        if w.endswith("s"):
+            forms.add(w[:-1])
+        if any(_wm_word_in(f, sc) for f in forms):
+            continue
+        return True
+    return False
 
 
 def nasa_license_ok(item_data: dict) -> bool:
@@ -561,6 +623,7 @@ class SiteStats:
     accepted_total: int = 0
     rejected_foreign_total: int = 0
     best_effort_total: int = 0
+    blocked_total: int = 0
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -593,12 +656,13 @@ def log_site_stats_summary(site_stats: dict) -> None:
     for key in sorted(site_stats.keys()):
         s = site_stats[key]
         logging.info(
-            "%-18s %6d %7d %8d %9d %8d %9d %8d %8d %8d %7.3f %7.3f %8d %7d %8d",
+            "%-18s %6d %7d %8d %9d %8d %9d %8d %8d %8d %7.3f %7.3f %8d %7d %8d" "%s",
             key, s.segments_attempted, s.raw_total, s.license_ok_total,
             s.keyword_ok_total, s.sent_to_clip_total, s.preview_missing_total,
             s.clip_scored_total, s.clip_passed_total, s.clip_accept_total,
             s.avg_score, s.best_score,
             s.accepted_total, s.rejected_foreign_total, s.best_effort_total,
+            f"  блок-лист={s.blocked_total}" if s.blocked_total else "",
         )
     logging.info(
         "Как читать: raw=0 -> сайт вообще ничего не вернул по запросу (сеть/сам API/лимит). "
@@ -694,7 +758,7 @@ class Candidate:
     accepted: bool = False
     reject_reason: str = ""
     stats_key: Optional[str] = None
-    variant: Optional[str] = None  # narrow | medium | broad
+    variant: Optional[str] = None  # narrow | medium | name | broad
 
 
 @dataclass
@@ -1596,9 +1660,24 @@ ARCHIVE_SITES = ("wikimedia", "loc", "nasa")
 STOCK_SITES = ("pexels", "pixabay")
 
 
+def candidates_cap(
+    site: str, override: Optional[int] = CANDIDATES_OVERRIDE,
+    stock: int = CANDIDATES_STOCK, archive: int = CANDIDATES_ARCHIVE,
+) -> int:
+    """Потолок кандидатов с сайта под CLIP. override (SEARCH_CANDIDATES_PER_SITE) - для всех."""
+    if override:
+        return override
+    return stock if site in STOCK_SITES else archive
+
+
+def is_strong(c: Candidate, strong_own_sim: float = STRONG_OWN_SIM) -> bool:
+    """Сильное принятие: по абсолютному порогу либо (ранг <= 2 и own_sim >= STRONG_OWN_SIM)."""
+    return c.reject_reason == "abs" or (c.rank <= 2 and c.own_sim >= strong_own_sim)
+
+
 @dataclass
 class Variant:
-    name: str  # "narrow" | "medium" | "broad"
+    name: str  # "narrow" | "medium" | "name" | "broad"
     query: str
     sites: list[str]
     apply_entity_filter: bool
@@ -1621,9 +1700,21 @@ def _pixabay_first(sites: list[str]) -> list[str]:
 
 
 def entity_filter_applies(seg: SegmentSpec, variant_name: str, site: str) -> bool:
-    """Фильтр сущностей: только narrow/medium и только архивные сайты.
+    """Фильтр сущностей: только narrow/medium/name и только архивные сайты.
     (seg.is_entity и skip_keyword_filter проверяются в fetch_and_filter.)"""
-    return variant_name in ("narrow", "medium") and site in ARCHIVE_SITES
+    return variant_name in ("narrow", "medium", "name") and site in ARCHIVE_SITES
+
+
+def _is_latin_text(t: str) -> bool:
+    letters = [ch for ch in t if ch.isalpha()]
+    return bool(letters) and all(unicodedata.name(ch, "").startswith("LATIN") for ch in letters)
+
+
+def _entity_name_query(seg: SegmentSpec) -> Optional[str]:
+    for kw in seg.entity_keywords or []:
+        if kw and kw.strip() and _is_latin_text(kw.strip()):
+            return kw.strip()
+    return None
 
 
 def build_cascade(seg: SegmentSpec) -> list[Variant]:
@@ -1632,13 +1723,14 @@ def build_cascade(seg: SegmentSpec) -> list[Variant]:
     archive_first = bool(seg_sites) and seg_sites[0] in ARCHIVE_SITES
 
     if archive_first:
-        order = ("narrow", "medium", "broad")
+        order = ("narrow", "medium", "name", "broad") if seg.is_entity else ("narrow", "medium", "broad")
         narrow_medium_sites = [x for x in seg_sites if x in ARCHIVE_SITES]
     else:
         order = ("medium", "narrow", "broad")
         narrow_medium_sites = seg_sites
     queries = {
         "narrow": seg.query_narrow, "medium": seg.query_medium, "broad": seg.query_broad,
+        "name": _entity_name_query(seg) if seg.is_entity else None,
     }
     broad_sites = _pixabay_first(list(STOCK_SITES))
 
@@ -1692,6 +1784,20 @@ async def fetch_and_filter(
         )
         return []
 
+    if site == "wikimedia" and WIKIMEDIA_BLOCKLIST_WORDS:
+        before_bl = len(licensed)
+        licensed = [
+            c for c in licensed
+            if not wikimedia_blocked(c.text, seg.scene, WIKIMEDIA_BLOCKLIST_WORDS)
+        ]
+        stats.blocked_total += before_bl - len(licensed)
+        if not licensed:
+            logging.info(
+                "Сегмент %s/%s [%s]: %s кандидатов прошли лицензию, но 0 после блок-листа типов контента.",
+                seg.index, site, variant_name, before_bl,
+            )
+            return []
+
     apply_entity = entity_filter_applies(seg, variant_name, site)
     skip_keyword_filter = site == "pexels" and seg.type == "video"
     if seg.is_entity and apply_entity and not skip_keyword_filter:
@@ -1731,7 +1837,8 @@ def _record_choice(ctx: Context, cand: Candidate, seg_index: Optional[int] = Non
     logging.info(
         "Сегмент %s: выбран %s/%s [%s] own_sim=%.3f rank=%s причина=%s (%s)",
         seg_index, cand.site, cand.cand_id, cand.variant, cand.own_sim, cand.rank,
-        cand.reject_reason, "принят" if cand.accepted else "best-effort",
+        cand.reject_reason,
+        ("принят" if is_strong(cand) else "принят, слабый") if cand.accepted else "best-effort",
     )
 
 
@@ -1768,7 +1875,7 @@ async def run_variant(ctx: Context, seg: SegmentSpec, variant: Variant) -> list[
         licensed = await fetch_and_filter(ctx, site, seg, variant.query, variant.name, stats_key=key)
         if not licensed:
             continue
-        top = licensed[:CANDIDATES_PER_SITE]
+        top = licensed[:candidates_cap(site)]
         scored = await score_candidates(
             ctx, top, seg_index=seg.index, stats_key=key, variant_name=variant.name,
         )
@@ -1776,24 +1883,39 @@ async def run_variant(ctx: Context, seg: SegmentSpec, variant: Variant) -> list[
             continue
         pool.extend(scored)
         pool.sort(key=lambda c: c.own_sim, reverse=True)
-        if any(c.accepted for c in scored):
+        if any(c.accepted and is_strong(c) for c in scored):
             break
     return pool
 
 
 async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
     rejected_pool: list[Candidate] = []
+    weak_pool: list[Candidate] = []  # принятые только "впритык": каскад продолжается
     for variant in build_cascade(seg):
         scored = await run_variant(ctx, seg, variant)
         accepted = select_accepted(seg, scored)
-        if accepted:
-            url, backup_url = await try_claim_pool(ctx, accepted, seg.index)
+        if any(is_strong(c) for c in accepted):
+            # Сильные первыми (основной выбор), остальные принятые - в хвост (под backup).
+            ordered = [c for c in accepted if is_strong(c)] + [c for c in accepted if not is_strong(c)]
+            url, backup_url = await try_claim_pool(ctx, ordered, seg.index)
             if url:
                 chosen = ctx.primary_cands.get(seg.index)
                 if chosen is not None:
                     _record_choice(ctx, chosen, seg.index)
                 return url, backup_url
+        elif accepted:
+            weak_pool.extend(dc_replace(c) for c in accepted)
         rejected_pool.extend(c for c in scored if not c.accepted)
+
+    # Каскад кончился, сильных нет: лучший из всех слабых принятых по own_sim.
+    if weak_pool:
+        weak_pool.sort(key=lambda c: c.own_sim, reverse=True)
+        url, backup_url = await try_claim_pool(ctx, weak_pool, seg.index)
+        if url:
+            chosen = ctx.primary_cands.get(seg.index)
+            if chosen is not None:
+                _record_choice(ctx, chosen, seg.index)
+            return url, backup_url
 
     # Никто не принят (или принятых не удалось заклеймить): берём лучшего по own_sim.
     if rejected_pool:
@@ -1827,7 +1949,7 @@ async def _backup_pool(
             if (c.site, c.cand_id) not in ctx.used_files
             and (c.site, c.cand_id) != exclude_key
         ]
-    top = fresh[:CANDIDATES_PER_SITE]
+    top = fresh[:candidates_cap(site)]
     if not top:
         return []
     return await score_candidates(
@@ -2098,6 +2220,14 @@ async def amain(args: argparse.Namespace) -> int:
         len(segments), rel_top_n, REL_MARGIN, FLAT_SPREAD,
     )
 
+    logging.info(
+        "Параметры поиска: STRONG_OWN_SIM=%.3f (SEARCH_STRONG_OWN_SIM); потолки кандидатов: "
+        "сток=%s, архивы=%s, общий override=%s (SEARCH_CANDIDATES_STOCK / SEARCH_CANDIDATES_ARCHIVE / "
+        "SEARCH_CANDIDATES_PER_SITE); блок-лист Wikimedia: %s слов (SEARCH_WIKIMEDIA_BLOCKLIST).",
+        STRONG_OWN_SIM, CANDIDATES_STOCK, CANDIDATES_ARCHIVE,
+        CANDIDATES_OVERRIDE if CANDIDATES_OVERRIDE else "нет", len(WIKIMEDIA_BLOCKLIST_WORDS),
+    )
+
     pexels_key = os.environ.get("PEXELS_API_KEY", "")
     pixabay_key = os.environ.get("PIXABAY_API_KEY", "")
     if not pexels_key or not pixabay_key:
@@ -2226,7 +2356,8 @@ def _selftest() -> int:
 
     def mk(sites, n="wiki narrow", m="wiki medium", b="city street", **kw):
         return SegmentSpec(index=1, scene="s", sites=sites, query_narrow=n, query_medium=m,
-                           query_broad=b, type="image", is_entity=True, entity_keywords=["x"])
+                           query_broad=b, type="image", is_entity=True,
+                           entity_keywords=kw.get("ek", []))
 
     def view(seg):
         return [(v.name, v.sites) for v in build_cascade(seg)]
@@ -2367,6 +2498,42 @@ def _selftest() -> int:
     c0 = mkc(9, 0.3, "rank")
     assert c0.variant is None and dc_replace(c0, variant="narrow").variant == "narrow"
     assert dc_replace(dc_replace(c0, variant="broad"), own_sim=0.1).variant == "broad"
+    # is_strong
+    sc = lambda r, x, why: Candidate("p", "1", "", True, None, None, own_sim=x, similarity=x,
+                                     rank=r, accepted=True, reject_reason=why)
+    assert is_strong(sc(5, 0.30, "abs")) is True
+    assert is_strong(sc(1, 0.25, "rank")) is True
+    assert is_strong(sc(4, 0.214, "rank")) is False
+    assert is_strong(sc(2, 0.23, "rank")) is False
+    # вариант name
+    def mk2(sites, ek, ent=True, n="Mehmed VI Constantinople 1920", m="Mehmed VI sultan", b="ottoman palace"):
+        return SegmentSpec(index=1, scene="s", sites=sites, query_narrow=n, query_medium=m,
+                           query_broad=b, type="image", is_entity=ent, entity_keywords=ek)
+    c = view(mk2(["wikimedia", "loc"], ["Mehmed VI", "Мехмед VI"]))
+    assert [n for n, _ in c] == ["narrow", "medium", "name", "broad"], c
+    assert c[2] == ("name", ["wikimedia", "loc"]), c
+    assert [v.query for v in build_cascade(mk2(["wikimedia", "loc"], ["Mehmed VI", "Мехмед VI"]))][2] == "Mehmed VI"
+    assert [v.query for v in build_cascade(mk2(["wikimedia"], ["Мехмед", "Treaty of Sevres"]))][2] == "Treaty of Sevres"
+    assert all(n != "name" for n, _ in view(mk2(["wikimedia"], ["Мехмед VI"])))
+    assert all(n != "name" for n, _ in view(mk2(["wikimedia"], [])))
+    assert all(n != "name" for n, _ in view(mk2(["wikimedia"], ["Mehmed VI"], ent=False)))
+    assert all(n != "name" for n, _ in view(mk2(["pexels", "wikimedia"], ["Mehmed VI"])))
+    assert all(n != "name" for n, _ in view(mk2(["wikimedia"], ["Mehmed VI"], m="mehmed  vi")))
+    assert entity_filter_applies(mk2(["wikimedia"], ["x"]), "name", "wikimedia") is True
+    assert entity_filter_applies(mk2(["wikimedia"], ["x"]), "name", "pexels") is False
+    # candidates_cap (без os.environ)
+    for st in ("pexels", "pixabay"):
+        assert candidates_cap(st, None, 15, 8) == 15
+    for st in ("wikimedia", "loc", "nasa"):
+        assert candidates_cap(st, None, 15, 8) == 8
+    assert candidates_cap("pexels", 5, 15, 8) == 5 and candidates_cap("loc", 5, 15, 8) == 5
+    # wikimedia_blocked
+    bl = WIKIMEDIA_BLOCKLIST_WORDS or _DEFAULT_WM_BLOCKLIST
+    assert wikimedia_blocked("Stamps of Russia 2013", "Sultan leaves the palace", bl) is True
+    assert wikimedia_blocked("Stamps of Russia 2013", "a postage stamp is shown", bl) is False
+    assert wikimedia_blocked("Stamps of Russia 2013", "Sultan", ()) is False
+    assert wikimedia_blocked("Mapleton street 1920", "street", bl) is False
+    assert wikimedia_blocked("Old book cover scan", "a book", bl) is True
     print("selftest OK")
     return 0
 
