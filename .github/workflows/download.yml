@@ -119,10 +119,12 @@ jobs:
         SEARCH_CLIP_MODEL: ${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32-quickgelu' }}
         SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
         # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
-        # SEARCH_SIM_MIN_THRESHOLD: "0.21"
+        # Значения ниже включены по итогам прогона на 126 сегментах
+        SEARCH_SIM_MIN_THRESHOLD: "0.22"
         # SEARCH_SIM_ACCEPT_THRESHOLD: "0.30"
         # SEARCH_LOC_MIN_INTERVAL_SECONDS: "3.2"
-        # SEARCH_LOC_TIMEOUT_SECONDS: "30"
+        SEARCH_LOC_TIMEOUT_SECONDS: "15"
+        SEARCH_LOC_MAX_RETRIES: "2"
         # SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS: "0.35"
         # SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY: "3"
       run: >
