@@ -24,8 +24,8 @@ response_schema).
 Формат requests.json:
     Словарь "номер сегмента" (строка) -> запись с полями: scene (одно английское предложение
     о том, что видно в кадре), sites (список источников в порядке приоритета), query_narrow,
-    query_medium, query_broad (строка или null), type ("image"/"video"), is_entity (bool),
-    entity_keywords (список строк). Старых полей query и fallback_query в записи НЕТ.
+    query_medium, query_broad (строка или null), type ("image"/"video"), is_entity (bool, выводится
+    как bool(entity_keywords)), entity_keywords (список строк, английское написание первым). Старых полей query и fallback_query в записи НЕТ.
     Записи перед сохранением проходят _normalize_entry (детерминированная починка без
     повторных вызовов Gemini).
 
@@ -171,16 +171,17 @@ phrase on its own. The style depends on the FIRST site in "sites":
    - If the first site is an archive (wikimedia / loc / nasa):
      * query_narrow: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
 caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
-named event, plus a year appended when the segment gives one (e.g. "Topkapi Palace", "Mehmed VI \
-1918", "Siege of Vienna 1683"). If a real name genuinely needs more than 4 words, that's fine - the \
-limit is about cutting padding, not truncating a proper noun. For nasa: exact mission/object names \
+named event, optionally with a short refinement of the object (e.g. "Topkapi Palace gate", "Mehmed \
+VI", "Siege of Vienna"). Do NOT append a year unless it is named in the segment's text (see the YEARS \
+rule). If a real name genuinely needs more than 4 words, that's fine - the limit is about cutting \
+padding, not truncating a proper noun. For nasa: exact mission/object names \
 and dates, as concise as the name requires.
      * query_medium: ONLY the name OR ONLY the place, WITHOUT a year (e.g. "Mehmed VI", "Vienna").
      * query_broad: an ordinary plain-language phrasing of the same visual scene for \
 pexels/pixabay, 2-4 words, no proper nouns (e.g. "old harbor", "wooden desk").
      MediaWiki (wikimedia) and LOC search match literal file titles/captions, which are short and \
 factual, so descriptive or stylistic padding only dilutes the match. BAD -> GOOD: "Villa Magnolia \
-San Remo interior 1926 archive" -> "Villa Magnolia San Remo 1926"; "Prince Ertugrul Ottoman prince \
+San Remo interior 1926 archive" -> "Villa Magnolia San Remo"; "Prince Ertugrul Ottoman prince \
 historical photo" -> "Ertuğrul Osman" (or the exact name given in the segment).
    - If the first site is stock (pexels / pixabay):
      * query_medium: 2-4 words, main object + context (e.g. "winding mountain road").
@@ -195,23 +196,19 @@ never null.
 4. type - "image" or "video", whichever fits the described scene better (a static portrait, \
 document, or map -> "image"; a dynamic action or a generic/modern/abstract scene -> "video").
 
-5. is_entity - true when the segment text names ONE OR MORE SPECIFIC, NAMEABLE real-world entities \
-that a database text search could match against: a specific person (e.g. "Mehmed VI", "Peter the \
-Great"), a specific place - city, country, sea, region, building (e.g. "Vienna", "Persian Gulf", \
-"Istanbul", "Topkapi Palace") - or a specific historical event (e.g. "Siege of Vienna 1683"). If \
-such a name is present, is_entity MUST be true, regardless of how ordinary or generic the resulting \
-frame looks (a plain city view, a coastline, or a street is still an entity scene when the text \
-names the city or coast) and regardless of which sites you chose. Set is_entity = false only when \
-the text names nothing specific: general religions, ideologies, nationalities, empires-as-a-whole-\
-concept, professions, titles without a name, emotions, or generic historical themes (for example \
-"Islam", "the Ottoman dynasty" used generically, "a caliph", "war", "monarchy", "tradition") - these \
-cannot be verified by a text-metadata match, so they get is_entity = false and an empty \
-entity_keywords list.
+5. entity_keywords - the MAIN entity field. List EVERY proper name (person, place, event, \
+organization, treaty, building) that appears in your query_narrow or query_medium, each in TWO \
+variants: the English spelling and the Russian spelling, as consecutive pairs, for example \
+["Vienna", "Вена", "Topkapi Palace", "Дворец Топкапы"]. The ENGLISH spelling of the most important \
+name MUST be the FIRST element of the list (the search script uses it as the lookup query). Keep \
+each name as one element (do not split "Topkapi Palace" into two words). Generic things - religions, \
+ideologies, nationalities, professions, titles without a name, emotions, general themes ("Islam", \
+"a caliph", "war", "monarchy") are NOT proper names. An EMPTY list [] means "no proper names in \
+the queries". Never leave it empty when a query contains a proper name, even if the frame looks \
+generic (a plain city view or a coastline of a named city is still an entity scene).
 
-6. entity_keywords - only populated when is_entity = true. Give 2-4 spelling variants (English AND \
-Russian) of ALL the specific named entities mentioned in the segment - if the segment names several \
-distinct people/places/events, merge all of their variants into this single list rather than \
-picking only the most important one. Empty list [] when is_entity = false.
+6. is_entity - true when entity_keywords is non-empty, false when it is empty. Fill it consistently \
+with entity_keywords (the script recomputes it from that list anyway).
 
 GENERAL RULES:
 - Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
@@ -223,6 +220,11 @@ subject itself (e.g. "stock market", "video game", "video call", "vintage car", 
 building").
 - NEVER use mood adjectives (sad, empty, mysterious, dramatic, lonely, gloomy, etc.) in a query \
 unless that exact mood is stated in the segment's text.
+- YEARS: put a year (also a decade like "1920s" or a range like "1914-1918") in a query ONLY if that \
+exact year is named in the segment's text; otherwise the query contains no year at all. Never guess or \
+add a year from your own knowledge. Example: the text says "In 1918 Mehmed VI became sultan" -> the \
+year comes from the text, so "Mehmed VI 1918" is allowed; the text says only "Mehmed VI became \
+sultan" -> use "Mehmed VI". Archive sites match every word, so an invented year returns nothing.
 - Never include "creative commons", "free", or "no copyright" in a query - these are not effective \
 search terms; licensing is filtered separately downstream, not through the query text.
 - Do not invent scene details beyond what the segment's text actually says.
@@ -259,7 +261,8 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             type=types.Type.STRING,
             description=(
                 "Most specific query, English. First site archive (wikimedia/loc/nasa): exact "
-                "name/place/event + year, 2-4 words (a proper name that needs more than 4 words "
+                "name/place/event (+ short object refinement), 2-4 words, with NO year unless the "
+                "year is named in the segment text (a proper name that needs more than 4 words "
                 "is fine - the limit is about padding, not truncating a name). First site stock "
                 "(pexels/pixabay): 4-6 words, a bit more specific than query_medium. No filler "
                 "b-roll/cinematic/footage/HD/4K or 'stock footage/photo/image'; video/stock/"
@@ -289,13 +292,18 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
         "is_entity": types.Schema(
             type=types.Type.BOOLEAN,
             description=(
-                "true if the text names a specific real person, place (city, country, sea, "
-                "building) or event - even if the frame looks generic. false only for abstract or "
-                "generic topics with no specific name."
+                "true if entity_keywords is non-empty, false if it is empty (the script "
+                "recomputes this from entity_keywords)."
             ),
         ),
         "entity_keywords": types.Schema(
-            type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING)
+            type=types.Type.ARRAY,
+            items=types.Schema(type=types.Type.STRING),
+            description=(
+                "ALL proper names (person, place, event, organization, treaty, building) from "
+                "query_narrow/query_medium, each as English spelling then Russian spelling. "
+                "English spelling of the main name FIRST. Empty list = no proper names."
+            ),
         ),
     },
     property_ordering=[
@@ -577,13 +585,206 @@ def _strip_forbidden(text: str) -> str:
     return _trim_query_edges(cut) if n_cut else cut
 
 
-def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None) -> dict:
+# "historic" как наполнитель ("historic palace" -> "palace"). Одиночное слово, не входит в
+# FORBIDDEN_QUERY_PHRASES: "historic district" допустимо, если эта пара слов есть в тексте
+# сегмента (часть названия). "historical" не затрагивается (граница слова).
+_HISTORIC_RE = re.compile(r"\bhistoric\b(?:[\s-]+(?P<next>[^\W\d_]+))?", re.IGNORECASE)
+
+
+def strip_historic_filler(query: str, segment_text: Optional[str] = None) -> tuple[str, int]:
+    """Вырезает слово "historic" из запроса, кроме случая, когда пара "historic <слово>"
+    дословно есть в тексте сегмента (без учёта регистра). segment_text=None - режутся все.
+    Возвращает (запрос, сколько вхождений вырезано)."""
+    if not query:
+        return query, 0
+    text_l = segment_text.lower() if segment_text else ""
+    n_cut = 0
+
+    def _repl(m: re.Match) -> str:
+        nonlocal n_cut
+        nxt = m.group("next")
+        if nxt and re.search(r"\bhistoric[\s-]+" + re.escape(nxt.lower()) + r"\b", text_l):
+            return m.group(0)
+        n_cut += 1
+        return (nxt or "") if nxt else " "
+
+    out = _HISTORIC_RE.sub(_repl, query)
+    if not n_cut:
+        return query, 0
+    out = re.sub(r"\s+", " ", out).strip()
+    return _trim_query_edges(out), n_cut
+
+
+# Годы в запросах: Wikimedia/LOC требуют все слова сразу, выдуманный год даёт пустую выдачу.
+# Год допустим, только если он назван в тексте (субтитрах) этого же сегмента.
+_YEAR_PAT = r"(?:1[0-9]{3}|20[0-9]{2})"
+# Вводные слова перед годом режутся вместе с ним (\"early 1900s\", \"circa 1900\", \"in 1920\").
+_YEAR_LEAD_WORDS = (
+    "circa", "ca", "around", "about", "early", "late", "mid",
+    "in", "from", "since", "until", "by", "before", "after", "during", "between",
+)
+_YEAR_RE = re.compile(
+    r"(?P<pre>(?:\b(?:" + "|".join(_YEAR_LEAD_WORDS) + r")\.?\s+)?)"
+    r"(?:"
+    # диапазон: 1914-1918 / 1914 - 1918 / 1914-18
+    r"(?P<ra>\b" + _YEAR_PAT + r")(?:\s*[-\u2013\u2014]\s*(?P<rb>" + _YEAR_PAT + r")\b|[-\u2013\u2014](?P<rc>\d{2})\b)"
+    r"|(?P<dec>\b" + _YEAR_PAT + r")s\b"        # десятилетие: 1920s
+    r"|(?P<yr>\b" + _YEAR_PAT + r"\b)"          # одиночный год
+    r")",
+    re.IGNORECASE,
+)
+_TEXT_YEAR_RE = re.compile(r"(?<!\d)" + _YEAR_PAT + r"(?!\d)")
+
+
+def strip_unsupported_years(query: str, segment_text: Optional[str] = None) -> tuple[str, int]:
+    """Вырезает из запроса годы (1900), десятилетия (1920s) и диапазоны (1914-1918),
+    которых нет в тексте сегмента. Возвращает (очищенный_запрос, сколько_вырезано).
+
+    Год остаётся, только если это же число есть в segment_text. Диапазон остаётся, только
+    если в тексте есть оба конца; иначе режется целиком. Десятилетие 1920s проверяется по
+    числу 1920. segment_text=None (или пустой) - в тексте лет нет, режутся все. Один
+    вырезанный год/десятилетие/диапазон считается за 1. Если что-то вырезано, края чистит
+    _trim_query_edges (\"Treaty of Sevres in 1920\" -> \"Treaty of Sevres\"); если нет -
+    запрос возвращается как есть."""
+    known = set(_TEXT_YEAR_RE.findall(segment_text)) if segment_text else set()
+    n_cut = 0
+
+    def _repl(m: re.Match) -> str:
+        nonlocal n_cut
+        if m.group("ra"):
+            end = m.group("rb") or (m.group("ra")[:2] + m.group("rc"))
+            keep = m.group("ra") in known and end in known
+        else:
+            keep = (m.group("dec") or m.group("yr")) in known
+        if keep:
+            return m.group(0)
+        n_cut += 1
+        return " "
+
+    cut = _YEAR_RE.sub(_repl, query)
+    if not n_cut:
+        return query, 0
+    cut = re.sub(r"\(\s*\)|\[\s*\]", " ", cut)  # опустевшие скобки: \"Vienna (1900)\"
+    cut = re.sub(r"\s+", " ", cut).strip()
+    return _trim_query_edges(cut), n_cut
+
+
+# Общие слова, которые сами по себе не имя собственное (fallback_entity_keywords).
+_GENERIC_CAPS_WORDS = frozenset({
+    "the", "a", "an", "old", "new", "city", "royal", "ancient", "modern", "great", "grand",
+    "national", "imperial", "historic", "historical", "medieval", "classic",
+    "central", "main", "public", "traditional", "european", "asian", "inner", "outer",
+})
+
+
+# Маленькие служебные слова, которые не рвут имя в середине ("Treaty of Sevres").
+_NAME_CONNECTORS = frozenset({"of", "de", "von", "van", "the"})
+
+# Архивные источники: для них fallback работает и при is_entity=false от Gemini.
+_ARCHIVE_SITES = frozenset({"wikimedia", "loc", "nasa"})
+
+
+def fallback_entity_keywords(query: str) -> list[str]:
+    """Имена собственные из query_medium без сети (когда Gemini сказал is_entity=true, или
+    is_entity=false при архивном первом сайте, но дал пустой entity_keywords).
+
+    Берутся слова с заглавной буквы, кроме общих (The, Old, City, Royal...); соседние такие
+    слова склеиваются в одно имя (\"Topkapi Palace\"). Строчные of / de / von / van / the между
+    заглавными словами не рвут цепочку (\"Treaty of Sevres\"); в начале и в конце цепочки они
+    не включаются. Общее слово или знак препинания разрывают цепочку. Запрос делится на части
+    по запятой и точке с запятой. Первое слово части заглавное по правилам письма, поэтому
+    цепочка, начинающаяся с него, считается именем, только если в ней 2+ слов или она
+    занимает всю часть (\"Vienna\", \"Mehmed VI\", \"Vienna, Istanbul\"); одиночное первое слово
+    части, где есть другие слова (\"Vienna street, Istanbul\"), пропускается.
+    Нет имён - пустой список."""
+    tokens = (query or "").split()
+    n_tok = len(tokens)
+    # Границы частей запроса: часть закрывает токен с запятой / точкой с запятой на конце
+    # (отдельный токен-разделитель закрывает предыдущую часть).
+    part_last = [False] * n_tok
+    for i, tok in enumerate(tokens):
+        core = tok.rstrip(",;:.")
+        if "," in tok[len(core):] or ";" in tok[len(core):]:
+            part_last[i] = True
+            if not core and i > 0:
+                part_last[i - 1] = True
+    part_last = [last or i == n_tok - 1 for i, last in enumerate(part_last)]
+    names: list[str] = []
+    run: list[str] = []
+    pending: list[str] = []  # служебные слова после run, ещё не подтверждённые заглавным словом
+    run_start = -1
+    run_end = -1
+
+    def _flush() -> None:
+        nonlocal run, pending, run_start, run_end
+        if run:
+            at_part_start = run_start == 0 or part_last[run_start - 1]
+            whole_part = at_part_start and part_last[run_end]
+            skip = at_part_start and len(run) < 2 and not whole_part
+            if not skip:
+                name = " ".join(run)
+                if name.casefold() not in {n.casefold() for n in names}:
+                    names.append(name)
+        run, pending, run_start, run_end = [], [], -1, -1
+
+    for i, tok in enumerate(tokens):
+        word = tok.strip(EDGE_STRIP_CHARS + "()[]\"'")
+        ends_run = tok != tok.rstrip(",;:.")  # знак препинания после слова закрывает цепочку
+        is_cap = (
+            bool(word) and word[0].isupper() and word.casefold() not in _GENERIC_CAPS_WORDS
+        )
+        if is_cap:
+            if not run:
+                run_start = i
+            run.extend(pending)
+            pending = []
+            run.append(word)
+            run_end = i
+            if ends_run:
+                _flush()
+        elif run and word in _NAME_CONNECTORS and not ends_run:
+            pending.append(word)
+        else:
+            _flush()
+    _flush()
+    return names
+
+
+def _clean_keywords(raw) -> list[str]:
+    """strip, без нестрок/пустых/дублей (дубли - без учёта регистра, остаётся первое
+    написание); регистр самих элементов сохраняется."""
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for kw in raw:
+        if not isinstance(kw, str):
+            continue
+        kw = kw.strip()
+        if kw and kw.casefold() not in seen:
+            seen.add(kw.casefold())
+            out.append(kw)
+    return out
+
+
+def _normalize_entry(
+    item: dict, seg_index: int, stats: Optional[Counter] = None,
+    segment_text: Optional[str] = None,
+) -> dict:
     """Детерминированно проверяет и чинит запись сегмента (без новых вызовов Gemini).
 
     Структурно битая запись (не объект / нет обязательных ключей) - ValueError, чтобы
     сработали ретраи батча. Остальное чинится на месте; причины правок копятся в stats
     (Counter): по каждой причине - число записей, плюс "_entries" - сколько записей
-    исправлено хотя бы раз. Замечания без правки идут в stats с префиксом "note:"."""
+    исправлено хотя бы раз. Замечания без правки идут в stats с префиксом "note:".
+
+    segment_text - субтитры этого сегмента: годы в запросах остаются, только если названы
+    в нём (None - вырезаются все). Число вырезанных годов копится в stats["_years_cut"].
+
+    is_entity всегда выводится: bool(entity_keywords после чистки); значение от Gemini
+    игнорируется. Пустой список при is_entity=true от Gemini -> fallback_entity_keywords
+    по query_medium; то же при is_entity=false, если первый сайт архивный
+    (wikimedia / loc / nasa), для стоковых сегментов - как раньше. Случаи, когда итог != ответу Gemini, копятся в stats["_entity_derived"]."""
     if not isinstance(item, dict):
         raise ValueError(f"Сегмент {seg_index}: запись ответа не объект: {str(item)[:200]}")
     missing = [k for k in REQUIRED_ENTRY_KEYS if k not in item]
@@ -609,6 +810,7 @@ def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None
     # запросы: вырезаем слова-наполнители
     scene = item["scene"].strip() if isinstance(item["scene"], str) else ""
     queries: dict[str, Optional[str]] = {}
+    years_cut = 0
     for key in ("query_narrow", "query_medium", "query_broad"):
         raw = item[key]
         if raw is None and key == "query_broad":
@@ -618,12 +820,24 @@ def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None
             raw = ""
         if FORBIDDEN_QUERY_RE.search(raw):
             fixes.append("forbidden_words_removed")
-        queries[key] = _strip_forbidden(raw)
+        cleaned, n_hist = strip_historic_filler(_strip_forbidden(raw), segment_text)
+        if n_hist:
+            fixes.append("historic_removed")
+        cleaned, n_years = strip_unsupported_years(cleaned, segment_text)
+        if n_years:
+            years_cut += n_years
+            fixes.append("unsupported_years_removed")
+        queries[key] = cleaned
 
     narrow, medium, broad = queries["query_narrow"], queries["query_medium"], queries["query_broad"]
     if not narrow or not medium:
         if not narrow and not medium:
-            narrow = medium = _strip_forbidden(scene)
+            narrow, n_hist = strip_historic_filler(_strip_forbidden(scene), segment_text)
+            if n_hist:
+                fixes.append("historic_removed")
+            narrow, n_years = strip_unsupported_years(narrow, segment_text)
+            medium = narrow
+            years_cut += n_years
             if not narrow:
                 raise ValueError(f"Сегмент {seg_index}: пусты query_narrow, query_medium и scene")
         elif not narrow:
@@ -636,16 +850,18 @@ def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None
         broad = None
         fixes.append("broad_emptied")
 
-    # is_entity / entity_keywords
-    is_entity = item["is_entity"]
-    keywords = item["entity_keywords"] if isinstance(item["entity_keywords"], list) else []
-    if is_entity is False:
+    # entity_keywords - главное поле; is_entity выводится из него (ответ Gemini игнорируется)
+    gemini_is_entity = item["is_entity"]
+    raw_keywords = item["entity_keywords"]
+    keywords = _clean_keywords(raw_keywords)
+    if keywords != raw_keywords:
+        fixes.append("keywords_cleaned")
+    if not keywords and (gemini_is_entity is True or sites[0] in _ARCHIVE_SITES):
+        keywords = fallback_entity_keywords(medium)
         if keywords:
-            keywords = []
-            fixes.append("keywords_cleared")
-    elif is_entity is True and not keywords:
-        notes.append("note:entity_without_keywords")
-        _warn_limited("Сегмент %s: is_entity=true, но entity_keywords пуст - оставляю как есть.", seg_index)
+            fixes.append("keywords_fallback")
+    is_entity = bool(keywords)
+    entity_derived = is_entity is not gemini_is_entity
 
     # type
     seg_type = item["type"]
@@ -661,6 +877,10 @@ def _normalize_entry(item: dict, seg_index: int, stats: Optional[Counter] = None
             stats[note] += 1
         if fixes:
             stats["_entries"] += 1
+        if years_cut:
+            stats["_years_cut"] += years_cut
+        if entity_derived:
+            stats["_entity_derived"] += 1
 
     return {
         "scene": scene,
@@ -711,11 +931,12 @@ def call_gemini_batch(
 
             result: dict[str, dict] = {}
             fix_stats: Counter = Counter()
+            seg_texts = {s.index: s.text for s in batch}
             for item in parsed:
                 if not isinstance(item, dict) or "segment_index" not in item:
                     raise ValueError(f"В элементе ответа нет segment_index: {item}")
                 idx = item.pop("segment_index")
-                result[str(idx)] = _normalize_entry(item, idx, fix_stats)
+                result[str(idx)] = _normalize_entry(item, idx, fix_stats, seg_texts.get(idx))
 
             got_indices = {int(k) for k in result.keys()}
             missing = expected_indices - got_indices
@@ -727,9 +948,13 @@ def call_gemini_batch(
                 )
 
             fixed_entries = fix_stats.pop("_entries", 0)
+            years_cut_total = fix_stats.pop("_years_cut", 0)
+            entity_derived_total = fix_stats.pop("_entity_derived", 0)
             logging.info(
-                "Нормализация батча [%s..%s]: исправлено записей %s из %s%s",
-                batch[0].index, batch[-1].index, fixed_entries, len(result),
+                "Нормализация батча [%s..%s]: исправлено записей %s из %s, вырезано годов: %s, "
+                "is_entity выведен из ключевых слов: %s%s",
+                batch[0].index, batch[-1].index, fixed_entries, len(result), years_cut_total,
+                entity_derived_total,
                 ("; причины: " + ", ".join(f"{k}={v}" for k, v in sorted(fix_stats.items())))
                 if fix_stats else "",
             )
@@ -989,8 +1214,188 @@ def make_batches(
     return batches
 
 
+def run_self_tests() -> int:
+    """Self-tests без сети: python generate_queries.py --self-test. 0 - все прошли, 1 - есть падения."""
+    failures: list[str] = []
+
+    def check(name: str, got, want) -> None:
+        ok = got == want
+        print(("PASS" if ok else "FAIL") + f"  {name}" + ("" if ok else f"\n      got:  {got!r}\n      want: {want!r}"))
+        if not ok:
+            failures.append(name)
+
+    def entry(**over) -> dict:
+        base = {
+            "scene": "A view.", "sites": ["pexels"], "query_narrow": "Topkapi Palace gate",
+            "query_medium": "Topkapi Palace", "query_broad": "palace", "type": "image",
+            "is_entity": False, "entity_keywords": [],
+        }
+        base.update(over)
+        return base
+
+    saved_warn = _normalize_warn_left[0]
+    _normalize_warn_left[0] = 0  # тесты не должны тратить лимит warning
+    try:
+        # --- годы (E1) ---
+        check("years: год не из текста вырезается",
+              strip_unsupported_years("Treaty of Sevres in 1920"), ("Treaty of Sevres", 1))
+        check("years: год из текста остаётся",
+              strip_unsupported_years("Treaty of Sevres 1920", "в 1920 году"), ("Treaty of Sevres 1920", 0))
+        check("years: диапазон без текста",
+              strip_unsupported_years("trenches 1914-1918"), ("trenches", 1))
+        check("years: десятилетие и скобки",
+              strip_unsupported_years("Vienna (1900) street early 1920s"), ("Vienna street", 2))
+        st: Counter = Counter()
+        e = _normalize_entry(entry(query_medium="Vienna 1900", query_narrow="Vienna 1900",
+                                   entity_keywords=["Vienna"]), 1, st, None)
+        check("years: _normalize_entry режет год и считает", (e["query_medium"], st["_years_cut"]), ("Vienna", 2))
+
+        # --- is_entity / entity_keywords (E2) ---
+        st = Counter()
+        e = _normalize_entry(entry(is_entity=False, entity_keywords=["Istanbul", "Стамбул"]), 1, st)
+        check("ключевые слова есть, Gemini=false -> true",
+              (e["is_entity"], e["entity_keywords"], st["_entity_derived"]),
+              (True, ["Istanbul", "Стамбул"], 1))
+
+        st = Counter()
+        e = _normalize_entry(entry(is_entity=True, entity_keywords=[], query_medium="Topkapi Palace"), 2, st)
+        check("пустой список, Gemini=true, medium 'Topkapi Palace' -> fallback",
+              (e["is_entity"], e["entity_keywords"], st["_entity_derived"]),
+              (True, ["Topkapi Palace"], 0))
+
+        st = Counter()
+        e = _normalize_entry(entry(is_entity=True, entity_keywords=[], query_narrow="royal throne room",
+                                   query_medium="royal throne room"), 3, st)
+        check("пустой список, Gemini=true, 'royal throne room' -> false",
+              (e["is_entity"], e["entity_keywords"], st["_entity_derived"]), (False, [], 1))
+
+        st = Counter()
+        e = _normalize_entry(entry(is_entity=True, entity_keywords=["  Vienna ", "", "  ", "Вена", "vienna", "Вена", "NATO"]), 4, st)
+        check("дубли/пустые чистятся, регистр сохраняется",
+              (e["entity_keywords"], e["is_entity"]), (["Vienna", "Вена", "NATO"], True))
+
+        e = _normalize_entry(entry(is_entity=True, entity_keywords=["Vienna"]), 5, Counter())
+        check("is_entity=true и список непуст -> без изменений",
+              (e["is_entity"], e["entity_keywords"]), (True, ["Vienna"]))
+
+        e = _normalize_entry(entry(is_entity=False, entity_keywords=[], query_medium="crowd street"), 6, Counter())
+        check("false и пустой список -> false", (e["is_entity"], e["entity_keywords"]), (False, []))
+
+        # --- fallback_entity_keywords ---
+        check("fallback: склейка соседних", fallback_entity_keywords("Topkapi Palace"), ["Topkapi Palace"])
+        check("fallback: общие слова пропускаются", fallback_entity_keywords("The Old City Istanbul skyline"), ["Istanbul"])
+        check("fallback: одиночное первое слово пропускается", fallback_entity_keywords("Street in Vienna"), ["Vienna"])
+        check("fallback: два имени", fallback_entity_keywords("Sultan Abdulmecid II and Istanbul"), ["Sultan Abdulmecid II", "Istanbul"])
+        check("fallback: нет имён", fallback_entity_keywords("royal throne room"), [])
+        check("fallback: пусто", fallback_entity_keywords(""), [])
+        check("fallback: одиночное слово-запрос", fallback_entity_keywords("Vienna"), ["Vienna"])
+        check("fallback: одиночное слово-запрос 2", fallback_entity_keywords("Istanbul"), ["Istanbul"])
+        check("fallback: Treaty of Sevres", fallback_entity_keywords("Treaty of Sevres"), ["Treaty of Sevres"])
+        check("fallback: Battle of Vienna", fallback_entity_keywords("Battle of Vienna"), ["Battle of Vienna"])
+        check("fallback: Duke of Wellington", fallback_entity_keywords("Duke of Wellington"), ["Duke of Wellington"])
+        check("fallback: Vienna street -> []", fallback_entity_keywords("Vienna street"), [])
+        check("fallback: Mehmed VI", fallback_entity_keywords("Mehmed VI"), ["Mehmed VI"])
+        check("fallback: Topkapi Palace", fallback_entity_keywords("Topkapi Palace"), ["Topkapi Palace"])
+        check("fallback: предлог в конце не включается", fallback_entity_keywords("Treaty of"), [])
+        check("fallback: предлог в начале не включается", fallback_entity_keywords("the Sevres treaty gate"), ["Sevres"])
+        check("fallback: части через запятую", fallback_entity_keywords("Vienna, Istanbul"), ["Vienna", "Istanbul"])
+        check("fallback: части через ;", fallback_entity_keywords("Vienna; Treaty of Sevres"), ["Vienna", "Treaty of Sevres"])
+        check("fallback: часть с другими словами", fallback_entity_keywords("Vienna street, Istanbul"), ["Istanbul"])
+        check("fallback: первое слово части + имя", fallback_entity_keywords("Street in Vienna, Istanbul"), ["Vienna", "Istanbul"])
+        e = _normalize_entry(entry(is_entity=False, entity_keywords=[], sites=["wikimedia", "pexels"],
+                                   query_medium="Topkapi Palace"), 7, Counter())
+        check("архивный сегмент, is_entity=false, пусто -> true",
+              (e["is_entity"], e["entity_keywords"]), (True, ["Topkapi Palace"]))
+        e = _normalize_entry(entry(is_entity=False, entity_keywords=[], sites=["pexels", "wikimedia"],
+                                   query_medium="Topkapi Palace"), 8, Counter())
+        check("стоковый первый сайт, is_entity=false -> false",
+              (e["is_entity"], e["entity_keywords"]), (False, []))
+
+        # --- _trim_query_edges (13; восстановлены по докстрингу, см. допущения) ---
+        for i, (src, want) in enumerate([
+            ("of crowd", "crowd"), ("  crowd  ", "crowd"), (", crowd ;", "crowd"),
+            ("crowd of", "crowd"), ("crowd the", "crowd"), ("the Hague", "the Hague"),
+            ("The Beatles", "The Beatles"), ("of and in", ""), ("crowd , , street", "crowd, street"),
+            ("In The Crowd", "The Crowd"), ("crowd, street.", "crowd, street"),
+            ("", ""), ("Treaty of Sevres", "Treaty of Sevres"),
+        ], 1):
+            check(f"trim {i}: {src!r}", _trim_query_edges(src), want)
+
+        # --- historic (E3) ---
+        check("historic: palace", strip_historic_filler("historic palace"), ("palace", 1))
+        check("historic: city gate", strip_historic_filler("historic city gate"), ("city gate", 1))
+        check("historic: в середине, регистр", strip_historic_filler("Vienna Historic skyline"), ("Vienna skyline", 1))
+        check("historic: district нет в тексте -> режется",
+              strip_historic_filler("historic district Vienna", "Мы гуляли по Вене"), ("district Vienna", 1))
+        check("historic: district есть в тексте -> остаётся",
+              strip_historic_filler("historic district Vienna", "the Historic District of Vienna"),
+              ("historic district Vienna", 0))
+        check("historic: palace не из текста, а district из текста",
+              strip_historic_filler("historic palace", "historic district"), ("palace", 1))
+        check("historic: historical не трогается", strip_historic_filler("historical palace"), ("historical palace", 0))
+        check("historic: без вхождений", strip_historic_filler("Topkapi Palace"), ("Topkapi Palace", 0))
+        check("historic: запрос только из слова", strip_historic_filler("historic"), ("", 1))
+        st = Counter()
+        e = _normalize_entry(entry(query_narrow="historic city gate", query_medium="historic palace",
+                                   query_broad="historic palace"), 9, st, None)
+        check("historic: _normalize_entry чистит и считает",
+              (e["query_narrow"], e["query_medium"], e["query_broad"], st["historic_removed"]),
+              ("city gate", "palace", "palace", 1))
+
+        # --- сквозь call_gemini_batch: строка "Нормализация батча" и лимит warning (E3) ---
+        import types as _t
+        payload = [dict(entry(query_medium="historic palace 1900", query_narrow="historic palace 1900",
+                              is_entity=False, entity_keywords=["Vienna"], sites=["bogus"],
+                              type="weird"), segment_index=i) for i in range(1, 31)]
+        fake = _t.SimpleNamespace(models=_t.SimpleNamespace(
+            generate_content=lambda **kw: _t.SimpleNamespace(text=json.dumps(payload))))
+        segs = [Segment(i, "0", "1", "text") for i in range(1, 31)]
+
+        class _Cap(logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.recs = []
+
+            def emit(self, rec):
+                self.recs.append((rec.levelno, rec.getMessage()))
+
+        cap = _Cap()
+        root = logging.getLogger()
+        old_level = root.level
+        root.addHandler(cap)
+        root.setLevel(logging.INFO)
+        _normalize_warn_left[0] = MAX_NORMALIZE_WARNINGS  # реальный счётчик для этого теста
+        try:
+            call_gemini_batch(fake, "m", segs)
+        finally:
+            root.removeHandler(cap)
+            root.setLevel(old_level)
+            _normalize_warn_left[0] = 0
+        norm = [m for lv, m in cap.recs if m.startswith("Нормализация батча")]
+        check("лог: одна строка нормализации", len(norm), 1)
+        line = norm[0] if norm else ""
+        check("лог: оба новых счётчика",
+              ("вырезано годов: 60" in line, "is_entity выведен из ключевых слов: 30" in line), (True, True))
+        check("лог: прежний формат", line.startswith("Нормализация батча [1..30]: исправлено записей 30 из 30, вырезано годов:"), True)
+        check("лог: причины (в т.ч. historic_removed)",
+              ("; причины: " in line, "historic_removed=30" in line, "sites_empty=30" in line), (True, True, True))
+        warns = [m for lv, m in cap.recs if lv == logging.WARNING]
+        n_limit_notes = sum(m.startswith("Достигнут лимит") for m in warns)
+        check("лимит: отдельных warning ровно MAX_NORMALIZE_WARNINGS",
+              len(warns) - n_limit_notes, MAX_NORMALIZE_WARNINGS)
+        check("лимит: одно итоговое уведомление о лимите", n_limit_notes, 1)
+    finally:
+        _normalize_warn_left[0] = saved_warn
+
+    print(f"\nИтого: {'все тесты прошли' if not failures else 'ПАДЕНИЯ: ' + ', '.join(failures)}")
+    return 1 if failures else 0
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    if "--self-test" in sys.argv[1:]:
+        return run_self_tests()
 
     parser = argparse.ArgumentParser(description="Генерация поисковых запросов из SRT через Gemini")
     parser.add_argument("--input", default=os.environ.get("GENQ_INPUT", "input.srt"))
