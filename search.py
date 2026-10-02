@@ -69,6 +69,9 @@ search.py
     SEARCH_SIM_ACCEPT_THRESHOLD - абсолютный критерий принятия (умолч. 0.30 - см. там же)
     SEARCH_REL_TOP_N (умолч. 10 - потолок), SEARCH_REL_MARGIN (0.03), SEARCH_FLAT_SPREAD (0.03)
         - относительная оценка, см. раздел "Относительная оценка CLIP" ниже
+    SEARCH_PIXABAY_STRICT_TYPES - типы контента в запросах к Pixabay (умолч. 1): для видео
+        добавляется video_type=film, для фото image_type=photo (отсекает анимацию, 3D-рендеры,
+        иллюстрации). 0/false/no/off - параметры не добавляются (прежнее поведение). Читается один раз.
 
 Возвращаемые коды:
     0 - links.txt и missing.txt успешно записаны (даже если часть/все сегменты в missing)
@@ -383,6 +386,12 @@ WIKIMEDIA_STRICT_BLOCK_WORDS: tuple = (
 )
 WIKIMEDIA_STRICT_BLOCK: bool = (
     os.environ.get("SEARCH_WIKIMEDIA_STRICT_BLOCK", "1").strip().lower() not in ("0", "false", "no", "off")
+)
+
+# Pixabay: ограничение типа контента (видео -> video_type=film, фото -> image_type=photo).
+# SEARCH_PIXABAY_STRICT_TYPES=0 - параметры не добавляются (прежнее поведение).
+PIXABAY_STRICT_TYPES: bool = (
+    os.environ.get("SEARCH_PIXABAY_STRICT_TYPES", "1").strip().lower() not in ("0", "false", "no", "off")
 )
 
 # Режим источников: 1 = только архивные, 2 = микс (по умолчанию), 3 = только стоки.
@@ -1253,6 +1262,11 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
             return []
         url = "https://pixabay.com/api/videos/" if media_type == "video" else "https://pixabay.com/api/"
         params = {"key": ctx.pixabay_api_key, "q": query, "per_page": 20}
+        if PIXABAY_STRICT_TYPES:
+            if media_type == "video":
+                params["video_type"] = "film"
+            else:
+                params["image_type"] = "photo"
         data = await http_get_json(ctx, "pixabay", url, params=params, treat_429_as_exhaustion=True)
         result: list[Candidate] = []
         if not data:
@@ -1686,7 +1700,9 @@ async def finalize_candidate(ctx: Context, cand: Candidate) -> Optional[str]:
     return cand.page_url
 
 
-async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: str) -> Optional[str]:
+async def try_claim_backup(
+    ctx: Context, tail: list[Candidate], primary_site: str, seg_index: Optional[int] = None,
+) -> Optional[str]:
     """Выбирает РОВНО ОДНОГО backup-кандидата.
     Приоритет: кандидат с сайта, ОТЛИЧНОГО от сайта primary.
     Для LOC брать backup с того же сайта строго запрещено: при часовом бане IP
@@ -1705,7 +1721,7 @@ async def try_claim_backup(ctx: Context, tail: list[Candidate], primary_site: st
         ctx.used_files.add(key)
     url = await finalize_candidate(ctx, backup_cand)
     if url:
-        _record_choice(ctx, backup_cand, backup=True)
+        _record_choice(ctx, backup_cand, seg_index, backup=True)
     return url
 
 
@@ -1722,7 +1738,7 @@ async def try_claim_pool(
         if final_url:
             if seg_index is not None:
                 ctx.primary_cands[seg_index] = cand
-            backup_url = await try_claim_backup(ctx, pool[i + 1:], cand.site)
+            backup_url = await try_claim_backup(ctx, pool[i + 1:], cand.site, seg_index)
             return final_url, backup_url
     return None, None
 
@@ -1925,19 +1941,60 @@ def _choice_key(cand: Candidate) -> str:
     return cand.reject_reason if cand.accepted else f"best_effort_{cand.reject_reason}"
 
 
+LOG_META_MAX_LEN = 200
+
+
+def pexels_slug(page_url: Optional[str]) -> str:
+    """Слаг из page_url Pexels: последний сегмент пути без числового id в конце
+    (.../video/some-title-1234567/ -> some-title). Если разобрать не удалось - сам page_url;
+    пусто/None -> "". Только для лога, в отбор не участвует."""
+    if not page_url:
+        return ""
+    try:
+        segment = [x for x in urlparse(page_url).path.split("/") if x][-1]
+    except (IndexError, ValueError):
+        return page_url
+    m = re.match(r"^(.+)-\d+$", segment)
+    return m.group(1) if m else page_url
+
+
+def candidate_log_meta(cand: Candidate, max_len: int = LOG_META_MAX_LEN) -> str:
+    """Строка для лога: теги Pixabay (Candidate.text) или слаг Pexels; пусто, если данных нет.
+    Только для лога: ни в фильтрации, ни в оценке, ни в выходных файлах не используется."""
+    if cand.site == "pixabay":
+        label, value = "теги", (cand.text or "").strip()
+    elif cand.site == "pexels":
+        label, value = "слаг", pexels_slug(cand.page_url).strip()
+    else:
+        return ""
+    if not value:
+        return ""
+    if len(value) > max_len:
+        value = value[:max_len] + "…"
+    return f" {label}={value}"
+
+
 def _record_choice(ctx: Context, cand: Candidate, seg_index: Optional[int] = None, backup: bool = False) -> None:
     key = _choice_key(cand)
     if backup:
         ctx.backup_reasons[key] += 1
         ctx.backup_own_sims.append(cand.own_sim)
+        logging.info(
+            "Сегмент %s: выбран резерв %s/%s [%s] own_sim=%.3f rank=%s причина=%s (%s)%s",
+            seg_index, cand.site, cand.cand_id, cand.variant, cand.own_sim, cand.rank,
+            cand.reject_reason,
+            ("принят" if is_strong(cand) else "принят, слабый") if cand.accepted else "best-effort",
+            candidate_log_meta(cand),
+        )
         return
     ctx.choice_reasons[key] += 1
     ctx.choice_own_sims.append(cand.own_sim)
     logging.info(
-        "Сегмент %s: выбран %s/%s [%s] own_sim=%.3f rank=%s причина=%s (%s)",
+        "Сегмент %s: выбран %s/%s [%s] own_sim=%.3f rank=%s причина=%s (%s)%s",
         seg_index, cand.site, cand.cand_id, cand.variant, cand.own_sim, cand.rank,
         cand.reject_reason,
         ("принят" if is_strong(cand) else "принят, слабый") if cand.accepted else "best-effort",
+        candidate_log_meta(cand),
     )
 
 
@@ -2120,7 +2177,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
                 url, _c = await _claim_first(ctx, select_accepted(seg, pool))
                 if url:
                     if _c is not None:
-                        _record_choice(ctx, _c, backup=True)
+                        _record_choice(ctx, _c, seg.index, backup=True)
                     return url, "other"
                 rejected.extend(c for c in pool if not c.accepted)
 
@@ -2134,7 +2191,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
                 url, _c = await _claim_first(ctx, select_accepted(seg, pool))
                 if url:
                     if _c is not None:
-                        _record_choice(ctx, _c, backup=True)
+                        _record_choice(ctx, _c, seg.index, backup=True)
                     return url, "same"
                 rejected.extend(c for c in pool if not c.accepted)
 
@@ -2142,7 +2199,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
     if rejected:
         url, cand = await _claim_first(ctx, best_effort_order(rejected))
         if url and cand is not None:
-            _record_choice(ctx, cand, backup=True)
+            _record_choice(ctx, cand, seg.index, backup=True)
             ctx.site_stats.setdefault(cand.stats_key or cand.site, SiteStats()).best_effort_total += 1
             logging.info(
                 "Сегмент %s: принятых backup нет, выбран лучший без принятия: %s/%s (own_sim=%.3f).",
@@ -2362,10 +2419,12 @@ async def amain(args: argparse.Namespace) -> int:
         "Параметры поиска: STRONG_OWN_SIM=%.3f (SEARCH_STRONG_OWN_SIM); потолки кандидатов: "
         "сток=%s, архивы=%s, общий override=%s (SEARCH_CANDIDATES_STOCK / SEARCH_CANDIDATES_ARCHIVE / "
         "SEARCH_CANDIDATES_PER_SITE); блок-лист Wikimedia: %s слов (SEARCH_WIKIMEDIA_BLOCKLIST), строгий блок без исключения по "
-        "сцене: %s (SEARCH_WIKIMEDIA_STRICT_BLOCK).",
+        "сцене: %s (SEARCH_WIKIMEDIA_STRICT_BLOCK); типы контента Pixabay (video_type=film / "
+        "image_type=photo): %s (SEARCH_PIXABAY_STRICT_TYPES).",
         STRONG_OWN_SIM, CANDIDATES_STOCK, CANDIDATES_ARCHIVE,
         CANDIDATES_OVERRIDE if CANDIDATES_OVERRIDE else "нет", len(WIKIMEDIA_BLOCKLIST_WORDS),
         "вкл" if WIKIMEDIA_STRICT_BLOCK else "выкл",
+        "вкл" if PIXABAY_STRICT_TYPES else "выкл",
     )
 
     pexels_key = os.environ.get("PEXELS_API_KEY", "")
@@ -2515,6 +2574,7 @@ def _selftest() -> int:
     # self-test не зависит от SEARCH_SOURCES_MODE / SEARCH_WIKIMEDIA_STRICT_BLOCK в окружении
     globals()["SOURCES_MODE"] = 2
     globals()["WIKIMEDIA_STRICT_BLOCK"] = True
+    _selftest_pixabay_strict_env = PIXABAY_STRICT_TYPES  # реальное значение из окружения (для проверки env-режима)
 
     def mk(sites, n="wiki narrow", m="wiki medium", b="city street", **kw):
         return SegmentSpec(index=1, scene="s", sites=sites, query_narrow=n, query_medium=m,
@@ -2804,6 +2864,126 @@ def _selftest() -> int:
         assert backup_candidate_sites(["loc"], "loc", 3) == ["pixabay", "pexels"]
     finally:
         BACKUP_EXTRA_SITES[:] = _old_extra
+
+    # --- Pixabay: типы контента в параметрах запроса ---
+    def _pixabay_params(media_type, strict):
+        captured = []
+
+        async def _fake_http(ctx_, site, url, headers=None, params=None, treat_429_as_exhaustion=False):
+            captured.append((url, dict(params or {})))
+            return {"hits": []}
+
+        class _Ctx:
+            exhausted_sites: set = set()
+            pixabay_api_key = "K"
+            search_cache: dict = {}
+            search_cache_lock = asyncio.Lock()
+
+        _old_http, _old_flag = _g["http_get_json"], _g["PIXABAY_STRICT_TYPES"]
+        _g["http_get_json"], _g["PIXABAY_STRICT_TYPES"] = _fake_http, strict
+        try:
+            asyncio.run(search_pixabay(_Ctx(), "q " + media_type + str(strict), media_type))
+        finally:
+            _g["http_get_json"], _g["PIXABAY_STRICT_TYPES"] = _old_http, _old_flag
+        assert len(captured) == 1, captured
+        return captured[0][1]
+
+    pv = _pixabay_params("video", True)
+    assert pv.get("video_type") == "film" and "image_type" not in pv, pv
+    assert pv["key"] == "K" and pv["per_page"] == 20 and pv["q"].startswith("q video"), pv
+    pi = _pixabay_params("image", True)
+    assert pi.get("image_type") == "photo" and "video_type" not in pi, pi
+    assert pi["key"] == "K" and pi["per_page"] == 20, pi
+    for _mt in ("video", "image"):
+        p0 = _pixabay_params(_mt, False)
+        assert "video_type" not in p0 and "image_type" not in p0, p0
+        assert set(p0) == {"key", "q", "per_page"}, p0
+    # значение константы из окружения согласовано с разбором SEARCH_PIXABAY_STRICT_TYPES
+    _env_v = os.environ.get("SEARCH_PIXABAY_STRICT_TYPES", "1").strip().lower()
+    assert _selftest_pixabay_strict_env == (_env_v not in ("0", "false", "no", "off"))
+
+    # --- слаг Pexels ---
+    assert pexels_slug("https://www.pexels.com/video/some-title-1234567/") == "some-title"
+    assert pexels_slug("https://www.pexels.com/photo/a-man-on-a-beach-98765") == "a-man-on-a-beach"
+    assert pexels_slug("https://www.pexels.com/video/1234567/") == "https://www.pexels.com/video/1234567/"
+    assert pexels_slug("https://www.pexels.com/video/no-id-here/") == "https://www.pexels.com/video/no-id-here/"
+    assert pexels_slug("") == "" and pexels_slug(None) == ""
+
+    # --- лог выбранного кадра: теги/слаг только в логе, выходные данные не меняются ---
+    class _CaptureInfo(logging.Handler):
+        def __init__(self):
+            super().__init__(level=logging.INFO)
+            self.msgs: list[str] = []
+
+        def emit(self, record):
+            self.msgs.append(record.getMessage())
+
+    class _LogCtx:
+        def __init__(self):
+            self.choice_reasons, self.choice_own_sims = Counter(), []
+            self.backup_reasons, self.backup_own_sims = Counter(), []
+
+    def _logged(cand, backup=False):
+        h, root = _CaptureInfo(), logging.getLogger()
+        _lvl = root.level
+        root.addHandler(h)
+        root.setLevel(logging.INFO)
+        try:
+            _record_choice(_LogCtx(), cand, 7, backup=backup)
+        finally:
+            root.removeHandler(h)
+            root.setLevel(_lvl)
+        assert len(h.msgs) == 1, h.msgs
+        return h.msgs[0]
+
+    c_pb = Candidate(site="pixabay", cand_id="42", text="sea, wave, animation", license_ok=True,
+                     preview_url=None, page_url="https://pixabay.com/videos/x-42/",
+                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad")
+    c_px = Candidate(site="pexels", cand_id="1234567", text="", license_ok=True, preview_url=None,
+                     page_url="https://www.pexels.com/video/ocean-waves-1234567/",
+                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad")
+    c_wm = Candidate(site="wikimedia", cand_id="File:A.jpg", text="x", license_ok=True, preview_url=None,
+                     page_url="https://commons.wikimedia.org/wiki/File:A.jpg",
+                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="narrow")
+    for _bk in (False, True):
+        m = _logged(c_pb, _bk)
+        assert "pixabay/42" in m and "теги=sea, wave, animation" in m, m
+        m = _logged(c_px, _bk)
+        assert "pexels/1234567" in m and "слаг=ocean-waves" in m and "page_url" not in m, m
+        m = _logged(c_wm, _bk)
+        assert "теги=" not in m and "слаг=" not in m, m
+    assert ("резерв" in _logged(c_pb, True)) and ("резерв" not in _logged(c_pb, False))
+    # пустые теги не печатаются; длинные обрезаются
+    c_empty = Candidate(site="pixabay", cand_id="1", text="  ", license_ok=True, preview_url=None, page_url=None)
+    assert candidate_log_meta(c_empty) == ""
+    assert candidate_log_meta(Candidate(site="pexels", cand_id="1", text="", license_ok=True,
+                                        preview_url=None, page_url=None)) == ""
+    c_long = Candidate(site="pixabay", cand_id="1", text="t" * 500, license_ok=True, preview_url=None, page_url=None)
+    assert len(candidate_log_meta(c_long)) <= len(" теги=") + LOG_META_MAX_LEN + 1
+    # логирование не меняет кандидата и не влияет на URL, уходящие в links.txt / backup_links.txt
+    _before = dc_replace(c_pb)
+    _logged(c_pb)
+    assert c_pb == _before
+    import types as _types
+
+    async def _fake_finalize(ctx_, cand_):
+        return f"https://cdn.example/{cand_.site}/{cand_.cand_id}.mp4"
+
+    _old_fin = _g["finalize_candidate"]
+    _g["finalize_candidate"] = _fake_finalize
+    try:
+        _uctx = _types.SimpleNamespace(
+            used_files=set(), used_files_lock=asyncio.Lock(), primary_cands={},
+            choice_reasons=Counter(), choice_own_sims=[], backup_reasons=Counter(), backup_own_sims=[],
+        )
+        _res = asyncio.run(try_claim_pool(_uctx, [c_pb, c_px], 7))
+    finally:
+        _g["finalize_candidate"] = _old_fin
+    assert _res == ("https://cdn.example/pixabay/42.mp4", "https://cdn.example/pexels/1234567.mp4"), _res
+    # формат строк выходных файлов остаётся прежним: "номер: URL" и "номер"
+    assert f"{7}: {_res[0]}\n" == "7: https://cdn.example/pixabay/42.mp4\n"
+    assert f"{7}: {_res[1]}\n" == "7: https://cdn.example/pexels/1234567.mp4\n"
+    assert "теги" not in _res[0] and "слаг" not in _res[1]
 
     print("selftest OK")
     return 0
