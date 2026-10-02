@@ -6,6 +6,18 @@ on:
         description: 'Путь к SRT-файлу в репозитории (для генерации поисковых запросов через Gemini, а затем автоматического подбора медиа через search.py). Оставь пустым, если сейчас не нужно.'
         required: false
         type: string
+      sources:
+        description: 'Источники: 1 = архив, 2 = микс, 3 = сток'
+        required: false
+        type: choice
+        options: ["1", "2", "3"]
+        default: "2"
+      strict:
+        description: 'Проверка запросов: 1 = калибровка (стоп), 2 = мягко (варнинг)'
+        required: false
+        type: choice
+        options: ["1", "2"]
+        default: "1"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно.'
         required: false
@@ -49,6 +61,8 @@ jobs:
       env:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
+        GENQ_SOURCES_MODE: ${{ inputs.sources }}
+        GENQ_STRICT: ${{ inputs.strict }}
         PYTHONUNBUFFERED: "1"
       run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
 
@@ -60,12 +74,16 @@ jobs:
         path: requests.json.checkpoint.json
         key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
 
+    # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
+    # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.
     - name: Upload requests.json as artifact
+      if: always()
       uses: actions/upload-artifact@v6
       with:
         name: requests-json
         path: requests.json
         retention-days: 14
+        if-no-files-found: ignore
 
   # -------------------------------------------------------------------------
   # Шаг 2: requests.json -> links.txt/missing.txt через search.py.
@@ -118,6 +136,7 @@ jobs:
         PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
         SEARCH_CLIP_MODEL: ${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32-quickgelu' }}
         SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
+        SEARCH_SOURCES_MODE: ${{ inputs.sources }}
         # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
         # Значения ниже включены по итогам прогона на 126 сегментах
         SEARCH_SIM_MIN_THRESHOLD: "0.22"
