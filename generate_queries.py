@@ -8,6 +8,7 @@ response_schema).
 
 Использование:
     python generate_queries.py --input input.srt --output requests.json
+    python generate_queries.py --sources-mode 2 --strict 1
 
 Переменные окружения:
     GEMINI_API_KEY       - обязателен, ключ Gemini API
@@ -20,6 +21,11 @@ response_schema).
     GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
     GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
                            (по умолчанию 60; в SDK передаётся в миллисекундах)
+    GENQ_SOURCES_MODE    - опционально, режим источников: 1 (только архив: wikimedia, loc, nasa),
+                           2 (микс, по умолчанию), 3 (только сток: pexels, pixabay)
+    GENQ_STRICT          - опционально, строгость проверки запросов: 1 (калибровка, по умолчанию -
+                           падение с кодом 1 при нарушениях после повтора), 2 (мягко - warning в логе,
+                           requests.json записан, код 0)
 
 Формат requests.json:
     Словарь "номер сегмента" (строка) -> запись с полями: scene (одно английское предложение
@@ -30,9 +36,10 @@ response_schema).
     повторных вызовов Gemini).
 
 Возвращаемые коды:
-    0 - requests.json успешно записан целиком
-    1 - структурная ошибка (битый SRT, невалидный запрос/schema, ключ) - НЕ связана
-        с дневной квотой, требует разбора кода/данных
+    0 - requests.json успешно записан целиком (в т.ч. при предупреждениях в мягком режиме GENQ_STRICT=2)
+    1 - структурная ошибка (битый SRT, невалидный запрос/schema, ключ) ИЛИ неудачная валидация
+        запросов при GENQ_STRICT=1 после повторного запроса REPAIR (requests.json при этом
+        сохраняется на диск для проверки, чекпоинт не удаляется)
     3 - дневной лимит ПОДТВЕРЖДЁН у всех моделей из списка (основной + fallback) - НЕ баг,
         нужно либо подождать сброса квоты (полночь по тихоокеанскому времени), либо
         включить billing, либо добавить ещё моделей в --fallback-models. Прогресс
@@ -55,6 +62,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -106,6 +114,71 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 60
 PREFLIGHT_MAX_ATTEMPTS = 3
 PREFLIGHT_BACKOFF_BASE_SECONDS = 2
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
+
+DEFAULT_SOURCES_MODE = 2
+DEFAULT_STRICT = 1
+
+# Мусорные типы кадра (не должны присутствовать ни в scene, ни в запросах).
+# Базовый список слов в единственном числе в ОДНОЙ константе; регулярное выражение
+# строится динамически кодом через build_junk_kind_re.
+JUNK_KIND_WORDS = (
+    "map", "calendar", "document", "chart", "diagram", "infographic",
+    "flag", "emblem", "coat of arms", "newspaper", "ID card", "passport",
+)
+
+
+def build_junk_kind_re(words: tuple[str, ...]) -> re.Pattern:
+    """Динамически собирает регулярное выражение для поиска мусорных типов кадра
+    по границам слов, с учётом множественного числа и без учёта регистра."""
+    patterns = []
+    for w in words:
+        parts = w.split()
+        if w.lower() == "coat of arms":
+            patterns.append(r"coats?\s+of\s+arms")
+        elif len(parts) > 1:
+            escaped_lead = r"[\s-]+".join(re.escape(p) for p in parts[:-1])
+            escaped_last = re.escape(parts[-1]) + r"s?"
+            patterns.append(escaped_lead + r"[\s-]+" + escaped_last)
+        else:
+            patterns.append(re.escape(w) + r"s?")
+    return re.compile(r"\b(?:" + "|".join(patterns) + r")\b", re.IGNORECASE)
+
+
+JUNK_KIND_RE = build_junk_kind_re(JUNK_KIND_WORDS)
+
+
+def parse_sources_mode(cli_val: Optional[str | int], env_val: Optional[str | int]) -> int:
+    """Парсит режим источников (1=архив, 2=микс, 3=сток). CLI в приоритете.
+    Любое невалидное значение игнорируется с WARNING и берётся 2."""
+    val = cli_val if cli_val is not None else env_val
+    if val is None:
+        return DEFAULT_SOURCES_MODE
+    val_str = str(val).strip()
+    if val_str in ("1", "2", "3"):
+        return int(val_str)
+    logging.warning(
+        "Некорректный режим источников %r (допустимо 1, 2, 3) - использую по умолчанию %s.",
+        val, DEFAULT_SOURCES_MODE,
+    )
+    return DEFAULT_SOURCES_MODE
+
+
+def parse_strict_mode(cli_val: Optional[str | int], env_val: Optional[str | int]) -> int:
+    """Парсит строгость проверки (1=калибровка, 2=мягко). CLI в приоритете.
+    Любое невалидное значение игнорируется с WARNING и берётся 1."""
+    val = cli_val if cli_val is not None else env_val
+    if val is None:
+        return DEFAULT_STRICT
+    val_str = str(val).strip()
+    if val_str in ("1", "2"):
+        return int(val_str)
+    logging.warning(
+        "Некорректная строгость проверки %r (допустимо 1, 2) - использую по умолчанию %s.",
+        val, DEFAULT_STRICT,
+    )
+    return DEFAULT_STRICT
+
+
 # Слова-наполнители, которые безусловно вырезаются из запросов (см. _normalize_entry).
 # video/stock/historic/vintage сюда НЕ входят: они допустимы, если часть предмета
 # ("stock market", "video game", "vintage car"). Фразы идут раньше одиночных слов.
@@ -136,7 +209,38 @@ REQUIRED_ENTRY_KEYS = [
 # Потолок отдельных warning нормализации за весь запуск, дальше - только итоговые счётчики.
 MAX_NORMALIZE_WARNINGS = 20
 
-SYSTEM_INSTRUCTION = """\
+
+def build_system_instruction(
+    mode: int = DEFAULT_SOURCES_MODE, junk_words: tuple[str, ...] = JUNK_KIND_WORDS
+) -> str:
+    """Генерирует системный промпт с учётом выбранного режима источников (1/2/3)
+    и запрещённых типов кадра из junk_words."""
+    junk_list_str = ", ".join(junk_words)
+
+    mode_blocks = {
+        1: (
+            "SOURCE MODE RULES (MODE 1: ARCHIVE ONLY):\n"
+            "- All segments MUST use archival sites ONLY: [\"wikimedia\", \"loc\"] (use \"nasa\" first only when explicitly about space/astronomy/NASA missions). NEVER include \"pexels\" or \"pixabay\".\n"
+            "- All search queries must follow the archival search style (concise proper nouns, literal title/caption matches).\n"
+            "- For abstract or general segments without a specific named entity: derive a generalized ARCHIVAL query for the depicted place/era from the nearest neighbor segments, without people names, and strictly without any forbidden visual types.\n"
+        ),
+        2: (
+            "SOURCE MODE RULES (MODE 2: MIXED ARCHIVE AND STOCK):\n"
+            "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the segment's narration explicitly names a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
+            "- When genuinely unsure, use stock sites [\"pexels\", \"pixabay\"], NOT both and NOT archive.\n"
+            "- For abstract or general segments: follow the ABSTRACT / GENERAL SEGMENTS rule below (use stock sites).\n"
+        ),
+        3: (
+            "SOURCE MODE RULES (MODE 3: STOCK ONLY):\n"
+            "- All segments MUST use stock sites ONLY: [\"pexels\", \"pixabay\"]. NEVER include \"wikimedia\", \"loc\", or \"nasa\".\n"
+            "- All search queries must follow the stock search style: query_medium (2-4 words, object + context), query_narrow (4-6 words, slightly more specific), query_broad (1-2 words, general image).\n"
+            "- Replace any proper names with visual generalizations (e.g. \"Mehmed VI\" / \"sultan\" -> \"man in traditional robe\", \"Topkapi Palace\" -> \"old palace courtyard\").\n"
+            "- In Mode 3, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
+        ),
+    }
+    mode_rule = mode_blocks.get(mode, mode_blocks[2])
+
+    instruction = f"""\
 You generate search-query instructions for stock/archival video and photo sourcing for a video's \
 scenes. You receive numbered scene segments (number = the segment's sequential position in the \
 original SRT, plus its timing and on-screen text).
@@ -146,24 +250,23 @@ a response" (including silent/empty segments), with no gaps and no duplicates. E
 contain a segment_index field (an integer, exactly matching the number from "### Segment N") plus \
 the remaining fields defined by the schema. The order of objects in the array does not matter.
 
+{mode_rule}
 FIELD RULES:
 
-1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Write it \
-BEFORE the queries and derive all three queries from it. For abstract phrases, pick concrete \
-objects/places that belong to the topic instead of emotions (e.g. "economy" -> a factory, a cargo \
-port, banknotes). Do NOT invent details that are not in the segment's text (no extra people, moods, weather, \
+1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Describe \
+ONLY what can actually be filmed by a camera: people, buildings, streets, landscapes, physical \
+objects, portraits. \
+STRICTLY FORBIDDEN visual types (do NOT use or depict them in scene or in any query): {junk_list_str} \
+(and their plural forms). \
+NEVER show a date or number as a calendar; NEVER show geopolitics, borders, or wars as a map - \
+instead show the location, people, building, equipment, vehicles, or a portrait of the named person. \
+Write scene BEFORE the queries and derive all three queries from it. \
+Do NOT invent details that are not in the segment's text (no extra people, moods, weather, \
 time of day, or settings the text does not mention).
 
 2. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
-"pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources.
-   - Use sites = ["wikimedia", "loc"] when the segment is about a specific named real person, a \
-specific real historical event with a date/place, a specific historical document, artifact, or \
-building. Add "nasa" first only when the scene is explicitly about space, astronomy, or a NASA \
-mission.
-   - Use sites = ["pexels", "pixabay"] when the segment is a generic, modern, or abstract scene \
-with no tie to a specific real person, event, or place (for example an office, nature, a city \
-street, an everyday action, a UI/screen-recording style moment).
-   - When genuinely unsure, include both, real/archival sources first.
+"pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources. \
+Follow the SOURCE MODE RULES above.
 
 3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene, from \
 most specific to most general. They are tried in this order, so each must be a realistic search \
@@ -193,8 +296,8 @@ screen, a title/credits card with no depicted content, or on-screen text with no
 happening. When in doubt, fill it in rather than returning null. query_narrow and query_medium are \
 never null.
 
-4. type - "image" or "video", whichever fits the described scene better (a static portrait, \
-document, or map -> "image"; a dynamic action or a generic/modern/abstract scene -> "video").
+4. type - "image" or "video", whichever fits the described scene better (a static portrait -> \
+"image"; a dynamic action or a generic/modern/abstract scene -> "video").
 
 5. entity_keywords - the MAIN entity field. List EVERY proper name (person, place, event, \
 organization, treaty, building) that appears in your query_narrow or query_medium, each in TWO \
@@ -210,14 +313,24 @@ generic (a plain city view or a coastline of a named city is still an entity sce
 6. is_entity - true when entity_keywords is non-empty, false when it is empty. Fill it consistently \
 with entity_keywords (the script recomputes it from that list anyway).
 
+ABSTRACT / GENERAL SEGMENTS:
+When a segment lacks a concrete visible physical subject (such as narrator evaluations, conclusions, \
+transitions, abstract concepts, emotions, numbers, or dates without physical objects):
+- Look at the nearest neighboring segments (2 segments before and 2 segments after, in the batch \
+and in the Context BEFORE/AFTER sections).
+- Derive a general visual theme from them.
+- Formulate the scene and all three queries as a GENERALIZED stock shot fitting that visual theme \
+(without proper nouns, even if neighbors name them: e.g. "Topkapi Palace" -> "old palace interior").
+- Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode 1).
+
 GENERAL RULES:
 - Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
 words.
-- NEVER use these filler words in any query: b-roll, cinematic, footage, HD, 4K, and the phrases \
-"stock footage", "stock photo", "stock image". The words video, stock, historic, vintage are also \
-banned as filler (style padding added to a query), but ALLOWED when they are part of the depicted \
-subject itself (e.g. "stock market", "video game", "video call", "vintage car", "historic \
-building").
+- NEVER use these filler words in any query: b-roll, cinematic, footage, HD, 4K, historical, and the \
+phrases "stock footage", "stock photo", "stock image". Also NEVER use forbidden visual types in \
+any query: {junk_list_str} (and plural forms). The words video, stock, vintage are also banned as \
+filler (style padding added to a query), but ALLOWED when they are part of the depicted subject \
+itself (e.g. "stock market", "video game", "video call", "vintage car").
 - NEVER use mood adjectives (sad, empty, mysterious, dramatic, lonely, gloomy, etc.) in a query \
 unless that exact mood is stated in the segment's text.
 - YEARS: put a year (also a decade like "1920s" or a range like "1914-1918") in a query ONLY if that \
@@ -237,6 +350,10 @@ narrative (for example, to resolve a pronoun or continue a thought from the curr
 NOT create response objects for these context segment numbers. Only answer for the segments listed \
 under "Segments that need a response", each marked as "### Segment N".
 """
+    return instruction
+
+
+SYSTEM_INSTRUCTION = build_system_instruction(DEFAULT_SOURCES_MODE)
 
 # Порядок полей важен: scene идёт первым после segment_index, чтобы модель сначала
 # описывала кадр, а уже потом строила по нему запросы. Gemini не гарантирует порядок по
@@ -459,6 +576,7 @@ def build_prompt(
     batch: list[Segment],
     context_before: list[Segment] | None = None,
     context_after: list[Segment] | None = None,
+    repair_info: dict[int, dict] | None = None,
 ) -> str:
     lines: list[str] = []
 
@@ -467,10 +585,39 @@ def build_prompt(
         lines.extend(_format_context_line(s) for s in context_before)
         lines.append("")
 
-    lines.append("### Segments that need a response")
-    for s in batch:
-        text = s.text if s.text else "(silence / no text)"
-        lines.append(f"### Segment {s.index}\nTiming: {s.start} --> {s.end}\nText: {text}\n")
+    if repair_info:
+        lines.append("### Segments that need a response (REPAIR MODE)")
+        lines.append(
+            "The following segments had validation issues in their previously generated data. "
+            "Fix the specific issues listed for each segment while preserving the rest of the valid scene and queries."
+        )
+        lines.append("")
+        for s in batch:
+            text = s.text if s.text else "(silence / no text)"
+            rep = repair_info.get(s.index, {})
+            prev = rep.get("entry", {})
+            issues_list = rep.get("issues", [])
+            issues_formatted = "\n".join(f"  - {iss}" for iss in issues_list) if issues_list else "  - (no specific issues)"
+            neighbors_str = rep.get("neighbors", "(no neighbor context)")
+
+            lines.append(f"### Segment {s.index}")
+            lines.append(f"Timing: {s.start} --> {s.end}")
+            lines.append(f"Narration text: {text}")
+            lines.append(f"Previous scene: {prev.get('scene', '')}")
+            lines.append(f"Previous sites: {json.dumps(prev.get('sites', []))}")
+            lines.append(f"Previous query_narrow: {prev.get('query_narrow', '')}")
+            lines.append(f"Previous query_medium: {prev.get('query_medium', '')}")
+            lines.append(f"Previous query_broad: {prev.get('query_broad', '')}")
+            lines.append("Validation issues to fix:")
+            lines.append(issues_formatted)
+            lines.append(f"Neighbors (context):\n{neighbors_str}")
+            lines.append("Instruction: Fix ONLY the validation issues above; do NOT introduce forbidden words or sites.")
+            lines.append("")
+    else:
+        lines.append("### Segments that need a response")
+        for s in batch:
+            text = s.text if s.text else "(silence / no text)"
+            lines.append(f"### Segment {s.index}\nTiming: {s.start} --> {s.end}\nText: {text}\n")
 
     if context_after:
         lines.append("### Context AFTER (do not create response objects for these segment numbers - context only)")
@@ -895,6 +1042,121 @@ def _normalize_entry(
 
 
 # ---------------------------------------------------------------------------
+# Валидация записей и подготовка повторного запроса
+# ---------------------------------------------------------------------------
+
+def validate_entries(
+    entries: dict[str, dict],
+    mode: int,
+    junk_re: Optional[re.Pattern] = None,
+) -> dict[str, list[str]]:
+    """Пост-проверка записей сегментов на соблюдение ограничений режима и запрещённых типов кадра.
+    Возвращает словарь {номер_сегмента: [описания_проблем]}."""
+    rx_check = junk_re if junk_re is not None else JUNK_KIND_RE
+    archive_sites = frozenset({"wikimedia", "loc", "nasa"})
+    stock_sites = frozenset({"pexels", "pixabay"})
+    issues: dict[str, list[str]] = {}
+
+    for idx_str, entry in entries.items():
+        seg_issues: list[str] = []
+
+        # 1. Запрещённые слова-типы в полях scene, query_narrow, query_medium, query_broad
+        for field in ("scene", "query_narrow", "query_medium", "query_broad"):
+            val = entry.get(field)
+            if val and isinstance(val, str):
+                found = rx_check.findall(val)
+                if found:
+                    words_uniq = sorted(set(w.lower() for w in found))
+                    seg_issues.append(
+                        f"в поле {field} запрещённый тип кадра: {', '.join(words_uniq)}"
+                    )
+
+        # 2. Соответствие sites режиму
+        sites = entry.get("sites") or []
+        if not sites:
+            seg_issues.append("список sites пуст")
+        else:
+            if mode == 1:
+                stock_present = [s for s in sites if s in stock_sites]
+                if stock_present:
+                    seg_issues.append(
+                        f"в режиме 1 (архив) недопустимы стоковые сайты: {', '.join(stock_present)}"
+                    )
+            elif mode == 3:
+                arch_present = [s for s in sites if s in archive_sites]
+                if arch_present:
+                    seg_issues.append(
+                        f"в режиме 3 (сток) недопустимы архивные сайты: {', '.join(arch_present)}"
+                    )
+
+        # 3. Режим 3: is_entity != false ИЛИ entity_keywords непустой
+        if mode == 3:
+            is_ent = entry.get("is_entity", False)
+            kw = entry.get("entity_keywords") or []
+            if is_ent is not False:
+                seg_issues.append(
+                    f"в режиме 3 (сток) is_entity должен быть false, получено: {is_ent}"
+                )
+            if kw:
+                seg_issues.append(
+                    f"в режиме 3 (сток) entity_keywords должен быть пустым, найдено: {kw}"
+                )
+
+        if seg_issues:
+            issues[idx_str] = seg_issues
+
+    return issues
+
+
+def chunk_repair_indices(indices: list[int], max_size: int = 125) -> list[list[int]]:
+    """Разбивает список индексов для повторного запроса (REPAIR) поровну:
+    при n <= 125 - один запрос, иначе k = ceil(n/125) запросов по ~n/k."""
+    n = len(indices)
+    if n == 0:
+        return []
+    if n <= max_size:
+        return [indices]
+    k = math.ceil(n / max_size)
+    chunk_size = math.ceil(n / k)
+    chunks = []
+    for i in range(0, n, chunk_size):
+        chunks.append(indices[i : i + chunk_size])
+    return chunks
+
+
+def format_neighbors_context(
+    target_idx: int,
+    segments: list[Segment],
+    results: dict[str, dict],
+    window: int = CONTEXT_WINDOW,
+) -> str:
+    """Форматирует контекст соседей +-window для блока REPAIR (текст и текущая scene)."""
+    pos = None
+    for i, s in enumerate(segments):
+        if s.index == target_idx:
+            pos = i
+            break
+    if pos is None:
+        return "(no neighbor context available)"
+
+    before = segments[max(0, pos - window) : pos]
+    after = segments[pos + 1 : pos + 1 + window]
+
+    lines = []
+    if before:
+        lines.append("Context BEFORE:")
+        for s in before:
+            sc = results.get(str(s.index), {}).get("scene", "(no scene)")
+            lines.append(f"  [{s.index}] Text: {s.text or '(empty)'} | Scene: {sc}")
+    if after:
+        lines.append("Context AFTER:")
+        for s in after:
+            sc = results.get(str(s.index), {}).get("scene", "(no scene)")
+            lines.append(f"  [{s.index}] Text: {s.text or '(empty)'} | Scene: {sc}")
+    return "\n".join(lines) if lines else "(no neighbors)"
+
+
+# ---------------------------------------------------------------------------
 # Вызов Gemini с ретраями
 # ---------------------------------------------------------------------------
 
@@ -904,11 +1166,13 @@ def call_gemini_batch(
     batch: list[Segment],
     context_before: list[Segment] | None = None,
     context_after: list[Segment] | None = None,
+    mode: int = DEFAULT_SOURCES_MODE,
+    repair_info: dict[int, dict] | None = None,
 ) -> dict:
-    prompt = build_prompt(batch, context_before, context_after)
+    prompt = build_prompt(batch, context_before, context_after, repair_info=repair_info)
 
     config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
+        system_instruction=build_system_instruction(mode),
         response_mime_type="application/json",
         response_schema=RESPONSE_SCHEMA,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -1180,7 +1444,174 @@ def save_checkpoint(path: str, src_hash: str, results: dict, exhausted_models: d
 
 
 # ---------------------------------------------------------------------------
-# main
+# Повторный запрос REPAIR и завершение
+# ---------------------------------------------------------------------------
+
+def run_repair_cycle(
+    client: "genai.Client",
+    current_model: str,
+    fallback_queue: list[str],
+    segments: list[Segment],
+    results: dict[str, dict],
+    exhausted_models: dict[str, str],
+    checkpoint_path: str,
+    src_hash: str,
+    sources_mode: int,
+    strict_mode: int,
+    output_path: str,
+    call_batch_fn=call_gemini_batch,
+) -> int:
+    """Выполняет пост-проверку записей, один раунд исправления REPAIR через Gemini
+    (при наличии проблем), логирует статистику источников и сохраняет requests.json."""
+    initial_issues = validate_entries(results, sources_mode)
+    problem_indices = sorted(int(k) for k in initial_issues.keys())
+
+    if problem_indices:
+        logging.warning(
+            "Обнаружены ошибки валидации в %s сегментах. Запускаю повторный запрос (REPAIR)...",
+            len(problem_indices),
+        )
+        seg_by_idx = {s.index: s for s in segments}
+        repair_chunks = chunk_repair_indices(problem_indices, max_size=125)
+
+        for chunk_num, chunk_indices in enumerate(repair_chunks, start=1):
+            chunk_segs = [seg_by_idx[i] for i in chunk_indices]
+            first_idx, last_idx = chunk_segs[0].index, chunk_segs[-1].index
+            first_pos = next(i for i, s in enumerate(segments) if s.index == first_idx)
+            last_pos = next(i for i, s in enumerate(segments) if s.index == last_idx)
+            ctx_before = segments[max(0, first_pos - CONTEXT_WINDOW) : first_pos]
+            ctx_after = segments[last_pos + 1 : last_pos + 1 + CONTEXT_WINDOW]
+
+            chunk_repair_info = {}
+            for s in chunk_segs:
+                chunk_repair_info[s.index] = {
+                    "entry": results.get(str(s.index), {}),
+                    "issues": initial_issues.get(str(s.index), []),
+                    "neighbors": format_neighbors_context(s.index, segments, results, CONTEXT_WINDOW),
+                }
+
+            logging.info(
+                "REPAIR чанк %s/%s: %s сегментов [%s..%s] (модель: %s)",
+                chunk_num, len(repair_chunks), len(chunk_segs), first_idx, last_idx, current_model,
+            )
+
+            while True:
+                try:
+                    repaired_batch = call_batch_fn(
+                        client, current_model, chunk_segs, ctx_before, ctx_after,
+                        mode=sources_mode, repair_info=chunk_repair_info,
+                    )
+                    break
+                except DailyQuotaExceededError as e:
+                    logging.warning(
+                        "Дневной лимит исчерпан для модели %s: %s", e.model, e
+                    )
+                    exhausted_models[e.model] = _now_iso()
+                    save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                    if not fallback_queue:
+                        logging.error(
+                            "Дневной лимит исчерпан во время REPAIR, а запасных моделей больше нет. "
+                            "Прогресс сохранён в чекпоинте %s.", checkpoint_path,
+                        )
+                        return 3
+                    current_model = fallback_queue.pop(0)
+                    logging.warning("Переключаюсь на запасную модель: %s", current_model)
+                    continue
+                except Exception as e:
+                    logging.error(
+                        "REPAIR чанк %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
+                        "requests.json НЕ будет записан (чекпоинт сохранён в %s).",
+                        first_idx, last_idx, MAX_RETRIES, e, checkpoint_path,
+                    )
+                    save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                    return 1
+
+            results.update(repaired_batch)
+            save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+
+    # Проверка только исправленных номеров (если повтора не было - post_issues пусто)
+    if problem_indices:
+        repaired_entries = {str(i): results[str(i)] for i in problem_indices}
+        post_issues = validate_entries(repaired_entries, sources_mode)
+    else:
+        post_issues = {}
+
+    n_before = len(initial_issues)
+    n_after = len(post_issues)
+    logging.info(
+        "Валидация: проблемных сегментов до повтора: %s, после повтора: %s",
+        n_before, n_after,
+    )
+
+    archive_count = sum(
+        1 for e in results.values()
+        if e.get("sites") and e["sites"][0] in ("wikimedia", "loc", "nasa")
+    )
+    stock_count = sum(
+        1 for e in results.values()
+        if e.get("sites") and e["sites"][0] in ("pexels", "pixabay")
+    )
+    total_entries = len(results)
+    arch_pct = (archive_count / total_entries * 100.0) if total_entries else 0.0
+    stock_pct = (stock_count / total_entries * 100.0) if total_entries else 0.0
+    logging.info(
+        "Источники: архив %s (%.1f%%), сток %s (%.1f%%)",
+        archive_count, arch_pct, stock_count, stock_pct,
+    )
+
+    ordered = {str(k): results[str(k)] for k in sorted(int(k) for k in results.keys())}
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(ordered, f, ensure_ascii=False, indent=2)
+
+    if post_issues:
+        problem_items = sorted(post_issues.items(), key=lambda x: int(x[0]))
+        for idx_str, problems in problem_items[:MAX_NORMALIZE_WARNINGS]:
+            msg = f"Сегмент {idx_str}: {'; '.join(problems)}"
+            if strict_mode == 1:
+                logging.error("%s", msg)
+            else:
+                logging.warning("%s", msg)
+
+        if len(problem_items) > MAX_NORMALIZE_WARNINGS:
+            limit_msg = (
+                f"Достигнут лимит отдельных сообщений ({len(problem_items)} сегментов с ошибками) - "
+                f"показаны первые {MAX_NORMALIZE_WARNINGS}."
+            )
+            if strict_mode == 1:
+                logging.error("%s", limit_msg)
+            else:
+                logging.warning("%s", limit_msg)
+
+        summary_msg = (
+            f"Остались нарушения валидации в {len(problem_items)} сегментах: "
+            f"{sorted(int(k) for k in post_issues.keys())}"
+        )
+        if strict_mode == 1:
+            logging.error("%s", summary_msg)
+            logging.error(
+                "GENQ_STRICT=1: валидация не пройдена. requests.json записан, "
+                "чекпоинт НЕ удалён (%s).", checkpoint_path,
+            )
+            return 1
+        else:
+            logging.warning("%s", summary_msg)
+            logging.warning(
+                "GENQ_STRICT=2: есть нарушения валидации, но включён мягкий режим. "
+                "requests.json записан, завершаю с кодом 0.",
+            )
+            if os.path.isfile(checkpoint_path):
+                os.remove(checkpoint_path)
+            return 0
+
+    if os.path.isfile(checkpoint_path):
+        os.remove(checkpoint_path)
+
+    logging.info("Готово: %s сегментов записано в %s", len(ordered), output_path)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Разбиение на батчи и self-tests
 # ---------------------------------------------------------------------------
 
 def make_batches(
@@ -1384,6 +1815,193 @@ def run_self_tests() -> int:
         check("лимит: отдельных warning ровно MAX_NORMALIZE_WARNINGS",
               len(warns) - n_limit_notes, MAX_NORMALIZE_WARNINGS)
         check("лимит: одно итоговое уведомление о лимите", n_limit_notes, 1)
+
+        # ===================================================================
+        # Новые тесты: JUNK_KIND_RE, validate_entries, REPAIR, чанки, режимы
+        # ===================================================================
+
+        # 1. JUNK_KIND_RE: границы слов и множественное число
+        check("junk_re: documentary не совпадает", bool(JUNK_KIND_RE.search("a documentary film")), False)
+        check("junk_re: documentation не совпадает", bool(JUNK_KIND_RE.search("ancient documentation")), False)
+        check("junk_re: Maps совпадает", bool(JUNK_KIND_RE.search("Historic Maps of Europe")), True)
+        check("junk_re: map в единственном числе", bool(JUNK_KIND_RE.search("a road map")), True)
+        check("junk_re: calendar совпадает", bool(JUNK_KIND_RE.search("calendar page")), True)
+        check("junk_re: calendars совпадает", bool(JUNK_KIND_RE.search("wall calendars")), True)
+        check("junk_re: coat of arms совпадает", bool(JUNK_KIND_RE.search("royal coat of arms")), True)
+        check("junk_re: coats of arms совпадает", bool(JUNK_KIND_RE.search("several coats of arms")), True)
+        check("junk_re: ID card совпадает", bool(JUNK_KIND_RE.search("driver ID card")), True)
+        check("junk_re: ID cards совпадает", bool(JUNK_KIND_RE.search("two id cards")), True)
+        check("junk_re: passport совпадает", bool(JUNK_KIND_RE.search("open passport")), True)
+        check("junk_re: passports совпадает", bool(JUNK_KIND_RE.search("foreign passports")), True)
+
+        # 2. Динамическая сборка JUNK_KIND_RE и промпта из JUNK_KIND_WORDS (правка 2)
+        test_junk_words = JUNK_KIND_WORDS + ("poster",)
+        test_re = build_junk_kind_re(test_junk_words)
+        test_prompt = build_system_instruction(2, junk_words=test_junk_words)
+        check("динамический junk: poster найден в test_re", bool(test_re.search("vintage posters on wall")), True)
+        check("динамический junk: poster отсутствует в штатном JUNK_KIND_RE", bool(JUNK_KIND_RE.search("vintage posters on wall")), False)
+        check("динамический junk: poster присутствует в test_prompt", "poster" in test_prompt, True)
+
+        # 3. validate_entries: проверка полей и слов-типов
+        v_entries = {
+            "101": entry(scene="A map of London", sites=["pexels"]),
+            "102": entry(query_narrow="calendar 1920", sites=["pexels"]),
+            "103": entry(query_medium="coat of arms", sites=["pexels"]),
+            "104": entry(query_broad="passports", sites=["pexels"]),
+            "105": entry(scene="Clean street", query_narrow="street", query_medium="street", query_broad="street"),
+        }
+        v_res = validate_entries(v_entries, mode=2)
+        check("validate: 101 scene map", "101" in v_res and any("scene" in s and "map" in s for s in v_res["101"]), True)
+        check("validate: 102 query_narrow calendar", "102" in v_res and any("query_narrow" in s and "calendar" in s for s in v_res["102"]), True)
+        check("validate: 103 query_medium coat of arms", "103" in v_res and any("query_medium" in s and "coat of arms" in s for s in v_res["103"]), True)
+        check("validate: 104 query_broad passports", "104" in v_res and any("query_broad" in s and "passports" in s for s in v_res["104"]), True)
+        check("validate: 105 без ошибок", "105" in v_res, False)
+
+        # 4. validate_entries: соответствие sites режимам 1 и 3
+        v_sites = {
+            "201": entry(sites=["pexels", "wikimedia"]),
+            "202": entry(sites=["wikimedia", "loc"]),
+            "203": entry(sites=["wikimedia", "pexels"]),
+            "204": entry(sites=["pexels", "pixabay"]),
+            "205": entry(sites=[]),
+        }
+        res_m1 = validate_entries(v_sites, mode=1)
+        check("validate режим 1: pexels запрещён", "201" in res_m1 and any("режиме 1" in s for s in res_m1["201"]), True)
+        check("validate режим 1: wikimedia разрешён", "202" in res_m1, False)
+        check("validate список sites пуст", "205" in res_m1 and any("список sites пуст" in s for s in res_m1["205"]), True)
+
+        res_m3 = validate_entries(v_sites, mode=3)
+        check("validate режим 3: wikimedia запрещён", "203" in res_m3 and any("режиме 3" in s for s in res_m3["203"]), True)
+        check("validate режим 3: pexels разрешён", "204" in res_m3, False)
+
+        # 5. validate_entries: режим 3 и entity_keywords / is_entity (правка 1)
+        v_mode3 = {
+            "301": entry(sites=["pexels"], is_entity=False, entity_keywords=[]),
+            "302": entry(sites=["pexels"], is_entity=False, entity_keywords=["Paris"]),
+            "303": entry(sites=["pexels"], is_entity=True, entity_keywords=[]),
+            "304": entry(sites=["pexels"], is_entity=True, entity_keywords=["London"]),
+        }
+        res_m3_ent = validate_entries(v_mode3, mode=3)
+        check("validate режим 3: is_entity=false и keywords=[] -> OK", "301" in res_m3_ent, False)
+        check("validate режим 3: keywords непустой -> нарушение", "302" in res_m3_ent and any("entity_keywords" in s for s in res_m3_ent["302"]), True)
+        check("validate режим 3: is_entity=true при пустом keywords -> нарушение (правка 1)",
+              "303" in res_m3_ent and any("is_entity" in s for s in res_m3_ent["303"]), True)
+        check("validate режим 3: оба поля нарушены", "304" in res_m3_ent and len(res_m3_ent["304"]) >= 2, True)
+
+        # 6. chunk_repair_indices: разбиение проблемных номеров
+        check("чанки: 10 номеров -> 1 запрос", [len(c) for c in chunk_repair_indices(list(range(10)))], [10])
+        check("чанки: 125 номеров -> 1 запрос", [len(c) for c in chunk_repair_indices(list(range(125)))], [125])
+        check("чанки: 126 номеров -> 2 запроса по 63", [len(c) for c in chunk_repair_indices(list(range(126)))], [63, 63])
+        check("чанки: 230 номеров -> 2 запроса по 115", [len(c) for c in chunk_repair_indices(list(range(230)))], [115, 115])
+        check("чанки: 300 номеров -> 3 запроса по 100", [len(c) for c in chunk_repair_indices(list(range(300)))], [100, 100, 100])
+        check("чанки: пустой список", chunk_repair_indices([]), [])
+
+        # 7. build_system_instruction для каждого режима
+        p1 = build_system_instruction(1)
+        p2 = build_system_instruction(2)
+        p3 = build_system_instruction(3)
+        check("промпт режим 1: содержит MODE 1: ARCHIVE ONLY", "MODE 1: ARCHIVE ONLY" in p1, True)
+        check("промпт режим 1: содержит запрещённые слова", "calendar" in p1 and "map" in p1, True)
+        check("промпт режим 2: содержит MODE 2: MIXED", "MODE 2: MIXED" in p2, True)
+        check("промпт режим 3: содержит MODE 3: STOCK ONLY", "MODE 3: STOCK ONLY" in p3, True)
+
+        # 8. build_prompt: блок REPAIR и соседи
+        seg_rep = Segment(42, "00:01:00,000", "00:01:05,000", "Reviewing war maps")
+        rep_data = {
+            42: {
+                "entry": entry(scene="Looking at a map of battles", query_narrow="battle map"),
+                "issues": ["в поле scene запрещённый тип кадра: map"],
+                "neighbors": "  [41] Text: Before | Scene: Calm\n  [43] Text: After | Scene: Peace",
+            }
+        }
+        rep_prompt = build_prompt([seg_rep], repair_info=rep_data)
+        check("prompt REPAIR: заголовок режима", "REPAIR MODE" in rep_prompt, True)
+        check("prompt REPAIR: содержит предыдущую сцену", "Looking at a map of battles" in rep_prompt, True)
+        check("prompt REPAIR: содержит проблему", "в поле scene запрещённый тип кадра: map" in rep_prompt, True)
+        check("prompt REPAIR: содержит соседей", "Before | Scene: Calm" in rep_prompt, True)
+
+        # 9. Повторный запрос на заглушке (REPAIR cycle):
+        # а) Исправление проходит -> код 0, файл записан
+        # б) Исправление не проходит, GENQ_STRICT=1 -> код 1, файл записан, чекпоинт не удалён
+        # в) Исправление не проходит, GENQ_STRICT=2 -> код 0, файл записан, чекпоинт удалён
+        import tempfile
+        test_segs = [
+            Segment(1, "00:00:00,000", "00:00:02,000", "A soldier stands guard"),
+            Segment(2, "00:00:02,000", "00:00:04,000", "Map of the border"),
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            out_file = os.path.join(td, "requests.json")
+            cp_file = checkpoint_path_for(out_file)
+
+            # Кейс А: успешное исправление
+            with open(cp_file, "w") as f:
+                f.write("{}")
+            initial_res_a = {
+                "1": entry(scene="Soldier standing guard", sites=["pexels"], query_narrow="soldier guard"),
+                "2": entry(scene="A military map", sites=["pexels"], query_narrow="military map"),
+            }
+            def mock_call_success(*args, **kwargs):
+                return {
+                    "2": entry(scene="A fortress wall at the border", sites=["pexels"],
+                               query_narrow="fortress wall border", query_medium="fortress wall", query_broad="fortress")
+                }
+            code_a = run_repair_cycle(
+                client=None, current_model="test-model", fallback_queue=[],
+                segments=test_segs, results=initial_res_a, exhausted_models={},
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=1,
+                output_path=out_file, call_batch_fn=mock_call_success,
+            )
+            check("repair mock: успех -> код 0", code_a, 0)
+            check("repair mock: успех -> файл записан", os.path.isfile(out_file), True)
+            check("repair mock: успех -> чекпоинт удалён", os.path.isfile(cp_file), False)
+            with open(out_file) as f:
+                saved_data_a = json.load(f)
+            check("repair mock: успех -> сегмент 2 исправлен", "fortress wall" in saved_data_a["2"]["scene"], True)
+
+            # Кейс Б: неуспех, strict=1 -> код 1, файл записан, чекпоинт не удалён
+            with open(cp_file, "w") as f:
+                f.write("{}")
+            initial_res_b = {
+                "1": entry(scene="Soldier standing guard", sites=["pexels"], query_narrow="soldier guard"),
+                "2": entry(scene="A military map", sites=["pexels"], query_narrow="military map"),
+            }
+            def mock_call_fail(*args, **kwargs):
+                # Модель снова вернула слово map
+                return {
+                    "2": entry(scene="Another strategic map", sites=["pexels"], query_narrow="strategic map")
+                }
+            code_b = run_repair_cycle(
+                client=None, current_model="test-model", fallback_queue=[],
+                segments=test_segs, results=initial_res_b, exhausted_models={},
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=1,
+                output_path=out_file, call_batch_fn=mock_call_fail,
+            )
+            check("repair mock: неуспех strict=1 -> код 1", code_b, 1)
+            check("repair mock: неуспех strict=1 -> файл записан", os.path.isfile(out_file), True)
+            check("repair mock: неуспех strict=1 -> чекпоинт сохранён (не удалён)", os.path.isfile(cp_file), True)
+
+            # Кейс В: неуспех, strict=2 -> код 0, файл записан, чекпоинт удалён
+            code_c = run_repair_cycle(
+                client=None, current_model="test-model", fallback_queue=[],
+                segments=test_segs, results=initial_res_b, exhausted_models={},
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=2,
+                output_path=out_file, call_batch_fn=mock_call_fail,
+            )
+            check("repair mock: неуспех strict=2 -> код 0", code_c, 0)
+            check("repair mock: неуспех strict=2 -> файл записан", os.path.isfile(out_file), True)
+            check("repair mock: неуспех strict=2 -> чекпоинт удалён", os.path.isfile(cp_file), False)
+
+        # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
+        check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
+        check("parse mode: env валидный", parse_sources_mode(None, "3"), 3)
+        check("parse mode: невалидный -> дефолт 2", parse_sources_mode("invalid", None), 2)
+        check("parse mode: None -> дефолт 2", parse_sources_mode(None, None), 2)
+        check("parse strict: CLI валидный", parse_strict_mode("2", "1"), 2)
+        check("parse strict: env валидный", parse_strict_mode(None, "2"), 2)
+        check("parse strict: невалидный -> дефолт 1", parse_strict_mode("bad", None), 1)
+        check("parse strict: None -> дефолт 1", parse_strict_mode(None, None), 1)
+
     finally:
         _normalize_warn_left[0] = saved_warn
 
@@ -1410,6 +2028,14 @@ def main() -> int:
         help="Через запятую - модели для переключения при исчерпании дневного лимита основной.",
     )
     parser.add_argument(
+        "--sources-mode", default=None,
+        help="Режим источников: 1 (только архив), 2 (микс, по умолчанию), 3 (только сток).",
+    )
+    parser.add_argument(
+        "--strict", default=None,
+        help="Строгость проверки запросов: 1 (калибровка/код 1 при ошибках), 2 (мягко/warning, код 0).",
+    )
+    parser.add_argument(
         "--skip-schema-preflight", action="store_true",
         help="Пропустить проверку response_schema на 2 синтетических сегментах (не рекомендуется).",
     )
@@ -1423,6 +2049,16 @@ def main() -> int:
     if not os.path.isfile(args.input):
         logging.error("Входной файл не найден: %s", args.input)
         return 1
+
+    sources_mode = parse_sources_mode(args.sources_mode, os.environ.get("GENQ_SOURCES_MODE"))
+    strict_mode = parse_strict_mode(args.strict, os.environ.get("GENQ_STRICT"))
+
+    mode_names = {1: "только архив", 2: "микс", 3: "только сток"}
+    logging.info(
+        "Режим источников: %s (%s), строгость проверки: %s (%s)",
+        sources_mode, mode_names[sources_mode], strict_mode,
+        "калибровка / код 1" if strict_mode == 1 else "мягко / код 0",
+    )
 
     try:
         segments = parse_srt(args.input)
@@ -1521,7 +2157,8 @@ def main() -> int:
         while True:
             try:
                 batch_result = call_gemini_batch(
-                    client, current_model, batch, context_before, context_after
+                    client, current_model, batch, context_before, context_after,
+                    mode=sources_mode,
                 )
                 break
             except DailyQuotaExceededError as e:
@@ -1562,16 +2199,20 @@ def main() -> int:
             batch_num, len(batches), progress_pct, len(results), len(segments),
         )
 
-    ordered = {str(k): results[str(k)] for k in sorted(int(k) for k in results.keys())}
-
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(ordered, f, ensure_ascii=False, indent=2)
-
-    if os.path.isfile(checkpoint_path):
-        os.remove(checkpoint_path)
-
-    logging.info("Готово: %s сегментов записано в %s", len(ordered), args.output)
-    return 0
+    # Пост-проверка, исправление REPAIR, статистика и завершение
+    return run_repair_cycle(
+        client=client,
+        current_model=current_model,
+        fallback_queue=fallback_queue,
+        segments=segments,
+        results=results,
+        exhausted_models=exhausted_models,
+        checkpoint_path=checkpoint_path,
+        src_hash=src_hash,
+        sources_mode=sources_mode,
+        strict_mode=strict_mode,
+        output_path=args.output,
+    )
 
 
 if __name__ == "__main__":
