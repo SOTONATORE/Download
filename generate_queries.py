@@ -589,8 +589,26 @@ def build_prompt(
         lines.append("### Segments that need a response (REPAIR MODE)")
         lines.append(
             "The following segments had validation issues in their previously generated data. "
-            "Fix the specific issues listed for each segment while preserving the rest of the valid scene and queries."
+            "Fix the specific issues listed for each segment."
         )
+        lines.append("")
+        lines.append("REPAIR RULES:")
+        lines.append("- Fix ONLY the listed issues; keep every other field as it is.")
+        lines.append(
+            f"- If an issue says a shot type is forbidden ({', '.join(JUNK_KIND_WORDS)}): "
+            "REPLACE the whole scene with something a camera can shoot: people, a building, a street, "
+            "a landscape, a physical object, a portrait of a named person. The forbidden word AND its "
+            "near-synonyms or reformulations (sheet, page, leaf, illustration, print, chart-like, etc.) "
+            "must not appear in scene or in any of query_narrow / query_medium / query_broad. "
+            "Do not just rephrase it."
+        )
+        lines.append("- A date or a number is NEVER shown as a calendar; geopolitics and wars are NEVER shown as a map.")
+        lines.append(
+            "- For an abstract segment (a date, a number, an assessment, a transition) use the generalized "
+            "stock shot rule from the system prompt: infer the common visual theme from the neighbors and "
+            "write a generic frame (no proper names)."
+        )
+        lines.append("- Fix sites / entity_keywords issues according to the current sources mode.")
         lines.append("")
         for s in batch:
             text = s.text if s.text else "(silence / no text)"
@@ -603,11 +621,16 @@ def build_prompt(
             lines.append(f"### Segment {s.index}")
             lines.append(f"Timing: {s.start} --> {s.end}")
             lines.append(f"Narration text: {text}")
-            lines.append(f"Previous scene: {prev.get('scene', '')}")
-            lines.append(f"Previous sites: {json.dumps(prev.get('sites', []))}")
-            lines.append(f"Previous query_narrow: {prev.get('query_narrow', '')}")
-            lines.append(f"Previous query_medium: {prev.get('query_medium', '')}")
-            lines.append(f"Previous query_broad: {prev.get('query_broad', '')}")
+            # Для сегментов с мусорным словом прежний кадр не показываем: модель на нём якорится
+            has_junk = any(
+                "forbidden shot type" in iss or "запрещённый тип кадра" in iss for iss in issues_list
+            )
+            if not has_junk:
+                lines.append(f"Previous scene: {prev.get('scene', '')}")
+                lines.append(f"Previous sites: {json.dumps(prev.get('sites', []))}")
+                lines.append(f"Previous query_narrow: {prev.get('query_narrow', '')}")
+                lines.append(f"Previous query_medium: {prev.get('query_medium', '')}")
+                lines.append(f"Previous query_broad: {prev.get('query_broad', '')}")
             lines.append("Validation issues to fix:")
             lines.append(issues_formatted)
             lines.append(f"Neighbors (context):\n{neighbors_str}")
@@ -1045,63 +1068,80 @@ def _normalize_entry(
 # Валидация записей и подготовка повторного запроса
 # ---------------------------------------------------------------------------
 
+def _collect_entry_issues(
+    entry: dict, mode: int, rx_check: re.Pattern
+) -> list[tuple[str, str]]:
+    """Собирает проблемы одной записи как пары (текст_ru, текст_en): русский - для лога,
+    английский - для промпта REPAIR. Условия проверки заданы в одном месте."""
+    archive_sites = frozenset({"wikimedia", "loc", "nasa"})
+    stock_sites = frozenset({"pexels", "pixabay"})
+    found_issues: list[tuple[str, str]] = []
+
+    # 1. Запрещённые слова-типы в полях scene, query_narrow, query_medium, query_broad
+    for field in ("scene", "query_narrow", "query_medium", "query_broad"):
+        val = entry.get(field)
+        if val and isinstance(val, str):
+            found = rx_check.findall(val)
+            if found:
+                words_uniq = ", ".join(sorted(set(w.lower() for w in found)))
+                found_issues.append((
+                    f"в поле {field} запрещённый тип кадра: {words_uniq}",
+                    f"forbidden shot type '{words_uniq}' in field {field}",
+                ))
+
+    # 2. Соответствие sites режиму
+    sites = entry.get("sites") or []
+    if not sites:
+        found_issues.append(("список sites пуст", "sites list is empty"))
+    else:
+        if mode == 1:
+            stock_present = ", ".join(x for x in sites if x in stock_sites)
+            if stock_present:
+                found_issues.append((
+                    f"в режиме 1 (архив) недопустимы стоковые сайты: {stock_present}",
+                    f"in mode 1 (archive) stock sites are not allowed: {stock_present}",
+                ))
+        elif mode == 3:
+            arch_present = ", ".join(x for x in sites if x in archive_sites)
+            if arch_present:
+                found_issues.append((
+                    f"в режиме 3 (сток) недопустимы архивные сайты: {arch_present}",
+                    f"in mode 3 (stock) archive sites are not allowed: {arch_present}",
+                ))
+
+    # 3. Режим 3: is_entity != false ИЛИ entity_keywords непустой
+    if mode == 3:
+        is_ent = entry.get("is_entity", False)
+        kw = entry.get("entity_keywords") or []
+        if is_ent is not False:
+            found_issues.append((
+                f"в режиме 3 (сток) is_entity должен быть false, получено: {is_ent}",
+                f"in mode 3 (stock) is_entity must be false, got: {is_ent}",
+            ))
+        if kw:
+            found_issues.append((
+                f"в режиме 3 (сток) entity_keywords должен быть пустым, найдено: {kw}",
+                f"in mode 3 (stock) entity_keywords must be empty, found: {kw}",
+            ))
+
+    return found_issues
+
+
 def validate_entries(
     entries: dict[str, dict],
     mode: int,
     junk_re: Optional[re.Pattern] = None,
+    lang: str = "ru",
 ) -> dict[str, list[str]]:
     """Пост-проверка записей сегментов на соблюдение ограничений режима и запрещённых типов кадра.
-    Возвращает словарь {номер_сегмента: [описания_проблем]}."""
+    Возвращает словарь {номер_сегмента: [описания_проблем]}. lang="ru" (по умолчанию) - тексты
+    для лога, lang="en" - те же проблемы по-английски для промпта REPAIR."""
     rx_check = junk_re if junk_re is not None else JUNK_KIND_RE
-    archive_sites = frozenset({"wikimedia", "loc", "nasa"})
-    stock_sites = frozenset({"pexels", "pixabay"})
+    pos = 1 if lang == "en" else 0
     issues: dict[str, list[str]] = {}
 
     for idx_str, entry in entries.items():
-        seg_issues: list[str] = []
-
-        # 1. Запрещённые слова-типы в полях scene, query_narrow, query_medium, query_broad
-        for field in ("scene", "query_narrow", "query_medium", "query_broad"):
-            val = entry.get(field)
-            if val and isinstance(val, str):
-                found = rx_check.findall(val)
-                if found:
-                    words_uniq = sorted(set(w.lower() for w in found))
-                    seg_issues.append(
-                        f"в поле {field} запрещённый тип кадра: {', '.join(words_uniq)}"
-                    )
-
-        # 2. Соответствие sites режиму
-        sites = entry.get("sites") or []
-        if not sites:
-            seg_issues.append("список sites пуст")
-        else:
-            if mode == 1:
-                stock_present = [s for s in sites if s in stock_sites]
-                if stock_present:
-                    seg_issues.append(
-                        f"в режиме 1 (архив) недопустимы стоковые сайты: {', '.join(stock_present)}"
-                    )
-            elif mode == 3:
-                arch_present = [s for s in sites if s in archive_sites]
-                if arch_present:
-                    seg_issues.append(
-                        f"в режиме 3 (сток) недопустимы архивные сайты: {', '.join(arch_present)}"
-                    )
-
-        # 3. Режим 3: is_entity != false ИЛИ entity_keywords непустой
-        if mode == 3:
-            is_ent = entry.get("is_entity", False)
-            kw = entry.get("entity_keywords") or []
-            if is_ent is not False:
-                seg_issues.append(
-                    f"в режиме 3 (сток) is_entity должен быть false, получено: {is_ent}"
-                )
-            if kw:
-                seg_issues.append(
-                    f"в режиме 3 (сток) entity_keywords должен быть пустым, найдено: {kw}"
-                )
-
+        seg_issues = [pair[pos] for pair in _collect_entry_issues(entry, mode, rx_check)]
         if seg_issues:
             issues[idx_str] = seg_issues
 
@@ -1482,11 +1522,15 @@ def run_repair_cycle(
             ctx_before = segments[max(0, first_pos - CONTEXT_WINDOW) : first_pos]
             ctx_after = segments[last_pos + 1 : last_pos + 1 + CONTEXT_WINDOW]
 
+            # В промпт уходят английские формулировки проблем, в лог - русские
+            issues_en = validate_entries(
+                {str(i): results[str(i)] for i in chunk_indices}, sources_mode, lang="en"
+            )
             chunk_repair_info = {}
             for s in chunk_segs:
                 chunk_repair_info[s.index] = {
                     "entry": results.get(str(s.index), {}),
-                    "issues": initial_issues.get(str(s.index), []),
+                    "issues": issues_en.get(str(s.index), []),
                     "neighbors": format_neighbors_context(s.index, segments, results, CONTEXT_WINDOW),
                 }
 
@@ -1910,15 +1954,65 @@ def run_self_tests() -> int:
         rep_data = {
             42: {
                 "entry": entry(scene="Looking at a map of battles", query_narrow="battle map"),
-                "issues": ["в поле scene запрещённый тип кадра: map"],
+                "issues": ["forbidden shot type 'map' in field scene"],
                 "neighbors": "  [41] Text: Before | Scene: Calm\n  [43] Text: After | Scene: Peace",
             }
         }
         rep_prompt = build_prompt([seg_rep], repair_info=rep_data)
         check("prompt REPAIR: заголовок режима", "REPAIR MODE" in rep_prompt, True)
-        check("prompt REPAIR: содержит предыдущую сцену", "Looking at a map of battles" in rep_prompt, True)
-        check("prompt REPAIR: содержит проблему", "в поле scene запрещённый тип кадра: map" in rep_prompt, True)
+        check("prompt REPAIR: мусорный сегмент без предыдущей сцены", "Looking at a map of battles" in rep_prompt, False)
+        check("prompt REPAIR: содержит проблему", "forbidden shot type 'map' in field scene" in rep_prompt, True)
         check("prompt REPAIR: содержит соседей", "Before | Scene: Calm" in rep_prompt, True)
+
+        # 8а. validate_entries(lang="en") и lang по умолчанию
+        en_in = {
+            "1": entry(scene="A calendar page", sites=["pexels"]),
+            "2": entry(sites=["pexels"]),
+            "3": entry(sites=["wikimedia"], is_entity=True, entity_keywords=["Rome"]),
+            "4": entry(sites=[]),
+        }
+        en_m1 = validate_entries(en_in, mode=1, lang="en")
+        en_m3 = validate_entries(en_in, mode=3, lang="en")
+        ru_m1 = validate_entries(en_in, mode=1)
+        check("validate en: слово-тип", "forbidden shot type 'calendar' in field scene" in en_m1["1"], True)
+        check("validate en: режим 1", "in mode 1 (archive) stock sites are not allowed: pexels" in en_m1["2"], True)
+        check("validate en: режим 3 архивные сайты",
+              "in mode 3 (stock) archive sites are not allowed: wikimedia" in en_m3["3"], True)
+        check("validate en: режим 3 is_entity", "in mode 3 (stock) is_entity must be false, got: True" in en_m3["3"], True)
+        check("validate en: режим 3 entity_keywords",
+              "in mode 3 (stock) entity_keywords must be empty, found: ['Rome']" in en_m3["3"], True)
+        check("validate en: пустой sites", "sites list is empty" in en_m1["4"], True)
+        check("validate ru по умолчанию: слово-тип", "в поле scene запрещённый тип кадра: calendar" in ru_m1["1"], True)
+        check("validate ru по умолчанию: режим 1",
+              "в режиме 1 (архив) недопустимы стоковые сайты: pexels" in ru_m1["2"], True)
+        check("validate ru по умолчанию: пустой sites", "список sites пуст" in ru_m1["4"], True)
+        check("validate: ru и en дают одинаковые номера и число проблем",
+              {k: len(v) for k, v in en_m3.items()}, {k: len(v) for k, v in validate_entries(en_in, mode=3).items()})
+
+        # 8б. build_prompt REPAIR: правила, английские проблемы, скрытие прежнего кадра
+        seg_a = Segment(57, "00:02:00,000", "00:02:03,000", "In 1920 everything changed")
+        seg_b = Segment(58, "00:02:03,000", "00:02:06,000", "The market opened")
+        old_a = entry(scene="A historic calendar page", query_narrow="calendar sheet wood",
+                      query_medium="calendar sheet", query_broad="calendar")
+        old_b = entry(scene="Busy bazaar stalls", sites=["wikimedia"], query_narrow="bazaar stalls old",
+                      query_medium="bazaar stalls", query_broad="bazaar")
+        iss_en = validate_entries({"57": old_a, "58": old_b}, mode=3, lang="en")
+        rep2 = {
+            57: {"entry": old_a, "issues": iss_en["57"], "neighbors": "  [56] Text: X | Scene: Y"},
+            58: {"entry": old_b, "issues": iss_en["58"], "neighbors": "  [57] Text: Z | Scene: W"},
+        }
+        rp = build_prompt([seg_a, seg_b], repair_info=rep2)
+        check("prompt REPAIR: английская проблема", "forbidden shot type 'calendar' in field scene" in rp, True)
+        check("prompt REPAIR: нет русских слов проблем", "запрещённый" in rp or "недопустимы" in rp, False)
+        check("prompt REPAIR: все слова JUNK_KIND_WORDS", all(w in rp for w in JUNK_KIND_WORDS), True)
+        check("prompt REPAIR: фраза про near-synonyms", "near-synonyms" in rp, True)
+        check("prompt REPAIR: мусорный сегмент без старой scene", "A historic calendar page" in rp, False)
+        check("prompt REPAIR: мусорный сегмент без старых query",
+              "calendar sheet wood" in rp or "Previous query_broad: calendar" in rp, False)
+        check("prompt REPAIR: мусорный сегмент сохраняет текст и соседей",
+              "In 1920 everything changed" in rp and "[56] Text: X" in rp, True)
+        check("prompt REPAIR: сегмент только с sites сохраняет старые значения",
+              "Busy bazaar stalls" in rp and "Previous query_narrow: bazaar stalls old" in rp, True)
 
         # 9. Повторный запрос на заглушке (REPAIR cycle):
         # а) Исправление проходит -> код 0, файл записан
@@ -1991,6 +2085,36 @@ def run_self_tests() -> int:
             check("repair mock: неуспех strict=2 -> код 0", code_c, 0)
             check("repair mock: неуспех strict=2 -> файл записан", os.path.isfile(out_file), True)
             check("repair mock: неуспех strict=2 -> чекпоинт удалён", os.path.isfile(cp_file), False)
+
+            # Кейс Г: в call_batch_fn уходят английские проблемы, а лог остаётся русским
+            captured: dict = {}
+            def mock_call_capture(*args, **kwargs):
+                captured.update(kwargs.get("repair_info") or {})
+                return {"2": entry(scene="Another strategic map", sites=["pexels"], query_narrow="strategic map")}
+            class _ListHandler(logging.Handler):
+                def __init__(self):
+                    super().__init__()
+                    self.msgs: list[str] = []
+                def emit(self, record):
+                    self.msgs.append(record.getMessage())
+            lh = _ListHandler()
+            logging.getLogger().addHandler(lh)
+            try:
+                with open(cp_file, "w") as f:
+                    f.write("{}")
+                run_repair_cycle(
+                    client=None, current_model="test-model", fallback_queue=[],
+                    segments=test_segs, results=dict(initial_res_b), exhausted_models={},
+                    checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=2,
+                    output_path=out_file, call_batch_fn=mock_call_capture,
+                )
+            finally:
+                logging.getLogger().removeHandler(lh)
+            check("repair mock: в call_batch_fn английские проблемы",
+                  captured.get(2, {}).get("issues"), ["forbidden shot type 'map' in field scene",
+                                                      "forbidden shot type 'map' in field query_narrow"])
+            check("repair mock: лог по-прежнему русский (Сегмент N: ...)",
+                  any(m.startswith("Сегмент 2: в поле scene запрещённый тип кадра: map") for m in lh.msgs), True)
 
         # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
         check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
