@@ -46,16 +46,8 @@ jobs:
     - name: Install query-generation deps
       run: pip install -U google-genai
 
-    # Чекпоинт между запусками: если прошлый прогон упал (квота/сбой Gemini), подтягиваем
-    # его из кэша (тот же SRT -> тот же хэш), и генерация продолжится с прерванного места.
-    # Для другого SRT/содержимого префикс не совпадёт, а скрипт дополнительно сверяет хэш.
-    - name: Restore Gemini checkpoint from previous run
-      uses: actions/cache/restore@v5
-      with:
-        path: requests.json.checkpoint.json
-        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
-        restore-keys: |
-          genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-
+    # Чекпоинт между запусками НЕ используется: каждый прогон генерирует запросы с нуля
+    # (иначе после правок промпта/режима подтягивались бы старые батчи из кэша).
 
     - name: Generate search queries via Gemini
       env:
@@ -65,14 +57,6 @@ jobs:
         GENQ_STRICT: ${{ inputs.strict }}
         PYTHONUNBUFFERED: "1"
       run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
-
-    # При успехе скрипт сам удаляет чекпоинт, поэтому сохраняем его только при падении шага.
-    - name: Save Gemini checkpoint (only if generation failed)
-      if: failure()
-      uses: actions/cache/save@v5
-      with:
-        path: requests.json.checkpoint.json
-        key: genq-checkpoint-${{ hashFiles(inputs.srt_path) }}-${{ github.run_id }}
 
     # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
     # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.
