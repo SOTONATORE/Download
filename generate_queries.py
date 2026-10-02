@@ -92,6 +92,8 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_FALLBACK_MODELS = ["gemini-3.1-flash-lite"]
 DEFAULT_BATCH_SIZE = 100
 CONTEXT_WINDOW = 3
+# Круг 2 REPAIR: широкое окно соседей (только текст SRT, ближайшие первыми, с пометкой расстояния).
+REPAIR2_CONTEXT_WINDOW = 10
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
 # Практический потолок ожидания для НЕ-дневных 429 (RPM/TPM) внутри одного запуска -
@@ -253,16 +255,21 @@ the remaining fields defined by the schema. The order of objects in the array do
 {mode_rule}
 FIELD RULES:
 
-1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Describe \
-ONLY what can actually be filmed by a camera: people, buildings, streets, landscapes, physical \
-objects, portraits. \
-STRICTLY FORBIDDEN visual types (do NOT use or depict them in scene or in any query): {junk_list_str} \
-(and their plural forms). \
-NEVER show a date or number as a calendar; NEVER show geopolitics, borders, or wars as a map - \
-instead show the location, people, building, equipment, vehicles, or a portrait of the named person. \
+1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Choose it \
+by answering three questions in order: (1) WHERE does this happen - the place named in the segment's \
+text, or, if the text names none, the place implied by the neighboring segments; (2) WHO is there - the \
+people by role or group, without personal names when the sites are stock; (3) WHAT of this can a camera \
+film as a solid, living subject - a building, a hall, a street, a landscape, people, a vehicle, a tool, \
+a physical object - rather than a flat sheet. Flat objects that carry text (paper, page, sheet, \
+parchment, letter, manuscript, scroll) are undesirable as the MAIN subject of the frame. \
+Never use or depict these shot types in scene or in any query: {junk_list_str} (and plural forms); \
+a date or number is never a calendar, and geopolitics or wars are never a map. \
 Write scene BEFORE the queries and derive all three queries from it. \
-Do NOT invent details that are not in the segment's text (no extra people, moods, weather, \
-time of day, or settings the text does not mention).
+If the only thing the segment's text gives you to show is one of those forbidden shot types or a flat \
+text-bearing object (a treaty, decree, letter, newspaper, map, date, flag, and the like), treat the \
+segment as abstract and apply the ABSTRACT / GENERAL SEGMENTS rule below: a generalized frame built \
+from the neighbors is not an invented detail. Otherwise do NOT invent details that are not in the \
+segment's text (no extra people, moods, weather, time of day, or settings the text does not mention).
 
 2. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
 "pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources. \
@@ -340,7 +347,8 @@ year comes from the text, so "Mehmed VI 1918" is allowed; the text says only "Me
 sultan" -> use "Mehmed VI". Archive sites match every word, so an invented year returns nothing.
 - Never include "creative commons", "free", or "no copyright" in a query - these are not effective \
 search terms; licensing is filtered separately downstream, not through the query text.
-- Do not invent scene details beyond what the segment's text actually says.
+- Do not invent scene details beyond what the segment's text actually says (a generalized frame for an \
+abstract segment, per the scene and ABSTRACT rules, is not an invention).
 - Always include silent/empty segments in the output with a neutral scene and queries inferred from \
 neighboring segments' context (query_broad may be null for them) - never skip a segment number.
 
@@ -572,6 +580,23 @@ def _format_context_line(s: Segment) -> str:
     return f"[{s.index}] {text}"
 
 
+def _repair_round_rule(mode: int) -> str:
+    """Дополнительное правило круга 2 REPAIR (только для него), зависит от режима источников."""
+    base = (
+        "- ROUND 2 ONLY: if the segment is about a specific document, treaty, decree, letter, map, date or "
+        "the like, and without it the text gives nothing that a camera can shoot, replace it with a "
+        "generalized frame derived from the neighbors (the place and the people, no personal names). "
+    )
+    if mode == 1:
+        return base + (
+            "Keep archival sites according to the Mode 1 rules; write a generalized ARCHIVAL query for the "
+            "place or era taken from the neighbors, with no personal names and no shot-type words."
+        )
+    return base + (
+        'Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false.'
+    )
+
+
 def build_prompt(
     batch: list[Segment],
     context_before: list[Segment] | None = None,
@@ -592,23 +617,41 @@ def build_prompt(
             "Fix the specific issues listed for each segment."
         )
         lines.append("")
+        rep_round = max((int(r.get("round", 1)) for r in repair_info.values()), default=1)
+        rep_mode = next((r["mode"] for r in repair_info.values() if r.get("mode")), DEFAULT_SOURCES_MODE)
+        junk_list = ", ".join(JUNK_KIND_WORDS)
+        if rep_round >= 2:
+            lines.append(
+                "This is REPAIR ROUND 2 of 2 (the last one): the first attempt did not remove the problems below."
+            )
         lines.append("REPAIR RULES:")
-        lines.append("- Fix ONLY the listed issues; keep every other field as it is.")
         lines.append(
-            f"- If an issue says a shot type is forbidden ({', '.join(JUNK_KIND_WORDS)}): "
-            "REPLACE the whole scene with something a camera can shoot: people, a building, a street, "
-            "a landscape, a physical object, a portrait of a named person. The forbidden word AND its "
-            "near-synonyms or reformulations (sheet, page, leaf, illustration, print, chart-like, etc.) "
-            "must not appear in scene or in any of query_narrow / query_medium / query_broad. "
-            "Do not just rephrase it."
+            "- Fix ONLY the listed issues. If an issue is only about sites / entity_keywords / is_entity, "
+            "keep scene and queries as they are."
+        )
+        lines.append(
+            f"- If an issue says a shot type is forbidden ({junk_list}): do NOT edit the old queries. "
+            "First write a NEW scene from scratch, using only this segment's narration text and the text of "
+            "its neighbors, by answering three questions in order: (1) WHERE does this happen; (2) WHO is "
+            "there (people by role, no personal names when the sites are stock); (3) WHAT of this can a "
+            "camera film as a solid, living subject (a building, a hall, a street, a landscape, people, a "
+            "vehicle, a physical object) rather than a flat sheet. Only then derive query_narrow, "
+            "query_medium and query_broad from that new scene. Flat objects that carry text (paper, page, "
+            "sheet, parchment, letter, manuscript, scroll) must not be the main subject of the frame. "
+            "The forbidden word AND its near-synonyms or reformulations (sheet, page, leaf, illustration, "
+            "print, chart-like, etc.) must not appear in scene or in any of query_narrow / query_medium / "
+            "query_broad. Do not just rephrase."
         )
         lines.append("- A date or a number is NEVER shown as a calendar; geopolitics and wars are NEVER shown as a map.")
         lines.append(
-            "- For an abstract segment (a date, a number, an assessment, a transition) use the generalized "
+            "- For an abstract segment (a date, a number, an assessment, a transition), or one whose text "
+            "offers nothing to show except a forbidden shot type, use the generalized "
             "stock shot rule from the system prompt: infer the common visual theme from the neighbors and "
             "write a generic frame (no proper names)."
         )
         lines.append("- Fix sites / entity_keywords issues according to the current sources mode.")
+        if rep_round >= 2:
+            lines.append(_repair_round_rule(rep_mode))
         lines.append("")
         for s in batch:
             text = s.text if s.text else "(silence / no text)"
@@ -636,6 +679,12 @@ def build_prompt(
             lines.append(f"Neighbors (context):\n{neighbors_str}")
             lines.append("Instruction: Fix ONLY the validation issues above; do NOT introduce forbidden words or sites.")
             lines.append("")
+        lines.append(
+            "SELF-CHECK before answering: make sure that none of scene, query_narrow, query_medium, "
+            f"query_broad contains a word from this list: {', '.join(JUNK_KIND_WORDS)}, nor its forms "
+            "(plural, hyphenated, compound) or paraphrases."
+        )
+        lines.append("")
     else:
         lines.append("### Segments that need a response")
         for s in batch:
@@ -1167,10 +1216,15 @@ def chunk_repair_indices(indices: list[int], max_size: int = 125) -> list[list[i
 def format_neighbors_context(
     target_idx: int,
     segments: list[Segment],
-    results: dict[str, dict],
+    results: Optional[dict[str, dict]] = None,
     window: int = CONTEXT_WINDOW,
+    with_distance: bool = False,
 ) -> str:
-    """Форматирует контекст соседей +-window для блока REPAIR (текст и текущая scene)."""
+    """Форматирует контекст соседей +-window для блока REPAIR. Источник - ТОЛЬКО текст SRT:
+    scene и любые значения из results не показываются (параметр results оставлен ради
+    совместимости вызовов и не используется). with_distance=False (круг 1): блоки Context
+    BEFORE / AFTER. with_distance=True (круг 2): компактный список, ближайшие первыми, у каждого
+    соседа пометка distance N; дальние соседи идут как фон."""
     pos = None
     for i, s in enumerate(segments):
         if s.index == target_idx:
@@ -1179,20 +1233,37 @@ def format_neighbors_context(
     if pos is None:
         return "(no neighbor context available)"
 
+    def _txt(s: Segment) -> str:
+        return " ".join((s.text or "").split()) or "(empty)"
+
     before = segments[max(0, pos - window) : pos]
     after = segments[pos + 1 : pos + 1 + window]
 
     lines = []
-    if before:
-        lines.append("Context BEFORE:")
-        for s in before:
-            sc = results.get(str(s.index), {}).get("scene", "(no scene)")
-            lines.append(f"  [{s.index}] Text: {s.text or '(empty)'} | Scene: {sc}")
-    if after:
-        lines.append("Context AFTER:")
-        for s in after:
-            sc = results.get(str(s.index), {}).get("scene", "(no scene)")
-            lines.append(f"  [{s.index}] Text: {s.text or '(empty)'} | Scene: {sc}")
+    if with_distance:
+        # before[-d] - сосед слева на расстоянии d, after[d-1] - сосед справа на расстоянии d
+        for d in range(1, window + 1):
+            if d <= len(before):
+                s = before[-d]
+                lines.append(f"  distance {d} | before [{s.index}]: {_txt(s)}")
+            if d <= len(after):
+                s = after[d - 1]
+                lines.append(f"  distance {d} | after [{s.index}]: {_txt(s)}")
+        if lines:
+            lines.insert(
+                0,
+                f"Neighbors by distance (nearest first; distance 1-{CONTEXT_WINDOW} is the immediate "
+                f"surroundings, farther ones are background):",
+            )
+    else:
+        if before:
+            lines.append("Context BEFORE:")
+            for s in before:
+                lines.append(f"  [{s.index}] Text: {_txt(s)}")
+        if after:
+            lines.append("Context AFTER:")
+            for s in after:
+                lines.append(f"  [{s.index}] Text: {_txt(s)}")
     return "\n".join(lines) if lines else "(no neighbors)"
 
 
@@ -1487,6 +1558,95 @@ def save_checkpoint(path: str, src_hash: str, results: dict, exhausted_models: d
 # Повторный запрос REPAIR и завершение
 # ---------------------------------------------------------------------------
 
+def _run_repair_round(
+    client: "genai.Client",
+    current_model: str,
+    fallback_queue: list[str],
+    segments: list[Segment],
+    results: dict[str, dict],
+    exhausted_models: dict[str, str],
+    checkpoint_path: str,
+    src_hash: str,
+    sources_mode: int,
+    indices: list[int],
+    round_num: int,
+    call_batch_fn=call_gemini_batch,
+) -> tuple[Optional[int], str]:
+    """Один круг REPAIR по номерам indices (чанки по chunk_repair_indices). Обновляет results,
+    fallback_queue, exhausted_models и чекпоинт на месте. Возвращает (код, модель): код None -
+    круг завершён, иначе код возврата процесса (3 - квоты исчерпаны, 1 - ошибка вызова)."""
+    seg_by_idx = {s.index: s for s in segments}
+    repair_chunks = chunk_repair_indices(indices, max_size=125)
+    # Круг 1: +-CONTEXT_WINDOW с блоками Context BEFORE/AFTER; круг 2: +-REPAIR2_CONTEXT_WINDOW
+    # с пометками расстояния. В обоих кругах соседи - только текст SRT.
+    neighbors_window = REPAIR2_CONTEXT_WINDOW if round_num == 2 else CONTEXT_WINDOW
+
+    for chunk_num, chunk_indices in enumerate(repair_chunks, start=1):
+        chunk_segs = [seg_by_idx[i] for i in chunk_indices]
+        first_idx, last_idx = chunk_segs[0].index, chunk_segs[-1].index
+        first_pos = next(i for i, s in enumerate(segments) if s.index == first_idx)
+        last_pos = next(i for i, s in enumerate(segments) if s.index == last_idx)
+        ctx_before = segments[max(0, first_pos - CONTEXT_WINDOW) : first_pos]
+        ctx_after = segments[last_pos + 1 : last_pos + 1 + CONTEXT_WINDOW]
+
+        # В промпт уходят английские формулировки проблем, в лог - русские
+        issues_en = validate_entries(
+            {str(i): results[str(i)] for i in chunk_indices}, sources_mode, lang="en"
+        )
+        chunk_repair_info = {}
+        for s in chunk_segs:
+            chunk_repair_info[s.index] = {
+                "entry": results.get(str(s.index), {}),
+                "issues": issues_en.get(str(s.index), []),
+                "neighbors": format_neighbors_context(
+                    s.index, segments, None, neighbors_window, with_distance=(round_num == 2)
+                ),
+                "round": round_num,
+                "mode": sources_mode,
+            }
+
+        logging.info(
+            "REPAIR круг %s/2: чанк %s/%s: %s сегментов [%s..%s] (модель: %s)",
+            round_num, chunk_num, len(repair_chunks), len(chunk_segs), first_idx, last_idx, current_model,
+        )
+
+        while True:
+            try:
+                repaired_batch = call_batch_fn(
+                    client, current_model, chunk_segs, ctx_before, ctx_after,
+                    mode=sources_mode, repair_info=chunk_repair_info,
+                )
+                break
+            except DailyQuotaExceededError as e:
+                logging.warning(
+                    "Дневной лимит исчерпан для модели %s: %s", e.model, e
+                )
+                exhausted_models[e.model] = _now_iso()
+                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                if not fallback_queue:
+                    logging.error(
+                        "Дневной лимит исчерпан во время REPAIR, а запасных моделей больше нет. "
+                        "Прогресс сохранён в чекпоинте %s.", checkpoint_path,
+                    )
+                    return 3, current_model
+                current_model = fallback_queue.pop(0)
+                logging.warning("Переключаюсь на запасную модель: %s", current_model)
+                continue
+            except Exception as e:
+                logging.error(
+                    "REPAIR круг %s/2, чанк %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
+                    "requests.json НЕ будет записан (чекпоинт сохранён в %s).",
+                    round_num, first_idx, last_idx, MAX_RETRIES, e, checkpoint_path,
+                )
+                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+                return 1, current_model
+
+        results.update(repaired_batch)
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+
+    return None, current_model
+
+
 def run_repair_cycle(
     client: "genai.Client",
     current_model: str,
@@ -1501,91 +1661,58 @@ def run_repair_cycle(
     output_path: str,
     call_batch_fn=call_gemini_batch,
 ) -> int:
-    """Выполняет пост-проверку записей, один раунд исправления REPAIR через Gemini
-    (при наличии проблем), логирует статистику источников и сохраняет requests.json."""
+    """Выполняет пост-проверку записей, до двух кругов исправления REPAIR через Gemini
+    (круг 2 - только для номеров, оставшихся с нарушениями после круга 1; третьего круга нет),
+    логирует статистику источников и сохраняет requests.json."""
     initial_issues = validate_entries(results, sources_mode)
     problem_indices = sorted(int(k) for k in initial_issues.keys())
+    post_issues_1: dict[str, list[str]] = {}
+    post_issues_2: dict[str, list[str]] = {}
+    round2_ran = False
 
     if problem_indices:
         logging.warning(
             "Обнаружены ошибки валидации в %s сегментах. Запускаю повторный запрос (REPAIR)...",
             len(problem_indices),
         )
-        seg_by_idx = {s.index: s for s in segments}
-        repair_chunks = chunk_repair_indices(problem_indices, max_size=125)
+        code, current_model = _run_repair_round(
+            client, current_model, fallback_queue, segments, results, exhausted_models,
+            checkpoint_path, src_hash, sources_mode, problem_indices, 1, call_batch_fn,
+        )
+        if code is not None:
+            return code
 
-        for chunk_num, chunk_indices in enumerate(repair_chunks, start=1):
-            chunk_segs = [seg_by_idx[i] for i in chunk_indices]
-            first_idx, last_idx = chunk_segs[0].index, chunk_segs[-1].index
-            first_pos = next(i for i, s in enumerate(segments) if s.index == first_idx)
-            last_pos = next(i for i, s in enumerate(segments) if s.index == last_idx)
-            ctx_before = segments[max(0, first_pos - CONTEXT_WINDOW) : first_pos]
-            ctx_after = segments[last_pos + 1 : last_pos + 1 + CONTEXT_WINDOW]
+        # Перепроверка только исправленных номеров круга 1
+        post_issues_1 = validate_entries({str(i): results[str(i)] for i in problem_indices}, sources_mode)
 
-            # В промпт уходят английские формулировки проблем, в лог - русские
-            issues_en = validate_entries(
-                {str(i): results[str(i)] for i in chunk_indices}, sources_mode, lang="en"
+        if post_issues_1:
+            round2_indices = sorted(int(k) for k in post_issues_1.keys())
+            logging.warning(
+                "После круга 1 остались нарушения в %s сегментах. Запускаю круг 2 REPAIR (последний)...",
+                len(round2_indices),
             )
-            chunk_repair_info = {}
-            for s in chunk_segs:
-                chunk_repair_info[s.index] = {
-                    "entry": results.get(str(s.index), {}),
-                    "issues": issues_en.get(str(s.index), []),
-                    "neighbors": format_neighbors_context(s.index, segments, results, CONTEXT_WINDOW),
-                }
-
-            logging.info(
-                "REPAIR чанк %s/%s: %s сегментов [%s..%s] (модель: %s)",
-                chunk_num, len(repair_chunks), len(chunk_segs), first_idx, last_idx, current_model,
+            code, current_model = _run_repair_round(
+                client, current_model, fallback_queue, segments, results, exhausted_models,
+                checkpoint_path, src_hash, sources_mode, round2_indices, 2, call_batch_fn,
             )
+            if code is not None:
+                return code
+            round2_ran = True
+            # Перепроверка только номеров круга 2
+            post_issues_2 = validate_entries({str(i): results[str(i)] for i in round2_indices}, sources_mode)
 
-            while True:
-                try:
-                    repaired_batch = call_batch_fn(
-                        client, current_model, chunk_segs, ctx_before, ctx_after,
-                        mode=sources_mode, repair_info=chunk_repair_info,
-                    )
-                    break
-                except DailyQuotaExceededError as e:
-                    logging.warning(
-                        "Дневной лимит исчерпан для модели %s: %s", e.model, e
-                    )
-                    exhausted_models[e.model] = _now_iso()
-                    save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                    if not fallback_queue:
-                        logging.error(
-                            "Дневной лимит исчерпан во время REPAIR, а запасных моделей больше нет. "
-                            "Прогресс сохранён в чекпоинте %s.", checkpoint_path,
-                        )
-                        return 3
-                    current_model = fallback_queue.pop(0)
-                    logging.warning("Переключаюсь на запасную модель: %s", current_model)
-                    continue
-                except Exception as e:
-                    logging.error(
-                        "REPAIR чанк %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
-                        "requests.json НЕ будет записан (чекпоинт сохранён в %s).",
-                        first_idx, last_idx, MAX_RETRIES, e, checkpoint_path,
-                    )
-                    save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                    return 1
+    post_issues = post_issues_2 if round2_ran else post_issues_1
 
-            results.update(repaired_batch)
-            save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-
-    # Проверка только исправленных номеров (если повтора не было - post_issues пусто)
-    if problem_indices:
-        repaired_entries = {str(i): results[str(i)] for i in problem_indices}
-        post_issues = validate_entries(repaired_entries, sources_mode)
+    if round2_ran:
+        logging.info(
+            "Валидация: проблемных сегментов до повтора: %s, после круга 1: %s, после круга 2: %s",
+            len(initial_issues), len(post_issues_1), len(post_issues_2),
+        )
     else:
-        post_issues = {}
-
-    n_before = len(initial_issues)
-    n_after = len(post_issues)
-    logging.info(
-        "Валидация: проблемных сегментов до повтора: %s, после повтора: %s",
-        n_before, n_after,
-    )
+        logging.info(
+            "Валидация: проблемных сегментов до повтора: %s, после круга 1: %s, круг 2 не требовался",
+            len(initial_issues), len(post_issues_1),
+        )
 
     archive_count = sum(
         1 for e in results.values()
@@ -1955,14 +2082,14 @@ def run_self_tests() -> int:
             42: {
                 "entry": entry(scene="Looking at a map of battles", query_narrow="battle map"),
                 "issues": ["forbidden shot type 'map' in field scene"],
-                "neighbors": "  [41] Text: Before | Scene: Calm\n  [43] Text: After | Scene: Peace",
+                "neighbors": "  [41] Text: Before\n  [43] Text: After",
             }
         }
         rep_prompt = build_prompt([seg_rep], repair_info=rep_data)
         check("prompt REPAIR: заголовок режима", "REPAIR MODE" in rep_prompt, True)
         check("prompt REPAIR: мусорный сегмент без предыдущей сцены", "Looking at a map of battles" in rep_prompt, False)
         check("prompt REPAIR: содержит проблему", "forbidden shot type 'map' in field scene" in rep_prompt, True)
-        check("prompt REPAIR: содержит соседей", "Before | Scene: Calm" in rep_prompt, True)
+        check("prompt REPAIR: содержит соседей (текст SRT)", "[41] Text: Before" in rep_prompt, True)
 
         # 8а. validate_entries(lang="en") и lang по умолчанию
         en_in = {
@@ -1998,8 +2125,8 @@ def run_self_tests() -> int:
                       query_medium="bazaar stalls", query_broad="bazaar")
         iss_en = validate_entries({"57": old_a, "58": old_b}, mode=3, lang="en")
         rep2 = {
-            57: {"entry": old_a, "issues": iss_en["57"], "neighbors": "  [56] Text: X | Scene: Y"},
-            58: {"entry": old_b, "issues": iss_en["58"], "neighbors": "  [57] Text: Z | Scene: W"},
+            57: {"entry": old_a, "issues": iss_en["57"], "neighbors": "  [56] Text: X"},
+            58: {"entry": old_b, "issues": iss_en["58"], "neighbors": "  [57] Text: Z"},
         }
         rp = build_prompt([seg_a, seg_b], repair_info=rep2)
         check("prompt REPAIR: английская проблема", "forbidden shot type 'calendar' in field scene" in rp, True)
@@ -2013,6 +2140,71 @@ def run_self_tests() -> int:
               "In 1920 everything changed" in rp and "[56] Text: X" in rp, True)
         check("prompt REPAIR: сегмент только с sites сохраняет старые значения",
               "Busy bazaar stalls" in rp and "Previous query_narrow: bazaar stalls old" in rp, True)
+
+        # 7а. Системный промпт: три вопроса, подсказка про плоские листы, слова из константы
+        for md, pm in ((1, p1), (2, p2), (3, p3)):
+            check(f"системный промпт режим {md}: три вопроса (где / кто / что снимаемое)",
+                  all(q in pm for q in ("(1) WHERE", "(2) WHO", "(3) WHAT")), True)
+            check(f"системный промпт режим {md}: подсказка про плоские листы с текстом",
+                  all(w in pm for w in ("paper", "parchment", "manuscript", "scroll")) and "MAIN subject" in pm, True)
+            check(f"системный промпт режим {md}: все слова JUNK_KIND_WORDS из константы",
+                  all(w in pm for w in JUNK_KIND_WORDS), True)
+            check(f"системный промпт режим {md}: ссылка на ABSTRACT / GENERAL SEGMENTS из правила scene",
+                  pm.index("ABSTRACT / GENERAL SEGMENTS") < pm.index("2. sites"), True)
+        check("плоские листы не добавлены в валидатор",
+              JUNK_KIND_RE.search("old paper scroll letter page parchment manuscript"), None)
+
+        # 8в. format_neighbors_context: только текст SRT, без scene и без значений results
+        nb_segs = [Segment(i, "00:00:00,000", "00:00:01,000", f"Text{i}") for i in range(1, 31)]
+        nb_res = {str(i): entry(scene=f"SCENE_OF_{i}") for i in range(1, 31)}
+        nb1 = format_neighbors_context(15, nb_segs, nb_res, CONTEXT_WINDOW)
+        check("neighbors круг 1: текст SRT соседей", "[12] Text: Text12" in nb1 and "[18] Text: Text18" in nb1, True)
+        check("neighbors круг 1: окно +-3", "[11]" not in nb1 and "[19]" not in nb1, True)
+        check("neighbors круг 1: нет scene", "Scene" not in nb1 and "SCENE_OF" not in nb1, True)
+        check("neighbors круг 1: блоки BEFORE/AFTER", "Context BEFORE:" in nb1 and "Context AFTER:" in nb1, True)
+        check("константы окон: круг 1 = 3, круг 2 = 10", (CONTEXT_WINDOW, REPAIR2_CONTEXT_WINDOW), (3, 10))
+        nb2 = format_neighbors_context(15, nb_segs, nb_res, REPAIR2_CONTEXT_WINDOW, with_distance=True)
+        check("neighbors круг 2: нет scene", "Scene" not in nb2 and "SCENE_OF" not in nb2, True)
+        check("neighbors круг 2: окно 10",
+              "[5]" in nb2 and "[25]" in nb2 and "[4]" not in nb2 and "[26]" not in nb2 and "[15]" not in nb2, True)
+        check("neighbors круг 2: ближайшие первыми",
+              nb2.index("distance 1 |") < nb2.index("distance 2 |") < nb2.index("distance 10 |"), True)
+        check("neighbors круг 2: пометка расстояния и текст SRT",
+              "distance 1 | before [14]: Text14" in nb2 and "distance 1 | after [16]: Text16" in nb2, True)
+        nb2_edge = format_neighbors_context(1, nb_segs, nb_res, REPAIR2_CONTEXT_WINDOW, with_distance=True)
+        check("neighbors круг 2: край файла без before", "before" not in nb2_edge and "after [2]" in nb2_edge, True)
+
+        # 8г. Промпт REPAIR: круг 1 и круг 2 в режимах 1 / 2 / 3
+        seg_r2 = Segment(70, "00:03:00,000", "00:03:03,000", "The treaty was signed")
+        old_r2 = entry(scene="Treaty on a desk", query_narrow="treaty document", query_medium="treaty document",
+                       query_broad="document")
+        nb_r2 = format_neighbors_context(15, nb_segs, nb_res, REPAIR2_CONTEXT_WINDOW, with_distance=True)
+        for md in (1, 2, 3):
+            iss_r2 = validate_entries({"70": old_r2}, mode=md, lang="en")["70"]
+            info1 = {70: {"entry": old_r2, "issues": iss_r2, "neighbors": nb1, "round": 1, "mode": md}}
+            info2 = {70: {"entry": old_r2, "issues": iss_r2, "neighbors": nb_r2, "round": 2, "mode": md}}
+            pr1 = build_prompt([seg_r2], repair_info=info1)
+            pr2 = build_prompt([seg_r2], repair_info=info2)
+            check(f"REPAIR круг 1 режим {md}: три вопроса и плоские листы",
+                  all(q in pr1 for q in ("WHERE", "WHO", "WHAT", "scroll", "NEW scene")), True)
+            check(f"REPAIR круг 1 режим {md}: нет правила круга 2", "ROUND 2" not in pr1, True)
+            check(f"REPAIR круг 1 режим {md}: самопроверка в конце блока со словами из константы",
+                  "SELF-CHECK" in pr1 and all(w in pr1[pr1.index("SELF-CHECK"):] for w in JUNK_KIND_WORDS), True)
+            check(f"REPAIR круг 1 режим {md}: самопроверка после списка сегментов",
+                  pr1.index("SELF-CHECK") > pr1.index("### Segment 70"), True)
+            check(f"REPAIR круг 2 режим {md}: правило круга 2 и самопроверка", "ROUND 2 ONLY" in pr2 and "SELF-CHECK" in pr2, True)
+            check(f"REPAIR круг 2 режим {md}: старая scene мусорного сегмента не показана",
+                  "Treaty on a desk" not in pr2 and "Previous query" not in pr2, True)
+            check(f"REPAIR круг 2 режим {md}: соседи с расстоянием, без scene",
+                  "distance 1 |" in pr2 and "Scene" not in pr2, True)
+            if md == 1:
+                check("REPAIR круг 2 режим 1: архивные sites, без инструкции про сток",
+                      "Keep archival sites" in pr2 and 'sites = ["pexels", "pixabay"]' not in pr2
+                      and "is_entity = false" not in pr2, True)
+            else:
+                check(f"REPAIR круг 2 режим {md}: sites = pexels/pixabay, пустые entity_keywords, is_entity=false",
+                      'sites = ["pexels", "pixabay"]' in pr2 and "entity_keywords = []" in pr2
+                      and "is_entity = false" in pr2, True)
 
         # 9. Повторный запрос на заглушке (REPAIR cycle):
         # а) Исправление проходит -> код 0, файл записан
@@ -2115,6 +2307,131 @@ def run_self_tests() -> int:
                                                       "forbidden shot type 'map' in field query_narrow"])
             check("repair mock: лог по-прежнему русский (Сегмент N: ...)",
                   any(m.startswith("Сегмент 2: в поле scene запрещённый тип кадра: map") for m in lh.msgs), True)
+
+            # Кейс Д: два круга REPAIR на заглушке (число вызовов, итоговые коды, квота и исключение)
+            cyc_segs = [Segment(i, "00:00:00,000", "00:00:01,000", "Map of the border" if i == 7 else f"Narration {i}")
+                        for i in range(1, 15)]
+
+            def good_entry():
+                return entry(scene="A fortress wall at the border", query_narrow="fortress wall border",
+                             query_medium="fortress wall", query_broad="fortress")
+
+            def bad_entry():
+                return entry(scene="Another strategic map", query_narrow="strategic map")
+
+            def make_results():
+                r = {str(s.index): entry(scene="Calm street") for s in cyc_segs}
+                r["7"] = entry(scene="A military map", query_narrow="military map")
+                return r
+
+            def make_mock(seq, calls):
+                def _m(client, model, chunk, cb, ca, mode=2, repair_info=None):
+                    calls.append((model, dict(repair_info or {})))
+                    kind = seq[min(len(calls) - 1, len(seq) - 1)]
+                    if isinstance(kind, Exception):
+                        raise kind
+                    return {"7": good_entry() if kind == "good" else bad_entry()}
+                return _m
+
+            def run_cyc(seq, strict=1, fallback=None, out=None):
+                calls: list = []
+                with open(cp_file, "w") as f:
+                    f.write("{}")
+                exhausted: dict = {}
+                code = run_repair_cycle(
+                    client=None, current_model="test-model", fallback_queue=list(fallback or []),
+                    segments=cyc_segs, results=make_results(), exhausted_models=exhausted,
+                    checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=strict,
+                    output_path=out or out_file, call_batch_fn=make_mock(seq, calls),
+                )
+                return code, calls, exhausted
+
+            root_logger = logging.getLogger()
+            saved_level = root_logger.level
+            root_logger.setLevel(logging.INFO)
+            lh2 = _ListHandler()
+            root_logger.addHandler(lh2)
+            try:
+                # Д1. Исправлено в круге 1 -> круг 2 не вызывается
+                if os.path.isfile(out_file):
+                    os.remove(out_file)
+                code_d1, calls_d1, _ = run_cyc(["good"])
+                check("repair 2 круга: исправлено в круге 1 -> код 0", code_d1, 0)
+                check("repair 2 круга: исправлено в круге 1 -> один вызов (круг 2 не вызывался)", len(calls_d1), 1)
+                check("repair 2 круга: круг 1 помечен round=1", [v["round"] for v in calls_d1[0][1].values()], [1])
+                check("repair 2 круга: круг 1 -> соседи без scene и без distance",
+                      "Scene" not in calls_d1[0][1][7]["neighbors"] and "distance" not in calls_d1[0][1][7]["neighbors"]
+                      and "[6] Text: Narration 6" in calls_d1[0][1][7]["neighbors"], True)
+                check("repair 2 круга: лог 'круг 2 не требовался'",
+                      any("круг 2 не требовался" in m for m in lh2.msgs), True)
+
+                # Д2. Исправлено в круге 2 -> код 0, файл записан, чекпоинт удалён
+                lh2.msgs.clear()
+                if os.path.isfile(out_file):
+                    os.remove(out_file)
+                code_d2, calls_d2, _ = run_cyc(["bad", "good"])
+                check("repair 2 круга: исправлено в круге 2 -> код 0", code_d2, 0)
+                check("repair 2 круга: исправлено в круге 2 -> два вызова", len(calls_d2), 2)
+                check("repair 2 круга: исправлено в круге 2 -> файл записан", os.path.isfile(out_file), True)
+                check("repair 2 круга: исправлено в круге 2 -> чекпоинт удалён", os.path.isfile(cp_file), False)
+                with open(out_file) as f:
+                    saved_d2 = json.load(f)
+                check("repair 2 круга: сегмент 7 исправлен кругом 2", "fortress wall" in saved_d2["7"]["scene"], True)
+                info_r2 = calls_d2[1][1][7]
+                check("repair 2 круга: круг 2 помечен round=2", info_r2["round"], 2)
+                check("repair 2 круга: круг 2 -> окно 10, ближайшие первыми, пометка distance, без scene",
+                      "distance 6 | before [1]" in info_r2["neighbors"] and "distance 7 | after [14]" in info_r2["neighbors"]
+                      and "distance 8 |" not in info_r2["neighbors"]
+                      and info_r2["neighbors"].index("distance 1 |") < info_r2["neighbors"].index("distance 2 |")
+                      and "Scene" not in info_r2["neighbors"] and "Calm street" not in info_r2["neighbors"], True)
+                check("repair 2 круга: лог статистики по кругам",
+                      any("после круга 1: 1, после круга 2: 0" in m for m in lh2.msgs), True)
+                check("repair 2 круга: по строке REPAIR на чанк в каждом круге",
+                      sum(1 for m in lh2.msgs if m.startswith("REPAIR круг 1/2: чанк 1/1: 1 сегментов [7..7]")) == 1
+                      and sum(1 for m in lh2.msgs if m.startswith("REPAIR круг 2/2: чанк 1/1: 1 сегментов [7..7]")) == 1, True)
+                check("repair 2 круга: строка 'Источники' осталась", any(m.startswith("Источники: архив") for m in lh2.msgs), True)
+
+                # Д3. Не исправлено после круга 2: strict=1 -> код 1, strict=2 -> код 0; не больше двух кругов
+                lh2.msgs.clear()
+                code_d3, calls_d3, _ = run_cyc(["bad"], strict=1)
+                check("repair 2 круга: не исправлено, strict=1 -> код 1", code_d3, 1)
+                check("repair 2 круга: не исправлено -> ровно два вызова (третьего круга нет)", len(calls_d3), 2)
+                check("repair 2 круга: не исправлено, strict=1 -> файл записан", os.path.isfile(out_file), True)
+                check("repair 2 круга: не исправлено, strict=1 -> чекпоинт сохранён", os.path.isfile(cp_file), True)
+                check("repair 2 круга: ERROR-строка с номером сегмента",
+                      any(m.startswith("Сегмент 7: в поле scene запрещённый тип кадра: map") for m in lh2.msgs), True)
+                code_d4, calls_d4, _ = run_cyc(["bad"], strict=2)
+                check("repair 2 круга: не исправлено, strict=2 -> код 0", code_d4, 0)
+                check("repair 2 круга: не исправлено, strict=2 -> два вызова", len(calls_d4), 2)
+                check("repair 2 круга: не исправлено, strict=2 -> файл записан", os.path.isfile(out_file), True)
+                check("repair 2 круга: не исправлено, strict=2 -> чекпоинт удалён", os.path.isfile(cp_file), False)
+
+                # Д4. Квота во втором круге: запасная модель, затем код 3
+                out_q = os.path.join(td, "out_q.json")
+                code_q1, calls_q1, exh_q1 = run_cyc(
+                    ["bad", DailyQuotaExceededError("test-model", "quota"), "good"], fallback=["fb-model"], out=out_q)
+                check("repair круг 2: квота -> переключение на запасную модель, код 0", code_q1, 0)
+                check("repair круг 2: квота -> вызовы test-model, test-model, fb-model",
+                      [c[0] for c in calls_q1], ["test-model", "test-model", "fb-model"])
+                check("repair круг 2: квота -> модель помечена исчерпанной", "test-model" in exh_q1, True)
+                check("repair круг 2: после переключения остаётся round=2", calls_q1[2][1][7]["round"], 2)
+                if os.path.isfile(out_q):
+                    os.remove(out_q)
+                code_q2, calls_q2, _ = run_cyc(
+                    ["bad", DailyQuotaExceededError("test-model", "quota")], fallback=[], out=out_q)
+                check("repair круг 2: квота без запасных моделей -> код 3", code_q2, 3)
+                check("repair круг 2: код 3 -> requests.json не записан", os.path.isfile(out_q), False)
+                check("repair круг 2: код 3 -> чекпоинт сохранён", os.path.isfile(cp_file), True)
+
+                # Д5. Исключение во втором круге -> код 1, requests.json не записан, чекпоинт сохранён
+                code_x, calls_x, _ = run_cyc(["bad", RuntimeError("boom")], out=out_q)
+                check("repair круг 2: исключение -> код 1", code_x, 1)
+                check("repair круг 2: исключение -> requests.json не записан", os.path.isfile(out_q), False)
+                check("repair круг 2: исключение -> чекпоинт сохранён", os.path.isfile(cp_file), True)
+                check("repair круг 2: исключение -> два вызова", len(calls_x), 2)
+            finally:
+                root_logger.removeHandler(lh2)
+                root_logger.setLevel(saved_level)
 
         # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
         check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
