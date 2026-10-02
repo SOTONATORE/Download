@@ -355,6 +355,7 @@ def _loc_get(url: str, timeout: int = 30, is_file_request: bool = False, **kwarg
     интервалом LOC_MIN_INTERVAL_SECONDS от момента ЗАВЕРШЕНИЯ прошлого запроса.
     Ретраит транзиентные сетевые ошибки/таймауты. При первом же HTTP 429 сразу
     помечает LOC исчерпанным до конца запуска (_loc_exhausted = True)."""
+    global _loc_exhausted
     with _loc_lock:
         if _loc_exhausted:
             raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
@@ -401,6 +402,7 @@ def _loc_get_json(url: str, **kwargs) -> dict:
     При получении статического HTML (выставки, блоги, порталы вместо API) сразу
     выбрасывает исключение без бессмысленных ретраев, мгновенно переводя сегмент
     на backup без сжигания лимитов. 429 - LocExhaustedError."""
+    global _loc_exhausted
     with _loc_lock:
         if _loc_exhausted:
             raise LocExhaustedError("LOC уже исчерпан в этом запуске (был 429 ранее)")
@@ -1154,6 +1156,7 @@ def _loc_is_photo(entry: dict) -> bool:
 
 
 def download_loc_gov(number: int, url: str) -> None:
+    global _loc_exhausted
     parsed = urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)
     query["fo"] = ["json"]
@@ -1193,7 +1196,6 @@ def download_loc_gov(number: int, url: str) -> None:
             if any(m in content.lower() for m in (b"just a moment...", b"cf-chl", b"cloudflare", b"captcha")):
                 log_429_details("LOC", f"file CAPTCHA ({direct_url})", file_resp)
                 with _loc_lock:
-                    global _loc_exhausted
                     _loc_exhausted = True
                 raise LocExhaustedError("HTTP 429 / CAPTCHA при скачивании файла LOC - LOC помечен исчерпанным до конца запуска")
             fail(number, f"loc.gov {number}: похоже, скачалась HTML-страница")
