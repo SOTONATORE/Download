@@ -92,8 +92,20 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_FALLBACK_MODELS = ["gemini-3.1-flash-lite"]
 DEFAULT_BATCH_SIZE = 100
 CONTEXT_WINDOW = 3
+# Окна контекста в блоке сегмента (build_segment_block): набираются целыми предложениями,
+# пока сумма слов не достигнет порога; верхней границы нет.
+CONTEXT_BEFORE_WORDS = 40
+CONTEXT_AFTER_WORDS = 25
+SHORT_SEGMENT_MAX_WORDS = 3
+SHORT_SEGMENT_NOTE = (
+    "Note: this fragment is too short to carry a picture on its own; use the setting of the "
+    "sentence unless the fragment itself names a specific place, person or object."
+)
 # Круг 2 REPAIR: широкое окно соседей (только текст SRT, ближайшие первыми, с пометкой расстояния).
 REPAIR2_CONTEXT_WINDOW = 10
+# Предохранитель расширения окна соседей REPAIR до границ предложений: максимум добавленных
+# сегментов на каждую сторону (на текст без пунктуации предложение может быть бесконечным).
+REPAIR_MAX_EXPAND_SEGMENTS = 20
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 4
 # Практический потолок ожидания для НЕ-дневных 429 (RPM/TPM) внутри одного запуска -
@@ -224,11 +236,11 @@ def build_system_instruction(
             "SOURCE MODE RULES (MODE 1: ARCHIVE ONLY):\n"
             "- All segments MUST use archival sites ONLY: [\"wikimedia\", \"loc\"] (use \"nasa\" first only when explicitly about space/astronomy/NASA missions). NEVER include \"pexels\" or \"pixabay\".\n"
             "- All search queries must follow the archival search style (concise proper nouns, literal title/caption matches).\n"
-            "- For abstract or general segments without a specific named entity: derive a generalized ARCHIVAL query for the depicted place/era from the nearest neighbor segments, without people names, and strictly without any forbidden visual types.\n"
+            "- For abstract or general segments without a specific named entity: derive a generalized ARCHIVAL query for the depicted place/era taken by the SOURCE LADDER (steps b, c and e), without people names, and strictly without any forbidden visual types.\n"
         ),
         2: (
             "SOURCE MODE RULES (MODE 2: MIXED ARCHIVE AND STOCK):\n"
-            "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the segment's narration explicitly names a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
+            "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the words of the segment explicitly name a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
             "- When genuinely unsure, use stock sites [\"pexels\", \"pixabay\"], NOT both and NOT archive.\n"
             "- For abstract or general segments: follow the ABSTRACT / GENERAL SEGMENTS rule below (use stock sites).\n"
         ),
@@ -236,7 +248,7 @@ def build_system_instruction(
             "SOURCE MODE RULES (MODE 3: STOCK ONLY):\n"
             "- All segments MUST use stock sites ONLY: [\"pexels\", \"pixabay\"]. NEVER include \"wikimedia\", \"loc\", or \"nasa\".\n"
             "- All search queries must follow the stock search style: query_medium (2-4 words, object + context), query_narrow (4-6 words, slightly more specific), query_broad (1-2 words, general image).\n"
-            "- Replace any proper names with visual generalizations (e.g. \"Mehmed VI\" / \"sultan\" -> \"man in traditional robe\", \"Topkapi Palace\" -> \"old palace courtyard\").\n"
+            "- Replace any proper names with plain visual generalizations (a person by role or appearance, a place or building by its type).\n"
             "- In Mode 3, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
         ),
     }
@@ -255,21 +267,33 @@ the remaining fields defined by the schema. The order of objects in the array do
 {mode_rule}
 FIELD RULES:
 
-1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Choose it \
-by answering three questions in order: (1) WHERE does this happen - the place named in the segment's \
-text, or, if the text names none, the place implied by the neighboring segments; (2) WHO is there - the \
-people by role or group, without personal names when the sites are stock; (3) WHAT of this can a camera \
-film as a solid, living subject - a building, a hall, a street, a landscape, people, a vehicle, a tool, \
-a physical object - rather than a flat sheet. Flat objects that carry text (paper, page, sheet, \
-parchment, letter, manuscript, scroll) are undesirable as the MAIN subject of the frame. \
+1. scene - ONE English sentence: what the viewer should SEE in the frame for this segment. Segments \
+are fragments of continuous speech, so the scene shows what the words of this segment itself talk about. \
+Choose it by answering three questions in order: (1) WHERE does this happen - the place and situation \
+given by the SOURCE LADDER below; (2) WHO is there - the people by role or group, without personal \
+names when the sites are stock; (3) WHAT of this can a camera film as a solid, living subject - a \
+building, a hall, a street, a landscape, people, a vehicle, a tool, a physical object - rather than a \
+flat sheet. Flat objects that carry text (paper, page, sheet, parchment, letter, manuscript, scroll) \
+are undesirable as the MAIN subject of the frame.
+SOURCE LADDER (the same for every segment, it always ends with a result):
+   a) if the words of the segment name something a camera can film, show that;
+   b) otherwise take the place and situation from the whole sentence (the "Sentence" line; the words \
+after << belong to it and may be used);
+   c) if the sentence gives too little, take only the place, the time and the participants by role \
+from the "Before" line;
+   d) the "After" line and any segment that follows the current one serve only to understand the text \
+(a pronoun, a continued thought) and are NEVER a source for the scene;
+   e) if nothing was found, scene is still REQUIRED for every segment in every mode, including REPAIR: \
+a general view of the place or era of the sentence's topic; an empty string, null or a refusal for scene \
+is never allowed.
+Weak fragments (function words, abstraction, a state, a negation, an enumeration) are handled by steps \
+b and c, with people shown by role.
 Never use or depict these shot types in scene or in any query: {junk_list_str} (and plural forms); \
 a date or number is never a calendar, and geopolitics or wars are never a map. \
 Write scene BEFORE the queries and derive all three queries from it. \
-If the only thing the segment's text gives you to show is one of those forbidden shot types or a flat \
+If the only thing the segment's words give you to show is one of those forbidden shot types or a flat \
 text-bearing object (a treaty, decree, letter, newspaper, map, date, flag, and the like), treat the \
-segment as abstract and apply the ABSTRACT / GENERAL SEGMENTS rule below: a generalized frame built \
-from the neighbors is not an invented detail. Otherwise do NOT invent details that are not in the \
-segment's text (no extra people, moods, weather, time of day, or settings the text does not mention).
+segment as abstract and apply the ABSTRACT / GENERAL SEGMENTS rule below.
 
 2. sites - ordered list of source sites, in priority order for this segment. Allowed values: \
 "pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources. \
@@ -281,39 +305,36 @@ phrase on its own. The style depends on the FIRST site in "sites":
    - If the first site is an archive (wikimedia / loc / nasa):
      * query_narrow: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
 caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
-named event, optionally with a short refinement of the object (e.g. "Topkapi Palace gate", "Mehmed \
-VI", "Siege of Vienna"). Do NOT append a year unless it is named in the segment's text (see the YEARS \
+named event, optionally with a short refinement of the object. Do NOT append a year unless it is named in the segment's text (see the YEARS \
 rule). If a real name genuinely needs more than 4 words, that's fine - the limit is about cutting \
 padding, not truncating a proper noun. For nasa: exact mission/object names \
 and dates, as concise as the name requires.
-     * query_medium: ONLY the name OR ONLY the place, WITHOUT a year (e.g. "Mehmed VI", "Vienna").
-     * query_broad: an ordinary plain-language phrasing of the same visual scene for \
-pexels/pixabay, 2-4 words, no proper nouns (e.g. "old harbor", "wooden desk").
+     * query_medium: ONLY the name OR ONLY the place, WITHOUT a year.
+     * query_broad: an ordinary plain-language phrasing of the setting or place of the same visual scene for \
+pexels/pixabay, 2-4 words, no proper nouns, not a portrait of a person.
      MediaWiki (wikimedia) and LOC search match literal file titles/captions, which are short and \
-factual, so descriptive or stylistic padding only dilutes the match. BAD -> GOOD: "Villa Magnolia \
-San Remo interior 1926 archive" -> "Villa Magnolia San Remo"; "Prince Ertugrul Ottoman prince \
-historical photo" -> "Ertuğrul Osman" (or the exact name given in the segment).
+factual, so descriptive or stylistic padding only dilutes the match: use the bare name or place \
+exactly as the segment gives it, without added descriptors, years or archive words.
    - If the first site is stock (pexels / pixabay):
-     * query_medium: 2-4 words, main object + context (e.g. "winding mountain road").
-     * query_narrow: slightly more specific than medium, 4-6 words (e.g. "winding mountain road \
-with pines").
-     * query_broad: 1-2 words, the general image (e.g. "mountains").
+     * query_medium: 2-4 words, main object + context.
+     * query_narrow: slightly more specific than medium, 4-6 words.
+     * query_broad: 1-2 words, the general image; prefer the setting or place over a portrait of a person.
    - query_broad = null ONLY for segments with no visual scene at all - e.g. silence, a black \
 screen, a title/credits card with no depicted content, or on-screen text with nothing else \
 happening. When in doubt, fill it in rather than returning null. query_narrow and query_medium are \
-never null.
+never null. This rule is about query_broad only.
 
-4. type - "image" or "video", whichever fits the described scene better (a static portrait -> \
+4. type - "image" or "video", whichever fits the described scene better (a still, motionless view -> \
 "image"; a dynamic action or a generic/modern/abstract scene -> "video").
 
 5. entity_keywords - the MAIN entity field. List EVERY proper name (person, place, event, \
 organization, treaty, building) that appears in your query_narrow or query_medium, each in TWO \
-variants: the English spelling and the Russian spelling, as consecutive pairs, for example \
-["Vienna", "Вена", "Topkapi Palace", "Дворец Топкапы"]. The ENGLISH spelling of the most important \
+variants: the English spelling and the Russian spelling, as consecutive pairs, in the form \
+["<English name 1>", "<Russian name 1>", "<English name 2>", "<Russian name 2>"]. The ENGLISH spelling of the most important \
 name MUST be the FIRST element of the list (the search script uses it as the lookup query). Keep \
-each name as one element (do not split "Topkapi Palace" into two words). Generic things - religions, \
-ideologies, nationalities, professions, titles without a name, emotions, general themes ("Islam", \
-"a caliph", "war", "monarchy") are NOT proper names. An EMPTY list [] means "no proper names in \
+each name as one element (do not split a multi-word name into separate words). Generic things - religions, \
+ideologies, nationalities, professions, titles without a name, emotions, general themes are NOT \
+proper names. An EMPTY list [] means "no proper names in \
 the queries". Never leave it empty when a query contains a proper name, even if the frame looks \
 generic (a plain city view or a coastline of a named city is still an entity scene).
 
@@ -323,11 +344,11 @@ with entity_keywords (the script recomputes it from that list anyway).
 ABSTRACT / GENERAL SEGMENTS:
 When a segment lacks a concrete visible physical subject (such as narrator evaluations, conclusions, \
 transitions, abstract concepts, emotions, numbers, or dates without physical objects):
-- Look at the nearest neighboring segments (2 segments before and 2 segments after, in the batch \
-and in the Context BEFORE/AFTER sections).
-- Derive a general visual theme from them.
-- Formulate the scene and all three queries as a GENERALIZED stock shot fitting that visual theme \
-(without proper nouns, even if neighbors name them: e.g. "Topkapi Palace" -> "old palace interior").
+- Take the place and situation by the SOURCE LADDER: the "Sentence" line first (step b), then the \
+"Before" line (step c), then a general view of the place or era of the topic (step e). The "After" \
+line and the segments after the current one are not used for the scene.
+- Formulate the scene and all three queries as a GENERALIZED stock shot of that place or situation \
+(without proper nouns, even if the context names them).
 - Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode 1).
 
 GENERAL RULES:
@@ -337,33 +358,42 @@ words.
 phrases "stock footage", "stock photo", "stock image". Also NEVER use forbidden visual types in \
 any query: {junk_list_str} (and plural forms). The words video, stock, vintage are also banned as \
 filler (style padding added to a query), but ALLOWED when they are part of the depicted subject \
-itself (e.g. "stock market", "video game", "video call", "vintage car").
+of the segment itself.
 - NEVER use mood adjectives (sad, empty, mysterious, dramatic, lonely, gloomy, etc.) in a query \
 unless that exact mood is stated in the segment's text.
 - YEARS: put a year (also a decade like "1920s" or a range like "1914-1918") in a query ONLY if that \
 exact year is named in the segment's text; otherwise the query contains no year at all. Never guess or \
-add a year from your own knowledge. Example: the text says "In 1918 Mehmed VI became sultan" -> the \
-year comes from the text, so "Mehmed VI 1918" is allowed; the text says only "Mehmed VI became \
-sultan" -> use "Mehmed VI". Archive sites match every word, so an invented year returns nothing.
+add a year from your own knowledge: a year that the text itself names may be used, a year that only \
+you know may not. Archive sites match every word, so an invented year returns nothing.
 - Never include "creative commons", "free", or "no copyright" in a query - these are not effective \
 search terms; licensing is filtered separately downstream, not through the query text.
-- Do not invent scene details beyond what the segment's text actually says (a generalized frame for an \
-abstract segment, per the scene and ABSTRACT rules, is not an invention).
-- VARIETY: when several neighboring segments are about the same subject, each one MUST show a \
-different main subject or a different framing (wide shot, medium shot, close-up, detail). The scene of \
-a segment must not repeat the scenes you wrote for the previous three segments of this response, and \
-its query_narrow must not repeat their query_narrow. Framing words are for the scene only; do not add \
-them to queries as filler. For a segment about a named entity from an archive source, the name in \
-query_medium and entity_keywords stays exactly as the rules above require; only the scene and \
-query_narrow may vary the aspect or type of shot. Do not invent events or details that the segment's \
-text does not say.
-- Always include silent/empty segments in the output with a neutral scene and queries inferred from \
-neighboring segments' context (query_broad may be null for them) - never skip a segment number.
+- Do not invent scene details: the only details allowed are those of the words of the segment, the \
+place, time and participants taken from the "Sentence" and "Before" lines by the SOURCE LADDER, and a \
+general view of the place or era (step e); everything else is an invention (extra people, moods, \
+weather, time of day or settings that none of these sources gives).
+- Do not replace an idea with an object that symbolizes it when the words do not mention that object; \
+show the place or situation of the sentence instead.
+- VARIETY: the scene of a segment must not repeat the scenes you wrote for the previous three segments \
+of this response, and its query_narrow must not repeat their query_narrow. When neighboring segments \
+are about the same subject, vary the scene by another aspect of the same place or event that the \
+words support, never by another subject and never by a changing frame size. For a segment about a \
+named entity from an archive source, the name in query_medium and entity_keywords stays exactly as the \
+rules above require; only the scene and query_narrow may vary. Do not invent events or details \
+beyond what the scene rules above allow.
+- Always include silent/empty segments in the output (query_broad may be null for them), with scene \
+and queries taken by the SOURCE LADDER: for a segment without text the "Sentence" line if it lies \
+inside a sentence, otherwise the "Before" line, otherwise a general view (step e) - never skip a \
+segment number.
 
-You may also be given extra CONTEXT - neighboring segments before and/or after the main list, under \
-separate "Context BEFORE" / "Context AFTER" headers. Use this context only to understand the \
-narrative (for example, to resolve a pronoun or continue a thought from the current segment) - do \
-NOT create response objects for these context segment numbers. Only answer for the segments listed \
+You may also be given extra CONTEXT inside each segment block: a "Sentence" line (the full sentence \
+this segment belongs to, with the words of this segment between >> and <<), a "Before (context only)" \
+line and an "After (context only)" line (the neighboring sentences). In REPAIR mode a "Neighbors \
+(context)" block is added: in round 1 it lists neighbor segments under "Context BEFORE:" and \
+"Context AFTER:" labels, in round 2 it lists neighbors by distance, nearest first. Use this context \
+to understand the narrative (for example, to resolve a pronoun or continue a thought from the \
+current segment); what of it may enter the scene is set by the SOURCE LADDER, where Neighbors \
+entries before the segment count as the Before line and entries after it as the After line. \
+Do NOT create response objects for context. Only answer for the segments listed \
 under "Segments that need a response", each marked as "### Segment N".
 """
     return instruction
@@ -382,8 +412,8 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             type=types.Type.STRING,
             description=(
                 "ONE English sentence: what the viewer should see in the frame. For abstract "
-                "phrases use concrete objects/places of the topic (economy -> factory, cargo "
-                "port, banknotes), not emotions. Do not invent details that are not in the segment text."
+                "phrases use concrete objects/places of the topic, not emotions. Do not invent "
+                "details that are not in the segment text."
             ),
         ),
         "sites": types.Schema(
@@ -399,7 +429,7 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
                 "is fine - the limit is about padding, not truncating a name). First site stock "
                 "(pexels/pixabay): 4-6 words, a bit more specific than query_medium. No filler "
                 "b-roll/cinematic/footage/HD/4K or 'stock footage/photo/image'; video/stock/"
-                "historic/vintage only when part of the subject itself (e.g. 'stock market'); no "
+                "historic/vintage only when part of the subject itself; no "
                 "mood adjectives absent from the text."
             ),
         ),
@@ -580,8 +610,202 @@ def source_hash(segments: list[Segment]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Склейка сегментов в предложения (только данные; в промпт и в main пока не подключена)
+# ---------------------------------------------------------------------------
+
+# Знаки, которыми может кончаться предложение (многоточие «...» из трёх точек тоже
+# заканчивается на "." и отдельно распознаётся в _ends_sentence).
+SENTENCE_END_CHARS = ".?!\u2026"
+# Закрывающие кавычки/скобки, которые могут стоять ПОСЛЕ знака конца: He said "stop." / (so.)
+SENTENCE_CLOSERS = "\"'\u00bb\u201d\u2019)]"
+# Открывающие кавычки/скобки в начале следующего сегмента: их пропускаем при проверке заглавной.
+SENTENCE_OPENERS = "\"'\u00ab\u201c\u2018\u201e(["
+# Сокращения, после точки которых предложение НЕ заканчивается (сравнение регистрозависимое,
+# чтобы "no." в конце обычной фразы осталось концом предложения). "No." остаётся в наборе, но
+# _ends_sentence обрабатывает его отдельно: оно сокращение только перед цифрой.
+NO_BREAK_ABBREVIATIONS = frozenset(
+    {"Mr.", "Mrs.", "Ms.", "Dr.", "St.", "No.", "Jr.", "Sr.", "vs."}
+)
+# "etc." - особый случай: может и закончить предложение, поэтому точка после неё считается
+# продолжением только если следующий сегмент начинается со строчной буквы.
+LOWERCASE_CONTINUES_ABBREVIATIONS = frozenset({"etc."})
+
+
+@dataclass
+class Sentence:
+    number: int                         # порядковый номер предложения, с 1
+    seg_indices: list[int]              # Segment.index входящих сегментов, по порядку
+    text: str                           # полный текст (тексты сегментов через один пробел)
+    spans: dict[int, tuple[int, int]]   # Segment.index -> (start, end) внутри text; text[start:end] = текст сегмента
+
+    @property
+    def word_count(self) -> int:
+        return len(self.text.split())
+
+
+def _strip_closers(text: str) -> str:
+    return text.rstrip(SENTENCE_CLOSERS + " ")
+
+
+def _ends_sentence(text: str, next_text: Optional[str]) -> bool:
+    """Заканчивается ли предложение на этом сегменте. text - непустой нормализованный текст
+    сегмента, next_text - текст следующего НЕпустого сегмента (None, если его нет)."""
+    core = _strip_closers(text)
+    if not core or core[-1] not in SENTENCE_END_CHARS:
+        return False
+    nxt = next_text.lstrip(SENTENCE_OPENERS + " ") if next_text else ""
+
+    if core.endswith("\u2026") or core.endswith("..."):
+        # Многоточие - конец только перед заглавной буквой; перед строчной (и перед цифрой,
+        # знаком и т.п.) это продолжение фразы. В самом конце текста - конец.
+        return next_text is None or nxt[:1].isupper()
+
+    if core[-1] in "?!":
+        return True
+
+    # Остался случай "."
+    token = core.split()[-1].lstrip(SENTENCE_OPENERS)
+    if token == "No.":
+        # «No.» - сокращение (номер) только перед цифрой («No.» + «5 apples.»); слово-число
+        # («Five apples.») цифрой не считается, там граница; реплика «No.» - тоже граница.
+        return not re.match(r"\d", nxt)
+    if token in NO_BREAK_ABBREVIATIONS:
+        return False
+    if token in LOWERCASE_CONTINUES_ABBREVIATIONS:
+        return not nxt[:1].islower()
+    if re.search(r"\d\.$", token) and nxt[:1].isdigit():
+        # число, разрезанное между сегментами: "1." + "5 percent"
+        return False
+    return True
+
+
+def merge_segments_into_sentences(
+    segments: list[Segment],
+) -> tuple[list[Sentence], dict[int, Sentence]]:
+    """Склеивает сегменты SRT в предложения. Чистая функция: без сети и без побочных эффектов,
+    вызывается один раз по всему списку (до разбиения на батчи).
+
+    Возвращает (sentences, by_segment): список предложений по порядку и словарь
+    Segment.index -> Sentence, в которое входит сегмент (ссылка на тот же объект).
+
+    Правила конца предложения см. _ends_sentence. Дополнительно:
+    - последнее предложение без финального знака - тоже предложение;
+    - пустой сегмент никогда не разрывает предложение: если предложение открыто, пустой
+      сегмент входит в него с пустой границей (start == end, пробел в текст не добавляется);
+      если открытого предложения нет (начало файла или тишина между предложениями), пустой
+      сегмент образует отдельное предложение с text == \"\", чтобы не примешиваться к соседям;
+    - тексты сегментов перед склейкой нормализуются (пробелы схлопываются)."""
+    texts = [" ".join((s.text or "").split()) for s in segments]
+
+    # next_nonempty[i] - текст ближайшего непустого сегмента строго после i
+    next_nonempty: list[Optional[str]] = [None] * len(segments)
+    upcoming: Optional[str] = None
+    for i in range(len(segments) - 1, -1, -1):
+        next_nonempty[i] = upcoming
+        if texts[i]:
+            upcoming = texts[i]
+
+    sentences: list[Sentence] = []
+    by_segment: dict[int, Sentence] = {}
+    current: Optional[Sentence] = None
+
+    for i, seg in enumerate(segments):
+        t = texts[i]
+        if not t:
+            if current is None:
+                lone = Sentence(len(sentences) + 1, [seg.index], "", {seg.index: (0, 0)})
+                sentences.append(lone)
+                by_segment[seg.index] = lone
+            else:
+                pos = len(current.text)
+                current.seg_indices.append(seg.index)
+                current.spans[seg.index] = (pos, pos)
+                by_segment[seg.index] = current
+            continue
+
+        if current is None:
+            current = Sentence(len(sentences) + 1, [], "", {})
+            sentences.append(current)
+        if current.text:
+            current.text += " "
+        start = len(current.text)
+        current.text += t
+        current.seg_indices.append(seg.index)
+        current.spans[seg.index] = (start, len(current.text))
+        by_segment[seg.index] = current
+
+        if _ends_sentence(t, next_nonempty[i]):
+            current = None
+
+    return sentences, by_segment
+
+
+# ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
+
+def _collect_context_sentences(
+    sentences: list[Sentence], start: int, step: int, window_words: int
+) -> list[Sentence]:
+    """Целые предложения от ближайшего к сегменту наружу (step -1 - назад, +1 - вперёд), пока
+    сумма слов не достигнет window_words. Предложение, переваливающее за порог, берётся целиком;
+    минимум одно предложение, если оно есть. Предложения с пустым текстом пропускаются.
+    Возвращает предложения в порядке от ближнего к дальнему."""
+    out: list[Sentence] = []
+    total = 0
+    i = start
+    while 0 <= i < len(sentences):
+        sen = sentences[i]
+        i += step
+        if not sen.text:
+            continue
+        out.append(sen)
+        total += sen.word_count
+        if total >= window_words:
+            break
+    return out
+
+
+def build_segment_block(
+    seg: Segment,
+    sentences: list[Sentence],
+    by_segment: dict[int, Sentence],
+    before_words: int = CONTEXT_BEFORE_WORDS,
+    after_words: int = CONTEXT_AFTER_WORDS,
+) -> str:
+    """Блок одного сегмента для пользовательского промпта (без хвостовой пустой строки).
+    Не зависит от build_prompt - его же будет использовать REPAIR. sentences/by_segment - результат
+    merge_segments_into_sentences по ВСЕМУ списку сегментов (предложение через границу батча
+    берётся целиком). Пустые строки (нет Before у первого / After у последнего предложения) не
+    печатаются.
+
+    Пустой сегмент: Text = (silence / no text), без маркера >>...<<; если он стоит внутри
+    непустого предложения, оно выводится в строке Sentence без маркера."""
+    sen = by_segment[seg.index]
+    lines = [f"### Segment {seg.index}", f"Timing: {seg.start} --> {seg.end}"]
+    text = " ".join((seg.text or "").split())
+
+    if text:
+        a, b = sen.spans[seg.index]
+        marked = f"{sen.text[:a]}>>{sen.text[a:b]}<<{sen.text[b:]}"
+        lines.append(f"Text (what this segment says): {text}")
+        lines.append(f"Sentence: {marked}")
+        if len(text.split()) <= SHORT_SEGMENT_MAX_WORDS:
+            lines.append(SHORT_SEGMENT_NOTE)
+    else:
+        lines.append("Text (what this segment says): (silence / no text)")
+        if sen.text:
+            lines.append(f"Sentence: {sen.text}")
+
+    pos = sen.number - 1
+    before = _collect_context_sentences(sentences, pos - 1, -1, before_words)
+    after = _collect_context_sentences(sentences, pos + 1, +1, after_words)
+    if before:
+        lines.append("Before (context only): " + " ".join(x.text for x in reversed(before)))
+    if after:
+        lines.append("After (context only): " + " ".join(x.text for x in after))
+    return "\n".join(lines)
+
 
 def _format_context_line(s: Segment) -> str:
     text = s.text if s.text else "(silence / no text)"
@@ -610,13 +834,20 @@ def build_prompt(
     context_before: list[Segment] | None = None,
     context_after: list[Segment] | None = None,
     repair_info: dict[int, dict] | None = None,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
 ) -> str:
+    """Обычный режим: блоки сегментов строит build_segment_block по sentence_index (результат
+    merge_segments_into_sentences по всему списку; без него - запасной вариант: склейка только по
+    batch, для вызовов без полного списка вроде preflight). context_before/context_after больше
+    не используются ни в обычном режиме, ни в REPAIR (контекст теперь внутри блока сегмента:
+    Sentence / Before / After по целым предложениям); параметры оставлены ради совместимости
+    сигнатуры. В REPAIR блок каждого сегмента тоже строит build_segment_block по sentence_index
+    (посчитан один раз по всему списку сегментов); запасной вариант без него - склейка по batch."""
     lines: list[str] = []
 
-    if context_before:
-        lines.append("### Context BEFORE (do not create response objects for these segment numbers - context only)")
-        lines.extend(_format_context_line(s) for s in context_before)
-        lines.append("")
+    if sentence_index is None:
+        sentence_index = merge_segments_into_sentences(batch)
+    sentences, by_segment = sentence_index
 
     if repair_info:
         lines.append("### Segments that need a response (REPAIR MODE)")
@@ -639,8 +870,12 @@ def build_prompt(
         )
         lines.append(
             f"- If an issue says a shot type is forbidden ({junk_list}): do NOT edit the old queries. "
-            "First write a NEW scene from scratch, using only this segment's narration text and the text of "
-            "its neighbors, by answering three questions in order: (1) WHERE does this happen; (2) WHO is "
+            "First write a NEW scene from scratch by answering three questions in order, taking the place, "
+            "the situation and the participants by the SOURCE LADDER of the system prompt (the words of this "
+            "segment, then the Sentence line, then the Before line, then a general view of the place or era); "
+            "the After line and the Neighbors entries after the segment are for understanding only and are "
+            "NEVER a source for the scene, and this holds wherever the rules below mention neighbors: "
+            "(1) WHERE does this happen; (2) WHO is "
             "there (people by role, no personal names when the sites are stock); (3) WHAT of this can a "
             "camera film as a solid, living subject (a building, a hall, a street, a landscape, people, a "
             "vehicle, a physical object) rather than a flat sheet. Only then derive query_narrow, "
@@ -662,16 +897,14 @@ def build_prompt(
             lines.append(_repair_round_rule(rep_mode))
         lines.append("")
         for s in batch:
-            text = s.text if s.text else "(silence / no text)"
             rep = repair_info.get(s.index, {})
             prev = rep.get("entry", {})
             issues_list = rep.get("issues", [])
             issues_formatted = "\n".join(f"  - {iss}" for iss in issues_list) if issues_list else "  - (no specific issues)"
             neighbors_str = rep.get("neighbors", "(no neighbor context)")
 
-            lines.append(f"### Segment {s.index}")
-            lines.append(f"Timing: {s.start} --> {s.end}")
-            lines.append(f"Narration text: {text}")
+            # Заголовок, Timing, Text, Sentence с маркером, Note и Before/After - как в обычном режиме
+            lines.append(build_segment_block(s, sentences, by_segment))
             # Для сегментов с мусорным словом прежний кадр не показываем: модель на нём якорится
             has_junk = any(
                 "forbidden shot type" in iss or "запрещённый тип кадра" in iss for iss in issues_list
@@ -696,12 +929,8 @@ def build_prompt(
     else:
         lines.append("### Segments that need a response")
         for s in batch:
-            text = s.text if s.text else "(silence / no text)"
-            lines.append(f"### Segment {s.index}\nTiming: {s.start} --> {s.end}\nText: {text}\n")
-
-    if context_after:
-        lines.append("### Context AFTER (do not create response objects for these segment numbers - context only)")
-        lines.extend(_format_context_line(s) for s in context_after)
+            lines.append(build_segment_block(s, sentences, by_segment))
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -1205,6 +1434,69 @@ def validate_entries(
     return issues
 
 
+# Страховка для query_broad (этап 3в): у архивного сегмента с именем каскад при пустом архиве
+# падает на query_broad, и слова portrait/man/woman/boy/girl дают студийный портрет не по теме.
+# Набор слов фиксирован: формы (portraits, men, women) и составные не считаются.
+BROAD_BANNED_WORDS = ("portrait", "man", "woman", "boy", "girl")
+# Целое слово без учёта регистра. Слева и справа не допускаются буква/цифра/подчёркивание и дефис
+# (man-made, manual, human, boyfriend не срабатывают). Апостроф (обычный и типографский) границу
+# слова не нарушает: "woman's" и "woman\u2019s" - это слово woman.
+BROAD_BANNED_RE = re.compile(
+    r"(?<![\w-])(" + "|".join(BROAD_BANNED_WORDS) + r")(?![\w-])", re.IGNORECASE
+)
+
+
+def is_archive_named_entry(entry: dict) -> bool:
+    """Архивный сегмент с именем: первый сайт архивный (как в _normalize_entry и в статистике
+    источников: sites[0] in wikimedia/loc/nasa) И entity_keywords непустой (is_entity выводится
+    из него же). Стоковый первый сайт или пустые entity_keywords - не такой сегмент."""
+    sites = entry.get("sites")
+    kw = entry.get("entity_keywords")
+    if not isinstance(sites, list) or not sites or sites[0] not in _ARCHIVE_SITES:
+        return False
+    return isinstance(kw, list) and any(isinstance(k, str) and k.strip() for k in kw)
+
+
+def check_archive_broad_words(entries: dict[str, dict], lang: str = "ru") -> dict[str, list[str]]:
+    """Страховка кодом после ответа модели: если сегмент архивный с именем и в query_broad есть
+    слово из BROAD_BANNED_WORDS, возвращает проблему (формат как у validate_entries). query_broad
+    не меняется, слова не вычищаются; остальные сегменты не затрагиваются."""
+    issues: dict[str, list[str]] = {}
+    for idx_str, entry in entries.items():
+        if not is_archive_named_entry(entry):
+            continue
+        broad = entry.get("query_broad")
+        if not isinstance(broad, str) or not broad:
+            continue
+        found = sorted({m.group(1).lower() for m in BROAD_BANNED_RE.finditer(broad)})
+        if not found:
+            continue
+        words = ", ".join(found)
+        if lang == "en":
+            issues[idx_str] = [
+                f"query_broad contains the word '{words}', which is not allowed in query_broad of an "
+                f"archive segment with a named entity; rewrite query_broad without any of: "
+                f"{', '.join(BROAD_BANNED_WORDS)}"
+            ]
+        else:
+            issues[idx_str] = [
+                f"в query_broad архивного сегмента с именем запрещённое слово: {words}"
+            ]
+    return issues
+
+
+def validate_with_broad_guard(
+    entries: dict[str, dict], mode: int, junk_re: Optional[re.Pattern] = None, lang: str = "ru",
+) -> dict[str, list[str]]:
+    """validate_entries + check_archive_broad_words в один словарь {номер: [проблемы]}.
+    Сегмент с обеими причинами попадает один раз (причины склеиваются), поэтому в REPAIR он
+    не дублируется."""
+    issues = validate_entries(entries, mode, junk_re, lang)
+    for idx_str, extra in check_archive_broad_words(entries, lang).items():
+        issues.setdefault(idx_str, []).extend(extra)
+    return issues
+
+
 def chunk_repair_indices(indices: list[int], max_size: int = 125) -> list[list[int]]:
     """Разбивает список индексов для повторного запроса (REPAIR) поровну:
     при n <= 125 - один запрос, иначе k = ceil(n/125) запросов по ~n/k."""
@@ -1221,18 +1513,64 @@ def chunk_repair_indices(indices: list[int], max_size: int = 125) -> list[list[i
     return chunks
 
 
+def _neighbor_window(
+    pos: int,
+    segments: list[Segment],
+    window: int,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None,
+    target_idx: int = 0,
+) -> tuple[list[Segment], list[Segment]]:
+    """Окно соседей вокруг позиции pos: сегменты в радиусе +-window, расширенные в обе стороны до
+    границ целых предложений (по sentence_index: первый сегмент предложения для левого края,
+    последний - для правого). Добавлено не более REPAIR_MAX_EXPAND_SEGMENTS сегментов на сторону;
+    при срабатывании лимита окно режется по нему и пишется предупреждение. Без sentence_index
+    расширения нет (прежнее поведение). Возвращает (before, after) в хронологическом порядке."""
+    start = max(0, pos - window)
+    end = min(len(segments), pos + 1 + window)  # не включительно
+    if sentence_index is not None:
+        _, by_segment = sentence_index
+        pos_of = {sg.index: i for i, sg in enumerate(segments)}
+        if start < pos:
+            sen = by_segment.get(segments[start].index)
+            first = pos_of.get(sen.seg_indices[0]) if sen else None
+            if first is not None and first < start:
+                new_start = max(first, start - REPAIR_MAX_EXPAND_SEGMENTS)
+                if new_start > first:
+                    logging.warning(
+                        "REPAIR: окно соседей сегмента %s слева обрезано по лимиту расширения (%s сегментов), "
+                        "предложение не доведено до начала.", target_idx, REPAIR_MAX_EXPAND_SEGMENTS,
+                    )
+                start = new_start
+        if end - 1 > pos:
+            sen = by_segment.get(segments[end - 1].index)
+            last = pos_of.get(sen.seg_indices[-1]) if sen else None
+            if last is not None and last > end - 1:
+                new_last = min(last, end - 1 + REPAIR_MAX_EXPAND_SEGMENTS)
+                if new_last < last:
+                    logging.warning(
+                        "REPAIR: окно соседей сегмента %s справа обрезано по лимиту расширения (%s сегментов), "
+                        "предложение не доведено до конца.", target_idx, REPAIR_MAX_EXPAND_SEGMENTS,
+                    )
+                end = new_last + 1
+    return segments[start:pos], segments[pos + 1 : end]
+
+
 def format_neighbors_context(
     target_idx: int,
     segments: list[Segment],
     results: Optional[dict[str, dict]] = None,
     window: int = CONTEXT_WINDOW,
     with_distance: bool = False,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
 ) -> str:
     """Форматирует контекст соседей +-window для блока REPAIR. Источник - ТОЛЬКО текст SRT:
     scene и любые значения из results не показываются (параметр results оставлен ради
     совместимости вызовов и не используется). with_distance=False (круг 1): блоки Context
     BEFORE / AFTER. with_distance=True (круг 2): компактный список, ближайшие первыми, у каждого
-    соседа пометка distance N; дальние соседи идут как фон."""
+    соседа пометка distance N; дальние соседи идут как фон.
+    sentence_index (по всему списку сегментов): окно +-window расширяется до границ целых
+    предложений (см. _neighbor_window); distance считается от проверяемого сегмента, в том числе
+    для добавленных. Без sentence_index окно строго +-window, как раньше."""
     pos = None
     for i, s in enumerate(segments):
         if s.index == target_idx:
@@ -1244,13 +1582,12 @@ def format_neighbors_context(
     def _txt(s: Segment) -> str:
         return " ".join((s.text or "").split()) or "(empty)"
 
-    before = segments[max(0, pos - window) : pos]
-    after = segments[pos + 1 : pos + 1 + window]
+    before, after = _neighbor_window(pos, segments, window, sentence_index, target_idx)
 
     lines = []
     if with_distance:
         # before[-d] - сосед слева на расстоянии d, after[d-1] - сосед справа на расстоянии d
-        for d in range(1, window + 1):
+        for d in range(1, max(len(before), len(after)) + 1):
             if d <= len(before):
                 s = before[-d]
                 lines.append(f"  distance {d} | before [{s.index}]: {_txt(s)}")
@@ -1287,8 +1624,11 @@ def call_gemini_batch(
     context_after: list[Segment] | None = None,
     mode: int = DEFAULT_SOURCES_MODE,
     repair_info: dict[int, dict] | None = None,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
 ) -> dict:
-    prompt = build_prompt(batch, context_before, context_after, repair_info=repair_info)
+    prompt = build_prompt(
+        batch, context_before, context_after, repair_info=repair_info, sentence_index=sentence_index
+    )
 
     config = types.GenerateContentConfig(
         system_instruction=build_system_instruction(mode),
@@ -1579,14 +1919,16 @@ def _run_repair_round(
     indices: list[int],
     round_num: int,
     call_batch_fn=call_gemini_batch,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
 ) -> tuple[Optional[int], str]:
     """Один круг REPAIR по номерам indices (чанки по chunk_repair_indices). Обновляет results,
     fallback_queue, exhausted_models и чекпоинт на месте. Возвращает (код, модель): код None -
     круг завершён, иначе код возврата процесса (3 - квоты исчерпаны, 1 - ошибка вызова)."""
     seg_by_idx = {s.index: s for s in segments}
     repair_chunks = chunk_repair_indices(indices, max_size=125)
-    # Круг 1: +-CONTEXT_WINDOW с блоками Context BEFORE/AFTER; круг 2: +-REPAIR2_CONTEXT_WINDOW
-    # с пометками расстояния. В обоих кругах соседи - только текст SRT.
+    # Строка соседей (format_neighbors_context): круг 1 - +-CONTEXT_WINDOW, подписи Context
+    # BEFORE/AFTER внутри строки; круг 2 - +-REPAIR2_CONTEXT_WINDOW с пометками distance N. В обоих
+    # кругах окно расширено до границ целых предложений (sentence_index), соседи - только текст SRT.
     neighbors_window = REPAIR2_CONTEXT_WINDOW if round_num == 2 else CONTEXT_WINDOW
 
     for chunk_num, chunk_indices in enumerate(repair_chunks, start=1):
@@ -1598,7 +1940,7 @@ def _run_repair_round(
         ctx_after = segments[last_pos + 1 : last_pos + 1 + CONTEXT_WINDOW]
 
         # В промпт уходят английские формулировки проблем, в лог - русские
-        issues_en = validate_entries(
+        issues_en = validate_with_broad_guard(
             {str(i): results[str(i)] for i in chunk_indices}, sources_mode, lang="en"
         )
         chunk_repair_info = {}
@@ -1607,7 +1949,8 @@ def _run_repair_round(
                 "entry": results.get(str(s.index), {}),
                 "issues": issues_en.get(str(s.index), []),
                 "neighbors": format_neighbors_context(
-                    s.index, segments, None, neighbors_window, with_distance=(round_num == 2)
+                    s.index, segments, None, neighbors_window, with_distance=(round_num == 2),
+                    sentence_index=sentence_index,
                 ),
                 "round": round_num,
                 "mode": sources_mode,
@@ -1623,6 +1966,7 @@ def _run_repair_round(
                 repaired_batch = call_batch_fn(
                     client, current_model, chunk_segs, ctx_before, ctx_after,
                     mode=sources_mode, repair_info=chunk_repair_info,
+                    sentence_index=sentence_index,
                 )
                 break
             except DailyQuotaExceededError as e:
@@ -1668,11 +2012,15 @@ def run_repair_cycle(
     strict_mode: int,
     output_path: str,
     call_batch_fn=call_gemini_batch,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
 ) -> int:
     """Выполняет пост-проверку записей, до двух кругов исправления REPAIR через Gemini
     (круг 2 - только для номеров, оставшихся с нарушениями после круга 1; третьего круга нет),
     логирует статистику источников и сохраняет requests.json."""
-    initial_issues = validate_entries(results, sources_mode)
+    # Склейка в предложения - один раз по всему списку (main передаёт готовый индекс)
+    if sentence_index is None:
+        sentence_index = merge_segments_into_sentences(segments)
+    initial_issues = validate_with_broad_guard(results, sources_mode)
     problem_indices = sorted(int(k) for k in initial_issues.keys())
     post_issues_1: dict[str, list[str]] = {}
     post_issues_2: dict[str, list[str]] = {}
@@ -1686,12 +2034,13 @@ def run_repair_cycle(
         code, current_model = _run_repair_round(
             client, current_model, fallback_queue, segments, results, exhausted_models,
             checkpoint_path, src_hash, sources_mode, problem_indices, 1, call_batch_fn,
+            sentence_index,
         )
         if code is not None:
             return code
 
         # Перепроверка только исправленных номеров круга 1
-        post_issues_1 = validate_entries({str(i): results[str(i)] for i in problem_indices}, sources_mode)
+        post_issues_1 = validate_with_broad_guard({str(i): results[str(i)] for i in problem_indices}, sources_mode)
 
         if post_issues_1:
             round2_indices = sorted(int(k) for k in post_issues_1.keys())
@@ -1702,12 +2051,13 @@ def run_repair_cycle(
             code, current_model = _run_repair_round(
                 client, current_model, fallback_queue, segments, results, exhausted_models,
                 checkpoint_path, src_hash, sources_mode, round2_indices, 2, call_batch_fn,
+                sentence_index,
             )
             if code is not None:
                 return code
             round2_ran = True
             # Перепроверка только номеров круга 2
-            post_issues_2 = validate_entries({str(i): results[str(i)] for i in round2_indices}, sources_mode)
+            post_issues_2 = validate_with_broad_guard({str(i): results[str(i)] for i in round2_indices}, sources_mode)
 
     post_issues = post_issues_2 if round2_ran else post_issues_1
 
@@ -2084,6 +2434,51 @@ def run_self_tests() -> int:
         check("промпт режим 2: содержит MODE 2: MIXED", "MODE 2: MIXED" in p2, True)
         check("промпт режим 3: содержит MODE 3: STOCK ONLY", "MODE 3: STOCK ONLY" in p3, True)
 
+        # 7а. Этап 3а: формулировки про контекст соответствуют реальному формату сегмента,
+        # в правилах нет конкретных примеров с именами, сюжетами и предметами
+        for md, pm in ((1, p1), (2, p2), (3, p3)):
+            check(f"этап 3а режим {md}: нет устаревших упоминаний чанк-блоков и 'narration text'",
+                  [x for x in ("### Context BEFORE", "### Context AFTER", "Context BEFORE/AFTER",
+                               "Context BEFORE\" / \"Context AFTER", "Context AFTER sections",
+                               "narration text", "Narration text") if x in pm], [])
+            check(f"этап 3а режим {md}: описаны строки Sentence / Before / After и маркеры >> <<",
+                  all(x in pm for x in ("Sentence", "Before (context only)", "After (context only)", ">>", "<<")), True)
+            check(f"этап 3а режим {md}: Neighbors - подписи круга 1 и список по расстоянию круга 2",
+                  all(x in pm for x in ("Neighbors (context)", "\"Context BEFORE:\"", "\"Context AFTER:\"", "by distance")), True)
+            banned = ["Topkapi", "Mehmed", "Vienna", "Вена", "Топкап", "Дворец", "Villa Magnolia", "San Remo",
+                      "Ertu", "Siege of", "old harbor", "wooden desk", "winding", "with pines", "mountains",
+                      "Islam", "caliph", "sultan", "monarchy", "palace", "courtyard",
+                      "stock market", "video game", "video call", "vintage car",
+                      "economy", "factory", "cargo port", "banknotes"]
+            pm_low = pm.lower()
+            check(f"этап 3а режим {md}: нет имён и сюжетных примеров",
+                  [w for w in banned if w.lower() in pm_low], [])
+        # те же запретные подстроки - в тексте всех description SEGMENT_ENTRY_SCHEMA
+        _descs = [pr.description or "" for pr in SEGMENT_ENTRY_SCHEMA.properties.values()]
+        _descs += [pr.items.description or "" for pr in SEGMENT_ENTRY_SCHEMA.properties.values() if pr.items is not None]
+        _descs_low = " ".join(_descs).lower()
+        check("этап 3а: нет имён и сюжетных примеров в description схемы",
+              [w for w in banned if w.lower() in _descs_low], [])
+        check("этап 3а: description схемы не пустые у scene/query_narrow (тест не пустой)",
+              len(_descs_low) > 200, True)
+        # подписи в тексте промпта совпадают с реальным выводом format_neighbors_context
+        _nb_t = [Segment(index=i, start="0", end="1", text=f"T{i}") for i in range(1, 6)]
+        _nb1 = format_neighbors_context(3, _nb_t, None, 1)
+        _nb2 = format_neighbors_context(3, _nb_t, None, 1, with_distance=True)
+        check("этап 3а: подписи Neighbors из промпта есть в реальном выводе",
+              "Context BEFORE:" in _nb1 and "Context AFTER:" in _nb1 and "Neighbors by distance" in _nb2, True)
+        # REPAIR-правило: нет 'narration text', есть ссылка на реальные источники контекста
+        _rp = build_prompt(
+            [_nb_t[2]],
+            repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 1, "mode": 2}},
+        )
+        check("этап 3а: REPAIR-правило без 'narration text', со ссылкой на Sentence/Neighbors",
+              ("narration text" in _rp, "Sentence, Before, After lines and the Neighbors block" in _rp), (False, False))
+        # этап 3б (изменён прежний тест: старая ссылка на After/Neighbors как источник сцены заменена лесенкой)
+        check("этап 3б: REPAIR круг 1 и 2 ссылаются на лесенку и запрет After, старой формулировки нет",
+              [("SOURCE LADDER" in x and "NEVER a source for the scene" in x and "using only the words of this segment and the context" not in x)
+               for x in (_rp, build_prompt([_nb_t[2]], repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 2, "mode": 1}}))], [True, True])
+
         # 7б. VARIETY: пункт в промпте всех режимов, без людей и имён, на своём месте
         for md, pm in ((1, p1), (2, p2), (3, p3)):
             check(f"VARIETY режим {md}: строка 'VARIETY:' ровно один раз", pm.count("VARIETY:"), 1)
@@ -2102,6 +2497,28 @@ def run_self_tests() -> int:
             check(f"VARIETY режим {md}: нет слов с заглавной (имён собственных)", v_caps, [])
             check(f"VARIETY режим {md}: после 'Do not invent scene details', до 'Always include silent/empty'",
                   pm.index("Do not invent scene details") < pm.index("VARIETY:") < pm.index("Always include silent/empty"), True)
+
+
+        # 3б: новые правила во всех трёх режимах
+        _KEY3B = {'rule1': 'fragments of continuous speech', 'ladder': 'SOURCE LADDER', 'a': 'a) if the words of the segment name something a camera can film', 'b': 'b) otherwise take the place and situation from the whole sentence', 'c': 'c) if the sentence gives too little', 'd_after': 'NEVER a source for the scene', 'e': 'scene is still REQUIRED for every segment in every mode, including REPAIR', 'variety': 'another aspect of the same place or event', 'symbol': 'Do not replace an idea with an object that symbolizes it', 'broad': 'not a portrait of a person', 'broad_soft': 'prefer the setting or place over a portrait of a person'}
+        _OLD3B = ['implied by the neighboring segments', 'built from the neighbors', "inferred from neighboring segments' context", 'from the nearest neighbor segments', "segment's narration", '(wide shot, medium shot, close-up, detail)', '2 segments before and 2 segments after', 'derive a general visual theme', 'a static portrait']
+        for md, pm in ((1, p1), (2, p2), (3, p3)):
+            for kn, kv in _KEY3B.items():
+                check(f"этап 3б режим {md}: ключевая фраза '{kn}'", kv in pm, True)
+            _va = pm.index("VARIETY: ") + 9
+            _vi = pm[_va:pm.index("\n", _va)].lower()
+            check(f"этап 3б режим {md}: VARIETY без close-up/close up/wide shot/medium shot/detail",
+                  re.findall(r"close-up|close up|wide shot|medium shot|\bdetail\b", _vi), [])
+            check(f"этап 3б режим {md}: старых формулировок A1-A7 нет", [o for o in _OLD3B if o in pm], [])
+            check(f"этап 3б режим {md}: лесенка в тексте один раз", pm.count("SOURCE LADDER (the same"), 1)
+            _nw = []
+            for _ln in pm[pm.index("SOURCE LADDER (the same"):pm.index("2. sites")].split("\n"):
+                for _sent in re.split(r"(?<=[.;:])\s+", _ln):
+                    for _w in _sent.split()[1:]:
+                        _c = _w.strip(".,;:()\"'")
+                        if _c[:1].isupper() and not _c.isupper() and _c not in ("Sentence", "Before", "After"):
+                            _nw.append(_c)
+            check(f"этап 3б режим {md}: в блоке лесенки нет слов с заглавной (кроме названий строк)", _nw, [])
 
         # 8. build_prompt: блок REPAIR и соседи
         seg_rep = Segment(42, "00:01:00,000", "00:01:05,000", "Reviewing war maps")
@@ -2352,7 +2769,7 @@ def run_self_tests() -> int:
                 return r
 
             def make_mock(seq, calls):
-                def _m(client, model, chunk, cb, ca, mode=2, repair_info=None):
+                def _m(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
                     calls.append((model, dict(repair_info or {})))
                     kind = seq[min(len(calls) - 1, len(seq) - 1)]
                     if isinstance(kind, Exception):
@@ -2459,6 +2876,405 @@ def run_self_tests() -> int:
             finally:
                 root_logger.removeHandler(lh2)
                 root_logger.setLevel(saved_level)
+
+        # 9. merge_segments_into_sentences: склейка сегментов в предложения
+        def _mk(*texts: str) -> list[Segment]:
+            return [Segment(i + 1, "00:00:00,000", "00:00:01,000", t) for i, t in enumerate(texts)]
+
+        def _groups(*texts: str) -> list[list[int]]:
+            return [x.seg_indices for x in merge_segments_into_sentences(_mk(*texts))[0]]
+
+        # 9а. реальный SRT (result.srt лежит рядом со скриптом или в текущей папке)
+        real_srt = next(
+            (c for c in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "result.srt"), "result.srt")
+             if os.path.isfile(c)),
+            None,
+        )
+        if real_srt is None:
+            print("SKIP  merge: result.srt не найден рядом со скриптом - тесты на реальном SRT пропущены")
+        else:
+            real_sen, real_by = merge_segments_into_sentences(parse_srt(real_srt))
+            check("merge real: ровно 41 предложение", len(real_sen), 41)
+            check("merge real: сегменты 100-101 склеены", real_by[100] is real_by[101], True)
+            check("merge real: предложение 100-101 состоит ровно из них",
+                  real_by[100].seg_indices, [100, 101])
+            check("merge real: сегменты 117-124 склеены",
+                  real_by[117].seg_indices, list(range(117, 125)))
+            check("merge real: 125-126 склеены без финальной точки",
+                  (real_by[125] is real_by[126], real_by[126].text[-1] in ".?!\u2026"), (True, False))
+            check("merge real: не более 48 слов в предложении", max(x.word_count for x in real_sen) <= 48, True)
+            check("merge real: не более 8 сегментов в предложении",
+                  max(len(x.seg_indices) for x in real_sen) <= 8, True)
+            check("merge real: каждый сегмент ровно в одном предложении",
+                  sorted(i for x in real_sen for i in x.seg_indices), list(range(1, 127)))
+            check("merge real: границы spans соответствуют тексту сегментов",
+                  all(
+                      x.text[a:b] == next(s.text for s in parse_srt(real_srt) if s.index == i)
+                      for x in real_sen for i, (a, b) in x.spans.items()
+                  ),
+                  True)
+
+        # 9б. многоточие
+        check("merge: многоточие + строчная -> склеивает", _groups("He died there\u2026", "of a heart condition."), [[1, 2]])
+        check("merge: многоточие + заглавная -> разрывает", _groups("He died there\u2026", "Of course."), [[1], [2]])
+        check("merge: три точки + строчная -> склеивает", _groups("He died there...", "of a heart condition."), [[1, 2]])
+        check("merge: три точки + заглавная -> разрывает", _groups("He died there...", "Of course."), [[1], [2]])
+        check("merge: многоточие в самом конце -> конец", _groups("Well\u2026"), [[1]])
+        check("merge: многоточие + открывающая кавычка + заглавная -> разрывает",
+              _groups("He died there\u2026", "\"Of course.\""), [[1], [2]])
+        check("merge: многоточие, закрывающая кавычка, строчная -> склеивает",
+              _groups("He said \"wait\u2026\"", "and left."), [[1, 2]])
+        check("merge: многоточие, пустой сегмент, строчная -> склеивает вместе с пустым",
+              _groups("He died there\u2026", "", "of a heart condition."), [[1, 2, 3]])
+
+        # 9в. закрывающие кавычка/скобка после знака
+        for closer in ['"', "'", "\u00bb", "\u201d", "\u2019", ")", "]"]:
+            for mark in [".", "?", "!", "\u2026"]:
+                check(f"merge: знак {mark!r} + закрывающий {closer!r} -> конец",
+                      _groups(f"He said stop{mark}{closer}", "Then left."), [[1], [2]])
+        check("merge: без знака конца - склеивает", _groups("He said", "stop."), [[1, 2]])
+        check("merge: запятая - не конец", _groups("He said,", "stop."), [[1, 2]])
+
+        # 9г. пустой сегмент
+        check("merge: пустой сегмент внутри предложения не ломает склейку",
+              _groups("Hello there", "", "my friend."), [[1, 2, 3]])
+        e_sen, e_by = merge_segments_into_sentences(_mk("Hello there", "", "my friend."))
+        check("merge: пустая граница start == end, пробелов не добавляет",
+              (e_sen[0].text, e_sen[0].spans[2]), ("Hello there my friend.", (11, 11)))
+        check("merge: пустой сегмент между предложениями - отдельное предложение с пустым текстом",
+              [(x.seg_indices, x.text) for x in merge_segments_into_sentences(_mk("One.", "", "Two."))[0]],
+              [([1], "One."), ([2], ""), ([3], "Two.")])
+        check("merge: пустой сегмент в начале", _groups("", "Hello."), [[1], [2]])
+        check("merge: пустой сегмент в конце после конца предложения", _groups("Hello.", ""), [[1], [2]])
+        check("merge: только пустые сегменты", _groups("", ""), [[1], [2]])
+        check("merge: пустой список", merge_segments_into_sentences([]), ([], {}))
+
+        # 9д. один сегмент из одного слова
+        check("merge: одно слово с точкой", _groups("Sultans."), [[1]])
+        check("merge: одно слово без знака", _groups("Sultans"), [[1]])
+        check("merge: одно слово склеивается с соседями",
+              _groups("A throne for", "Sultans", "and kings."), [[1, 2, 3]])
+
+        # 9е. аббревиатуры и числа в конце сегмента не дают границы
+        for abbr in ["Mr.", "Mrs.", "Ms.", "Dr.", "St.", "Jr.", "Sr.", "vs."]:  # "No." - отдельно, ниже
+            check(f"merge: {abbr} в конце сегмента - не граница",
+                  _groups(f"He met {abbr}", "Smith in town."), [[1, 2]])
+            check(f"merge: {abbr} в конце сегмента + заглавная - не граница",
+                  _groups(f"He met {abbr}", "Smith. He left."), [[1, 2]])
+        check("merge: аббревиатура в скобках - не граница", _groups("(see Mr.)", "Smith."), [[1, 2]])
+        check("merge: etc. + строчная - не граница", _groups("flags, drums, etc.", "were carried."), [[1, 2]])
+        check("merge: etc. + заглавная - граница", _groups("flags, drums, etc.", "Then it ended."), [[1], [2]])
+        check("merge: etc. в самом конце - граница", _groups("flags, drums, etc."), [[1]])
+        check("merge: число 1.5 в конце сегмента - не граница", _groups("it grew by 1.5", "percent."), [[1, 2]])
+        check("merge: число, разрезанное точкой (1. + 5) - не граница", _groups("it grew by 1.", "5 percent."), [[1, 2]])
+        check("merge: год с точкой + заглавная - граница", _groups("He died in 1926.", "Turkey refused."), [[1], [2]])
+        check("merge: обычное слово в нижнем регистре no. - граница", _groups("He said no.", "Then left."), [[1], [2]])
+        # 9е-1. «No.»: сокращение только перед символом-цифрой
+        check("merge: реплика «No.» + «Then left.» - две группы", _groups("No.", "Then left."), [[1], [2]])
+        check("merge: «No.» + «5 apples.» - склеивает", _groups("No.", "5 apples."), [[1, 2]])
+        check("merge: «No.» + «Five apples.» - две группы", _groups("No.", "Five apples."), [[1], [2]])
+        check("merge: «He met No.» + «Smith in town.» - граница (не цифра)",
+              _groups("He met No.", "Smith in town."), [[1], [2]])
+        check("merge: «No.» + пустой + «5 apples.» - склеивает", _groups("No.", "", "5 apples."), [[1, 2, 3]])
+        check("merge: «No.» в самом конце - граница", _groups("No."), [[1]])
+        check("merge: «(No.» + «5 apples.» - склеивает", _groups("(No.", "5 apples."), [[1, 2]])
+
+        # 9з. build_segment_block и подключение к build_prompt
+        def _blk(texts, i, bw=CONTEXT_BEFORE_WORDS, aw=CONTEXT_AFTER_WORDS):
+            segs = _mk(*texts)
+            sen, by = merge_segments_into_sentences(segs)
+            return build_segment_block(segs[i - 1], sen, by, bw, aw).split("\n")
+
+        check("window: константы 40/25", (CONTEXT_BEFORE_WORDS, CONTEXT_AFTER_WORDS), (40, 25))
+        # маркер ровно вокруг своего сегмента
+        bl = _blk(["He died there", "of a heart", "condition."], 2)
+        check("block: маркер вокруг текста сегмента",
+              "Sentence: He died there >>of a heart<< condition." in bl, True)
+        bl = _blk(["He died there", "of a heart", "condition."], 1)
+        check("block: маркер на первом сегменте предложения", "Sentence: >>He died there<< of a heart condition." in bl, True)
+        bl = _blk(["He died there", "of a heart", "condition."], 3)
+        check("block: маркер на последнем сегменте предложения", "Sentence: He died there of a heart >>condition.<<" in bl, True)
+        bl = _blk(["Hello there", "", "my friend."], 3)
+        check("block: маркер при пустом сегменте внутри предложения", "Sentence: Hello there >>my friend.<<" in bl, True)
+        check("block: заголовок и тайминг", (bl[0], bl[1]), ("### Segment 3", "Timing: 00:00:00,000 --> 00:00:01,000"))
+        check("block: строка Text", bl[2], "Text (what this segment says): my friend.")
+        # первое / последнее предложение, пустых строк нет
+        bl = _blk(["One two.", "Three four.", "Five six."], 1)
+        check("block: у первого предложения нет Before", [x for x in bl if x.startswith("Before")], [])
+        check("block: After первого = ближайшие целые предложения",
+              [x for x in bl if x.startswith("After")], ["After (context only): Three four. Five six."])
+        bl = _blk(["One two.", "Three four.", "Five six."], 3)
+        check("block: у последнего предложения нет After", [x for x in bl if x.startswith("After")], [])
+        check("block: Before последнего в хронологическом порядке",
+              [x for x in bl if x.startswith("Before")], ["Before (context only): One two. Three four."])
+        check("block: пустых строк внутри блока нет", all(x.strip() for x in bl), True)
+        bl = _blk(["Only one sentence here."], 1)
+        check("block: единственное предложение - ни Before, ни After",
+              [x for x in bl if x.startswith(("Before", "After"))], [])
+        # окно набирается целыми предложениями, может превышать порог
+        big = ["x " * 29 + "xx.", "tail one two three four."]   # 30 слов + 5 слов
+        bl = _blk(big + ["Mid one.", "Cur seg now."], 4, bw=40)
+        bb = next(x for x in bl if x.startswith("Before"))
+        check("window: 'Before' переваливает за 40 целиком", len(bb.split(": ", 1)[1].split()), 30 + 5 + 2)
+        bl = _blk(["a b c d e f g h i j k l m n o p q r s t u v w x y z a b c d e f g h i j k l m n o p q r s t u v w x y.",
+                   "Cur seg now."], 2, bw=40)
+        bb = next(x for x in bl if x.startswith("Before"))
+        check("window: единственное длинное предложение берётся целиком (минимум одно)", len(bb.split(": ", 1)[1].split()), 51)
+        bl = _blk(["S1 a b c d e f g h i.", "S2 a b c d e f g h i.", "S3 a b c d e f g h i.", "S4 a b c d e f g h i.",
+                   "S5 a b c d e f g h i.", "Cur seg now."], 6, bw=40)
+        bb = next(x for x in bl if x.startswith("Before"))
+        check("window: ровно 40 слов - останавливается (S2..S5)", bb.startswith("Before (context only): S2 ") and "S1" not in bb, True)
+        bl = _blk(["Cur seg now.", "A b c d e f g h i j.", "K l m n o p q r s t.", "U v w x y z a b c d.",
+                   "E f g h i j k l m n.", "O p q r s t u v w x."], 1, aw=25)
+        ab = next(x for x in bl if x.startswith("After"))
+        check("window: After 25 слов -> три предложения (30 слов, переваливает целиком)", len(ab.split(": ", 1)[1].split()), 30)
+        # пустые предложения пропускаются
+        bl = _blk(["Left one.", "", "Left two.", "", "Cur seg now."], 5, bw=1)
+        check("window: пустые предложения пропущены, берётся ближайшее непустое",
+              [x for x in bl if x.startswith("Before")], ["Before (context only): Left two."])
+        bl = _blk(["Cur seg now.", "", "", "Next one."], 1, aw=1)
+        check("window: пустые предложения после - пропущены",
+              [x for x in bl if x.startswith("After")], ["After (context only): Next one."])
+        bl = _blk(["", "Cur seg now."], 2)
+        check("window: только пустое предложение перед - Before нет", [x for x in bl if x.startswith("Before")], [])
+        # Note для коротких сегментов
+        for n_words, txt in [(1, "condition."), (2, "Hello there."), (3, "He left early.")]:
+            bl = _blk([txt, "Some longer sentence follows here today."], 1)
+            check(f"note: сегмент из {n_words} слов - есть Note", SHORT_SEGMENT_NOTE in bl, True)
+        bl = _blk(["He left very early.", "Next."], 1)
+        check("note: сегмент из 4 слов - нет Note", any(x.startswith("Note:") for x in bl), False)
+        check("note: текст дословно",
+              SHORT_SEGMENT_NOTE,
+              "Note: this fragment is too short to carry a picture on its own; use the setting of the "
+              "sentence unless the fragment itself names a specific place, person or object.")
+        bl = _blk(["Hello there", "", "my friend."], 2)
+        check("block: пустой сегмент - (silence / no text), без маркера и Note",
+              (bl[2], any(">>" in x for x in bl), any(x.startswith("Note:") for x in bl)),
+              ("Text (what this segment says): (silence / no text)", False, False))
+        bl = _blk(["One.", "", "Two."], 2)
+        check("block: пустой сегмент между предложениями - Before/After соседей",
+              bl[2:], ["Text (what this segment says): (silence / no text)",
+                       "Before (context only): One.", "After (context only): Two."])
+        # весь блок только на английском (кроме текста сегмента) и без старых меток
+        check("block: нет русских символов в служебных строках",
+              not re.search("[а-яё]", "\n".join(_blk(["He left very early.", "Next."], 1)), re.I), True)
+
+        # предложение через границу батча: целиком, принадлежит батчу своего сегмента
+        bsegs = _mk("He died there", "of a heart", "condition.", "Turkey refused", "to take it.")
+        b_idx = merge_segments_into_sentences(bsegs)
+        bts = make_batches(bsegs, 2, CONTEXT_WINDOW, min_last_batch_ratio=0.0)
+        check("batch: make_batches по-прежнему возвращает тройки",
+              [(len(b), len(cb), len(ca)) for b, cb, ca in bts], [(2, 0, 3), (3, 2, 0)])  # хвост из 3 сегментов слит по правилу min_size
+        p_b1 = build_prompt(bts[0][0], bts[0][1], bts[0][2], sentence_index=b_idx)
+        p_b2 = build_prompt(bts[1][0], bts[1][1], bts[1][2], sentence_index=b_idx)
+        check("batch: предложение через границу в первом батче - целиком, маркер на своём сегменте",
+              "Sentence: He died there >>of a heart<< condition." in p_b1, True)
+        check("batch: во втором батче то же предложение целиком, маркер на сегменте 3",
+              "Sentence: He died there of a heart >>condition.<<" in p_b2, True)
+        check("batch: сегмент принадлежит только своему батчу",
+              ("### Segment 3" in p_b1, "### Segment 3" in p_b2, "### Segment 2" in p_b2), (False, True, False))
+        check("batch: старых блоков Context BEFORE/AFTER в обычном режиме нет",
+              ("Context BEFORE" in p_b2, "Context AFTER" in p_b2, "\nText: " in p_b2), (False, False, False))
+        p_old = build_prompt(bts[1][0], bsegs[:1], bsegs[-1:], repair_info={3: {"entry": {}, "issues": ["x"]}})
+        check("batch: в REPAIR-режиме блоков Context BEFORE/AFTER на уровне чанка больше нет",
+              ("### Context BEFORE" in p_old, "### Context AFTER" in p_old), (False, False))
+        # REPAIR по общему sentence_index: окна по предложениям, старого формата сегмента нет
+        rp_ent = {3: {"entry": {"scene": "OLD_SCENE"}, "issues": ["x"], "neighbors": "NB"}}
+        p_r3 = build_prompt(bts[1][0][:1], bsegs[:1], bsegs[-1:], repair_info=rp_ent, sentence_index=b_idx)
+        check("repair block: предложение через границу батча целиком, маркер на сегменте 3",
+              "Sentence: He died there of a heart >>condition.<<" in p_r3, True)
+        check("repair block: After - следующее предложение целиком",
+              "After (context only): Turkey refused to take it." in p_r3, True)
+        check("repair block: нет 'Narration text:' и 'Context BEFORE/AFTER'",
+              ("Narration text:" in p_r3, "Context BEFORE" in p_r3, "Context AFTER" in p_r3), (False, False, False))
+        check("repair block: Note для короткого сегмента",
+              SHORT_SEGMENT_NOTE in p_r3, True)
+        check("repair block: Previous scene и Neighbors остались",
+              ("Previous scene: OLD_SCENE" in p_r3, "Neighbors (context):\nNB" in p_r3), (True, True))
+        # sentence_index доходит до call_batch_fn в обоих кругах
+        _si_seen: list = []
+        def _m_si(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+            _si_seen.append(sentence_index)
+            return {"1": entry(scene="Calm street", sites=["pexels"], query_narrow="calm street",
+                              query_medium="street", query_broad="street")}
+        _si_segs = _mk("Map of the border", "ends here.")
+        _si_idx = merge_segments_into_sentences(_si_segs)
+        with tempfile.TemporaryDirectory() as _td:
+            _o = os.path.join(_td, "r.json")
+            run_repair_cycle(
+                client=None, current_model="m", fallback_queue=[], segments=_si_segs,
+                results={"1": entry(scene="A map", sites=["pexels"], query_narrow="map"), "2": entry(scene="Calm street")},
+                exhausted_models={}, checkpoint_path=os.path.join(_td, "c.json"), src_hash="h",
+                sources_mode=2, strict_mode=2, output_path=_o, call_batch_fn=_m_si, sentence_index=_si_idx,
+            )
+        check("repair: sentence_index из run_repair_cycle доходит до call_batch_fn без пересчёта",
+              len(_si_seen) >= 1 and all(x is _si_idx for x in _si_seen), True)
+
+        if real_srt is not None:
+            rsegs = parse_srt(real_srt)
+            r_idx = merge_segments_into_sentences(rsegs)
+            rb = make_batches(rsegs, DEFAULT_BATCH_SIZE, CONTEXT_WINDOW)
+            pr1 = build_prompt(rb[0][0], rb[0][1], rb[0][2], sentence_index=r_idx)
+            pr2 = build_prompt(rb[1][0], rb[1][1], rb[1][2], sentence_index=r_idx)
+            check("real batch: сегмент 100 в батче 1, 101 в батче 2",
+                  ("### Segment 100\n" in pr1, "### Segment 101\n" in pr1, "### Segment 101\n" in pr2), (True, False, True))
+            check("real batch: предложение 100-101 целиком в обоих батчах",
+                  ("<<" in pr1 and r_idx[1][100].text in pr1.replace(">>", "").replace("<<", ""),
+                   r_idx[1][101].text in pr2.replace(">>", "").replace("<<", "")), (True, True))
+            check("real batch: в блоках нет пустых служебных строк вида 'Before (context only): '",
+                  not re.search(r"(Before|After) \(context only\): *$", pr1 + pr2, re.M), True)
+
+        # 9ж. ссылки на предложение и чистота
+        l_sen, l_by = merge_segments_into_sentences(_mk("A b", "c.", "D e."))
+        check("merge: by_segment ссылается на тот же объект", (l_by[1] is l_sen[0], l_by[2] is l_sen[0], l_by[3] is l_sen[1]), (True, True, True))
+        check("merge: номера предложений с 1", [x.number for x in l_sen], [1, 2])
+        check("merge: spans", (l_sen[0].text, l_sen[0].spans), ("A b c.", {1: (0, 3), 2: (4, 6)}))
+        before = [(s.index, s.text) for s in _mk("A b", "c.")]
+        merge_segments_into_sentences(_mk("A b", "c."))
+        check("merge: функция не меняет сегменты", [(s.index, s.text) for s in _mk("A b", "c.")], before)
+
+        # 9и. Окна соседей REPAIR расширяются до границ предложений
+        class _WarnCap(logging.Handler):
+            def __init__(self):
+                super().__init__(level=logging.WARNING)
+                self.msgs: list[str] = []
+            def emit(self, record):
+                self.msgs.append(record.getMessage())
+
+        def _nw(segs, tgt, win, with_idx=True):
+            sidx = merge_segments_into_sentences(segs) if with_idx else None
+            pos = next(i for i, x in enumerate(segs) if x.index == tgt)
+            b, a = _neighbor_window(pos, segs, win, sidx, tgt)
+            return [x.index for x in b], [x.index for x in a]
+
+        check("константа: REPAIR_MAX_EXPAND_SEGMENTS = 20", REPAIR_MAX_EXPAND_SEGMENTS, 20)
+        # 12 сегментов, предложения: [1-4] [5-6] [7-12]
+        ns = _mk("a b", "c d", "e f", "g h.", "i j", "k l.", "m n", "o p", "q r", "s t", "u v", "w x.")
+        # граница радиуса уже на границе предложения: окно совпадает со старым
+        old_b, old_a = _nw(ns, 7, 2, with_idx=False)
+        new_b, new_a = _nw(ns, 7, 2)
+        check("neighbors-window: сегмент 7, радиус 2 - слева граница совпала, окно как раньше", (old_b, new_b), ([5, 6], [5, 6]))
+        check("neighbors-window: справа расширено ровно на недостающие сегменты", (old_a, new_a), ([8, 9], [8, 9, 10, 11, 12]))
+        old_b, old_a = _nw(ns, 9, 1, with_idx=False)
+        new_b, new_a = _nw(ns, 9, 1)
+        check("neighbors-window: сегмент 9, радиус 1 - слева +1 до начала предложения 7..12",
+              (old_b, new_b), ([8], [7, 8]))
+        check("neighbors-window: сегмент 9, справа расширено до конца предложения",
+              (old_a, new_a), ([10], [10, 11, 12]))
+        old_b, old_a = _nw(ns, 3, 2, with_idx=False)
+        new_b, new_a = _nw(ns, 3, 2)
+        check("neighbors-window: слева край файла, справа конец предложения [1-4]",
+              (old_b, new_b, old_a, new_a), ([1, 2], [1, 2], [4, 5], [4, 5, 6]))
+        # окно не режет предложения: начало окна = начало предложения, конец = конец
+        sen_n, by_n = merge_segments_into_sentences(ns)
+        bad_cut = []
+        for tgt in range(1, 13):
+            for win in (1, 2, 3, 10):
+                b_, a_ = _nw(ns, tgt, win)
+                if b_ and by_n[b_[0]].seg_indices[0] != b_[0]:
+                    bad_cut.append((tgt, win, "L"))
+                if a_ and by_n[a_[-1]].seg_indices[-1] != a_[-1]:
+                    bad_cut.append((tgt, win, "R"))
+        check("neighbors-window: окно начинается и кончается на границах предложений", bad_cut, [])
+        # формат: круг 2, distance от проверяемого сегмента, в том числе для добавленных
+        nb_x = format_neighbors_context(9, ns, None, 1, with_distance=True, sentence_index=(sen_n, by_n))
+        check("neighbors-window круг 2: distance 1..3, добавленные сегменты с расстоянием от сегмента 9",
+              all(t in nb_x for t in ("distance 1 | before [8]: o p", "distance 2 | before [7]: m n",
+                                      "distance 1 | after [10]: s t", "distance 3 | after [12]: w x.")), True)
+        check("neighbors-window круг 2: нет distance 4", "distance 4" in nb_x, False)
+        nb_c1 = format_neighbors_context(9, ns, None, 1, sentence_index=(sen_n, by_n))
+        check("neighbors-window круг 1: блоки BEFORE/AFTER с расширением",
+              "Context BEFORE:" in nb_c1 and "[7] Text: m n" in nb_c1 and "[12] Text: w x." in nb_c1, True)
+        check("neighbors-window: без sentence_index - прежний вывод",
+              format_neighbors_context(9, ns, None, 1) == format_neighbors_context(9, ns, None, 1, sentence_index=None)
+              and "[7]" not in format_neighbors_context(9, ns, None, 1), True)
+        # предохранитель: текст без пунктуации
+        long_segs = _mk(*[f"w{i} x{i}" for i in range(1, 101)])
+        wc = _WarnCap()
+        logging.getLogger().addHandler(wc)
+        try:
+            lb, la = _nw(long_segs, 50, 3)
+        finally:
+            logging.getLogger().removeHandler(wc)
+        check("лимит: на сторону добавлено не больше 20 (слева 3+20, справа 3+20)", (len(lb), len(la)), (23, 23))
+        check("лимит: окно обрезано ровно по лимиту", (lb[0], la[-1]), (50 - 23, 50 + 23))
+        check("лимит: предупреждение в логе (слева и справа)",
+              (sum("слева" in m for m in wc.msgs), sum("справа" in m for m in wc.msgs)), (1, 1))
+        # реальный SRT: лимит не срабатывает ни для одного сегмента, оба круга
+        if real_srt is not None:
+            wc = _WarnCap()
+            logging.getLogger().addHandler(wc)
+            max_add = 0
+            try:
+                for rs in rsegs:
+                    for win in (CONTEXT_WINDOW, REPAIR2_CONTEXT_WINDOW):
+                        pos_ = rs.index - rsegs[0].index
+                        ob, oa = _neighbor_window(pos_, rsegs, win, None, rs.index)
+                        nb_, na_ = _neighbor_window(pos_, rsegs, win, r_idx, rs.index)
+                        max_add = max(max_add, len(nb_) - len(ob), len(na_) - len(oa))
+            finally:
+                logging.getLogger().removeHandler(wc)
+            check("real SRT: предупреждений о лимите нет", wc.msgs, [])
+            check("real SRT: максимальное добавление на сторону <= 20", max_add <= REPAIR_MAX_EXPAND_SEGMENTS, True)
+            print(f"INFO  real SRT: максимум добавленных сегментов на сторону = {max_add}")
+
+        # 9в. Страховка query_broad у архивного сегмента с именем (этап 3в)
+        def arch(broad, **over):
+            return entry(sites=["wikimedia", "loc"], is_entity=True, entity_keywords=["Mehmed VI"],
+                         query_broad=broad, **over)
+
+        def broad_repair_run(res, strict=2):
+            """Прогон run_repair_cycle с заглушкой: возвращает (номера в REPAIR по кругам, repair_info кругов)."""
+            segs = [Segment(i, "00:00:00,000", "00:00:01,000", f"text {i}") for i in sorted(int(k) for k in res)]
+            calls: list[tuple[list[int], dict]] = []
+
+            def mock(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+                calls.append(([x.index for x in chunk], repair_info))
+                return {str(x.index): res[str(x.index)] for x in chunk}  # модель ничего не меняет
+
+            with tempfile.TemporaryDirectory() as td2:
+                out2 = os.path.join(td2, "r.json")
+                code2 = run_repair_cycle(
+                    client=None, current_model="m", fallback_queue=[], segments=segs, results=dict(res),
+                    exhausted_models={}, checkpoint_path=checkpoint_path_for(out2), src_hash="h",
+                    sources_mode=2, strict_mode=strict, output_path=out2, call_batch_fn=mock,
+                )
+            return code2, calls
+
+        for w in BROAD_BANNED_WORDS:
+            res_w = {"1": arch(f"old {w} sitting"), "2": entry(), "3": arch("palace hall")}
+            code_w, calls_w = broad_repair_run(res_w)
+            check(f"broad: слово {w} -> в REPAIR только архивный с именем",
+                  [c[0] for c in calls_w][:1], [[1]])
+        not_hit = ["manual labor", "human figure", "boyfriend", "man-made lake", "portraits of kings",
+                   "men at work", "women", "palace hall", "super-man", None]
+        for q in not_hit:
+            check(f"broad: не срабатывает на {q!r}", check_archive_broad_words({"1": arch(q)}), {})
+        for q in ["woman's hat", "woman\u2019s hat", "WOMAN", "Portrait", "the Boy.", "'girl'"]:
+            check(f"broad: срабатывает на {q!r}", list(check_archive_broad_words({"1": arch(q)})), ["1"])
+        for src in (["pexels", "pixabay"],):
+            check("broad: стоковый сегмент с запрещённым словом не затронут",
+                  check_archive_broad_words({"1": entry(sites=src, is_entity=True, entity_keywords=["X"],
+                                                        query_broad="man portrait")}), {})
+        check("broad: архивный без имени не затронут",
+              check_archive_broad_words({"1": entry(sites=["wikimedia"], query_broad="royal man")}), {})
+        iss_b = check_archive_broad_words({"1": arch("a woman portrait")}, lang="en")["1"][0]
+        check("broad: причина на английском с найденными словами",
+              ("portrait, woman" in iss_b) and iss_b.isascii(), True)
+        # причина доходит до repair_info; сегмент с двумя причинами в REPAIR один раз
+        res_d = {"1": arch("man portrait", scene="A map on a desk")}
+        code_d, calls_d = broad_repair_run(res_d)
+        ids_d = [i for c in calls_d for i in c[0]]
+        check("broad: сегмент с двумя причинами не дублируется (круг 1 и 2 по одному разу)", ids_d, [1, 1])
+        iss_d = calls_d[0][1][1]["issues"]
+        check("broad: в issues и junk-причина, и причина query_broad",
+              (len(iss_d), any("query_broad contains" in x for x in iss_d),
+               any("forbidden shot type" in x for x in iss_d)), (2, True, True))
+        check("broad: без чистых сегментов REPAIR не вызывается",
+              broad_repair_run({"1": arch("palace"), "2": entry()})[1], [])
+        code_s1, _ = broad_repair_run({"1": arch("man")}, strict=1)
+        code_s2, _ = broad_repair_run({"1": arch("man")}, strict=2)
+        check("broad: после круга 2 слово осталось -> штатно strict=1 код 1, strict=2 код 0", (code_s1, code_s2), (1, 0))
 
         # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
         check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
@@ -2607,6 +3423,8 @@ def main() -> int:
             return 1
         logging.info("Preflight по response_schema занял %.2fs.", time.monotonic() - preflight_start)
 
+    # Склейка в предложения - один раз по всему списку, до разбиения на батчи
+    sentence_index = merge_segments_into_sentences(segments)
     batches = make_batches(segments, args.batch_size, CONTEXT_WINDOW)
 
     for batch_num, (batch, context_before, context_after) in enumerate(batches, start=1):
@@ -2626,7 +3444,7 @@ def main() -> int:
             try:
                 batch_result = call_gemini_batch(
                     client, current_model, batch, context_before, context_after,
-                    mode=sources_mode,
+                    mode=sources_mode, sentence_index=sentence_index,
                 )
                 break
             except DailyQuotaExceededError as e:
@@ -2680,6 +3498,7 @@ def main() -> int:
         sources_mode=sources_mode,
         strict_mode=strict_mode,
         output_path=args.output,
+        sentence_index=sentence_index,
     )
 
 
