@@ -349,6 +349,14 @@ sultan" -> use "Mehmed VI". Archive sites match every word, so an invented year 
 search terms; licensing is filtered separately downstream, not through the query text.
 - Do not invent scene details beyond what the segment's text actually says (a generalized frame for an \
 abstract segment, per the scene and ABSTRACT rules, is not an invention).
+- VARIETY: when several neighboring segments are about the same subject, each one MUST show a \
+different main subject or a different framing (wide shot, medium shot, close-up, detail). The scene of \
+a segment must not repeat the scenes you wrote for the previous three segments of this response, and \
+its query_narrow must not repeat their query_narrow. Framing words are for the scene only; do not add \
+them to queries as filler. For a segment about a named entity from an archive source, the name in \
+query_medium and entity_keywords stays exactly as the rules above require; only the scene and \
+query_narrow may vary the aspect or type of shot. Do not invent events or details that the segment's \
+text does not say.
 - Always include silent/empty segments in the output with a neutral scene and queries inferred from \
 neighboring segments' context (query_broad may be null for them) - never skip a segment number.
 
@@ -2075,6 +2083,25 @@ def run_self_tests() -> int:
         check("промпт режим 1: содержит запрещённые слова", "calendar" in p1 and "map" in p1, True)
         check("промпт режим 2: содержит MODE 2: MIXED", "MODE 2: MIXED" in p2, True)
         check("промпт режим 3: содержит MODE 3: STOCK ONLY", "MODE 3: STOCK ONLY" in p3, True)
+
+        # 7б. VARIETY: пункт в промпте всех режимов, без людей и имён, на своём месте
+        for md, pm in ((1, p1), (2, p2), (3, p3)):
+            check(f"VARIETY режим {md}: строка 'VARIETY:' ровно один раз", pm.count("VARIETY:"), 1)
+            v_start = pm.index("VARIETY: ") + len("VARIETY: ")
+            v_item = pm[v_start:pm.index("\n", v_start)]
+            v_low = v_item.lower()
+            check(f"VARIETY режим {md}: нет people / crowd / reaction",
+                  [w for w in ("people", "crowd", "reaction") if w in v_low], [])
+            v_caps = []
+            for v_sent in re.split(r"(?<=[.;])\s+", v_item):
+                for v_word in v_sent.split()[1:]:
+                    v_clean = v_word.strip(".,;:()\"'")
+                    # ALL-CAPS (MUST) - модальность, а не имя собственное
+                    if v_clean[:1].isupper() and not v_clean.isupper():
+                        v_caps.append(v_clean)
+            check(f"VARIETY режим {md}: нет слов с заглавной (имён собственных)", v_caps, [])
+            check(f"VARIETY режим {md}: после 'Do not invent scene details', до 'Always include silent/empty'",
+                  pm.index("Do not invent scene details") < pm.index("VARIETY:") < pm.index("Always include silent/empty"), True)
 
         # 8. build_prompt: блок REPAIR и соседи
         seg_rep = Segment(42, "00:01:00,000", "00:01:05,000", "Reviewing war maps")
