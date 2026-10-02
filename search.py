@@ -371,7 +371,37 @@ _DEFAULT_WM_BLOCKLIST = (
     "stamp", "stamps", "coin", "coins", "banknote", "banknotes", "map", "maps", "poster",
     "logo", "flag", "flags", "coat of arms", "diagram", "newspaper", "book cover",
     "title page", "page",
+    "calendar", "document", "chart", "infographic", "emblem", "id card", "passport",
 )
+# Общий список "мусорных типов кадра": для этих слов исключение "слово есть в scene" в
+# wikimedia_blocked НЕ действует (блокируются всегда, если слово есть в блок-листе).
+# Множественное число учитывается формами w / w+s / w без s. SEARCH_WIKIMEDIA_STRICT_BLOCK=0 -
+# вернуть прежнее поведение (исключение по сцене для всех слов).
+WIKIMEDIA_STRICT_BLOCK_WORDS: tuple = (
+    "map", "calendar", "document", "chart", "diagram", "infographic", "flag", "emblem",
+    "coat of arms", "newspaper", "ID card", "passport",
+)
+WIKIMEDIA_STRICT_BLOCK: bool = (
+    os.environ.get("SEARCH_WIKIMEDIA_STRICT_BLOCK", "1").strip().lower() not in ("0", "false", "no", "off")
+)
+
+# Режим источников: 1 = только архивные, 2 = микс (по умолчанию), 3 = только стоки.
+# Любое другое значение игнорируется (WARNING в amain) и берётся 2.
+SOURCES_MODE_DEFAULT = 2
+_SOURCES_MODE_RAW = os.environ.get("SEARCH_SOURCES_MODE")
+
+
+def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
+    """(режим, значение_корректно). Пустое/не заданное -> (2, True); мусор -> (2, False)."""
+    if raw is None or not raw.strip():
+        return SOURCES_MODE_DEFAULT, True
+    v = raw.strip()
+    if v in ("1", "2", "3"):
+        return int(v), True
+    return SOURCES_MODE_DEFAULT, False
+
+
+SOURCES_MODE, _SOURCES_MODE_VALID = parse_sources_mode(_SOURCES_MODE_RAW)
 _WM_BLOCKLIST_ENV = os.environ.get("SEARCH_WIKIMEDIA_BLOCKLIST")
 WIKIMEDIA_BLOCKLIST_WORDS: tuple = (
     _DEFAULT_WM_BLOCKLIST if _WM_BLOCKLIST_ENV is None
@@ -493,24 +523,63 @@ def _wm_word_in(word: str, text: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text) is not None
 
 
-def wikimedia_blocked(candidate_text: str, scene: str, blocklist) -> bool:
-    """True, если в тексте кандидата есть слово блок-листа, которого нет в сцене сегмента
-    (в сцене учитываются форма единственного/множественного числа)."""
-    if not blocklist:
-        return False
-    text = (candidate_text or "").lower()
-    sc = (scene or "").lower()
+def _wm_phrase_in(word: str, text: str) -> bool:
+    """Слово или фраза по границам слов (для строгого блока: "id card" не найдётся в "paid card",
+    "document" не найдётся в "documentary")."""
+    return re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text) is not None
+
+
+def _wm_forms(w: str) -> set:
+    forms = {w, w + "s"}
+    if w.endswith("s"):
+        forms.add(w[:-1])
+    return forms
+
+
+def _wm_blocked_impl(text: str, sc: str, blocklist, strict_words: frozenset) -> bool:
     for w in blocklist:
         w = (w or "").strip().lower()
-        if not w or not _wm_word_in(w, text):
+        if not w:
             continue
-        forms = {w, w + "s"}
-        if w.endswith("s"):
-            forms.add(w[:-1])
-        if any(_wm_word_in(f, sc) for f in forms):
+        if w in strict_words:
+            # строгое слово: формы единственного/множественного числа в тексте кандидата,
+            # исключения по сцене нет
+            if any(_wm_phrase_in(f, text) for f in _wm_forms(w)):
+                return True
+            continue
+        if not _wm_word_in(w, text):
+            continue
+        if any(_wm_word_in(f, sc) for f in _wm_forms(w)):
             continue
         return True
     return False
+
+
+def wikimedia_block_reason(
+    candidate_text: str, scene: str, blocklist, strict: Optional[bool] = None,
+) -> Optional[str]:
+    """None - не блокируется; "base" - блокируется и при прежнем поведении; "strict" -
+    блокируется только из-за строгого правила (слово из WIKIMEDIA_STRICT_BLOCK_WORDS есть
+    в сцене, раньше это снимало блок)."""
+    if not blocklist:
+        return None
+    if strict is None:
+        strict = WIKIMEDIA_STRICT_BLOCK
+    text = (candidate_text or "").lower()
+    sc = (scene or "").lower()
+    strict_words = frozenset(w.strip().lower() for w in WIKIMEDIA_STRICT_BLOCK_WORDS) if strict else frozenset()
+    if not _wm_blocked_impl(text, sc, blocklist, strict_words):
+        return None
+    if strict and not _wm_blocked_impl(text, sc, blocklist, frozenset()):
+        return "strict"
+    return "base"
+
+
+def wikimedia_blocked(candidate_text: str, scene: str, blocklist, strict: Optional[bool] = None) -> bool:
+    """True, если в тексте кандидата есть слово блок-листа, которого нет в сцене сегмента
+    (в сцене учитываются форма единственного/множественного числа). Слова из
+    WIKIMEDIA_STRICT_BLOCK_WORDS блокируются независимо от сцены (если strict / env включён)."""
+    return wikimedia_block_reason(candidate_text, scene, blocklist, strict) is not None
 
 
 def nasa_license_ok(item_data: dict) -> bool:
@@ -624,6 +693,7 @@ class SiteStats:
     rejected_foreign_total: int = 0
     best_effort_total: int = 0
     blocked_total: int = 0
+    blocked_strict_total: int = 0
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -662,7 +732,8 @@ def log_site_stats_summary(site_stats: dict) -> None:
             s.clip_scored_total, s.clip_passed_total, s.clip_accept_total,
             s.avg_score, s.best_score,
             s.accepted_total, s.rejected_foreign_total, s.best_effort_total,
-            f"  блок-лист={s.blocked_total}" if s.blocked_total else "",
+            (f"  блок-лист={s.blocked_total} (из них строгих={s.blocked_strict_total})"
+             if s.blocked_total else ""),
         )
     logging.info(
         "Как читать: raw=0 -> сайт вообще ничего не вернул по запросу (сеть/сам API/лимит). "
@@ -1659,6 +1730,25 @@ async def try_claim_pool(
 ARCHIVE_SITES = ("wikimedia", "loc", "nasa")
 STOCK_SITES = ("pexels", "pixabay")
 
+# Максимум WARNING-строк про подстановку sites по режиму источников; остальное - одной итоговой строкой.
+SOURCES_WARN_LIMIT = 10
+
+
+def filter_sites_by_mode(sites, mode: Optional[int] = None) -> list:
+    """Режим 1: только ARCHIVE_SITES; режим 3: только STOCK_SITES; режим 2: без изменений.
+    Порядок и дубликаты сохраняются."""
+    if mode is None:
+        mode = SOURCES_MODE
+    if mode == 1:
+        return [x for x in sites if x in ARCHIVE_SITES]
+    if mode == 3:
+        return [x for x in sites if x in STOCK_SITES]
+    return list(sites)
+
+
+def fallback_sites(mode: int) -> list:
+    return ["wikimedia", "loc"] if mode == 1 else ["pexels", "pixabay"]
+
 
 def candidates_cap(
     site: str, override: Optional[int] = CANDIDATES_OVERRIDE,
@@ -1717,8 +1807,11 @@ def _entity_name_query(seg: SegmentSpec) -> Optional[str]:
     return None
 
 
-def build_cascade(seg: SegmentSpec) -> list[Variant]:
-    """Чистая функция (без сети и ctx): упорядоченный список вариантов запроса."""
+def build_cascade(seg: SegmentSpec, mode: Optional[int] = None) -> list[Variant]:
+    """Чистая функция (без сети и ctx): упорядоченный список вариантов запроса.
+    Режим источников 1 (только архивные): broad (он идёт только на pixabay/pexels) не строится."""
+    if mode is None:
+        mode = SOURCES_MODE
     seg_sites = [x for x in _pixabay_first(list(seg.sites)) if x in SITE_SEARCH_FUNCS]
     archive_first = bool(seg_sites) and seg_sites[0] in ARCHIVE_SITES
 
@@ -1739,6 +1832,8 @@ def build_cascade(seg: SegmentSpec) -> list[Variant]:
     for name in order:
         q = queries[name]
         if not q or not q.strip():
+            continue
+        if name == "broad" and mode == 1:
             continue
         sites = broad_sites if name == "broad" else list(narrow_medium_sites)
         if not sites:
@@ -1786,10 +1881,14 @@ async def fetch_and_filter(
 
     if site == "wikimedia" and WIKIMEDIA_BLOCKLIST_WORDS:
         before_bl = len(licensed)
-        licensed = [
-            c for c in licensed
-            if not wikimedia_blocked(c.text, seg.scene, WIKIMEDIA_BLOCKLIST_WORDS)
-        ]
+        kept = []
+        for c in licensed:
+            reason = wikimedia_block_reason(c.text, seg.scene, WIKIMEDIA_BLOCKLIST_WORDS)
+            if reason is None:
+                kept.append(c)
+            elif reason == "strict":
+                stats.blocked_strict_total += 1
+        licensed = kept
         stats.blocked_total += before_bl - len(licensed)
         if not licensed:
             logging.info(
@@ -1973,6 +2072,18 @@ async def _claim_first(
     return None, None
 
 
+def backup_candidate_sites(seg_sites, primary_site: str, mode: Optional[int] = None) -> list:
+    """Сайты для backup: seg.sites + SEARCH_BACKUP_EXTRA_SITES (+ pexels/pixabay, если primary - loc).
+    Режим источников фильтрует результат целиком (режим 2 - без изменений)."""
+    candidate_sites = list(seg_sites) + BACKUP_EXTRA_SITES
+    # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
+    if primary_site == "loc":
+        for stock_site in ("pexels", "pixabay"):
+            if stock_site not in candidate_sites:
+                candidate_sites.append(stock_site)
+    return filter_sites_by_mode(candidate_sites, mode)
+
+
 async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
     """B1 (другие сайты) -> B2 (тот же сайт). Возвращает (url, 'other'|'same') или (None, None)."""
     primary = ctx.primary_cands.get(seg.index)
@@ -1982,12 +2093,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
 
     cascade = build_cascade(seg)
 
-    candidate_sites = list(seg.sites) + BACKUP_EXTRA_SITES
-    # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
-    if primary.site == "loc":
-        for stock_site in ("pexels", "pixabay"):
-            if stock_site not in candidate_sites:
-                candidate_sites.append(stock_site)
+    candidate_sites = backup_candidate_sites(seg.sites, primary.site)
 
     ordered: list[str] = []
     for site in candidate_sites:
@@ -2140,6 +2246,8 @@ def load_requests(path: str) -> list[SegmentSpec]:
         return ValueError(f"Сегмент {k!r} в requests.json: поле {field!r} {what}")
 
     specs: list[SegmentSpec] = []
+    sources_warned = 0
+    sources_suppressed = 0
     for k, v in data.items():
         try:
             idx = int(k)
@@ -2178,6 +2286,19 @@ def load_requests(path: str) -> list[SegmentSpec]:
             logging.warning(
                 "Сегмент %s: неизвестные сайты в sites %s - они будут проигнорированы.", k, unknown,
             )
+        if SOURCES_MODE != 2:
+            filtered = filter_sites_by_mode(norm_sites)
+            if not filtered:
+                filtered = fallback_sites(SOURCES_MODE)
+                if sources_warned < SOURCES_WARN_LIMIT:
+                    sources_warned += 1
+                    logging.warning(
+                        "Сегмент %s: после фильтра режима источников %s в sites %s ничего не осталось - "
+                        "подставлено %s.", k, SOURCES_MODE, norm_sites, filtered,
+                    )
+                else:
+                    sources_suppressed += 1
+            norm_sites = filtered
         try:
             specs.append(SegmentSpec(
                 index=idx,
@@ -2193,6 +2314,12 @@ def load_requests(path: str) -> list[SegmentSpec]:
         except (KeyError, TypeError, ValueError) as e:
             raise ValueError(f"Сегмент {k!r} в requests.json имеет некорректную структуру: {e}") from e
 
+    if sources_suppressed:
+        logging.warning(
+            "Режим источников %s: ещё у %s сегментов sites после фильтра был пуст "
+            "(подставлены стандартные; подробные строки подавлены, лимит %s).",
+            SOURCES_MODE, sources_suppressed, SOURCES_WARN_LIMIT,
+        )
     specs.sort(key=lambda s: s.index)
     return specs
 
@@ -2202,6 +2329,17 @@ async def amain(args: argparse.Namespace) -> int:
         logging.error("Входной файл не найден: %s", args.input)
         return 1
 
+    if not _SOURCES_MODE_VALID:
+        logging.warning(
+            "SEARCH_SOURCES_MODE=%r не из {1,2,3} - игнорируется, берётся %s.",
+            _SOURCES_MODE_RAW, SOURCES_MODE_DEFAULT,
+        )
+    logging.info(
+        "Режим источников: %s (%s; SEARCH_SOURCES_MODE).", SOURCES_MODE,
+        {1: "только архивные: wikimedia/loc/nasa, broad не выполняется",
+         2: "микс, без ограничений",
+         3: "только стоки: pexels/pixabay"}[SOURCES_MODE],
+    )
     try:
         segments = load_requests(args.input)
     except (ValueError, json.JSONDecodeError) as e:
@@ -2223,9 +2361,11 @@ async def amain(args: argparse.Namespace) -> int:
     logging.info(
         "Параметры поиска: STRONG_OWN_SIM=%.3f (SEARCH_STRONG_OWN_SIM); потолки кандидатов: "
         "сток=%s, архивы=%s, общий override=%s (SEARCH_CANDIDATES_STOCK / SEARCH_CANDIDATES_ARCHIVE / "
-        "SEARCH_CANDIDATES_PER_SITE); блок-лист Wikimedia: %s слов (SEARCH_WIKIMEDIA_BLOCKLIST).",
+        "SEARCH_CANDIDATES_PER_SITE); блок-лист Wikimedia: %s слов (SEARCH_WIKIMEDIA_BLOCKLIST), строгий блок без исключения по "
+        "сцене: %s (SEARCH_WIKIMEDIA_STRICT_BLOCK).",
         STRONG_OWN_SIM, CANDIDATES_STOCK, CANDIDATES_ARCHIVE,
         CANDIDATES_OVERRIDE if CANDIDATES_OVERRIDE else "нет", len(WIKIMEDIA_BLOCKLIST_WORDS),
+        "вкл" if WIKIMEDIA_STRICT_BLOCK else "выкл",
     )
 
     pexels_key = os.environ.get("PEXELS_API_KEY", "")
@@ -2351,8 +2491,30 @@ async def amain(args: argparse.Namespace) -> int:
     return 0
 
 
+class _CaptureWarnings(logging.Handler):
+    """Для self-test: собирает тексты WARNING-записей."""
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.msgs: list[str] = []
+
+    def emit(self, record):
+        self.msgs.append(record.getMessage())
+
+    def __enter__(self):
+        logging.getLogger().addHandler(self)
+        return self
+
+    def __exit__(self, *a):
+        logging.getLogger().removeHandler(self)
+        return False
+
+
 def _selftest() -> int:
     import tempfile
+
+    # self-test не зависит от SEARCH_SOURCES_MODE / SEARCH_WIKIMEDIA_STRICT_BLOCK в окружении
+    globals()["SOURCES_MODE"] = 2
+    globals()["WIKIMEDIA_STRICT_BLOCK"] = True
 
     def mk(sites, n="wiki narrow", m="wiki medium", b="city street", **kw):
         return SegmentSpec(index=1, scene="s", sites=sites, query_narrow=n, query_medium=m,
@@ -2534,6 +2696,115 @@ def _selftest() -> int:
     assert wikimedia_blocked("Stamps of Russia 2013", "Sultan", ()) is False
     assert wikimedia_blocked("Mapleton street 1920", "street", bl) is False
     assert wikimedia_blocked("Old book cover scan", "a book", bl) is True
+
+    # --- блок-лист: строгие слова ---
+    sbl = _DEFAULT_WM_BLOCKLIST
+    assert wikimedia_blocked("Old map of Constantinople", "a map of the city", sbl, strict=True) is True
+    assert wikimedia_blocked("Old maps of Constantinople", "a map of the city", sbl, strict=True) is True
+    assert wikimedia_blocked("Old map of Constantinople", "a map of the city", sbl, strict=False) is False
+    assert wikimedia_block_reason("Old map of Constantinople", "a map of the city", sbl, True) == "strict"
+    assert wikimedia_block_reason("Old map of Constantinople", "a map of the city", sbl, False) is None
+    assert wikimedia_block_reason("Old map of Constantinople", "palace", sbl, True) == "base"
+    assert wikimedia_block_reason("Palace garden", "palace", sbl, True) is None
+    assert wikimedia_blocked("Mapleton street 1920", "a map of the city", sbl, strict=True) is False
+    assert wikimedia_blocked("Documentary about Rome", "document", sbl, strict=True) is False
+    assert wikimedia_blocked("Scanned documents 1920", "palace", sbl, strict=True) is True
+    assert wikimedia_blocked("Soviet passport 1974", "passport office", sbl, strict=True) is True
+    assert wikimedia_blocked("ID card of a clerk", "office", sbl, strict=True) is True
+    assert wikimedia_blocked("Paid cardinal portrait", "office", sbl, strict=True) is False
+    assert wikimedia_blocked("Coat of arms of Rome", "coat of arms", sbl, strict=True) is True
+    # обычное слово блок-листа: исключение по сцене работает как раньше
+    assert wikimedia_blocked("Stamps of Russia 2013", "a postage stamp is shown", sbl, strict=True) is False
+    assert wikimedia_blocked("Stamps of Russia 2013", "Sultan", sbl, strict=True) is True
+    # выключение строгого блока (SEARCH_WIKIMEDIA_STRICT_BLOCK=0) возвращает прежнее поведение
+    _g = globals()
+    _old_strict = _g["WIKIMEDIA_STRICT_BLOCK"]
+    try:
+        _g["WIKIMEDIA_STRICT_BLOCK"] = True
+        assert wikimedia_blocked("Old map", "a map", sbl) is True
+        _g["WIKIMEDIA_STRICT_BLOCK"] = False
+        assert wikimedia_blocked("Old map", "a map", sbl) is False
+        assert wikimedia_blocked("Old map", "palace", sbl) is True
+    finally:
+        _g["WIKIMEDIA_STRICT_BLOCK"] = _old_strict
+    # слова строгого списка есть в дефолтном блок-листе
+    for w in WIKIMEDIA_STRICT_BLOCK_WORDS:
+        assert w.lower() in _DEFAULT_WM_BLOCKLIST, w
+
+    # --- режим источников ---
+    assert parse_sources_mode(None) == (2, True)
+    assert parse_sources_mode("") == (2, True)
+    assert parse_sources_mode("1") == (1, True)
+    assert parse_sources_mode(" 3 ") == (3, True)
+    assert parse_sources_mode("4") == (2, False)
+    assert parse_sources_mode("abc") == (2, False)
+    mixed = ["pexels", "wikimedia", "pixabay", "loc", "nasa"]
+    assert filter_sites_by_mode(mixed, 1) == ["wikimedia", "loc", "nasa"]
+    assert filter_sites_by_mode(mixed, 3) == ["pexels", "pixabay"]
+    assert filter_sites_by_mode(mixed, 2) == mixed
+    assert filter_sites_by_mode(["pexels"], 1) == []
+    # broad в режиме 1 не выполняется, в 2 и 3 - как раньше
+    seg_a = mk(["wikimedia", "pexels"])
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 1)]] == ["narrow", "medium"]
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 2)]] == ["narrow", "medium", "broad"]
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 3)]] == ["narrow", "medium", "broad"]
+    seg_s = mk(["pexels", "pixabay"])
+    assert [v.name for v in build_cascade(seg_s, 3)] == ["medium", "narrow", "broad"]
+
+    # load_requests: режимы 1/3, пустой sites после фильтра, лимит warning'ов
+    def _write_req(sites_list):
+        data = {}
+        for i, st in enumerate(sites_list, 1):
+            data[str(i)] = {"scene": "s", "sites": st, "query_narrow": "n", "query_medium": "m",
+                            "query_broad": "b", "type": "image", "is_entity": False,
+                            "entity_keywords": []}
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+    _old_mode = _g["SOURCES_MODE"]
+    try:
+        path = _write_req([["pexels", "wikimedia", "loc"], ["pexels", "pixabay"], ["wikimedia"]])
+        _g["SOURCES_MODE"] = 1
+        r = load_requests(path)
+        assert [x.sites for x in r] == [["wikimedia", "loc"], ["wikimedia", "loc"], ["wikimedia"]], r
+        _g["SOURCES_MODE"] = 3
+        r = load_requests(path)
+        assert [x.sites for x in r] == [["pexels"], ["pexels", "pixabay"], ["pexels", "pixabay"]], r
+        _g["SOURCES_MODE"] = 2
+        r = load_requests(path)
+        assert [x.sites for x in r] == [["pexels", "wikimedia", "loc"], ["pexels", "pixabay"], ["wikimedia"]]
+        os.remove(path)
+        # пустой после фильтра: WARNING с номером сегмента, лимит строк
+        path = _write_req([["pexels"]] * (SOURCES_WARN_LIMIT + 3))
+        _g["SOURCES_MODE"] = 1
+        with _CaptureWarnings() as cap:
+            r = load_requests(path)
+        assert all(x.sites == ["wikimedia", "loc"] for x in r)
+        per_seg = [m for m in cap.msgs if m.startswith("Сегмент ")]
+        assert len(per_seg) == SOURCES_WARN_LIMIT and "Сегмент 1:" in per_seg[0], cap.msgs
+        assert any("подавлены" in m for m in cap.msgs), cap.msgs
+        os.remove(path)
+    finally:
+        _g["SOURCES_MODE"] = _old_mode
+
+
+    # backup-сайты по режимам
+    _old_extra = list(BACKUP_EXTRA_SITES)
+    try:
+        BACKUP_EXTRA_SITES[:] = ["nasa", "pixabay"]
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 2) == \
+            ["wikimedia", "pexels", "nasa", "pixabay"]
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 1) == ["wikimedia", "nasa"]
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 3) == ["pexels", "pixabay"]
+        assert backup_candidate_sites(["loc"], "loc", 1) == ["loc", "nasa"]
+        assert backup_candidate_sites(["loc"], "loc", 2) == ["loc", "nasa", "pixabay", "pexels"]
+        assert backup_candidate_sites(["loc"], "loc", 3) == ["pixabay", "pexels"]
+    finally:
+        BACKUP_EXTRA_SITES[:] = _old_extra
+
     print("selftest OK")
     return 0
 
