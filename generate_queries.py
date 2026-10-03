@@ -31,7 +31,10 @@ response_schema).
     Словарь "номер сегмента" (строка) -> запись с полями: scene (одно английское предложение
     о том, что видно в кадре), sites (список источников в порядке приоритета), query_narrow,
     query_medium, query_broad (строка или null), type ("image"/"video"), is_entity (bool, выводится
-    как bool(entity_keywords)), entity_keywords (список строк, английское написание первым). Старых полей query и fallback_query в записи НЕТ.
+    как bool(entity_keywords)), entity_keywords (список строк, английское написание первым), visual_value (целое 0-100: насколько
+    реплика выигрывает от картинки; ставит Gemini по тексту и соседним репликам, вне 0-100 зажимается,
+    нечисловое/отсутствующее - ошибка ответа с повтором батча; при REPAIR не меняется; в записи идёт
+    последним полем). Старых полей query и fallback_query в записи НЕТ.
     Записи перед сохранением проходят _normalize_entry (детерминированная починка без
     повторных вызовов Gemini).
 
@@ -119,8 +122,8 @@ CHECKPOINT_SUFFIX = ".checkpoint.json"
 # Версия формата записи сегмента (набор полей ответа модели). Пишется в чекпоинт; при
 # несовпадении старый чекпоинт игнорируется, чтобы записи разных схем не смешались в
 # одном requests.json. ПОВЫШАТЬ при любом изменении полей SEGMENT_ENTRY_SCHEMA.
-# 1 - query/fallback_query; 2 - scene + query_narrow/medium/broad.
-SCHEMA_VERSION = 2
+# 1 - query/fallback_query; 2 - scene + query_narrow/medium/broad; 3 - + visual_value.
+SCHEMA_VERSION = 3
 # Таймаут HTTP-запроса к Gemini (сек). В google-genai HttpOptions.timeout задаётся в
 # МИЛЛИСЕКУНДАХ, поэтому при создании клиента переводим секунды в мс.
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
@@ -218,7 +221,7 @@ TRAILING_STOP_WORDS = LEADING_STOP_WORDS | {"the", "a", "an"}
 # Обязательные ключи записи ответа модели (после извлечения segment_index).
 REQUIRED_ENTRY_KEYS = [
     "scene", "sites", "query_narrow", "query_medium", "query_broad",
-    "type", "is_entity", "entity_keywords",
+    "type", "is_entity", "entity_keywords", "visual_value",
 ]
 # Потолок отдельных warning нормализации за весь запуск, дальше - только итоговые счётчики.
 MAX_NORMALIZE_WARNINGS = 20
@@ -341,6 +344,22 @@ generic (a plain city view or a coastline of a named city is still an entity sce
 6. is_entity - true when entity_keywords is non-empty, false when it is empty. Fill it consistently \
 with entity_keywords (the script recomputes it from that list anyway).
 
+7. visual_value - an INTEGER from 0 to 100: how much the words of this segment gain from a picture. \
+Judge ONLY by the text of this segment and the context of the neighboring sentences (for this field the \
+"Sentence", "Before" and "After" lines may all be used, even though the After line is never a source \
+for the scene). Do NOT judge by the scene or queries you wrote and do not raise the score just because \
+a stock shot for the topic exists. Anchors:
+   - 80-100: something concrete and visible that a camera can film - a place, an object, an event, a \
+person or an organization;
+   - 50-79: concrete but general ("people discussed", "in those years"): any shot on the topic would fit;
+   - 20-49: abstract or reasoning; a picture is possible only as a metaphor;
+   - 0-19: greetings, linking phrases, evaluations, calls to action, empty talk. A segment with no \
+text (silence) ALWAYS gets 0.
+Use the WHOLE range and tell the segments of this response apart: giving 70-90 to almost all segments \
+is wrong. The scores are used only to compare segments of ONE video with each other, so the most \
+picture-worthy segments must get the highest values and the emptiest ones the lowest. In REPAIR mode \
+copy the "Previous visual_value" unchanged.
+
 ABSTRACT / GENERAL SEGMENTS:
 When a segment lacks a concrete visible physical subject (such as narrator evaluations, conclusions, \
 transitions, abstract concepts, emotions, numbers, or dates without physical objects):
@@ -403,7 +422,9 @@ SYSTEM_INSTRUCTION = build_system_instruction(DEFAULT_SOURCES_MODE)
 
 # Порядок полей важен: scene идёт первым после segment_index, чтобы модель сначала
 # описывала кадр, а уже потом строила по нему запросы. Gemini не гарантирует порядок по
-# порядку ключей в dict, поэтому он задан явно через property_ordering.
+# порядку ключей в dict, поэтому он задан явно через property_ordering. Исключение - visual_value:
+# он стоит сразу после segment_index, до scene, чтобы оценка не якорилась на уже написанном кадре
+# (scene всегда конкретный, даже для абстрактных реплик). Порядок в requests.json от этого не зависит.
 SEGMENT_ENTRY_SCHEMA = types.Schema(
     type=types.Type.OBJECT,
     properties={
@@ -468,9 +489,20 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
                 "English spelling of the main name FIRST. Empty list = no proper names."
             ),
         ),
+        "visual_value": types.Schema(
+            type=types.Type.INTEGER,
+            description=(
+                "Integer 0-100: how much the segment's words gain from a picture, judged only "
+                "by the segment text and neighboring sentences. 80-100 concrete visible "
+                "(place/object/event/person/organization); 50-79 concrete but general; "
+                "20-49 abstract, metaphor only; 0-19 greeting/link/evaluation/call/empty. "
+                "Silence = 0. Use the whole range; do not give 70-90 to almost everything."
+            ),
+        ),
     },
     property_ordering=[
         "segment_index",
+        "visual_value",
         "scene",
         "sites",
         "query_narrow",
@@ -490,6 +522,7 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
         "type",
         "is_entity",
         "entity_keywords",
+        "visual_value",
     ],
 )
 
@@ -893,6 +926,10 @@ def build_prompt(
             "write a generic frame (no proper names)."
         )
         lines.append("- Fix sites / entity_keywords issues according to the current sources mode.")
+        lines.append(
+            "- visual_value: copy the 'Previous visual_value' of each segment unchanged; do NOT re-score, "
+            "even when the scene is rewritten."
+        )
         if rep_round >= 2:
             lines.append(_repair_round_rule(rep_mode))
         lines.append("")
@@ -915,6 +952,8 @@ def build_prompt(
                 lines.append(f"Previous query_narrow: {prev.get('query_narrow', '')}")
                 lines.append(f"Previous query_medium: {prev.get('query_medium', '')}")
                 lines.append(f"Previous query_broad: {prev.get('query_broad', '')}")
+            # visual_value показываем всегда (и для junk-сегментов): его ремонт не меняет
+            lines.append(f"Previous visual_value: {prev.get('visual_value', '')}")
             lines.append("Validation issues to fix:")
             lines.append(issues_formatted)
             lines.append(f"Neighbors (context):\n{neighbors_str}")
@@ -1223,13 +1262,28 @@ def _clean_keywords(raw) -> list[str]:
     return out
 
 
+def _parse_visual_value(raw, seg_index: int) -> tuple[int, bool]:
+    """Разбор visual_value: целое (int, не bool; float допустим только с целым значением).
+    Возвращает (значение, зажато_ли). Нечисловое, None, bool, строка, дробное - ValueError, чтобы
+    сработал повтор батча (как у других невалидных полей); молча ничего не подставляется.
+    Вне 0-100 - зажим в этот диапазон (причина копится в stats как visual_value_clamped)."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"Сегмент {seg_index}: visual_value должно быть целым числом, получено {raw!r}")
+    if isinstance(raw, float):
+        if not raw.is_integer():
+            raise ValueError(f"Сегмент {seg_index}: visual_value должно быть целым, получено {raw!r}")
+        raw = int(raw)
+    clamped = min(100, max(0, raw))
+    return clamped, clamped != raw
+
+
 def _normalize_entry(
     item: dict, seg_index: int, stats: Optional[Counter] = None,
     segment_text: Optional[str] = None,
 ) -> dict:
     """Детерминированно проверяет и чинит запись сегмента (без новых вызовов Gemini).
 
-    Структурно битая запись (не объект / нет обязательных ключей) - ValueError, чтобы
+    Структурно битая запись (не объект / нет обязательных ключей / нецелое visual_value) - ValueError, чтобы
     сработали ретраи батча. Остальное чинится на месте; причины правок копятся в stats
     (Counter): по каждой причине - число записей, плюс "_entries" - сколько записей
     исправлено хотя бы раз. Замечания без правки идут в stats с префиксом "note:".
@@ -1249,6 +1303,13 @@ def _normalize_entry(
 
     fixes: list[str] = []
     notes: list[str] = []
+
+    # visual_value: обязательное целое; нечисловое -> ValueError (повтор батча), вне 0-100 -> зажим
+    visual_value, vv_clamped = _parse_visual_value(item["visual_value"], seg_index)
+    if vv_clamped:
+        fixes.append("visual_value_clamped")
+        _warn_limited("Сегмент %s: visual_value %r вне 0-100 - зажал до %s.",
+                      seg_index, item["visual_value"], visual_value)
 
     # sites: только значения из SITES, без дублей, порядок сохраняется
     raw_sites = item["sites"] if isinstance(item["sites"], list) else []
@@ -1347,6 +1408,7 @@ def _normalize_entry(
         "type": seg_type,
         "is_entity": is_entity,
         "entity_keywords": keywords,
+        "visual_value": visual_value,
     }
 
 
@@ -1993,10 +2055,31 @@ def _run_repair_round(
                 save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
                 return 1, current_model
 
+        # visual_value ремонт не меняет: сохраняем прежнюю оценку (модель обязана вернуть поле
+        # по схеме, но её новое значение отбрасывается, если у сегмента оценка уже была)
+        for idx_str, new_entry in repaired_batch.items():
+            old_vv = results.get(idx_str, {}).get("visual_value")
+            if old_vv is not None:
+                new_entry["visual_value"] = old_vv
         results.update(repaired_batch)
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
 
     return None, current_model
+
+
+def summarize_visual_values(entries: dict[str, dict]) -> str:
+    """Одна строка для лога: min / медиана / max visual_value и число сегментов в корзинах
+    0-19, 20-49, 50-79, 80-100 (чтобы по прогону видеть, не ставит ли модель всем одно и то же)."""
+    vals = sorted(e["visual_value"] for e in entries.values() if isinstance(e.get("visual_value"), int))
+    if not vals:
+        return "visual_value: нет оценок"
+    n = len(vals)
+    median = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+    buckets = [sum(1 for v in vals if lo <= v <= hi) for lo, hi in ((0, 19), (20, 49), (50, 79), (80, 100))]
+    return (
+        f"visual_value: сегментов {n}, min {vals[0]}, медиана {median:g}, max {vals[-1]}; "
+        f"корзины 0-19: {buckets[0]}, 20-49: {buckets[1]}, 50-79: {buckets[2]}, 80-100: {buckets[3]}"
+    )
 
 
 def run_repair_cycle(
@@ -2087,6 +2170,7 @@ def run_repair_cycle(
         "Источники: архив %s (%.1f%%), сток %s (%.1f%%)",
         archive_count, arch_pct, stock_count, stock_pct,
     )
+    logging.info("%s", summarize_visual_values(results))
 
     ordered = {str(k): results[str(k)] for k in sorted(int(k) for k in results.keys())}
     with open(output_path, "w", encoding="utf-8") as f:
@@ -2188,7 +2272,7 @@ def run_self_tests() -> int:
         base = {
             "scene": "A view.", "sites": ["pexels"], "query_narrow": "Topkapi Palace gate",
             "query_medium": "Topkapi Palace", "query_broad": "palace", "type": "image",
-            "is_entity": False, "entity_keywords": [],
+            "is_entity": False, "entity_keywords": [], "visual_value": 50,
         }
         base.update(over)
         return base
@@ -3275,6 +3359,56 @@ def run_self_tests() -> int:
         code_s1, _ = broad_repair_run({"1": arch("man")}, strict=1)
         code_s2, _ = broad_repair_run({"1": arch("man")}, strict=2)
         check("broad: после круга 2 слово осталось -> штатно strict=1 код 1, strict=2 код 0", (code_s1, code_s2), (1, 0))
+
+        # 9г. visual_value: разбор, зажим, ошибки, ремонт, чекпоинт, лог
+        import tempfile as _tf
+        st_v: Counter = Counter()
+        e_v = _normalize_entry(entry(visual_value=85), 1, st_v)
+        check("visual_value: валидное проходит, поле последнее", (e_v["visual_value"], list(e_v)[-1]), (85, "visual_value"))
+        e_v = _normalize_entry(entry(visual_value=150), 1, st_v)
+        check("visual_value: 150 зажимается до 100 + причина в stats", (e_v["visual_value"], st_v["visual_value_clamped"]), (100, 1))
+        check("visual_value: -5 -> 0", _normalize_entry(entry(visual_value=-5), 1)["visual_value"], 0)
+        check("visual_value: 85.0 -> 85", _normalize_entry(entry(visual_value=85.0), 1)["visual_value"], 85)
+        _no_vv = entry()
+        del _no_vv["visual_value"]
+        for label, bad in (("нет поля", _no_vv), ("None", entry(visual_value=None)), ("строка", entry(visual_value="high")),
+                           ("bool", entry(visual_value=True)), ("дробное", entry(visual_value=85.5))):
+            try:
+                _normalize_entry(bad, 7)
+                raised = False
+            except ValueError:
+                raised = True
+            check(f"visual_value: {label} -> ValueError (повтор батча)", raised, True)
+        check("visual_value: в required схемы и в REQUIRED_ENTRY_KEYS",
+              ("visual_value" in SEGMENT_ENTRY_SCHEMA.required, "visual_value" in REQUIRED_ENTRY_KEYS,
+               "visual_value" in SEGMENT_ENTRY_SCHEMA.property_ordering), (True, True, True))
+        check("visual_value: правило в системной инструкции", "7. visual_value" in build_system_instruction(2), True)
+        with _tf.TemporaryDirectory() as td_v:
+            out_v = os.path.join(td_v, "r.json")
+            segs_v = [Segment(1, "00:00:00,000", "00:00:01,000", "a"), Segment(2, "00:00:01,000", "00:00:02,000", "b")]
+            res_v = {"1": entry(visual_value=30), "2": entry(scene="A map", query_narrow="battle map", visual_value=42)}
+            prompts_v: list[str] = []
+
+            def mock_v(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+                prompts_v.append(build_prompt(chunk, repair_info=repair_info, sentence_index=sentence_index))
+                return {"2": entry(scene="A fortress wall", query_narrow="fortress wall", visual_value=99)}
+
+            run_repair_cycle(client=None, current_model="m", fallback_queue=[], segments=segs_v, results=res_v,
+                             exhausted_models={}, checkpoint_path=checkpoint_path_for(out_v), src_hash="h",
+                             sources_mode=2, strict_mode=2, output_path=out_v, call_batch_fn=mock_v)
+            with open(out_v) as f_v:
+                saved_v = json.load(f_v)
+            check("visual_value: REPAIR не меняет прежнюю оценку", (saved_v["1"]["visual_value"], saved_v["2"]["visual_value"], "fortress" in saved_v["2"]["scene"]), (30, 42, True))
+            check("visual_value: Previous visual_value в промпте REPAIR", bool(prompts_v) and "Previous visual_value: 42" in prompts_v[0], True)
+            # старый чекпоинт (v2) игнорируется
+            cp_v = os.path.join(td_v, "old.checkpoint.json")
+            with open(cp_v, "w") as f_v:
+                json.dump({"source_hash": "h", "schema_version": 2, "results": {"1": entry()}, "exhausted_models": {}}, f_v)
+            check("visual_value: чекпоинт v2 без оценок не подхватывается", load_checkpoint(cp_v, "h")[0], {})
+        check("visual_value: строка распределения",
+              summarize_visual_values({"1": {"visual_value": 0}, "2": {"visual_value": 19}, "3": {"visual_value": 20},
+                                       "4": {"visual_value": 80}, "5": {"visual_value": 100}}),
+              "visual_value: сегментов 5, min 0, медиана 20, max 100; корзины 0-19: 2, 20-49: 1, 50-79: 0, 80-100: 2")
 
         # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
         check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
