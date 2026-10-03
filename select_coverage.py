@@ -3,7 +3,8 @@
 
 Запускается между generate_queries.py и поиском. Читает requests.json и .srt,
 проставляет каждому сегменту булево поле "skip" (false - искать, true - не искать)
-и атомарно переписывает requests.json. Остальные поля не меняются.
+и float-поле "min_duration" (сек; см. compute_min_durations) и атомарно переписывает
+requests.json. Остальные поля не меняются.
 
 Сопоставление: ключ сегмента в requests.json ("1", "2", ...) == номер реплики в .srt.
 Тайм-коды берутся только из .srt.
@@ -145,6 +146,7 @@ class Result:
     n_mandatory: int
     per_window: list[tuple[int, int, int]]  # (число выбранных, мс выбранных, мс доступного бюджета)
     warnings: list[str] = field(default_factory=list)
+    min_durations: dict[int, float] = field(default_factory=dict)  # заполняет run()
 
 
 def build_items(requests: dict, srt: list[Segment]) -> list[Item]:
@@ -190,6 +192,32 @@ def build_items(requests: dict, srt: list[Segment]) -> list[Item]:
 
 def _short(ids: list[int], limit: int = 15) -> str:
     return str(ids) if len(ids) <= limit else f"{ids[:limit]} ... (всего {len(ids)})"
+
+
+def compute_min_durations(items: list[Item]) -> dict[int, float]:
+    """min_duration (сек) для каждого сегмента.
+
+    Сегмент i: от его начала до начала следующего по номеру сегмента (пауза входит;
+    пустые блоки - такие же сегменты, как и остальные). Последний: конец минус начало.
+    Без допусков и округления вверх; считается в целых мс, в секунды переводится в конце.
+    """
+    if not items:
+        raise CoverageError("Нет сегментов для расчёта min_duration.")
+    ordered = sorted(items, key=lambda x: x.index)
+    ids = [it.index for it in ordered]
+    if len(set(ids)) != len(ids):
+        raise CoverageError("Повторяющиеся номера сегментов, min_duration не посчитать.")
+    out: dict[int, float] = {}
+    for it, nxt in zip(ordered, ordered[1:]):
+        gap_ms = nxt.start - it.start
+        if gap_ms < 0:
+            raise CoverageError(
+                f"Сегмент {nxt.index} начинается раньше сегмента {it.index} "
+                f"({nxt.start / 1000:.3f} с < {it.start / 1000:.3f} с): min_duration не определить.")
+        out[it.index] = gap_ms / 1000
+    last = ordered[-1]
+    out[last.index] = (last.end - last.start) / 1000
+    return out
 
 
 def select_segments(items: list[Item], percent: int, intro_seconds: float,
@@ -314,6 +342,10 @@ def format_summary(r: Result) -> str:
         + ", ".join(f"[{k + 1}] {c}/{ms / 1000:.1f}с ({av / 1000:.1f}с)"
                     for k, (c, ms, av) in enumerate(r.per_window)),
     ]
+    if r.min_durations:
+        vals = list(r.min_durations.values())
+        lines.append(f"min_duration: записано {len(vals)} сегментам; "
+                     f"минимум {min(vals):.3f} с, максимум {max(vals):.3f} с")
     lines += r.warnings
     return "\n".join(lines)
 
@@ -346,9 +378,12 @@ def run(requests_path: str, srt_path: str, percent: int, intro_seconds: float,
         raise CoverageError("requests.json: ожидался объект {\"1\": {...}, ...}.")
     srt = parse_srt(srt_path)
     items = build_items(requests, srt)
+    min_durations = compute_min_durations(items)  # всегда, в т.ч. при percent == 100
     result = select_segments(items, percent, intro_seconds, window_seconds)
+    result.min_durations = min_durations
     for key, seg in requests.items():
         seg["skip"] = result.skip[int(key)]
+        seg["min_duration"] = min_durations[int(key)]
     atomic_write_json(requests_path, requests)
     return result
 
@@ -422,6 +457,56 @@ def selftest() -> None:
     reqs, srt = _synth(texts=["т"] * 10 + [""] + ["т"] * 9, vv=[10] * 10 + [99] + [0] + [10] * 8)
     r = select_segments(build_items(reqs, srt), 60, 0)
     assert r.skip[11] and r.skip[12]
+
+    # 8. min_duration: обычный случай (6 с подряд), последний сегмент - своя длительность
+    reqs, srt = _synth(n=3)
+    md = compute_min_durations(build_items(reqs, srt))
+    assert md == {1: 6.0, 2: 6.0, 3: 6.0}, md
+
+    # 9. пауза между сегментами входит: 0-1000, 1500-2000, 2000-5300
+    srt = [Segment(1, "00:00:00,000", "00:00:01,000", "а"),
+           Segment(2, "00:00:01,500", "00:00:02,000", "б"),
+           Segment(3, "00:00:02,000", "00:00:05,300", "в")]
+    reqs = {str(i): {"visual_value": 1} for i in (1, 2, 3)}
+    md = compute_min_durations(build_items(reqs, srt))
+    assert md == {1: 1.5, 2: 0.5, 3: 3.3}, md  # последний: 5.3 - 2.0
+
+    # 10. сегменты в произвольном порядке и пустой блок (считается как обычный сегмент)
+    srt2 = [srt[2], srt[0], Segment(2, srt[1].start, srt[1].end, "")]
+    assert compute_min_durations(build_items(reqs, srt2)) == md
+
+    # 11. несовпадение количества - ошибка в обе стороны
+    for r_, s_ in ((dict(reqs, **{"4": {"visual_value": 1}}), srt), (reqs, srt[:2])):
+        try:
+            build_items(r_, s_)
+            raise AssertionError("ожидалась CoverageError")
+        except CoverageError:
+            pass
+
+    # 11b. следующий сегмент начинается раньше текущего - ошибка
+    bad = [Segment(1, "00:00:05,000", "00:00:06,000", "а"),
+           Segment(2, "00:00:01,000", "00:00:02,000", "б")]
+    try:
+        compute_min_durations(build_items({"1": {"visual_value": 1}, "2": {"visual_value": 1}}, bad))
+        raise AssertionError("ожидалась CoverageError")
+    except CoverageError as e:
+        assert "раньше" in str(e)
+
+    # 12. run при 100%: skip везде false, min_duration записан у всех, прочие поля целы
+    with tempfile.TemporaryDirectory() as d:
+        rp, sp = os.path.join(d, "requests.json"), os.path.join(d, "final.srt")
+        with open(sp, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:01,000\nа\n\n"
+                    "2\n00:00:01,500 --> 00:00:02,000\n\n\n"
+                    "3\n00:00:02,000 --> 00:00:05,300\nв\n\n")
+        atomic_write_json(rp, {str(i): {"visual_value": 1, "type": "photo"} for i in (1, 2, 3)})
+        res = run(rp, sp, 100, 10)
+        with open(rp, encoding="utf-8") as f:
+            data = json.load(f)
+        assert [data[k]["min_duration"] for k in "123"] == [1.5, 0.5, 3.3], data
+        assert all(data[k]["skip"] is False and data[k]["type"] == "photo" for k in "123")
+        assert all(isinstance(data[k]["min_duration"], float) for k in "123")
+        assert "min_duration: записано 3" in format_summary(res)
 
     print("selftest: все проверки пройдены")
 
