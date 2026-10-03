@@ -8,7 +8,7 @@ response_schema).
 
 Использование:
     python generate_queries.py --input input.srt --output requests.json
-    python generate_queries.py --sources-mode 2 --strict 1
+    python generate_queries.py --sources-mode 1 --strict 1
 
 Переменные окружения:
     GEMINI_API_KEY       - обязателен, ключ Gemini API
@@ -21,10 +21,10 @@ response_schema).
     GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
     GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
                            (по умолчанию 60; в SDK передаётся в миллисекундах)
-    GENQ_SOURCES_MODE    - опционально, режим источников: 1 (только архив: wikimedia, loc, nasa),
-                           2 (микс, по умолчанию), 3 (только сток: pexels, pixabay)
-    GENQ_STRICT          - опционально, строгость проверки запросов: 1 (калибровка, по умолчанию -
-                           падение с кодом 1 при нарушениях после повтора), 2 (мягко - warning в логе,
+    GENQ_SOURCES_MODE    - опционально, режим источников: 1 (микс, по умолчанию),
+                           2 (только архив: wikimedia, loc, nasa), 3 (только сток: pexels, pixabay)
+    GENQ_STRICT          - опционально, строгость проверки запросов: 1 (калибровка - падение
+                           с кодом 1 при нарушениях после повтора), 2 (мягко, по умолчанию - warning в логе,
                            requests.json записан, код 0)
 
 Формат requests.json:
@@ -133,8 +133,14 @@ PREFLIGHT_MAX_ATTEMPTS = 3
 PREFLIGHT_BACKOFF_BASE_SECONDS = 2
 SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
 
-DEFAULT_SOURCES_MODE = 2
-DEFAULT_STRICT = 1
+# Режимы источников (env GENQ_SOURCES_MODE / --sources-mode): 1 = микс (по умолчанию),
+# 2 = только архив, 3 = только сток. Числа 1/2/3 в коде не используются, только эти константы.
+SOURCES_MIX = 1
+SOURCES_ARCHIVE = 2
+SOURCES_STOCK = 3
+SOURCES_MODES = (SOURCES_MIX, SOURCES_ARCHIVE, SOURCES_STOCK)
+DEFAULT_SOURCES_MODE = SOURCES_MIX
+DEFAULT_STRICT = 2
 # Режим типа медиа (env MEDIA_MODE): 1 = смешанный (тип выбирает Gemini), 2 = только видео,
 # 3 = только фото. Не зависит от режима источников.
 DEFAULT_MEDIA_MODE = 1
@@ -171,17 +177,17 @@ JUNK_KIND_RE = build_junk_kind_re(JUNK_KIND_WORDS)
 
 
 def parse_sources_mode(cli_val: Optional[str | int], env_val: Optional[str | int]) -> int:
-    """Парсит режим источников (1=архив, 2=микс, 3=сток). CLI в приоритете.
-    Любое невалидное значение игнорируется с WARNING и берётся 2."""
+    """Парсит режим источников (1=микс, 2=архив, 3=сток). CLI в приоритете.
+    Любое невалидное значение игнорируется с WARNING и берётся режим по умолчанию (микс)."""
     val = cli_val if cli_val is not None else env_val
     if val is None:
         return DEFAULT_SOURCES_MODE
     val_str = str(val).strip()
-    if val_str in ("1", "2", "3"):
+    if val_str in tuple(str(m) for m in SOURCES_MODES):
         return int(val_str)
     logging.warning(
-        "Некорректный режим источников %r (допустимо 1, 2, 3) - использую по умолчанию %s.",
-        val, DEFAULT_SOURCES_MODE,
+        "Некорректный режим источников %r (допустимо %s) - использую по умолчанию %s.",
+        val, ", ".join(str(m) for m in SOURCES_MODES), DEFAULT_SOURCES_MODE,
     )
     return DEFAULT_SOURCES_MODE
 
@@ -205,7 +211,7 @@ def parse_media_mode(env_val: Optional[str | int]) -> int:
 
 def parse_strict_mode(cli_val: Optional[str | int], env_val: Optional[str | int]) -> int:
     """Парсит строгость проверки (1=калибровка, 2=мягко). CLI в приоритете.
-    Любое невалидное значение игнорируется с WARNING и берётся 1."""
+    Любое невалидное значение игнорируется с WARNING и берётся DEFAULT_STRICT (2)."""
     val = cli_val if cli_val is not None else env_val
     if val is None:
         return DEFAULT_STRICT
@@ -259,27 +265,27 @@ def build_system_instruction(
     junk_list_str = ", ".join(junk_words)
 
     mode_blocks = {
-        1: (
-            "SOURCE MODE RULES (MODE 1: ARCHIVE ONLY):\n"
+        SOURCES_ARCHIVE: (
+            f"SOURCE MODE RULES (MODE {SOURCES_ARCHIVE}: ARCHIVE ONLY):\n"
             "- All segments MUST use archival sites ONLY: [\"wikimedia\", \"loc\"] (use \"nasa\" first only when explicitly about space/astronomy/NASA missions). NEVER include \"pexels\" or \"pixabay\".\n"
             "- All search queries must follow the archival search style (concise proper nouns, literal title/caption matches).\n"
             "- For abstract or general segments without a specific named entity: derive a generalized ARCHIVAL query for the depicted place/era taken by the SOURCE LADDER (steps b, c and e), without people names, and strictly without any forbidden visual types.\n"
         ),
-        2: (
-            "SOURCE MODE RULES (MODE 2: MIXED ARCHIVE AND STOCK):\n"
+        SOURCES_MIX: (
+            f"SOURCE MODE RULES (MODE {SOURCES_MIX}: MIXED ARCHIVE AND STOCK):\n"
             "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the words of the segment explicitly name a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
             "- When genuinely unsure, use stock sites [\"pexels\", \"pixabay\"], NOT both and NOT archive.\n"
             "- For abstract or general segments: follow the ABSTRACT / GENERAL SEGMENTS rule below (use stock sites).\n"
         ),
-        3: (
-            "SOURCE MODE RULES (MODE 3: STOCK ONLY):\n"
+        SOURCES_STOCK: (
+            f"SOURCE MODE RULES (MODE {SOURCES_STOCK}: STOCK ONLY):\n"
             "- All segments MUST use stock sites ONLY: [\"pexels\", \"pixabay\"]. NEVER include \"wikimedia\", \"loc\", or \"nasa\".\n"
             "- All search queries must follow the stock search style: query_medium (2-4 words, object + context), query_narrow (4-6 words, slightly more specific), query_broad (1-2 words, general image).\n"
             "- Replace any proper names with plain visual generalizations (a person by role or appearance, a place or building by its type).\n"
-            "- In Mode 3, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
+            f"- In Mode {SOURCES_STOCK}, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
         ),
     }
-    mode_rule = mode_blocks.get(mode, mode_blocks[2])
+    mode_rule = mode_blocks.get(mode, mode_blocks[SOURCES_MIX])
 
     # Подсказка режима типа медиа (MEDIA_MODE): только при 2 или 3, в режиме 1 текст не меняется.
     media_hint = {
@@ -404,7 +410,7 @@ transitions, abstract concepts, emotions, numbers, or dates without physical obj
 line and the segments after the current one are not used for the scene.
 - Formulate the scene and all three queries as a GENERALIZED stock shot of that place or situation \
 (without proper nouns, even if the context names them).
-- Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode 1).
+- Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode {SOURCES_ARCHIVE}).
 
 GENERAL RULES:
 - Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
@@ -888,9 +894,9 @@ def _repair_round_rule(mode: int) -> str:
         "the like, and without it the text gives nothing that a camera can shoot, replace it with a "
         "generalized frame derived from the neighbors (the place and the people, no personal names). "
     )
-    if mode == 1:
+    if mode == SOURCES_ARCHIVE:
         return base + (
-            "Keep archival sites according to the Mode 1 rules; write a generalized ARCHIVAL query for the "
+            f"Keep archival sites according to the Mode {SOURCES_ARCHIVE} rules; write a generalized ARCHIVAL query for the "
             "place or era taken from the neighbors, with no personal names and no shot-type words."
         )
     return base + (
@@ -1482,34 +1488,34 @@ def _collect_entry_issues(
     if not sites:
         found_issues.append(("список sites пуст", "sites list is empty"))
     else:
-        if mode == 1:
+        if mode == SOURCES_ARCHIVE:
             stock_present = ", ".join(x for x in sites if x in stock_sites)
             if stock_present:
                 found_issues.append((
-                    f"в режиме 1 (архив) недопустимы стоковые сайты: {stock_present}",
-                    f"in mode 1 (archive) stock sites are not allowed: {stock_present}",
+                    f"в режиме {SOURCES_ARCHIVE} (архив) недопустимы стоковые сайты: {stock_present}",
+                    f"in mode {SOURCES_ARCHIVE} (archive) stock sites are not allowed: {stock_present}",
                 ))
-        elif mode == 3:
+        elif mode == SOURCES_STOCK:
             arch_present = ", ".join(x for x in sites if x in archive_sites)
             if arch_present:
                 found_issues.append((
-                    f"в режиме 3 (сток) недопустимы архивные сайты: {arch_present}",
-                    f"in mode 3 (stock) archive sites are not allowed: {arch_present}",
+                    f"в режиме {SOURCES_STOCK} (сток) недопустимы архивные сайты: {arch_present}",
+                    f"in mode {SOURCES_STOCK} (stock) archive sites are not allowed: {arch_present}",
                 ))
 
     # 3. Режим 3: is_entity != false ИЛИ entity_keywords непустой
-    if mode == 3:
+    if mode == SOURCES_STOCK:
         is_ent = entry.get("is_entity", False)
         kw = entry.get("entity_keywords") or []
         if is_ent is not False:
             found_issues.append((
-                f"в режиме 3 (сток) is_entity должен быть false, получено: {is_ent}",
-                f"in mode 3 (stock) is_entity must be false, got: {is_ent}",
+                f"в режиме {SOURCES_STOCK} (сток) is_entity должен быть false, получено: {is_ent}",
+                f"in mode {SOURCES_STOCK} (stock) is_entity must be false, got: {is_ent}",
             ))
         if kw:
             found_issues.append((
-                f"в режиме 3 (сток) entity_keywords должен быть пустым, найдено: {kw}",
-                f"in mode 3 (stock) entity_keywords must be empty, found: {kw}",
+                f"в режиме {SOURCES_STOCK} (сток) entity_keywords должен быть пустым, найдено: {kw}",
+                f"in mode {SOURCES_STOCK} (stock) entity_keywords must be empty, found: {kw}",
             ))
 
     return found_issues
@@ -2491,7 +2497,7 @@ def run_self_tests() -> int:
         # 2. Динамическая сборка JUNK_KIND_RE и промпта из JUNK_KIND_WORDS (правка 2)
         test_junk_words = JUNK_KIND_WORDS + ("poster",)
         test_re = build_junk_kind_re(test_junk_words)
-        test_prompt = build_system_instruction(2, junk_words=test_junk_words)
+        test_prompt = build_system_instruction(SOURCES_MIX, junk_words=test_junk_words)
         check("динамический junk: poster найден в test_re", bool(test_re.search("vintage posters on wall")), True)
         check("динамический junk: poster отсутствует в штатном JUNK_KIND_RE", bool(JUNK_KIND_RE.search("vintage posters on wall")), False)
         check("динамический junk: poster присутствует в test_prompt", "poster" in test_prompt, True)
@@ -2504,14 +2510,14 @@ def run_self_tests() -> int:
             "104": entry(query_broad="passports", sites=["pexels"]),
             "105": entry(scene="Clean street", query_narrow="street", query_medium="street", query_broad="street"),
         }
-        v_res = validate_entries(v_entries, mode=2)
+        v_res = validate_entries(v_entries, mode=SOURCES_MIX)
         check("validate: 101 scene map", "101" in v_res and any("scene" in s and "map" in s for s in v_res["101"]), True)
         check("validate: 102 query_narrow calendar", "102" in v_res and any("query_narrow" in s and "calendar" in s for s in v_res["102"]), True)
         check("validate: 103 query_medium coat of arms", "103" in v_res and any("query_medium" in s and "coat of arms" in s for s in v_res["103"]), True)
         check("validate: 104 query_broad passports", "104" in v_res and any("query_broad" in s and "passports" in s for s in v_res["104"]), True)
         check("validate: 105 без ошибок", "105" in v_res, False)
 
-        # 4. validate_entries: соответствие sites режимам 1 и 3
+        # 4. validate_entries: соответствие sites режимам архив и сток
         v_sites = {
             "201": entry(sites=["pexels", "wikimedia"]),
             "202": entry(sites=["wikimedia", "loc"]),
@@ -2519,14 +2525,14 @@ def run_self_tests() -> int:
             "204": entry(sites=["pexels", "pixabay"]),
             "205": entry(sites=[]),
         }
-        res_m1 = validate_entries(v_sites, mode=1)
-        check("validate режим 1: pexels запрещён", "201" in res_m1 and any("режиме 1" in s for s in res_m1["201"]), True)
-        check("validate режим 1: wikimedia разрешён", "202" in res_m1, False)
-        check("validate список sites пуст", "205" in res_m1 and any("список sites пуст" in s for s in res_m1["205"]), True)
+        res_arch = validate_entries(v_sites, mode=SOURCES_ARCHIVE)
+        check("validate режим архив: pexels запрещён", "201" in res_arch and any(f"режиме {SOURCES_ARCHIVE}" in s for s in res_arch["201"]), True)
+        check("validate режим архив: wikimedia разрешён", "202" in res_arch, False)
+        check("validate список sites пуст", "205" in res_arch and any("список sites пуст" in s for s in res_arch["205"]), True)
 
-        res_m3 = validate_entries(v_sites, mode=3)
-        check("validate режим 3: wikimedia запрещён", "203" in res_m3 and any("режиме 3" in s for s in res_m3["203"]), True)
-        check("validate режим 3: pexels разрешён", "204" in res_m3, False)
+        res_stock = validate_entries(v_sites, mode=SOURCES_STOCK)
+        check("validate режим сток: wikimedia запрещён", "203" in res_stock and any(f"режиме {SOURCES_STOCK}" in s for s in res_stock["203"]), True)
+        check("validate режим сток: pexels разрешён", "204" in res_stock, False)
 
         # 5. validate_entries: режим 3 и entity_keywords / is_entity (правка 1)
         v_mode3 = {
@@ -2535,7 +2541,7 @@ def run_self_tests() -> int:
             "303": entry(sites=["pexels"], is_entity=True, entity_keywords=[]),
             "304": entry(sites=["pexels"], is_entity=True, entity_keywords=["London"]),
         }
-        res_m3_ent = validate_entries(v_mode3, mode=3)
+        res_m3_ent = validate_entries(v_mode3, mode=SOURCES_STOCK)
         check("validate режим 3: is_entity=false и keywords=[] -> OK", "301" in res_m3_ent, False)
         check("validate режим 3: keywords непустой -> нарушение", "302" in res_m3_ent and any("entity_keywords" in s for s in res_m3_ent["302"]), True)
         check("validate режим 3: is_entity=true при пустом keywords -> нарушение (правка 1)",
@@ -2551,17 +2557,29 @@ def run_self_tests() -> int:
         check("чанки: пустой список", chunk_repair_indices([]), [])
 
         # 7. build_system_instruction для каждого режима
-        p1 = build_system_instruction(1)
-        p2 = build_system_instruction(2)
-        p3 = build_system_instruction(3)
-        check("промпт режим 1: содержит MODE 1: ARCHIVE ONLY", "MODE 1: ARCHIVE ONLY" in p1, True)
-        check("промпт режим 1: содержит запрещённые слова", "calendar" in p1 and "map" in p1, True)
-        check("промпт режим 2: содержит MODE 2: MIXED", "MODE 2: MIXED" in p2, True)
-        check("промпт режим 3: содержит MODE 3: STOCK ONLY", "MODE 3: STOCK ONLY" in p3, True)
+        p_mix = build_system_instruction(SOURCES_MIX)
+        p_arch = build_system_instruction(SOURCES_ARCHIVE)
+        p_stock = build_system_instruction(SOURCES_STOCK)
+        _blk_mix = f"MODE {SOURCES_MIX}: MIXED ARCHIVE AND STOCK"
+        _blk_arch = f"MODE {SOURCES_ARCHIVE}: ARCHIVE ONLY"
+        _blk_stock = f"MODE {SOURCES_STOCK}: STOCK ONLY"
+        check("промпт микс: блок микса и только он", (_blk_mix in p_mix, _blk_arch in p_mix, _blk_stock in p_mix), (True, False, False))
+        check("промпт архив: блок архива и только он", (_blk_mix in p_arch, _blk_arch in p_arch, _blk_stock in p_arch), (False, True, False))
+        check("промпт сток: блок стока и только он", (_blk_mix in p_stock, _blk_arch in p_stock, _blk_stock in p_stock), (False, False, True))
+        check("промпт: режим по умолчанию даёт блок микса", build_system_instruction(), p_mix)
+        check("промпт: SYSTEM_INSTRUCTION (по умолчанию) = микс", SYSTEM_INSTRUCTION, p_mix)
+        check("промпт: неизвестный режим -> запасной блок микса", build_system_instruction(99), p_mix)
+        check("промпт: константы режимов (микс 1, архив 2, сток 3), умолчание = микс",
+              (SOURCES_MIX, SOURCES_ARCHIVE, SOURCES_STOCK, DEFAULT_SOURCES_MODE), (1, 2, 3, SOURCES_MIX))
+        check("промпт архив: в тексте нет упоминаний режима микса/стока",
+              ("Mode %d" % SOURCES_STOCK in p_arch, "Mode %d" % SOURCES_MIX in p_arch), (False, False))
+        check("промпт микс/сток: ссылка 'unless running in Mode' ведёт на архив",
+              all(f"(unless running in Mode {SOURCES_ARCHIVE})." in x for x in (p_mix, p_arch, p_stock)), True)
+        check("промпт архив: содержит запрещённые слова", "calendar" in p_arch and "map" in p_arch, True)
 
         # 7а. Этап 3а: формулировки про контекст соответствуют реальному формату сегмента,
         # в правилах нет конкретных примеров с именами, сюжетами и предметами
-        for md, pm in ((1, p1), (2, p2), (3, p3)):
+        for md, pm in ((SOURCES_MIX, p_mix), (SOURCES_ARCHIVE, p_arch), (SOURCES_STOCK, p_stock)):
             check(f"этап 3а режим {md}: нет устаревших упоминаний чанк-блоков и 'narration text'",
                   [x for x in ("### Context BEFORE", "### Context AFTER", "Context BEFORE/AFTER",
                                "Context BEFORE\" / \"Context AFTER", "Context AFTER sections",
@@ -2595,17 +2613,17 @@ def run_self_tests() -> int:
         # REPAIR-правило: нет 'narration text', есть ссылка на реальные источники контекста
         _rp = build_prompt(
             [_nb_t[2]],
-            repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 1, "mode": 2}},
+            repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 1, "mode": SOURCES_MIX}},
         )
         check("этап 3а: REPAIR-правило без 'narration text', со ссылкой на Sentence/Neighbors",
               ("narration text" in _rp, "Sentence, Before, After lines and the Neighbors block" in _rp), (False, False))
         # этап 3б (изменён прежний тест: старая ссылка на After/Neighbors как источник сцены заменена лесенкой)
         check("этап 3б: REPAIR круг 1 и 2 ссылаются на лесенку и запрет After, старой формулировки нет",
               [("SOURCE LADDER" in x and "NEVER a source for the scene" in x and "using only the words of this segment and the context" not in x)
-               for x in (_rp, build_prompt([_nb_t[2]], repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 2, "mode": 1}}))], [True, True])
+               for x in (_rp, build_prompt([_nb_t[2]], repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 2, "mode": SOURCES_ARCHIVE}}))], [True, True])
 
         # 7б. VARIETY: пункт в промпте всех режимов, без людей и имён, на своём месте
-        for md, pm in ((1, p1), (2, p2), (3, p3)):
+        for md, pm in ((SOURCES_MIX, p_mix), (SOURCES_ARCHIVE, p_arch), (SOURCES_STOCK, p_stock)):
             check(f"VARIETY режим {md}: строка 'VARIETY:' ровно один раз", pm.count("VARIETY:"), 1)
             v_start = pm.index("VARIETY: ") + len("VARIETY: ")
             v_item = pm[v_start:pm.index("\n", v_start)]
@@ -2627,7 +2645,7 @@ def run_self_tests() -> int:
         # 3б: новые правила во всех трёх режимах
         _KEY3B = {'rule1': 'fragments of continuous speech', 'ladder': 'SOURCE LADDER', 'a': 'a) if the words of the segment name something a camera can film', 'b': 'b) otherwise take the place and situation from the whole sentence', 'c': 'c) if the sentence gives too little', 'd_after': 'NEVER a source for the scene', 'e': 'scene is still REQUIRED for every segment in every mode, including REPAIR', 'variety': 'another aspect of the same place or event', 'symbol': 'Do not replace an idea with an object that symbolizes it', 'broad': 'not a portrait of a person', 'broad_soft': 'prefer the setting or place over a portrait of a person'}
         _OLD3B = ['implied by the neighboring segments', 'built from the neighbors', "inferred from neighboring segments' context", 'from the nearest neighbor segments', "segment's narration", '(wide shot, medium shot, close-up, detail)', '2 segments before and 2 segments after', 'derive a general visual theme', 'a static portrait']
-        for md, pm in ((1, p1), (2, p2), (3, p3)):
+        for md, pm in ((SOURCES_MIX, p_mix), (SOURCES_ARCHIVE, p_arch), (SOURCES_STOCK, p_stock)):
             for kn, kv in _KEY3B.items():
                 check(f"этап 3б режим {md}: ключевая фраза '{kn}'", kv in pm, True)
             _va = pm.index("VARIETY: ") + 9
@@ -2667,23 +2685,23 @@ def run_self_tests() -> int:
             "3": entry(sites=["wikimedia"], is_entity=True, entity_keywords=["Rome"]),
             "4": entry(sites=[]),
         }
-        en_m1 = validate_entries(en_in, mode=1, lang="en")
-        en_m3 = validate_entries(en_in, mode=3, lang="en")
-        ru_m1 = validate_entries(en_in, mode=1)
-        check("validate en: слово-тип", "forbidden shot type 'calendar' in field scene" in en_m1["1"], True)
-        check("validate en: режим 1", "in mode 1 (archive) stock sites are not allowed: pexels" in en_m1["2"], True)
-        check("validate en: режим 3 архивные сайты",
-              "in mode 3 (stock) archive sites are not allowed: wikimedia" in en_m3["3"], True)
-        check("validate en: режим 3 is_entity", "in mode 3 (stock) is_entity must be false, got: True" in en_m3["3"], True)
-        check("validate en: режим 3 entity_keywords",
-              "in mode 3 (stock) entity_keywords must be empty, found: ['Rome']" in en_m3["3"], True)
-        check("validate en: пустой sites", "sites list is empty" in en_m1["4"], True)
-        check("validate ru по умолчанию: слово-тип", "в поле scene запрещённый тип кадра: calendar" in ru_m1["1"], True)
-        check("validate ru по умолчанию: режим 1",
-              "в режиме 1 (архив) недопустимы стоковые сайты: pexels" in ru_m1["2"], True)
-        check("validate ru по умолчанию: пустой sites", "список sites пуст" in ru_m1["4"], True)
+        en_arch = validate_entries(en_in, mode=SOURCES_ARCHIVE, lang="en")
+        en_stock = validate_entries(en_in, mode=SOURCES_STOCK, lang="en")
+        ru_arch = validate_entries(en_in, mode=SOURCES_ARCHIVE)
+        check("validate en: слово-тип", "forbidden shot type 'calendar' in field scene" in en_arch["1"], True)
+        check("validate en: режим архив", f"in mode {SOURCES_ARCHIVE} (archive) stock sites are not allowed: pexels" in en_arch["2"], True)
+        check("validate en: режим сток архивные сайты",
+              f"in mode {SOURCES_STOCK} (stock) archive sites are not allowed: wikimedia" in en_stock["3"], True)
+        check("validate en: режим сток is_entity", f"in mode {SOURCES_STOCK} (stock) is_entity must be false, got: True" in en_stock["3"], True)
+        check("validate en: режим сток entity_keywords",
+              f"in mode {SOURCES_STOCK} (stock) entity_keywords must be empty, found: ['Rome']" in en_stock["3"], True)
+        check("validate en: пустой sites", "sites list is empty" in en_arch["4"], True)
+        check("validate ru по умолчанию: слово-тип", "в поле scene запрещённый тип кадра: calendar" in ru_arch["1"], True)
+        check("validate ru по умолчанию: режим архив",
+              f"в режиме {SOURCES_ARCHIVE} (архив) недопустимы стоковые сайты: pexels" in ru_arch["2"], True)
+        check("validate ru по умолчанию: пустой sites", "список sites пуст" in ru_arch["4"], True)
         check("validate: ru и en дают одинаковые номера и число проблем",
-              {k: len(v) for k, v in en_m3.items()}, {k: len(v) for k, v in validate_entries(en_in, mode=3).items()})
+              {k: len(v) for k, v in en_stock.items()}, {k: len(v) for k, v in validate_entries(en_in, mode=SOURCES_STOCK).items()})
 
         # 8б. build_prompt REPAIR: правила, английские проблемы, скрытие прежнего кадра
         seg_a = Segment(57, "00:02:00,000", "00:02:03,000", "In 1920 everything changed")
@@ -2692,7 +2710,7 @@ def run_self_tests() -> int:
                       query_medium="calendar sheet", query_broad="calendar")
         old_b = entry(scene="Busy bazaar stalls", sites=["wikimedia"], query_narrow="bazaar stalls old",
                       query_medium="bazaar stalls", query_broad="bazaar")
-        iss_en = validate_entries({"57": old_a, "58": old_b}, mode=3, lang="en")
+        iss_en = validate_entries({"57": old_a, "58": old_b}, mode=SOURCES_STOCK, lang="en")
         rep2 = {
             57: {"entry": old_a, "issues": iss_en["57"], "neighbors": "  [56] Text: X"},
             58: {"entry": old_b, "issues": iss_en["58"], "neighbors": "  [57] Text: Z"},
@@ -2711,7 +2729,7 @@ def run_self_tests() -> int:
               "Busy bazaar stalls" in rp and "Previous query_narrow: bazaar stalls old" in rp, True)
 
         # 7а. Системный промпт: три вопроса, подсказка про плоские листы, слова из константы
-        for md, pm in ((1, p1), (2, p2), (3, p3)):
+        for md, pm in ((SOURCES_MIX, p_mix), (SOURCES_ARCHIVE, p_arch), (SOURCES_STOCK, p_stock)):
             check(f"системный промпт режим {md}: три вопроса (где / кто / что снимаемое)",
                   all(q in pm for q in ("(1) WHERE", "(2) WHO", "(3) WHAT")), True)
             check(f"системный промпт режим {md}: подсказка про плоские листы с текстом",
@@ -2743,12 +2761,12 @@ def run_self_tests() -> int:
         nb2_edge = format_neighbors_context(1, nb_segs, nb_res, REPAIR2_CONTEXT_WINDOW, with_distance=True)
         check("neighbors круг 2: край файла без before", "before" not in nb2_edge and "after [2]" in nb2_edge, True)
 
-        # 8г. Промпт REPAIR: круг 1 и круг 2 в режимах 1 / 2 / 3
+        # 8г. Промпт REPAIR: круг 1 и круг 2 во всех режимах источников
         seg_r2 = Segment(70, "00:03:00,000", "00:03:03,000", "The treaty was signed")
         old_r2 = entry(scene="Treaty on a desk", query_narrow="treaty document", query_medium="treaty document",
                        query_broad="document")
         nb_r2 = format_neighbors_context(15, nb_segs, nb_res, REPAIR2_CONTEXT_WINDOW, with_distance=True)
-        for md in (1, 2, 3):
+        for md in SOURCES_MODES:
             iss_r2 = validate_entries({"70": old_r2}, mode=md, lang="en")["70"]
             info1 = {70: {"entry": old_r2, "issues": iss_r2, "neighbors": nb1, "round": 1, "mode": md}}
             info2 = {70: {"entry": old_r2, "issues": iss_r2, "neighbors": nb_r2, "round": 2, "mode": md}}
@@ -2766,8 +2784,8 @@ def run_self_tests() -> int:
                   "Treaty on a desk" not in pr2 and "Previous query" not in pr2, True)
             check(f"REPAIR круг 2 режим {md}: соседи с расстоянием, без scene",
                   "distance 1 |" in pr2 and "Scene" not in pr2, True)
-            if md == 1:
-                check("REPAIR круг 2 режим 1: архивные sites, без инструкции про сток",
+            if md == SOURCES_ARCHIVE:
+                check("REPAIR круг 2 режим архив: архивные sites, без инструкции про сток",
                       "Keep archival sites" in pr2 and 'sites = ["pexels", "pixabay"]' not in pr2
                       and "is_entity = false" not in pr2, True)
             else:
@@ -2804,7 +2822,7 @@ def run_self_tests() -> int:
             code_a = run_repair_cycle(
                 client=None, current_model="test-model", fallback_queue=[],
                 segments=test_segs, results=initial_res_a, exhausted_models={},
-                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=1,
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=SOURCES_MIX, strict_mode=1,
                 output_path=out_file, call_batch_fn=mock_call_success,
             )
             check("repair mock: успех -> код 0", code_a, 0)
@@ -2829,7 +2847,7 @@ def run_self_tests() -> int:
             code_b = run_repair_cycle(
                 client=None, current_model="test-model", fallback_queue=[],
                 segments=test_segs, results=initial_res_b, exhausted_models={},
-                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=1,
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=SOURCES_MIX, strict_mode=1,
                 output_path=out_file, call_batch_fn=mock_call_fail,
             )
             check("repair mock: неуспех strict=1 -> код 1", code_b, 1)
@@ -2840,7 +2858,7 @@ def run_self_tests() -> int:
             code_c = run_repair_cycle(
                 client=None, current_model="test-model", fallback_queue=[],
                 segments=test_segs, results=initial_res_b, exhausted_models={},
-                checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=2,
+                checkpoint_path=cp_file, src_hash="hash", sources_mode=SOURCES_MIX, strict_mode=2,
                 output_path=out_file, call_batch_fn=mock_call_fail,
             )
             check("repair mock: неуспех strict=2 -> код 0", code_c, 0)
@@ -2866,7 +2884,7 @@ def run_self_tests() -> int:
                 run_repair_cycle(
                     client=None, current_model="test-model", fallback_queue=[],
                     segments=test_segs, results=dict(initial_res_b), exhausted_models={},
-                    checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=2,
+                    checkpoint_path=cp_file, src_hash="hash", sources_mode=SOURCES_MIX, strict_mode=2,
                     output_path=out_file, call_batch_fn=mock_call_capture,
                 )
             finally:
@@ -2894,7 +2912,7 @@ def run_self_tests() -> int:
                 return r
 
             def make_mock(seq, calls):
-                def _m(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+                def _m(client, model, chunk, cb, ca, mode=SOURCES_MIX, repair_info=None, sentence_index=None):
                     calls.append((model, dict(repair_info or {})))
                     kind = seq[min(len(calls) - 1, len(seq) - 1)]
                     if isinstance(kind, Exception):
@@ -2910,7 +2928,7 @@ def run_self_tests() -> int:
                 code = run_repair_cycle(
                     client=None, current_model="test-model", fallback_queue=list(fallback or []),
                     segments=cyc_segs, results=make_results(), exhausted_models=exhausted,
-                    checkpoint_path=cp_file, src_hash="hash", sources_mode=2, strict_mode=strict,
+                    checkpoint_path=cp_file, src_hash="hash", sources_mode=SOURCES_MIX, strict_mode=strict,
                     output_path=out or out_file, call_batch_fn=make_mock(seq, calls),
                 )
                 return code, calls, exhausted
@@ -3218,7 +3236,7 @@ def run_self_tests() -> int:
               ("Previous scene: OLD_SCENE" in p_r3, "Neighbors (context):\nNB" in p_r3), (True, True))
         # sentence_index доходит до call_batch_fn в обоих кругах
         _si_seen: list = []
-        def _m_si(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+        def _m_si(client, model, chunk, cb, ca, mode=SOURCES_MIX, repair_info=None, sentence_index=None):
             _si_seen.append(sentence_index)
             return {"1": entry(scene="Calm street", sites=["pexels"], query_narrow="calm street",
                               query_medium="street", query_broad="street")}
@@ -3230,7 +3248,7 @@ def run_self_tests() -> int:
                 client=None, current_model="m", fallback_queue=[], segments=_si_segs,
                 results={"1": entry(scene="A map", sites=["pexels"], query_narrow="map"), "2": entry(scene="Calm street")},
                 exhausted_models={}, checkpoint_path=os.path.join(_td, "c.json"), src_hash="h",
-                sources_mode=2, strict_mode=2, output_path=_o, call_batch_fn=_m_si, sentence_index=_si_idx,
+                sources_mode=SOURCES_MIX, strict_mode=2, output_path=_o, call_batch_fn=_m_si, sentence_index=_si_idx,
             )
         check("repair: sentence_index из run_repair_cycle доходит до call_batch_fn без пересчёта",
               len(_si_seen) >= 1 and all(x is _si_idx for x in _si_seen), True)
@@ -3353,7 +3371,7 @@ def run_self_tests() -> int:
             segs = [Segment(i, "00:00:00,000", "00:00:01,000", f"text {i}") for i in sorted(int(k) for k in res)]
             calls: list[tuple[list[int], dict]] = []
 
-            def mock(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+            def mock(client, model, chunk, cb, ca, mode=SOURCES_MIX, repair_info=None, sentence_index=None):
                 calls.append(([x.index for x in chunk], repair_info))
                 return {str(x.index): res[str(x.index)] for x in chunk}  # модель ничего не меняет
 
@@ -3362,7 +3380,7 @@ def run_self_tests() -> int:
                 code2 = run_repair_cycle(
                     client=None, current_model="m", fallback_queue=[], segments=segs, results=dict(res),
                     exhausted_models={}, checkpoint_path=checkpoint_path_for(out2), src_hash="h",
-                    sources_mode=2, strict_mode=strict, output_path=out2, call_batch_fn=mock,
+                    sources_mode=SOURCES_MIX, strict_mode=strict, output_path=out2, call_batch_fn=mock,
                 )
             return code2, calls
 
@@ -3423,20 +3441,20 @@ def run_self_tests() -> int:
         check("visual_value: в required схемы и в REQUIRED_ENTRY_KEYS",
               ("visual_value" in SEGMENT_ENTRY_SCHEMA.required, "visual_value" in REQUIRED_ENTRY_KEYS,
                "visual_value" in SEGMENT_ENTRY_SCHEMA.property_ordering), (True, True, True))
-        check("visual_value: правило в системной инструкции", "7. visual_value" in build_system_instruction(2), True)
+        check("visual_value: правило в системной инструкции", "7. visual_value" in build_system_instruction(SOURCES_MIX), True)
         with _tf.TemporaryDirectory() as td_v:
             out_v = os.path.join(td_v, "r.json")
             segs_v = [Segment(1, "00:00:00,000", "00:00:01,000", "a"), Segment(2, "00:00:01,000", "00:00:02,000", "b")]
             res_v = {"1": entry(visual_value=30), "2": entry(scene="A map", query_narrow="battle map", visual_value=42)}
             prompts_v: list[str] = []
 
-            def mock_v(client, model, chunk, cb, ca, mode=2, repair_info=None, sentence_index=None):
+            def mock_v(client, model, chunk, cb, ca, mode=SOURCES_MIX, repair_info=None, sentence_index=None):
                 prompts_v.append(build_prompt(chunk, repair_info=repair_info, sentence_index=sentence_index))
                 return {"2": entry(scene="A fortress wall", query_narrow="fortress wall", visual_value=99)}
 
             run_repair_cycle(client=None, current_model="m", fallback_queue=[], segments=segs_v, results=res_v,
                              exhausted_models={}, checkpoint_path=checkpoint_path_for(out_v), src_hash="h",
-                             sources_mode=2, strict_mode=2, output_path=out_v, call_batch_fn=mock_v)
+                             sources_mode=SOURCES_MIX, strict_mode=2, output_path=out_v, call_batch_fn=mock_v)
             with open(out_v) as f_v:
                 saved_v = json.load(f_v)
             check("visual_value: REPAIR не меняет прежнюю оценку", (saved_v["1"]["visual_value"], saved_v["2"]["visual_value"], "fortress" in saved_v["2"]["scene"]), (30, 42, True))
@@ -3452,14 +3470,19 @@ def run_self_tests() -> int:
               "visual_value: сегментов 5, min 0, медиана 20, max 100; корзины 0-19: 2, 20-49: 1, 50-79: 0, 80-100: 2")
 
         # 10. parse_sources_mode и parse_strict_mode (валидация env и CLI)
-        check("parse mode: CLI валидный", parse_sources_mode("1", "3"), 1)
-        check("parse mode: env валидный", parse_sources_mode(None, "3"), 3)
-        check("parse mode: невалидный -> дефолт 2", parse_sources_mode("invalid", None), 2)
-        check("parse mode: None -> дефолт 2", parse_sources_mode(None, None), 2)
+        check("parse mode: CLI валидный (1 микс), приоритет над env", parse_sources_mode("1", "3"), SOURCES_MIX)
+        check("parse mode: env валидный (3 сток)", parse_sources_mode(None, "3"), SOURCES_STOCK)
+        check("parse mode: '2' -> архив", parse_sources_mode("2", None), SOURCES_ARCHIVE)
+        check("parse mode: '3' -> сток", parse_sources_mode("3", None), SOURCES_STOCK)
+        check("parse mode: 2 (int) из env -> архив", parse_sources_mode(None, 2), SOURCES_ARCHIVE)
+        check("parse mode: невалидный -> микс", parse_sources_mode("invalid", None), SOURCES_MIX)
+        check("parse mode: None -> микс", parse_sources_mode(None, None), SOURCES_MIX)
+        check("parse mode: пустая строка -> микс", parse_sources_mode("", None), SOURCES_MIX)
+        check("parse mode: '4' и '0' -> микс", (parse_sources_mode("4", None), parse_sources_mode("0", None)), (SOURCES_MIX, SOURCES_MIX))
         check("parse strict: CLI валидный", parse_strict_mode("2", "1"), 2)
         check("parse strict: env валидный", parse_strict_mode(None, "2"), 2)
-        check("parse strict: невалидный -> дефолт 1", parse_strict_mode("bad", None), 1)
-        check("parse strict: None -> дефолт 1", parse_strict_mode(None, None), 1)
+        check("parse strict: невалидный -> дефолт 2", parse_strict_mode("bad", None), 2)
+        check("parse strict: None -> дефолт 2", parse_strict_mode(None, None), 2)
 
         # 11. MEDIA_MODE: разбор, принудительный тип, подсказка в инструкции
         check("media_mode: None -> 1", parse_media_mode(None), 1)
@@ -3482,10 +3505,10 @@ def run_self_tests() -> int:
         check("media_mode: режим 2 не пишет type_fixed", st_mm.get("type_fixed", 0), 0)
         check("media_mode: режим 1 оставляет ответ Gemini", _normalize_entry(entry(type="image"), 1)["type"], "image")
         check("media_mode: режим 1 битый type -> video", _normalize_entry(entry(type="gif"), 1)["type"], "video")
-        base_si = build_system_instruction(2)
-        check("media_mode: режим 1 не меняет инструкцию", build_system_instruction(2, media_mode=1), base_si)
+        base_si = build_system_instruction(SOURCES_MIX)
+        check("media_mode: режим 1 не меняет инструкцию", build_system_instruction(SOURCES_MIX, media_mode=1), base_si)
         check("media_mode: подсказка только в 2/3",
-              ("MOVING" in build_system_instruction(2, media_mode=2), "STILL" in build_system_instruction(2, media_mode=3),
+              ("MOVING" in build_system_instruction(SOURCES_MIX, media_mode=2), "STILL" in build_system_instruction(SOURCES_MIX, media_mode=3),
                "MEDIA MODE" in base_si), (True, True, False))
 
     finally:
@@ -3515,11 +3538,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--sources-mode", default=None,
-        help="Режим источников: 1 (только архив), 2 (микс, по умолчанию), 3 (только сток).",
+        help="Режим источников: 1 (микс, по умолчанию), 2 (только архив), 3 (только сток).",
     )
     parser.add_argument(
         "--strict", default=None,
-        help="Строгость проверки запросов: 1 (калибровка/код 1 при ошибках), 2 (мягко/warning, код 0).",
+        help="Строгость проверки запросов: 1 (калибровка/код 1 при ошибках), 2 (мягко/warning, код 0; по умолчанию).",
     )
     parser.add_argument(
         "--skip-schema-preflight", action="store_true",
@@ -3548,7 +3571,7 @@ def main() -> int:
     call_batch = partial(call_gemini_batch, media_mode=media_mode)
     logging.info("Режим типа медиа: %s (%s)", media_mode, MEDIA_MODE_NAMES[media_mode])
 
-    mode_names = {1: "только архив", 2: "микс", 3: "только сток"}
+    mode_names = {SOURCES_MIX: "микс", SOURCES_ARCHIVE: "только архив", SOURCES_STOCK: "только сток"}
     logging.info(
         "Режим источников: %s (%s), строгость проверки: %s (%s)",
         sources_mode, mode_names[sources_mode], strict_mode,
