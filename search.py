@@ -20,6 +20,9 @@ search.py
                         части сегментов backup просто не находится, это
                         нормальный случай (см. try_claim_backup)
     missing.txt      - номера сегментов, для которых ничего подходящего не нашлось
+    min_durations.json - {"номер": секунды} ТОЛЬКО для видео-сегментов (type=video, не skip);
+                        лежит в том же каталоге, что и links.txt; значение = min_duration из
+                        requests.json без изменений (читает download.py)
 
 Использование:
     python search.py --input requests.json --links-output links.txt \
@@ -69,6 +72,14 @@ search.py
     SEARCH_SIM_ACCEPT_THRESHOLD - абсолютный критерий принятия (умолч. 0.30 - см. там же)
     SEARCH_REL_TOP_N (умолч. 10 - потолок), SEARCH_REL_MARGIN (0.03), SEARCH_FLAT_SPREAD (0.03)
         - относительная оценка, см. раздел "Относительная оценка CLIP" ниже
+    MEDIA_MODE - 1 (смешанный, по умолч. при пустом/отсутствующем), 2 (только видео), 3 (только
+        фото). Иное значение - остановка с сообщением. В режиме 2 не опрашиваются сайты, не
+        отдающие видео из белого списка (сейчас wikimedia), каждый пропуск пишется в лог.
+        Тип сегмента всё равно берётся из requests.json (seg.type).
+        Только в режиме 1: если по типу из requests.json нет кандидата, принятого по abs/rank,
+        каскад повторяется с ДРУГИМ типом (image <-> video) по тем же запросам; best-effort - только
+        если не принят никто ни по одному из типов (см. process_segment_inner). Итоговый тип
+        сегмента попадает в min_durations.json. В режимах 2 и 3 переключения нет.
     SEARCH_PIXABAY_STRICT_TYPES - типы контента в запросах к Pixabay (умолч. 1): для видео
         добавляется video_type=film, для фото image_type=photo (отсекает анимацию, 3D-рендеры,
         иллюстрации). 0/false/no/off - параметры не добавляются (прежнее поведение). Читается один раз.
@@ -225,7 +236,7 @@ CLIP, где точность превью не критична, важна т�
 
 Относительная оценка CLIP:
  - Перед поиском scene всех сегментов кодируются ОДИН раз (батчи по 64) в матрицу нормализованных
-   векторов. Превью кандидата кодируется один раз (кэш по (site, cand_id), только вектор ~2 КБ);
+   векторов. Превью кандидата кодируется один раз (кэш по (site, kind, cand_id), только вектор ~2 КБ);
    сходство со всеми scene - одно матричное умножение. Текст запроса в CLIP больше не кодируется.
  - Принят, если own_sim >= SIM_MIN_THRESHOLD (0.21) И (а) его сегмент в топ-N сходств среди всех
    сегментов, или (б) own_sim >= SIM_ACCEPT_THRESHOLD (0.30). N без явного SEARCH_REL_TOP_N =
@@ -411,6 +422,101 @@ def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
 
 
 SOURCES_MODE, _SOURCES_MODE_VALID = parse_sources_mode(_SOURCES_MODE_RAW)
+
+# Режим медиа (env MEDIA_MODE): 1 = смешанный, 2 = только видео, 3 = только фото.
+# Читается ОДИН раз в amain (parse_media_mode) и дальше лежит в Context.media_mode.
+MEDIA_MODE_DEFAULT = 1
+MEDIA_MODE_NAMES = {1: "смешанный", 2: "только видео", 3: "только фото"}
+
+
+def parse_media_mode(raw: Optional[str]) -> int:
+    """Чистая функция. None/пусто -> 1; "1"/"2"/"3" (пробелы по краям игнорируются) -> число;
+    любое другое значение -> ValueError с сообщением по-русски (вызывающий останавливает работу)."""
+    if raw is None or not raw.strip():
+        return MEDIA_MODE_DEFAULT
+    v = raw.strip()
+    if v in ("1", "2", "3"):
+        return int(v)
+    raise ValueError(
+        f"MEDIA_MODE={raw!r} недопустим: ожидается 1 (смешанный), 2 (только видео), "
+        "3 (только фото) или пустое значение (= 1)."
+    )
+
+
+# Ранний фильтр по длительности видео (до CLIP). Мягкий: отсеивается только то, что ЯВНО короче
+# min_duration - DURATION_TOLERANCE_SECONDS; строгая проверка по реальному файлу - в download.py.
+DURATION_TOLERANCE_SECONDS = 1.0
+DURATION_FILTER_SITES = ("pexels", "pixabay")  # только у них duration есть в ответе поиска
+
+
+def parse_duration_seconds(raw: Any) -> Optional[float]:
+    """Чистая функция. Секунды как float или None, если значение неизвестно/мусор: нет поля,
+    не число (в т.ч. строка и bool), NaN/inf, ноль или отрицательное."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    d = float(raw)
+    if not math.isfinite(d) or d <= 0:
+        return None
+    return d
+
+
+def duration_verdict(raw: Any, min_duration: float) -> str:
+    """Чистая функция. "reject" - явно короче (d < min_duration - 1.0); "keep" - подходит или
+    попадает в зону неопределённости (граница включительно); "unknown" - длительность неизвестна
+    (кандидат НЕ отсеивается)."""
+    d = parse_duration_seconds(raw)
+    if d is None:
+        return "unknown"
+    if d < float(min_duration) - DURATION_TOLERANCE_SECONDS:
+        return "reject"
+    return "keep"
+
+
+MIN_DURATIONS_FILENAME = "min_durations.json"
+
+
+def build_min_durations(segments: Sequence["SegmentSpec"]) -> dict:
+    """Чистая функция. {"номер": float} только для type == "video" и не skip, по возрастанию
+    номера; значение min_duration без изменений. Видео без min_duration -> ValueError."""
+    out: dict = {}
+    for sg in sorted(segments, key=lambda x: x.index):
+        if sg.type != "video" or sg.skip:
+            continue
+        if sg.min_duration is None:
+            raise ValueError(
+                f"Сегмент {sg.index}: type=video, но в requests.json нет min_duration - "
+                "min_durations.json не может быть записан (подстановка значения не делается)."
+            )
+        out[str(sg.index)] = float(sg.min_duration)
+    return out
+
+
+def min_durations_path(links_output: str) -> str:
+    """min_durations.json кладётся в тот же каталог, что и links.txt."""
+    return os.path.join(os.path.dirname(os.path.abspath(links_output)), MIN_DURATIONS_FILENAME)
+
+
+def write_json_atomic(path: str, obj: Any) -> None:
+    """UTF-8, временный файл рядом + os.replace (читатель не увидит недописанный файл)."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def write_min_durations(links_output: str, segments: Sequence["SegmentSpec"]) -> str:
+    """Пишет min_durations.json (пустой объект {}, если видео-сегментов нет). Возвращает путь."""
+    path = min_durations_path(links_output)
+    write_json_atomic(path, build_min_durations(segments))
+    return path
 _WM_BLOCKLIST_ENV = os.environ.get("SEARCH_WIKIMEDIA_BLOCKLIST")
 WIKIMEDIA_BLOCKLIST_WORDS: tuple = (
     _DEFAULT_WM_BLOCKLIST if _WM_BLOCKLIST_ENV is None
@@ -703,6 +809,8 @@ class SiteStats:
     best_effort_total: int = 0
     blocked_total: int = 0
     blocked_strict_total: int = 0
+    duration_rejected_total: int = 0  # видео отсеяно ранним фильтром длительности (до CLIP)
+    duration_unknown_total: int = 0   # у видео нет/мусор в duration - пропущено без фильтра
     score_sum: float = 0.0
     best_score: float = 0.0
 
@@ -744,6 +852,14 @@ def log_site_stats_summary(site_stats: dict) -> None:
             (f"  блок-лист={s.blocked_total} (из них строгих={s.blocked_strict_total})"
              if s.blocked_total else ""),
         )
+    dur_parts = [
+        f"{k}: отсеяно {site_stats[k].duration_rejected_total}, "
+        f"длительность неизвестна: {site_stats[k].duration_unknown_total}"
+        for k in sorted(site_stats)
+        if site_stats[k].duration_rejected_total or site_stats[k].duration_unknown_total
+    ]
+    if dur_parts:
+        logging.info("Фильтр видео по длительности (до CLIP): " + "; ".join(dur_parts))
     logging.info(
         "Как читать: raw=0 -> сайт вообще ничего не вернул по запросу (сеть/сам API/лимит). "
         "лиценз.=0 при raw>0 -> все кандидаты отсеяны лицензионным фильтром. "
@@ -822,6 +938,7 @@ class SegmentSpec:
     is_entity: bool
     entity_keywords: list[str]
     skip: bool = False  # select_coverage.py: True - сегмент не искать, сразу в missing
+    min_duration: Optional[float] = None  # сек; нужен только видео-сегментам (type == "video")
 
 
 @dataclass
@@ -840,6 +957,35 @@ class Candidate:
     reject_reason: str = ""
     stats_key: Optional[str] = None
     variant: Optional[str] = None  # narrow | medium | name | broad
+    # Сырое значение duration из ответа поиска (только видео Pexels/Pixabay); None - поля нет.
+    # Pexels: целые секунды; у Pixabay формат не подтверждён - разбор только через parse_duration_seconds.
+    duration: Any = None
+    # Тип медиа кандидата: "photo" | "video". Номера фото и видео у Pexels/Pixabay лежат в разных
+    # пространствах, поэтому тип входит в ключ (см. cand_key). Заполняется в search_*.
+    kind: str = ""
+
+
+CAND_KINDS = ("photo", "video")
+
+
+def kind_of_media_type(media_type: str) -> str:
+    """Тип сегмента ("image"/"video") -> kind кандидата ("photo"/"video"). Неизвестное - ошибка."""
+    if media_type == "image":
+        return "photo"
+    if media_type == "video":
+        return "video"
+    raise ValueError(f"Неизвестный тип медиа {media_type!r}: ожидается 'image' или 'video'")
+
+
+def cand_key(cand: "Candidate") -> tuple:
+    """Единый ключ кандидата (site, kind, cand_id): used_files, exclude_key, кэш векторов CLIP.
+    Пустой или неизвестный kind - ошибка (молчаливых подстановок нет)."""
+    if cand.kind not in CAND_KINDS:
+        raise ValueError(
+            f"У кандидата {cand.site}/{cand.cand_id} не задан kind (получено {cand.kind!r}): "
+            f"ожидается один из {CAND_KINDS}"
+        )
+    return (cand.site, cand.kind, cand.cand_id)
 
 
 @dataclass
@@ -865,6 +1011,12 @@ class Context:
     choice_own_sims: list = field(default_factory=list)
     backup_reasons: Counter = field(default_factory=Counter)
     backup_own_sims: list = field(default_factory=list)
+    media_mode: int = MEDIA_MODE_DEFAULT  # 1 смешанный / 2 только видео / 3 только фото (см. parse_media_mode)
+    # Переключение типа (только режим 1): номера сегментов, для которых пробовали другой тип;
+    # номер -> ИТОГОВЫЙ тип (только если на другом типе кандидат найден); способ: abs / rank / best_effort.
+    switch_attempted: set = field(default_factory=set)
+    switch_final: dict = field(default_factory=dict)
+    switch_how: Counter = field(default_factory=Counter)
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +1078,7 @@ def compute_sims(scene_matrix: Any, image_vec: Any) -> list[float]:
 
 
 class EmbeddingCache:
-    """Кэш нормализованных векторов превью по ключу (site, cand_id). Один и тот же ключ
+    """Кэш нормализованных векторов превью по ключу (site, kind, cand_id). Один и тот же ключ
     кодируется один раз даже при параллельных запросах (общий future на ключ).
     Хранит только вектор (512 float32 ~ 2 КБ), не картинку и не байты."""
 
@@ -1229,6 +1381,8 @@ async def search_pexels(ctx: Context, query: str, media_type: str) -> list[Candi
             return []
         url = "https://api.pexels.com/videos/search" if media_type == "video" else "https://api.pexels.com/v1/search"
         headers = {"Authorization": ctx.pexels_api_key}
+        # Серверный min_duration НЕ передаётся: у /videos/search его в документации нет (он описан
+        # только для /videos/popular); не подтверждено живым запросом - не используем.
         params = {"query": query, "per_page": 15}
         data = await http_get_json(ctx, "pexels", url, headers=headers, params=params, treat_429_as_exhaustion=True)
         result: list[Candidate] = []
@@ -1243,6 +1397,7 @@ async def search_pexels(ctx: Context, query: str, media_type: str) -> list[Candi
                 result.append(Candidate(
                     site="pexels", cand_id=str(v["id"]), text="",
                     license_ok=True, preview_url=preview, page_url=v.get("url"),
+                    duration=v.get("duration"), kind="video",
                 ))
         else:
             for p in data.get("photos", []):
@@ -1250,7 +1405,7 @@ async def search_pexels(ctx: Context, query: str, media_type: str) -> list[Candi
                 preview = src.get("medium") or src.get("small") or src.get("original")
                 result.append(Candidate(
                     site="pexels", cand_id=str(p["id"]), text=p.get("alt") or "",
-                    license_ok=True, preview_url=preview, page_url=p.get("url"),
+                    license_ok=True, preview_url=preview, page_url=p.get("url"), kind="photo",
                 ))
         return result
 
@@ -1287,6 +1442,8 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
             result.append(Candidate(
                 site="pixabay", cand_id=str(hit["id"]), text=tags,
                 license_ok=True, preview_url=preview, page_url=page_url,
+                duration=hit.get("duration") if media_type == "video" else None,
+                kind=kind_of_media_type(media_type),
             ))
         return result
 
@@ -1295,6 +1452,20 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
 
 COMMONS_VIDEO_EXTENSIONS = frozenset({"webm", "ogv", "mpg", "mpeg"})
 _commons_video_skip_logged = False
+
+
+def site_skipped_in_video_only(site: str) -> bool:
+    """Чистая функция: режим 2 (только видео) не обращается к сайту, если он не отдаёт видео из
+    белого списка. Сейчас только wikimedia (Commons-видео webm/ogv/mpg/mpeg вне белого списка);
+    считается от белого списка, т.е. сам снимется, если форматы Commons туда попадут.
+    NASA (manifest-ресурсы mp4/mov) и LOC не пропускаются: их ответ не проверен вживую."""
+    if site == "wikimedia":
+        return not (COMMONS_VIDEO_EXTENSIONS & VIDEO_EXTENSIONS)
+    return False
+
+
+def video_only_skip_message(site: str) -> str:
+    return f"режим 2: сайт {site} пропущен, видео не отдаёт"
 
 
 async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Candidate]:
@@ -1373,6 +1544,7 @@ async def search_wikimedia(ctx: Context, query: str, media_type: str) -> list[Ca
                 site="wikimedia", cand_id=title, text=text,
                 license_ok=wikimedia_license_ok(license_short),
                 preview_url=thumb_url or direct_url, page_url=wiki_page_url,
+                kind=kind_of_media_type(media_type),
             ))
         return result
 
@@ -1447,6 +1619,7 @@ async def search_nasa(ctx: Context, query: str, media_type: str) -> list[Candida
                 site="nasa", cand_id=nasa_id, text=text,
                 license_ok=nasa_license_ok(d0), preview_url=preview, page_url=None,
                 final_url_resolver=_nasa_manifest_resolver(manifest_href, media_type),
+                kind=kind_of_media_type(media_type),
             ))
         return result
 
@@ -1500,6 +1673,7 @@ async def search_loc(ctx: Context, query: str, media_type: str) -> list[Candidat
             result.append(Candidate(
                 site="loc", cand_id=item_id, text=text,
                 license_ok=loc_license_ok(item), preview_url=preview, page_url=item_id,
+                kind=kind_of_media_type(media_type),
             ))
         return result
 
@@ -1651,7 +1825,7 @@ async def score_candidates(
                     raise _ClipEncodeError(str(e)) from e
 
         try:
-            vec = await ctx.clip.cache.get_or_compute((cand.site, cand.cand_id), compute)
+            vec = await ctx.clip.cache.get_or_compute(cand_key(cand), compute)
         except _ClipEncodeError as e:
             logging.debug("CLIP не смог закодировать %s/%s: %s", cand.site, cand.cand_id, e)
             stats.clip_error_total += 1
@@ -1715,7 +1889,7 @@ async def try_claim_backup(
     if backup_cand is None:
         return None
 
-    key = (backup_cand.site, backup_cand.cand_id)
+    key = cand_key(backup_cand)
     async with ctx.used_files_lock:
         if key in ctx.used_files:
             return None
@@ -1730,7 +1904,7 @@ async def try_claim_pool(
     ctx: Context, pool: list[Candidate], seg_index: Optional[int] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     for i, cand in enumerate(pool):
-        key = (cand.site, cand.cand_id)
+        key = cand_key(cand)
         async with ctx.used_files_lock:
             if key in ctx.used_files:
                 continue
@@ -1866,6 +2040,66 @@ def build_cascade(seg: SegmentSpec, mode: Optional[int] = None) -> list[Variant]
     return cascade
 
 
+def other_media_type(media_type: str) -> str:
+    """Чистая функция: image <-> video. Иной тип - ValueError (молчаливых подстановок нет)."""
+    if media_type == "image":
+        return "video"
+    if media_type == "video":
+        return "image"
+    raise ValueError(f"Неизвестный тип сегмента {media_type!r}: ожидается 'image' или 'video'")
+
+
+def should_switch_type(media_mode: int, normal_found: bool) -> bool:
+    """Чистая функция: пробовать ли другой тип. Только режим 1 и только если по родному типу
+    не принят никто по нормальным условиям (abs/rank, до best-effort)."""
+    return media_mode == 1 and not normal_found
+
+
+def validate_switch_inputs(segments: Sequence["SegmentSpec"], media_mode: int) -> None:
+    """Режим 1: любой сегмент, который может стать видео, обязан иметь min_duration (для проверки
+    длительности и записи в min_durations.json). Нет - ValueError с номерами, подстановки нет."""
+    if media_mode != 1:
+        return
+    bad = sorted(sg.index for sg in segments if not sg.skip and sg.min_duration is None)
+    if bad:
+        shown = ", ".join(map(str, bad[:20])) + (" ..." if len(bad) > 20 else "")
+        raise ValueError(
+            f"MEDIA_MODE=1: у сегментов нет min_duration в requests.json (номера: {shown}). "
+            "Он нужен, чтобы сегмент мог стать видео при переключении типа; значение не подставляется."
+        )
+
+
+def effective_segment(seg: "SegmentSpec", switch_final: dict) -> "SegmentSpec":
+    """Чистая функция: сегмент с ИТОГОВЫМ типом (после переключения), иначе тот же объект."""
+    t = switch_final.get(seg.index)
+    return seg if t is None or t == seg.type else dc_replace(seg, type=t)
+
+
+def final_segments(segments: Sequence["SegmentSpec"], switch_final: dict) -> list:
+    return [effective_segment(sg, switch_final) for sg in segments]
+
+
+def alt_cascade(alt_seg: "SegmentSpec") -> list[Variant]:
+    """Каскад для запасного типа (те же запросы). Для video сайты, не отдающие видео, убираются."""
+    out: list[Variant] = []
+    for v in build_cascade(alt_seg):
+        if alt_seg.type == "video":
+            sites = [x for x in v.sites if not site_skipped_in_video_only(x)]
+            if not sites:
+                continue
+            v = dc_replace(v, sites=sites)
+        out.append(v)
+    return out
+
+
+def summarize_type_switch(attempted: int, found: int, how: Counter) -> str:
+    g = lambda k: int(how.get(k, 0))
+    return (
+        f"Переключение типа (режим 1): сегментов переключено {attempted}, из них найден кандидат {found} "
+        f"(abs {g('abs')}, rank {g('rank')}, best-effort {g('best_effort')}), не найден {attempted - found}"
+    )
+
+
 def _stats_key(site: str, variant_name: str) -> str:
     return f"{site}_broad" if variant_name == "broad" else site
 
@@ -1875,6 +2109,10 @@ async def fetch_and_filter(
     stats_key: Optional[str] = None,
 ) -> list[Candidate]:
     q = query
+    # Режим 2 (только видео): сайт без видео в белом списке не опрашиваем. Строка в лог уже
+    # записана в amain (одна на сайт), здесь - только возврат пустого результата.
+    if ctx.media_mode == 2 and seg.type == "video" and site_skipped_in_video_only(site):
+        return []
     stats = ctx.site_stats.setdefault(stats_key or _stats_key(site, variant_name), SiteStats())
     stats.segments_attempted += 1
 
@@ -1895,6 +2133,36 @@ async def fetch_and_filter(
             seg.index, site, variant_name, len(raw),
         )
         return []
+
+    # Ранний мягкий фильтр длительности (до превью и CLIP): только видео Pexels/Pixabay и только
+    # если у сегмента есть min_duration. Кэш поиска общий для сегментов, поэтому фильтр здесь,
+    # а не в search_*. Неизвестная длительность не отсеивает (строгая проверка - в download.py).
+    if seg.type == "video" and seg.min_duration is not None and site in DURATION_FILTER_SITES:
+        before_d = len(licensed)
+        kept_d = []
+        rejected_d = 0
+        for c in licensed:
+            verdict = duration_verdict(c.duration, seg.min_duration)
+            if verdict == "reject":
+                rejected_d += 1
+                continue
+            if verdict == "unknown":
+                stats.duration_unknown_total += 1
+            kept_d.append(c)
+        stats.duration_rejected_total += rejected_d
+        licensed = kept_d
+        if rejected_d:
+            logging.info(
+                "Сегмент %s/%s [%s]: по длительности отсеяно %s из %s (min_duration=%.1f, порог: короче %.1f с).",
+                seg.index, site, variant_name, rejected_d, before_d,
+                seg.min_duration, seg.min_duration - DURATION_TOLERANCE_SECONDS,
+            )
+        if not licensed:
+            logging.info(
+                "Сегмент %s/%s [%s]: %s кандидатов прошли лицензию, но 0 после фильтра длительности.",
+                seg.index, site, variant_name, before_d,
+            )
+            return []
 
     if site == "wikimedia" and WIKIMEDIA_BLOCKLIST_WORDS:
         before_bl = len(licensed)
@@ -2045,10 +2313,14 @@ async def run_variant(ctx: Context, seg: SegmentSpec, variant: Variant) -> list[
     return pool
 
 
-async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+async def _cascade_normal(
+    ctx: Context, seg: SegmentSpec, cascade: list[Variant],
+) -> tuple[Optional[str], Optional[str], list[Candidate]]:
+    """Каскад с нормальными условиями (abs/rank) без best-effort. Возвращает (url, backup_url,
+    rejected_pool): url None - никто не принят (или принятых не удалось заклеймить)."""
     rejected_pool: list[Candidate] = []
     weak_pool: list[Candidate] = []  # принятые только "впритык": каскад продолжается
-    for variant in build_cascade(seg):
+    for variant in cascade:
         scored = await run_variant(ctx, seg, variant)
         accepted = select_accepted(seg, scored)
         if any(is_strong(c) for c in accepted):
@@ -2059,7 +2331,7 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optiona
                 chosen = ctx.primary_cands.get(seg.index)
                 if chosen is not None:
                     _record_choice(ctx, chosen, seg.index)
-                return url, backup_url
+                return url, backup_url, rejected_pool
         elif accepted:
             weak_pool.extend(dc_replace(c) for c in accepted)
         rejected_pool.extend(c for c in scored if not c.accepted)
@@ -2072,16 +2344,51 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optiona
             chosen = ctx.primary_cands.get(seg.index)
             if chosen is not None:
                 _record_choice(ctx, chosen, seg.index)
+            return url, backup_url, rejected_pool
+    return None, None, rejected_pool
+
+
+async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+    # 1) родной тип, нормальные условия
+    url, backup_url, rejected_native = await _cascade_normal(ctx, seg, build_cascade(seg))
+    if url:
+        return url, backup_url
+
+    # 2) только режим 1: другой тип по тем же запросам, тоже нормальные условия
+    alt: Optional[SegmentSpec] = None
+    rejected_alt: list[Candidate] = []
+    if should_switch_type(ctx.media_mode, False):
+        alt = dc_replace(seg, type=other_media_type(seg.type))
+        ctx.switch_attempted.add(seg.index)
+        url, backup_url, rejected_alt = await _cascade_normal(ctx, alt, alt_cascade(alt))
+        if url:
+            chosen = ctx.primary_cands.get(seg.index)
+            how = chosen.reject_reason if chosen is not None else "abs/rank"
+            ctx.switch_final[seg.index] = alt.type
+            ctx.switch_how[how] += 1
+            logging.info("Сегмент %s: тип %s -> %s, найден по %s", seg.index, seg.type, alt.type, how)
             return url, backup_url
 
-    # Никто не принят (или принятых не удалось заклеймить): берём лучшего по own_sim.
-    if rejected_pool:
-        url, backup_url = await try_claim_pool(ctx, best_effort_order(rejected_pool), seg.index)
+    # 3) Никто не принят ни по одному типу: best-effort. Берём лучшего среди оценённых по РОДНОМУ
+    # типу; кандидатов другого типа - только если по родному не оценён ни один (иначе тип сегмента
+    # не меняется из-за слабого кандидата).
+    pool, pool_seg = rejected_native, seg
+    if not pool and rejected_alt and alt is not None:
+        pool, pool_seg = rejected_alt, alt
+    if pool:
+        url, backup_url = await try_claim_pool(ctx, best_effort_order(pool), seg.index)
         if url:
             chosen = ctx.primary_cands.get(seg.index)
             if chosen is not None:
                 ctx.site_stats.setdefault(chosen.stats_key or chosen.site, SiteStats()).best_effort_total += 1
                 _record_choice(ctx, chosen, seg.index)
+            if pool_seg is not seg:
+                ctx.switch_final[seg.index] = pool_seg.type
+                ctx.switch_how["best_effort"] += 1
+                logging.info(
+                    "Сегмент %s: тип %s -> %s, найден по best-effort (по родному типу кандидатов нет)",
+                    seg.index, seg.type, pool_seg.type,
+                )
             return url, backup_url
     return None, None
 
@@ -2103,8 +2410,8 @@ async def _backup_pool(
     async with ctx.used_files_lock:
         fresh = [
             c for c in licensed
-            if (c.site, c.cand_id) not in ctx.used_files
-            and (c.site, c.cand_id) != exclude_key
+            if cand_key(c) not in ctx.used_files
+            and cand_key(c) != exclude_key
         ]
     top = fresh[:candidates_cap(site)]
     if not top:
@@ -2119,7 +2426,7 @@ async def _claim_first(
 ) -> tuple[Optional[str], Optional[Candidate]]:
     """pool уже упорядочен (select_accepted или по own_sim)."""
     for cand in pool:
-        key = (cand.site, cand.cand_id)
+        key = cand_key(cand)
         async with ctx.used_files_lock:
             if key in ctx.used_files:
                 continue
@@ -2147,7 +2454,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
     primary = ctx.primary_cands.get(seg.index)
     if primary is None:
         return None, None
-    pkey = (primary.site, primary.cand_id)
+    pkey = cand_key(primary)
 
     cascade = build_cascade(seg)
 
@@ -2221,7 +2528,8 @@ async def run_backup_pass(
     async def one(seg: SegmentSpec):
         try:
             async with ctx.global_semaphore:
-                url, src = await find_backup(ctx, seg)
+                # backup того же типа, что и основной (итоговый тип после переключения)
+                url, src = await find_backup(ctx, effective_segment(seg, ctx.switch_final))
         except Exception as e:
             logging.warning("Сегмент %s: ошибка поиска backup: %s", seg.index, e)
             return seg.index, None, None
@@ -2311,6 +2619,7 @@ def load_requests(path: str) -> list[SegmentSpec]:
     specs: list[SegmentSpec] = []
     sources_warned = 0
     sources_suppressed = 0
+    video_without_md: list[int] = []
     for k, v in data.items():
         try:
             idx = int(k)
@@ -2348,6 +2657,15 @@ def load_requests(path: str) -> list[SegmentSpec]:
             skip = False  # поля нет (старый requests.json) или null - искать как раньше
         elif not isinstance(skip, bool):
             raise bad(k, "skip", "должно быть true или false")
+        raw_md = v.get("min_duration")
+        min_duration: Optional[float] = None
+        if raw_md is not None:
+            if (isinstance(raw_md, bool) or not isinstance(raw_md, (int, float))
+                    or not math.isfinite(raw_md) or raw_md < 0):
+                raise bad(k, "min_duration", "должно быть неотрицательным числом (секунды) или null")
+            min_duration = float(raw_md)
+        if seg_type == "video" and not skip and min_duration is None:
+            video_without_md.append(idx)
         norm_sites = [x.strip().lower() for x in sites]
         unknown = [x for x in norm_sites if x not in SITE_SEARCH_FUNCS]
         if unknown:
@@ -2379,10 +2697,18 @@ def load_requests(path: str) -> list[SegmentSpec]:
                 is_entity=bool(v["is_entity"]),
                 entity_keywords=list(v.get("entity_keywords") or []),
                 skip=skip,
+                min_duration=min_duration,
             ))
         except (KeyError, TypeError, ValueError) as e:
             raise ValueError(f"Сегмент {k!r} в requests.json имеет некорректную структуру: {e}") from e
 
+    if video_without_md:
+        shown = ", ".join(str(i) for i in sorted(video_without_md)[:20])
+        more = f" и ещё {len(video_without_md) - 20}" if len(video_without_md) > 20 else ""
+        raise ValueError(
+            f"У видео-сегментов нет поля min_duration в requests.json (номера: {shown}{more}). "
+            "Перегенерируйте requests.json; значение по умолчанию не подставляется."
+        )
     if sources_suppressed:
         logging.warning(
             "Режим источников %s: ещё у %s сегментов sites после фильтра был пуст "
@@ -2398,6 +2724,17 @@ async def amain(args: argparse.Namespace) -> int:
         logging.error("Входной файл не найден: %s", args.input)
         return 1
 
+    try:
+        media_mode = parse_media_mode(os.environ.get("MEDIA_MODE"))  # единственное место чтения env
+    except ValueError as e:
+        logging.error("%s", e)
+        return 1
+    logging.info("Режим медиа: %s (%s; MEDIA_MODE).", media_mode, MEDIA_MODE_NAMES[media_mode])
+    if media_mode == 2:
+        for _site in SITE_SEARCH_FUNCS:
+            if site_skipped_in_video_only(_site):
+                logging.info(video_only_skip_message(_site))
+
     if not _SOURCES_MODE_VALID:
         logging.warning(
             "SEARCH_SOURCES_MODE=%r не из {1,2,3} - игнорируется, берётся %s.",
@@ -2411,6 +2748,7 @@ async def amain(args: argparse.Namespace) -> int:
     )
     try:
         all_segments = load_requests(args.input)
+        validate_switch_inputs(all_segments, media_mode)
     except (ValueError, json.JSONDecodeError) as e:
         logging.error("Ошибка чтения %s: %s", args.input, e)
         return 1
@@ -2432,6 +2770,7 @@ async def amain(args: argparse.Namespace) -> int:
                             (args.backup_missing_output, [])):
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
+        write_min_durations(args.links_output, all_segments)  # все skip -> {}
         logging.info(
             "Готово: найдено 0 из 0 сегментов, пропущено по skip %s (все записаны в %s).",
             len(skipped), args.missing_output,
@@ -2510,6 +2849,7 @@ async def amain(args: argparse.Namespace) -> int:
             global_semaphore=asyncio.Semaphore(GLOBAL_SEGMENT_CONCURRENCY),
             clip_semaphore=asyncio.Semaphore(CLIP_CONCURRENCY),
             used_files_lock=asyncio.Lock(),
+            media_mode=media_mode,
             rate_limiters={
                 "loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS),
                 "loc_preview": RateLimiter(LOC_PREVIEW_MIN_INTERVAL_SECONDS),
@@ -2554,6 +2894,10 @@ async def amain(args: argparse.Namespace) -> int:
 
         logging.info(summarize_choices(ctx.choice_reasons, ctx.choice_own_sims, "primary"))
         logging.info(summarize_choices(ctx.backup_reasons, ctx.backup_own_sims, "backup"))
+        if media_mode == 1:
+            logging.info(summarize_type_switch(
+                len(ctx.switch_attempted), len(ctx.switch_final), ctx.switch_how,
+            ))
 
         log_site_stats_summary(ctx.site_stats)
 
@@ -2564,6 +2908,11 @@ async def amain(args: argparse.Namespace) -> int:
     with open(args.backup_links_output, "w", encoding="utf-8") as f:
         for idx in sorted(backups):
             f.write(f"{idx}: {backups[idx]}\n")
+
+    # по ИТОГОВОМУ типу (после переключения и backup-прохода)
+    final_segs = final_segments(all_segments, ctx.switch_final)
+    md_path = write_min_durations(args.links_output, final_segs)
+    logging.info("Записан %s (видео-сегментов: %s).", md_path, len(build_min_durations(final_segs)))
 
     with open(args.missing_output, "w", encoding="utf-8") as f:
         for idx in sorted(missing):
@@ -2666,7 +3015,8 @@ def _selftest() -> int:
     assert view(mk(["flickr", "foo"])) == [("broad", ["pixabay", "pexels"])]
     # load_requests
     good = {"1": {"scene": "s", "sites": ["Pexels"], "query_narrow": "a b c", "query_medium": "a b",
-                  "query_broad": "", "type": "video", "is_entity": False, "entity_keywords": []}}
+                  "query_broad": "", "type": "video", "is_entity": False, "entity_keywords": [],
+                  "min_duration": 5.0}}
     old = {"1": {"sites": ["pexels"], "query": "a", "type": "image",
                  "is_entity": False}}
     badtype = {"2": dict(good["1"], query_medium="  ")}
@@ -3019,10 +3369,10 @@ def _selftest() -> int:
 
     c_pb = Candidate(site="pixabay", cand_id="42", text="sea, wave, animation", license_ok=True,
                      preview_url=None, page_url="https://pixabay.com/videos/x-42/",
-                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad")
+                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad", kind="video")
     c_px = Candidate(site="pexels", cand_id="1234567", text="", license_ok=True, preview_url=None,
                      page_url="https://www.pexels.com/video/ocean-waves-1234567/",
-                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad")
+                     own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="broad", kind="video")
     c_wm = Candidate(site="wikimedia", cand_id="File:A.jpg", text="x", license_ok=True, preview_url=None,
                      page_url="https://commons.wikimedia.org/wiki/File:A.jpg",
                      own_sim=0.3, rank=1, accepted=True, reject_reason="abs", variant="narrow")
@@ -3065,6 +3415,329 @@ def _selftest() -> int:
     assert f"{7}: {_res[0]}\n" == "7: https://cdn.example/pixabay/42.mp4\n"
     assert f"{7}: {_res[1]}\n" == "7: https://cdn.example/pexels/1234567.mp4\n"
     assert "теги" not in _res[0] and "слаг" not in _res[1]
+
+    # ---- ЧАСТЬ А: MEDIA_MODE, фильтр длительности, min_durations.json ----
+    # parse_media_mode
+    assert parse_media_mode(None) == 1 and parse_media_mode("") == 1 and parse_media_mode("  ") == 1
+    assert [parse_media_mode(x) for x in ("1", "2", "3", " 2 ")] == [1, 2, 3, 2]
+    for bad_mode in ("0", "4", "2.0", "video", "01", "-1", "1,2"):
+        try:
+            parse_media_mode(bad_mode)
+        except ValueError as e:
+            assert "MEDIA_MODE" in str(e) and "только видео" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError для MEDIA_MODE=%r" % (bad_mode,))
+
+    # parse_duration_seconds / duration_verdict: граница min-1, нет поля, мусор
+    assert parse_duration_seconds(12) == 12.0 and parse_duration_seconds(7.5) == 7.5
+    for junk in (None, "", "12", "abc", 0, 0.0, -3, -0.5, float("nan"), float("inf"), True, False, [], {}):
+        assert parse_duration_seconds(junk) is None, junk
+        assert duration_verdict(junk, 10.0) == "unknown", junk
+    assert duration_verdict(8.9, 10.0) == "reject"      # 8.9 < 9.0
+    assert duration_verdict(9, 10.0) == "keep"          # ровно min-1: не отсеиваем
+    assert duration_verdict(9.0, 10.0) == "keep"
+    assert duration_verdict(9.01, 10.0) == "keep"
+    assert duration_verdict(10, 10.0) == "keep" and duration_verdict(30, 10.0) == "keep"
+    assert duration_verdict(4, 5.3) == "reject" and duration_verdict(5, 5.3) == "keep"
+    assert duration_verdict(1, 1.0) == "keep" and duration_verdict(1, 0.0) == "keep"
+
+    # build_min_durations / запись
+    def _sg(i, t, md, skip=False):
+        return SegmentSpec(index=i, scene="s", sites=["pexels"], query_narrow="n", query_medium="m",
+                           query_broad=None, type=t, is_entity=False, entity_keywords=[],
+                           skip=skip, min_duration=md)
+
+    _segs = [_sg(10, "video", 7.25), _sg(2, "video", 5.0), _sg(3, "image", None),
+             _sg(4, "video", 9.0, skip=True), _sg(5, "image", 4.0)]
+    _md = build_min_durations(_segs)
+    assert _md == {"2": 5.0, "10": 7.25} and list(_md) == ["2", "10"], _md
+    assert all(isinstance(v, float) for v in _md.values())
+    assert build_min_durations([_sg(1, "image", None)]) == {} and build_min_durations([]) == {}
+    assert build_min_durations([_sg(1, "video", 3.0, skip=True)]) == {}
+    try:
+        build_min_durations([_sg(1, "video", None)])
+    except ValueError as e:
+        assert "Сегмент 1" in str(e) and "min_duration" in str(e), e
+    else:
+        raise AssertionError("видео без min_duration должно останавливать")
+    with tempfile.TemporaryDirectory() as _d:
+        _links = os.path.join(_d, "sub", "links.txt")
+        os.makedirs(os.path.dirname(_links))
+        _pth = write_min_durations(_links, _segs)
+        assert _pth == os.path.join(_d, "sub", "min_durations.json"), _pth
+        with open(_pth, "r", encoding="utf-8") as fh:
+            _raw = fh.read()
+        assert json.loads(_raw) == {"2": 5.0, "10": 7.25} and "5.0" in _raw, _raw
+        assert os.listdir(os.path.dirname(_pth)) == ["min_durations.json"]  # tmp-файла не осталось
+        write_min_durations(_links, [_sg(1, "image", None)])  # нет видео -> пустой объект, файл есть
+        with open(_pth, "r", encoding="utf-8") as fh:
+            assert json.load(fh) == {}
+
+    # load_requests: min_duration
+    _gv = good["1"]
+    assert load({"1": _gv})[0].min_duration == 5.0
+    assert load({"1": dict(_gv, min_duration=3)})[0].min_duration == 3.0
+    assert load({"1": dict(_gv, min_duration=0)})[0].min_duration == 0.0
+    # у image и у skip-видео поля может не быть
+    _no_md = {k: v for k, v in _gv.items() if k != "min_duration"}
+    assert load({"1": dict(_no_md, type="image")})[0].min_duration is None
+    assert load({"1": dict(_no_md, skip=True)})[0].min_duration is None
+    # видео без min_duration (нет поля / null) - остановка, с перечислением номеров
+    for _bad_set in ({"1": _no_md, "7": dict(_no_md, min_duration=None)},):
+        try:
+            load(_bad_set)
+        except ValueError as e:
+            assert "min_duration" in str(e) and "1, 7" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError: видео без min_duration")
+    for _bad_md in ("5", True, -1, float("nan"), [5]):
+        try:
+            load({"1": dict(_gv, min_duration=_bad_md)})
+        except ValueError as e:
+            assert "min_duration" in str(e) and "Сегмент" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError для min_duration=%r" % (_bad_md,))
+
+    # режим 2: пропуск сайтов без видео в белом списке (wikimedia пропущен, остальные нет)
+    assert site_skipped_in_video_only("wikimedia") is True
+    assert not any(site_skipped_in_video_only(x) for x in ("pexels", "pixabay", "nasa", "loc"))
+    assert video_only_skip_message("wikimedia") == "режим 2: сайт wikimedia пропущен, видео не отдаёт"
+
+    # fetch_and_filter: ранний фильтр длительности и пропуск сайта в режиме 2 (без сети)
+    import types as _t2
+
+    def _cand(site, cid, dur):
+        return Candidate(site=site, cand_id=cid, text="", license_ok=True,
+                         preview_url="http://x/p.jpg", page_url="http://x/" + cid, duration=dur)
+
+    _calls = []
+
+    def _mk_fake(site, items):
+        async def _fake(ctx_, q_, mt_):
+            _calls.append((site, mt_))
+            return list(items)
+        return _fake
+
+    _sites_backup = dict(SITE_SEARCH_FUNCS)
+    SITE_SEARCH_FUNCS["pexels"] = _mk_fake("pexels", [
+        _cand("pexels", "short", 3), _cand("pexels", "edge", 9), _cand("pexels", "long", 20),
+        _cand("pexels", "nofield", None), _cand("pexels", "zero", 0), _cand("pexels", "junk", "x"),
+    ])
+    SITE_SEARCH_FUNCS["wikimedia"] = _mk_fake("wikimedia", [_cand("wikimedia", "w1", None)])
+    SITE_SEARCH_FUNCS["nasa"] = _mk_fake("nasa", [_cand("nasa", "n1", None)])
+    try:
+        _vseg = _sg(1, "video", 10.0)
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=1)
+        _kept = asyncio.run(fetch_and_filter(_ctx, "pexels", _vseg, "q", "medium"))
+        assert [c.cand_id for c in _kept] == ["edge", "long", "nofield", "zero", "junk"], _kept
+        _st = _ctx.site_stats["pexels"]
+        assert _st.duration_rejected_total == 1 and _st.duration_unknown_total == 3, _st
+        # у сегмента без min_duration и у фото фильтра нет
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=1)
+        _k2 = asyncio.run(fetch_and_filter(_ctx, "pexels", _sg(1, "video", None), "q", "medium"))
+        assert len(_k2) == 6 and _ctx.site_stats["pexels"].duration_rejected_total == 0
+        _k3 = asyncio.run(fetch_and_filter(_ctx, "pexels", _sg(1, "image", 10.0), "q", "medium"))
+        assert len(_k3) == 6
+        # NASA: длительности в ответе нет, фильтр не применяется
+        _k4 = asyncio.run(fetch_and_filter(_ctx, "nasa", _vseg, "q", "medium"))
+        assert [c.cand_id for c in _k4] == ["n1"]
+        # все отсеяны -> пусто
+        SITE_SEARCH_FUNCS["pexels"] = _mk_fake("pexels", [_cand("pexels", "a", 1), _cand("pexels", "b", 2)])
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=1)
+        assert asyncio.run(fetch_and_filter(_ctx, "pexels", _vseg, "q", "medium")) == []
+        # режим 2: wikimedia для видео вообще не вызывается; для фото и в режиме 1 - вызывается
+        _calls.clear()
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=2)
+        assert asyncio.run(fetch_and_filter(_ctx, "wikimedia", _vseg, "q", "medium")) == []
+        assert _calls == [] and _ctx.site_stats == {}, (_calls, _ctx.site_stats)
+        asyncio.run(fetch_and_filter(_ctx, "wikimedia", _sg(1, "image", None), "q", "medium"))
+        assert _calls == [("wikimedia", "image")], _calls
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=1)
+        asyncio.run(fetch_and_filter(_ctx, "wikimedia", _vseg, "q", "medium"))
+        assert _calls[-1] == ("wikimedia", "video"), _calls
+        _ctx = _t2.SimpleNamespace(site_stats={}, media_mode=2)
+        asyncio.run(fetch_and_filter(_ctx, "nasa", _vseg, "q", "medium"))
+        assert _calls[-1] == ("nasa", "video"), _calls
+    finally:
+        SITE_SEARCH_FUNCS.clear()
+        SITE_SEARCH_FUNCS.update(_sites_backup)
+
+    # ---- ЧАСТЬ Б: переключение типа в режиме 1 ----
+    assert should_switch_type(1, False) is True
+    assert should_switch_type(1, True) is False      # уже принят нормально
+    assert should_switch_type(2, False) is False and should_switch_type(3, False) is False
+    assert other_media_type("image") == "video" and other_media_type("video") == "image"
+    try:
+        other_media_type("gif")
+    except ValueError as e:
+        assert "gif" in str(e), e
+    else:
+        raise AssertionError("ожидалась ValueError для неизвестного типа")
+
+    def _bs(i, t, md, skip=False, sites=("pexels", "wikimedia")):
+        return SegmentSpec(index=i, scene="s", sites=list(sites), query_narrow="a b", query_medium="c d",
+                           query_broad=None, type=t, is_entity=False, entity_keywords=[], skip=skip,
+                           min_duration=md)
+    validate_switch_inputs([_bs(1, "image", 3.0), _bs(2, "video", 5.0), _bs(3, "image", None, skip=True)], 1)
+    validate_switch_inputs([_bs(1, "image", None)], 2)   # режимы 2/3 - без проверки
+    validate_switch_inputs([_bs(1, "image", None)], 3)
+    try:
+        validate_switch_inputs([_bs(4, "image", None), _bs(2, "video", 5.0), _bs(9, "image", None)], 1)
+    except ValueError as e:
+        assert "min_duration" in str(e) and "4, 9" in str(e), e
+    else:
+        raise AssertionError("ожидалась ValueError: нет min_duration в режиме 1")
+
+    # итоговый тип -> min_durations
+    _sw = {1: "video", 2: "image"}
+    _fs = final_segments([_bs(1, "image", 4.0), _bs(2, "video", 6.0), _bs(3, "video", 7.0)], _sw)
+    assert [x.type for x in _fs] == ["video", "image", "video"]
+    assert build_min_durations(_fs) == {"1": 4.0, "3": 7.0}, build_min_durations(_fs)
+    _orig = _bs(1, "image", 4.0)
+    assert effective_segment(_orig, {}) is _orig and _orig.type == "image"
+
+    # каскад запасного типа: для video wikimedia убирается, для image - нет
+    _av = alt_cascade(_bs(1, "video", 4.0))
+    assert _av and all("wikimedia" not in v.sites and "pexels" in v.sites for v in _av), _av
+    _ai = alt_cascade(_bs(1, "image", 4.0))
+    assert _ai and all("wikimedia" in v.sites for v in _ai), _ai
+    assert "переключено 3" in summarize_type_switch(3, 2, Counter({"abs": 1, "best_effort": 1}))
+
+    # process_segment_inner с подменой run_variant/finalize_candidate (без сети)
+    def _pc(cid, acc, why, sim=0.3):
+        return Candidate(site="pexels", cand_id=cid, text="", license_ok=True, preview_url=None,
+                         page_url="p" + cid, own_sim=sim, similarity=sim, rank=1, accepted=acc,
+                         reject_reason=why, variant="medium", stats_key="pexels", kind="video")
+
+    def _mkctx(mode):
+        return Context(
+            session=None, pexels_api_key="", pixabay_api_key="", site_semaphores={},
+            global_semaphore=asyncio.Semaphore(1), clip_semaphore=asyncio.Semaphore(1),
+            used_files_lock=asyncio.Lock(), media_mode=mode,
+        )
+
+    _types_seen: list = []
+
+    def _mk_rv(by_type):
+        async def _rv(ctx_, seg_, variant_):
+            _types_seen.append(seg_.type)
+            return list(by_type.get(seg_.type, []))
+        return _rv
+
+    async def _fake_fin2(ctx_, cand_):
+        return f"https://cdn.example/{cand_.site}/{cand_.cand_id}"
+
+    _old = (_g["run_variant"], _g["finalize_candidate"])
+    _g["finalize_candidate"] = _fake_fin2
+    try:
+        # режим 1: родной image не принят, video принят по abs -> переключение
+        _g["run_variant"] = _mk_rv({"image": [_pc("i1", False, "floor", 0.1)], "video": [_pc("v1", True, "abs")]})
+        _c = _mkctx(1)
+        _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
+        assert _r[0] == "https://cdn.example/pexels/v1", _r
+        assert _c.switch_final == {5: "video"} and _c.switch_attempted == {5} and _c.switch_how["abs"] == 1
+        # режим 1: родной принят -> другой тип не трогаем
+        _types_seen.clear()
+        _g["run_variant"] = _mk_rv({"image": [_pc("i1", True, "abs")], "video": [_pc("v1", True, "abs")]})
+        _c = _mkctx(1)
+        _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
+        assert _r[0].endswith("/i1") and not _c.switch_attempted and set(_types_seen) == {"image"}, _types_seen
+        # режимы 2 и 3: переключения нет, best-effort на родном типе
+        for _m in (2, 3):
+            _types_seen.clear()
+            _g["run_variant"] = _mk_rv({"image": [_pc("i1", False, "floor", 0.1)], "video": [_pc("v1", True, "abs")]})
+            _c = _mkctx(_m)
+            _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
+            assert _r[0].endswith("/i1") and not _c.switch_final and not _c.switch_attempted, (_m, _r)
+            assert set(_types_seen) == {"image"}, _types_seen
+        # режим 1: никто не принят ни по одному типу -> best-effort родного типа, тип не меняется
+        _g["run_variant"] = _mk_rv({"image": [_pc("i1", False, "floor", 0.1)], "video": [_pc("v1", False, "rank_miss", 0.2)]})
+        _c = _mkctx(1)
+        _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
+        assert _r[0].endswith("/i1") and not _c.switch_final and _c.switch_attempted == {5}, _r
+        # режим 1: по родному ничего не оценено, у другого типа только слабые -> best-effort другого типа
+        _g["run_variant"] = _mk_rv({"video": [_pc("v1", False, "rank_miss", 0.2)]})
+        _c = _mkctx(1)
+        _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
+        assert _r[0].endswith("/v1") and _c.switch_final == {5: "video"} and _c.switch_how["best_effort"] == 1, _r
+        # режим 1: нигде ничего -> не найдено (missing), переключение не засчитано как найденное
+        _g["run_variant"] = _mk_rv({})
+        _c = _mkctx(1)
+        assert asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",)))) == (None, None)
+        assert _c.switch_attempted == {5} and not _c.switch_final
+    finally:
+        _g["run_variant"], _g["finalize_candidate"] = _old
+
+    # ---- ключ кандидата (site, kind, cand_id) ----
+    def _kc(site, kind, cid):
+        return Candidate(site=site, cand_id=cid, text="", license_ok=True, preview_url=None,
+                         page_url=None, kind=kind)
+
+    _kp, _kv = _kc("pexels", "photo", "1"), _kc("pexels", "video", "1")
+    assert cand_key(_kp) != cand_key(_kv), (cand_key(_kp), cand_key(_kv))
+    assert cand_key(_kp) == cand_key(_kc("pexels", "photo", "1")) == ("pexels", "photo", "1")
+    assert cand_key(_kc("pixabay", "photo", "1")) != cand_key(_kc("pixabay", "video", "1"))
+    assert cand_key(_kp) != cand_key(_kc("pixabay", "photo", "1"))
+    assert kind_of_media_type("image") == "photo" and kind_of_media_type("video") == "video"
+    for _bad_kind in ("", "image", None):
+        try:
+            cand_key(_kc("pexels", _bad_kind, "1"))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"cand_key принял kind={_bad_kind!r}")
+    try:
+        kind_of_media_type("gif")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("kind_of_media_type принял gif")
+    # used_files: photo id=1 и video id=1 не конфликтуют; повтор того же кандидата - конфликт
+    async def _fake_fin3(ctx_, cand_):
+        return f"https://cdn.example/{cand_.kind}/{cand_.cand_id}"
+
+    _old_fin3 = _g["finalize_candidate"]
+    _g["finalize_candidate"] = _fake_fin3
+    try:
+        _uctx3 = _types.SimpleNamespace(
+            used_files=set(), used_files_lock=asyncio.Lock(), primary_cands={},
+            choice_reasons=Counter(), choice_own_sims=[], backup_reasons=Counter(), backup_own_sims=[],
+        )
+        assert asyncio.run(_claim_first(_uctx3, [_kp]))[0] == "https://cdn.example/photo/1"
+        assert asyncio.run(_claim_first(_uctx3, [_kp]))[0] is None
+        assert asyncio.run(_claim_first(_uctx3, [_kv]))[0] == "https://cdn.example/video/1"
+        assert _uctx3.used_files == {("pexels", "photo", "1"), ("pexels", "video", "1")}
+        # _backup_pool: исключение по exclude_key отличает photo от video с тем же id
+        async def _fake_faf(ctx_, site_, seg_, query_, name_, stats_key=None):
+            return [_kc("pexels", "photo", "7"), _kc("pexels", "video", "7")]
+
+        async def _fake_score(ctx_, top_, **kw):
+            return list(top_)
+
+        _old_bp = (_g["fetch_and_filter"], _g["score_candidates"])
+        _g["fetch_and_filter"], _g["score_candidates"] = _fake_faf, _fake_score
+        try:
+            _bp = asyncio.run(_backup_pool(
+                _uctx3, "pexels", _types.SimpleNamespace(index=1), _types.SimpleNamespace(query="q", name="n"),
+                cand_key(_kc("pexels", "photo", "7")),
+            ))
+        finally:
+            _g["fetch_and_filter"], _g["score_candidates"] = _old_bp
+        assert [cand_key(c) for c in _bp] == [("pexels", "video", "7")], _bp
+    finally:
+        _g["finalize_candidate"] = _old_fin3
+    # кэш векторов: один id разных типов не делит вектор
+    _cc = EmbeddingCache()
+
+    async def _enc_p():
+        return "vec_photo"
+
+    async def _enc_v():
+        return "vec_video"
+
+    assert asyncio.run(_cc.get_or_compute(cand_key(_kp), _enc_p)) == "vec_photo"
+    assert asyncio.run(_cc.get_or_compute(cand_key(_kv), _enc_v)) == "vec_video"
+    assert asyncio.run(_cc.get_or_compute(cand_key(_kp), _enc_v)) == "vec_photo"
 
     print("selftest OK")
     return 0
