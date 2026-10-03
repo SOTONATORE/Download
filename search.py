@@ -20,7 +20,9 @@ search.py
                         части сегментов backup просто не находится, это
                         нормальный случай (см. try_claim_backup)
     missing.txt      - номера сегментов, для которых ничего подходящего не нашлось
-    min_durations.json - {"номер": секунды} ТОЛЬКО для видео-сегментов (type=video, не skip);
+    min_durations.json - {"номер": секунды} ТОЛЬКО для видео-сегментов (type=video, не skip),
+                        у которых есть строка в итоговом links.txt (ненайденные в файл не
+                        попадают; тип - итоговый, после переключения);
                         лежит в том же каталоге, что и links.txt; значение = min_duration из
                         requests.json без изменений (читает download.py)
 
@@ -83,6 +85,12 @@ search.py
     SEARCH_PIXABAY_STRICT_TYPES - типы контента в запросах к Pixabay (умолч. 1): для видео
         добавляется video_type=film, для фото image_type=photo (отсекает анимацию, 3D-рендеры,
         иллюстрации). 0/false/no/off - параметры не добавляются (прежнее поведение). Читается один раз.
+    SEARCH_DIRECT_LINKS - 1 (умолч., также при пустом/отсутствующем): для Pexels/Pixabay в links.txt и
+        backup_links.txt пишется ПРЯМАЯ ссылка на файл из ответа поиска (download.py качает её без
+        запроса к API); 0 - всегда page_url, как раньше. Другое значение - остановка с ошибкой.
+        Прямая ссылка используется, только если расширение её пути (jpg/jpeg/png для фото,
+        mp4/mov/avi для видео - по media_formats) соответствует типу и хост входит в CDN-хосты,
+        которые download.py считает прямыми; иначе пишется page_url (откаты считаются в сводке).
 
 Возвращаемые коды:
     0 - links.txt и missing.txt успешно записаны (даже если часть/все сегменты в missing)
@@ -303,9 +311,9 @@ import sys
 import threading
 import time
 import unicodedata
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field, replace as dc_replace
-from typing import Any, Awaitable, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Collection, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
 from media_formats import (
@@ -487,12 +495,16 @@ def duration_verdict(raw: Any, min_duration: float) -> str:
 MIN_DURATIONS_FILENAME = "min_durations.json"
 
 
-def build_min_durations(segments: Sequence["SegmentSpec"]) -> dict:
-    """Чистая функция. {"номер": float} только для type == "video" и не skip, по возрастанию
-    номера; значение min_duration без изменений. Видео без min_duration -> ValueError."""
+def build_min_durations(segments: Sequence["SegmentSpec"], *, found: Collection[int]) -> dict:
+    """Чистая функция. {"номер": float} только для сегментов, у которых type == "video", нет skip и
+    номер входит в found (= номера, реально записанные в итоговый links.txt); по возрастанию номера;
+    значение min_duration без изменений. Раньше found не было: в файл попадали ВСЕ видео-сегменты
+    requests.json, в том числе не найденные (они в missing.txt и ссылки не имеют).
+    Найденное видео без min_duration -> ValueError."""
+    found_set = set(found)
     out: dict = {}
     for sg in sorted(segments, key=lambda x: x.index):
-        if sg.type != "video" or sg.skip:
+        if sg.type != "video" or sg.skip or sg.index not in found_set:
             continue
         if sg.min_duration is None:
             raise ValueError(
@@ -524,10 +536,13 @@ def write_json_atomic(path: str, obj: Any) -> None:
                 pass
 
 
-def write_min_durations(links_output: str, segments: Sequence["SegmentSpec"]) -> str:
-    """Пишет min_durations.json (пустой объект {}, если видео-сегментов нет). Возвращает путь."""
+def write_min_durations(
+    links_output: str, segments: Sequence["SegmentSpec"], *, found: Collection[int],
+) -> str:
+    """Пишет min_durations.json (пустой объект {}, если подходящих видео-сегментов нет).
+    found - номера из итогового links.txt; segments - с ИТОГОВЫМ типом. Возвращает путь."""
     path = min_durations_path(links_output)
-    write_json_atomic(path, build_min_durations(segments))
+    write_json_atomic(path, build_min_durations(segments, found=found))
     return path
 _WM_BLOCKLIST_ENV = os.environ.get("SEARCH_WIKIMEDIA_BLOCKLIST")
 WIKIMEDIA_BLOCKLIST_WORDS: tuple = (
@@ -988,6 +1003,193 @@ class RateLimiter:
 
 
 # ---------------------------------------------------------------------------
+# Лимиты Pexels/Pixabay: скользящее окно, временное закрытие сайта, повтор потерянных
+# ---------------------------------------------------------------------------
+# Документация: Pexels - 200 запросов/час (в ответе 429 заголовков с остатком нет);
+# Pixabay - 100 запросов/60 с (заголовки X-RateLimit-Remaining и X-RateLimit-Reset, второй -
+# секунды до сброса окна). Запас от потолка: pexels 190, pixabay 90 (env, см. load_rate_config).
+# Pixabay - основной сток: перед каждым реальным запросом ждём место в окне.
+# Pexels - запасной: когда окно заполнено или пришёл 429, сайт закрывается на время, а сегменты
+# идут на другие сайты (ждать внутри сегмента не нужно); потерянные сегменты повторяются
+# одним проходом перед backup-проходом (run_retry_pass).
+
+PIXABAY_WINDOW_SECONDS = 60.0
+PEXELS_WINDOW_SECONDS = 3600.0
+PIXABAY_429_MAX_RETRIES = 3                # повторов того же запроса после 429
+PIXABAY_429_FALLBACK_PAUSE_SECONDS = 61.0  # пауза, если X-RateLimit-Reset нет/нечитаем
+PIXABAY_429_RESET_MARGIN_SECONDS = 1.0     # запас к X-RateLimit-Reset (иначе повтор при reset=0 ударит в то же окно)
+PIXABAY_429_RESET_SANE_MAX_SECONDS = 600.0  # reset больше этого - мусор в заголовке, берём fallback
+PIXABAY_CLOSE_AFTER_RETRIES_SECONDS = 120.0  # на сколько закрыть Pixabay, если все повторы дали 429
+
+
+class SiteTemporarilyClosed(Exception):
+    """Запрос не отправлен (или потерян), потому что сайт временно закрыт. Не ошибка данных:
+    ловится в fetch_and_filter, сегмент запоминается для повторного прохода."""
+
+    def __init__(self, site: str, reason: str = "") -> None:
+        super().__init__(f"{site}: сайт временно закрыт" + (f" ({reason})" if reason else ""))
+        self.site = site
+
+
+@dataclass(frozen=True)
+class RateConfig:
+    pixabay_requests_per_minute: int = 90
+    pexels_requests_per_hour: int = 190
+    pexels_cooldown_seconds: float = 900.0
+    retry_wait_max_seconds: float = 120.0
+
+
+def _env_number(
+    environ: Mapping[str, str], name: str, default: Any, cast: Callable[[str], Any],
+    minimum: float, strict: bool = False,
+) -> Any:
+    """Пустая/незаданная переменная - default (в GitHub Actions незаданная vars.X даёт пустую
+    строку). Мусор или значение вне границы - ValueError с именем переменной."""
+    raw = environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    kind = "целое число" if cast is int else "число"
+    try:
+        value = cast(raw.strip())
+    except ValueError:
+        raise ValueError(f"{name}={raw!r}: ожидается {kind}") from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name}={raw!r}: ожидается конечное {kind}")
+    if value < minimum or (strict and value <= minimum):
+        raise ValueError(f"{name}={raw!r}: значение должно быть {'больше' if strict else 'не меньше'} {minimum:g}")
+    return value
+
+
+def load_rate_config(environ: Optional[Mapping[str, str]] = None) -> RateConfig:
+    env = os.environ if environ is None else environ
+    d = RateConfig()
+    return RateConfig(
+        pixabay_requests_per_minute=_env_number(
+            env, "PIXABAY_REQUESTS_PER_MINUTE", d.pixabay_requests_per_minute, int, 1),
+        pexels_requests_per_hour=_env_number(
+            env, "PEXELS_REQUESTS_PER_HOUR", d.pexels_requests_per_hour, int, 1),
+        pexels_cooldown_seconds=_env_number(
+            env, "PEXELS_COOLDOWN_SECONDS", d.pexels_cooldown_seconds, float, 0.0, strict=True),
+        retry_wait_max_seconds=_env_number(
+            env, "RETRY_WAIT_MAX_SECONDS", d.retry_wait_max_seconds, float, 0.0),
+    )
+
+
+class SlidingWindowBudget:
+    """Не более max_requests взятий за любые window_seconds (скользящее окно). Чистый класс:
+    время через now_fn, сети нет. Вызывается из одного потока событийного цикла."""
+
+    def __init__(self, max_requests: int, window_seconds: float,
+                 now_fn: Callable[[], float] = time.monotonic) -> None:
+        if not isinstance(max_requests, int) or max_requests < 1:
+            raise ValueError(f"max_requests должен быть целым >= 1, получено {max_requests!r}")
+        if not window_seconds > 0:
+            raise ValueError(f"window_seconds должен быть > 0, получено {window_seconds!r}")
+        self.max_requests = max_requests
+        self.window_seconds = float(window_seconds)
+        self._now = now_fn
+        self._stamps: deque = deque()
+
+    def _evict(self, now: float) -> None:
+        while self._stamps and self._stamps[0] + self.window_seconds <= now:
+            self._stamps.popleft()
+
+    def try_acquire(self) -> bool:
+        now = self._now()
+        self._evict(now)
+        if len(self._stamps) < self.max_requests:
+            self._stamps.append(now)
+            return True
+        return False
+
+    def seconds_until_free(self) -> float:
+        """0.0, если место есть прямо сейчас; иначе сколько секунд до освобождения первого."""
+        now = self._now()
+        self._evict(now)
+        if len(self._stamps) < self.max_requests:
+            return 0.0
+        return self._stamps[0] + self.window_seconds - now
+
+
+def _fmt_secs(seconds: float) -> str:
+    return f"{seconds:.0f}" if seconds >= 10 else f"{seconds:.1f}"
+
+
+class SiteClosures:
+    """Временные закрытия сайтов со временем открытия. Закрытие и открытие - по одной строке
+    лога (open логируется, когда истечение впервые замечено: is_closed/sweep). Повторное close()
+    на уже закрытый сайт только продлевает срок (без новой строки и без счёта)."""
+
+    def __init__(self, now_fn: Callable[[], float] = time.monotonic,
+                 log_fn: Optional[Callable[[str], Any]] = None) -> None:
+        self._now = now_fn
+        self._log = log_fn if log_fn is not None else logging.info
+        self._until: dict = {}
+        self._info: dict = {}
+        self.close_counts: Counter = Counter()
+
+    def close(self, site: str, seconds: float, reason: str) -> None:
+        if not seconds > 0:
+            raise ValueError(f"Закрытие {site}: seconds должен быть > 0, получено {seconds!r}")
+        self.is_closed(site)  # сначала снять просроченное закрытие (и записать его в лог)
+        now = self._now()
+        new_until = now + seconds
+        if site in self._until:
+            self._until[site] = max(self._until[site], new_until)
+            return
+        self._until[site] = new_until
+        self._info[site] = (seconds, reason)
+        self.close_counts[site] += 1
+        self._log(f"Сайт {site} закрыт на {_fmt_secs(seconds)} с: {reason}.")
+
+    def is_closed(self, site: str) -> bool:
+        until = self._until.get(site)
+        if until is None:
+            return False
+        if self._now() < until:
+            return True
+        seconds, reason = self._info.pop(site)
+        del self._until[site]
+        self._log(f"Сайт {site} снова открыт (был закрыт на {_fmt_secs(seconds)} с: {reason}).")
+        return False
+
+    def seconds_until_open(self, site: str) -> float:
+        return (self._until[site] - self._now()) if self.is_closed(site) else 0.0
+
+    def sweep(self) -> None:
+        for site in list(self._until):
+            self.is_closed(site)
+
+
+def pixabay_reset_pause(raw: Optional[str]) -> tuple:
+    """(пауза в секундах, откуда взята) по заголовку X-RateLimit-Reset (секунды до сброса окна).
+    Нет заголовка / не число / отрицательное / больше PIXABAY_429_RESET_SANE_MAX_SECONDS -
+    PIXABAY_429_FALLBACK_PAUSE_SECONDS, причина возвращается второй частью (для лога)."""
+    if raw is None:
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, "X-RateLimit-Reset отсутствует"
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, f"X-RateLimit-Reset={raw!r} не число"
+    if not math.isfinite(v) or v < 0 or v > PIXABAY_429_RESET_SANE_MAX_SECONDS:
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, f"X-RateLimit-Reset={raw!r} вне разумных границ"
+    return v + PIXABAY_429_RESET_MARGIN_SECONDS, f"X-RateLimit-Reset={raw} + запас {PIXABAY_429_RESET_MARGIN_SECONDS:g} с"
+
+
+def retry_wait_plan(lost_sites: set, closures: SiteClosures, max_wait: float) -> tuple:
+    """Решение для повторного прохода: ('now', 0) - какой-то из сайтов уже открыт;
+    ('wait', сек) - ближайший откроется не позже max_wait; ('skip', сек) - позже max_wait."""
+    if not lost_sites:
+        raise ValueError("retry_wait_plan: пустой набор сайтов")
+    earliest = min(closures.seconds_until_open(s) for s in sorted(lost_sites))
+    if earliest <= 0:
+        return "now", 0.0
+    if earliest <= max_wait:
+        return "wait", earliest
+    return "skip", earliest
+
+
+# ---------------------------------------------------------------------------
 # Модели данных
 # ---------------------------------------------------------------------------
 
@@ -1028,6 +1230,10 @@ class Candidate:
     # Тип медиа кандидата: "photo" | "video". Номера фото и видео у Pexels/Pixabay лежат в разных
     # пространствах, поэтому тип входит в ключ (см. cand_key). Заполняется в search_*.
     kind: str = ""
+    # Прямая ссылка на файл из ответа поиска (только Pexels/Pixabay; правило выбора совпадает с
+    # download_pexels_*/download_pixabay_*). None - в ответе нужного поля нет. В links.txt уходит
+    # только через pick_final_url (после проверки расширения/хоста), page_url остаётся для логов.
+    direct_url: Optional[str] = None
 
 
 CAND_KINDS = ("photo", "video")
@@ -1076,12 +1282,31 @@ class Context:
     choice_own_sims: list = field(default_factory=list)
     backup_reasons: Counter = field(default_factory=Counter)
     backup_own_sims: list = field(default_factory=list)
+    direct_links: bool = True                            # SEARCH_DIRECT_LINKS (parse_direct_links)
+    direct_fallbacks: dict = field(default_factory=dict)  # page_url -> "ext" | "host" (откаты прямой ссылки)
     media_mode: int = MEDIA_MODE_DEFAULT  # 1 смешанный / 2 только видео / 3 только фото (см. parse_media_mode)
     # Переключение типа (только режим 1): номера сегментов, для которых пробовали другой тип;
     # номер -> ИТОГОВЫЙ тип (только если на другом типе кандидат найден); способ: abs / rank / best_effort.
     switch_attempted: set = field(default_factory=set)
     switch_final: dict = field(default_factory=dict)
     switch_how: Counter = field(default_factory=Counter)
+    # Лимиты Pexels/Pixabay (см. блок "Лимиты Pexels/Pixabay"). now_fn/sleep_fn подменяются в
+    # self-test; closures должен делить с now_fn одни часы.
+    now_fn: Callable[[], float] = time.monotonic
+    sleep_fn: Callable[[float], Awaitable[Any]] = asyncio.sleep
+    rate_cfg: RateConfig = field(default_factory=RateConfig)
+    closures: SiteClosures = field(default_factory=SiteClosures)
+    budgets: dict = field(default_factory=dict)          # сайт -> SlidingWindowBudget
+    request_counts: Counter = field(default_factory=Counter)  # сайт -> реальных HTTP-запросов
+    rl_pause_until: dict = field(default_factory=dict)   # pixabay: общая пауза после 429
+    lost_segments: dict = field(default_factory=dict)    # номер сегмента -> {сайты, пропущенные из-за закрытия}
+
+    def site_unavailable(self, site: str) -> bool:
+        """Сайт закрыт насовсем (exhausted_sites) или временно (closures)."""
+        return site in self.exhausted_sites or self.closures.is_closed(site)
+
+    def mark_lost(self, seg_index: int, site: str) -> None:
+        self.lost_segments.setdefault(seg_index, set()).add(site)
 
 
 # ---------------------------------------------------------------------------
@@ -1268,6 +1493,36 @@ class ClipScorer:
 # HTTP-хелпер с ретраями/бэкоффом + учёт 429-исчерпания
 # ---------------------------------------------------------------------------
 
+async def _take_request_slot(ctx: Context, site: str) -> None:
+    """Место в окне перед КАЖДЫМ реальным HTTP-запросом к pixabay/pexels (повторы тоже считаются).
+    pixabay: если места нет - ждём (и общую паузу после 429), не пропускаем.
+    pexels: если места нет - закрываем сайт до освобождения и бросаем SiteTemporarilyClosed;
+    взяв последнее место, закрываем сайт сразу, чтобы run_variant не слал в него новые запросы."""
+    budget = ctx.budgets.get(site)
+    if budget is None:
+        return
+    if site == "pexels":
+        if not budget.try_acquire():
+            reason = f"окно {budget.max_requests}/{budget.window_seconds:.0f} с заполнено"
+            ctx.closures.close(site, max(budget.seconds_until_free(), 0.001), reason)
+            raise SiteTemporarilyClosed(site, reason)
+        ctx.request_counts[site] += 1
+        wait = budget.seconds_until_free()
+        if wait > 0:
+            ctx.closures.close(
+                site, wait, f"окно {budget.max_requests}/{budget.window_seconds:.0f} с заполнено")
+        return
+    while True:
+        pause = ctx.rl_pause_until.get(site, 0.0) - ctx.now_fn()
+        if pause > 0:
+            await ctx.sleep_fn(pause)
+            continue
+        if budget.try_acquire():
+            break
+        await ctx.sleep_fn(max(budget.seconds_until_free(), 0.01))
+    ctx.request_counts[site] += 1
+
+
 async def http_get_json(
     ctx: Context,
     site: str,
@@ -1308,14 +1563,23 @@ async def http_get_json(
     request_id = _request_id()
     last_error: Optional[BaseException] = None
 
-    for attempt in range(1, max_attempts + 1):
+    rl_retries = 0  # повторы после 429 Pixabay: не тратят общие попытки
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        # Временное закрытие (pexels/pixabay): проверка и на входе, и после пауз/ожиданий -
+        # пока мы спали, другой запрос мог закрыть сайт.
+        if ctx.closures.is_closed(site):
+            raise SiteTemporarilyClosed(site)
         has_next = attempt < max_attempts
         backoff = min(INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS)
         retry_after: Optional[float] = None
+        pause_after: Optional[float] = None  # точная пауза перед повтором того же запроса (429 Pixabay)
 
         async with ctx.site_semaphores[site]:
             if rate_limiter is not None:
                 await rate_limiter.wait_turn()
+            await _take_request_slot(ctx, site)
             attempt_started = time.monotonic()
             try:
                 async with ctx.session.get(
@@ -1325,19 +1589,44 @@ async def http_get_json(
                     status = resp.status
 
                     if status == 429:
-                        if treat_429_as_exhaustion:
+                        if treat_429_as_exhaustion and site == "pixabay":
+                            # Не исчерпание: ждём сброса окна и повторяем тот же запрос.
+                            if rl_retries < PIXABAY_429_MAX_RETRIES:
+                                pause, src = pixabay_reset_pause(resp.headers.get("X-RateLimit-Reset"))
+                                rl_retries += 1
+                                ctx.rl_pause_until[site] = max(
+                                    ctx.rl_pause_until.get(site, 0.0), ctx.now_fn() + pause)
+                                logging.warning(
+                                    "pixabay: 429, повтор %s/%s через %s с (%s); сайт не закрываю.",
+                                    rl_retries, PIXABAY_429_MAX_RETRIES, _fmt_secs(pause), src,
+                                )
+                                last_error = RuntimeError("429 Too Many Requests")
+                                attempt -= 1  # повтор после 429 не расходует общие попытки
+                                pause_after = pause
+                            else:
+                                ctx.closures.close(
+                                    site, PIXABAY_CLOSE_AFTER_RETRIES_SECONDS,
+                                    f"429 после {PIXABAY_429_MAX_RETRIES} повторов",
+                                )
+                                raise SiteTemporarilyClosed(site, "429 после всех повторов")
+                        elif treat_429_as_exhaustion and site == "pexels":
+                            ctx.closures.close(
+                                site, ctx.rate_cfg.pexels_cooldown_seconds, "получен 429 от Pexels")
+                            raise SiteTemporarilyClosed(site, "429")
+                        elif treat_429_as_exhaustion:
                             logging.warning(
                                 "%s: получен 429 - помечаю сайт исчерпанным до конца "
                                 "текущего запуска.", site,
                             )
                             ctx.exhausted_sites.add(site)
                             return None
-                        logging.warning(
-                            "%s: 429, попытка %s/%s, %s.", site, attempt, max_attempts,
-                            f"жду {backoff:.1f}s" if has_next else "попыток больше нет",
-                        )
-                        last_error = RuntimeError("429 Too Many Requests")
-                        retry_after = backoff
+                        else:
+                            logging.warning(
+                                "%s: 429, попытка %s/%s, %s.", site, attempt, max_attempts,
+                                f"жду {backoff:.1f}s" if has_next else "попыток больше нет",
+                            )
+                            last_error = RuntimeError("429 Too Many Requests")
+                            retry_after = backoff
 
                     elif status in (401, 403):
                         text = await resp.text()
@@ -1411,6 +1700,9 @@ async def http_get_json(
                 )
                 retry_after = backoff
 
+        if pause_after is not None:
+            await ctx.sleep_fn(pause_after)
+            continue
         if retry_after is not None and has_next:
             await asyncio.sleep(retry_after + random.uniform(0, 1))
 
@@ -1434,7 +1726,136 @@ async def cached_search(
         if task is None:
             task = asyncio.ensure_future(fetch_coro_factory())
             ctx.search_cache[key] = task
-    return await task
+    try:
+        return await task
+    except SiteTemporarilyClosed:
+        # Запрос потерян из-за закрытия сайта: не кэшируем, иначе повторный проход
+        # получил бы тот же отказ вместо реального запроса.
+        async with ctx.search_cache_lock:
+            if ctx.search_cache.get(key) is task:
+                del ctx.search_cache[key]
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Прямые ссылки Pexels/Pixabay (см. SEARCH_DIRECT_LINKS в докстринге модуля)
+#
+# Правила выбора файла скопированы из download.py (читаются там из ответа API по id; в ответе
+# ПОИСКА те же поля):
+#   pexels фото   - src.original, иначе src.large                    (download_pexels_photo)
+#   pexels видео  - из video_files только file_type == "video/mp4" с непустым link; берётся файл с
+#                   максимальным width (None/0 -> 0; при равенстве - первый)  (download_pexels_video)
+#   pixabay фото  - largeImageURL, иначе imageURL                    (download_pixabay_photo)
+#   pixabay видео - videos.large, иначе videos.medium, иначе videos.small (первый непустой словарь,
+#                   без перехода к меньшему размеру, если у него пустой url); берётся его url
+#                                                                    (download_pixabay_video)
+# ---------------------------------------------------------------------------
+
+# Хосты, которые download.py (DIRECT_MEDIA_DOMAINS) считает прямыми ссылками. Для любого другого хоста
+# download.py направил бы URL в другую ветку (напр. pixabay.com/get/... -> попытка взять id из конца
+# ссылки -> провал), поэтому такая прямая ссылка не используется. Копия констант: download.py сюда
+# не импортируется (curl_cffi); при изменении там - обновить здесь.
+DIRECT_HOSTS_BY_SITE = {
+    "pexels": frozenset({"images.pexels.com", "videos.pexels.com"}),
+    "pixabay": frozenset({"cdn.pixabay.com"}),
+}
+DIRECT_ALLOWED_HOSTS = frozenset().union(*DIRECT_HOSTS_BY_SITE.values())
+
+
+def parse_direct_links(raw: Optional[str]) -> bool:
+    """Чистая функция. None/пусто -> True; "1" -> True; "0" -> False (пробелы по краям
+    игнорируются); любое другое значение -> ValueError (вызывающий останавливает работу)."""
+    if raw is None or not raw.strip():
+        return True
+    v = raw.strip()
+    if v == "1":
+        return True
+    if v == "0":
+        return False
+    raise ValueError(
+        f"SEARCH_DIRECT_LINKS={raw!r} недопустим: ожидается 1 (прямые ссылки, по умолчанию), "
+        "0 (всегда page_url, как раньше) или пустое значение (= 1)."
+    )
+
+
+def _clean_url(v: Any) -> Optional[str]:
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def pexels_photo_direct(photo: Mapping) -> Optional[str]:
+    src = photo.get("src") or {}
+    return _clean_url(src.get("original") or src.get("large"))
+
+
+def pexels_video_direct(video: Mapping) -> Optional[str]:
+    mp4 = [f for f in (video.get("video_files") or [])
+           if isinstance(f, dict) and f.get("file_type") == "video/mp4" and f.get("link")]
+    if not mp4:
+        return None
+    return _clean_url(max(mp4, key=lambda f: f.get("width") or 0)["link"])
+
+
+def pixabay_photo_direct(hit: Mapping) -> Optional[str]:
+    return _clean_url(hit.get("largeImageURL") or hit.get("imageURL"))
+
+
+def pixabay_video_direct(hit: Mapping) -> Optional[str]:
+    videos = hit.get("videos") or {}
+    best = videos.get("large") or videos.get("medium") or videos.get("small")
+    return _clean_url(best.get("url")) if isinstance(best, dict) else None
+
+
+def direct_fallback_reason(direct_url: str, kind: str) -> Optional[str]:
+    """None - прямую ссылку можно писать в links.txt. "ext" - у пути URL (без query) нет расширения
+    из белого списка для этого kind ("photo"/"video") или оно не соответствует типу. "host" - хост не из
+    DIRECT_ALLOWED_HOSTS."""
+    try:
+        parsed = urlparse(direct_url)
+    except ValueError:
+        return "ext"
+    if not is_allowed_ext(ext_from_name(parsed.path or ""), kind):
+        return "ext"
+    if (parsed.hostname or "").lower() not in DIRECT_ALLOWED_HOSTS:
+        return "host"
+    return None
+
+
+def pick_final_url(cand: "Candidate", direct_enabled: bool) -> tuple:
+    """Чистая функция. (URL для links.txt, причина отката | None). Прямая ссылка - только если
+    включена, задана и прошла direct_fallback_reason; иначе page_url (причина отката - "ext"/"host",
+    для включённой, но не заданной direct_url причины нет: это "в ответе поиска поля нет")."""
+    if direct_enabled and cand.direct_url:
+        reason = direct_fallback_reason(cand.direct_url, cand.kind)
+        if reason is None:
+            return cand.direct_url, None
+        return cand.page_url, reason
+    return cand.page_url, None
+
+
+def summarize_direct_links(label: str, urls: Mapping[int, str], fallbacks: Mapping[str, str]) -> str:
+    """Чистая функция: итоговая строка по ФАКТИЧЕСКИ записанным ссылкам (urls: номер -> URL из
+    links.txt / backup_links.txt). Y - ссылки Pexels/Pixabay; X - из них прямые (CDN-хост);
+    fallbacks: page_url -> причина отката (ext/host), заполняет finalize_candidate."""
+    tot = {"pexels": 0, "pixabay": 0}
+    direct = {"pexels": 0, "pixabay": 0}
+    rb = Counter()
+    for u in urls.values():
+        try:
+            host = (urlparse(u).hostname or "").lower()
+        except ValueError:
+            continue
+        for site in tot:
+            if host == f"{site}.com" or host.endswith(f".{site}.com"):
+                tot[site] += 1
+                if host in DIRECT_HOSTS_BY_SITE[site]:
+                    direct[site] += 1
+                elif u in fallbacks:
+                    rb[fallbacks[u]] += 1
+    return (
+        f"Прямых ссылок ({label}): {sum(direct.values())} из {sum(tot.values())} "
+        f"(pexels {direct['pexels']}/{tot['pexels']}, pixabay {direct['pixabay']}/{tot['pixabay']}); "
+        f"откатов на page_url: по расширению {rb['ext']}, по хосту {rb['host']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1463,7 +1884,7 @@ async def search_pexels(ctx: Context, query: str, media_type: str) -> list[Candi
                 result.append(Candidate(
                     site="pexels", cand_id=str(v["id"]), text="",
                     license_ok=True, preview_url=preview, page_url=v.get("url"),
-                    duration=v.get("duration"), kind="video",
+                    duration=v.get("duration"), kind="video", direct_url=pexels_video_direct(v),
                 ))
         else:
             for p in data.get("photos", []):
@@ -1472,6 +1893,7 @@ async def search_pexels(ctx: Context, query: str, media_type: str) -> list[Candi
                 result.append(Candidate(
                     site="pexels", cand_id=str(p["id"]), text=p.get("alt") or "",
                     license_ok=True, preview_url=preview, page_url=p.get("url"), kind="photo",
+                    direct_url=pexels_photo_direct(p),
                 ))
         return result
 
@@ -1510,6 +1932,7 @@ async def search_pixabay(ctx: Context, query: str, media_type: str) -> list[Cand
                 license_ok=True, preview_url=preview, page_url=page_url,
                 duration=hit.get("duration") if media_type == "video" else None,
                 kind=kind_of_media_type(media_type),
+                direct_url=pixabay_video_direct(hit) if media_type == "video" else pixabay_photo_direct(hit),
             ))
         return result
 
@@ -1949,7 +2372,10 @@ async def finalize_candidate(ctx: Context, cand: Candidate) -> Optional[str]:
         except Exception as e:
             logging.warning("Не удалось финализировать %s/%s: %s", cand.site, cand.cand_id, e)
             return None
-    return cand.page_url
+    url, reason = pick_final_url(cand, ctx.direct_links)
+    if reason is not None and url:
+        ctx.direct_fallbacks[url] = reason  # page_url -> причина; сводка сверяет с итоговыми файлами
+    return url
 
 
 async def try_claim_backup(
@@ -2194,7 +2620,15 @@ async def fetch_and_filter(
     stats = ctx.site_stats.setdefault(stats_key or _stats_key(site, variant_name), SiteStats())
     stats.segments_attempted += 1
 
-    raw = await SITE_SEARCH_FUNCS[site](ctx, q, seg.type)
+    try:
+        raw = await SITE_SEARCH_FUNCS[site](ctx, q, seg.type)
+    except SiteTemporarilyClosed as e:
+        ctx.mark_lost(seg.index, e.site)
+        logging.info(
+            "Сегмент %s/%s [%s]: сайт временно закрыт, запрос %r не выполнен (сегмент в списке повтора).",
+            seg.index, site, variant_name, q,
+        )
+        return []
     stats.raw_total += len(raw)
     if not raw:
         logging.info(
@@ -2373,6 +2807,9 @@ async def run_variant(ctx: Context, seg: SegmentSpec, variant: Variant) -> list[
     pool: list[Candidate] = []
     for site in variant.sites:
         if site in ctx.exhausted_sites or site not in SITE_SEARCH_FUNCS:
+            continue
+        if ctx.closures.is_closed(site):
+            ctx.mark_lost(seg.index, site)  # временное закрытие: сегмент идёт дальше, потом - в повтор
             continue
         key = _stats_key(site, variant.name)
         licensed = await fetch_and_filter(ctx, site, seg, variant.query, variant.name, stats_key=key)
@@ -2553,7 +2990,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
         for variant in cascade:
             pool: list[Candidate] = []
             for site in (x for x in variant.sites if x in group):
-                if site in ctx.exhausted_sites:
+                if ctx.site_unavailable(site):
                     continue
                 scored = await _backup_pool(ctx, site, seg, variant, pkey)
                 pool.extend(scored)
@@ -2568,7 +3005,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
                 rejected.extend(c for c in pool if not c.accepted)
 
     # B2: тот же сайт (для LOC полностью запрещено, чтобы не создать двойной отказ)
-    if primary.site not in ctx.exhausted_sites and primary.site != "loc":
+    if not ctx.site_unavailable(primary.site) and primary.site != "loc":
         for variant in cascade:
             if primary.site not in variant.sites:
                 continue
@@ -2677,6 +3114,70 @@ async def run_search(ctx: Context, segments: list[SegmentSpec]) -> tuple[dict, d
         raise
 
     return results, backups, missing
+
+
+async def run_retry_pass(
+    ctx: Context, segments: list[SegmentSpec], results: dict, backups: dict, missing: list,
+    max_wait_seconds: float,
+) -> tuple[int, int]:
+    """Повтор сегментов, потерянных из-за временного закрытия pexels/pixabay и оставшихся
+    «не найдено». Идёт после основного прохода, до backup-прохода. Повторяются только номера из
+    ctx.lost_segments, всё ещё стоящие в missing; не найденные по другой причине не трогаем.
+    Если ни один из потерянных сайтов не откроется за max_wait_seconds - повтор пропускается.
+    Находки переносятся в results/backups и убираются из missing (на месте).
+    Возвращает (повторено, найдено)."""
+    by_idx = {sg.index: sg for sg in segments}
+    todo = sorted(i for i in missing if i in ctx.lost_segments and i in by_idx)
+    if not todo:
+        return 0, 0
+    lost_sites: set = set()
+    for i in todo:
+        lost_sites |= ctx.lost_segments[i]
+    action, delay = retry_wait_plan(lost_sites, ctx.closures, max_wait_seconds)
+    if action == "wait":
+        logging.info(
+            "Повтор потерянных сегментов (%s): жду открытия сайта %s с (лимит ожидания %s с, "
+            "RETRY_WAIT_MAX_SECONDS).", len(todo), _fmt_secs(delay), _fmt_secs(max_wait_seconds),
+        )
+        await ctx.sleep_fn(delay + 0.05)
+        action, delay = retry_wait_plan(lost_sites, ctx.closures, 0.0)
+    if action != "now":
+        logging.info(
+            "Повтор потерянных сегментов (%s) пропущен: сайты %s не откроются за %s с "
+            "(до открытия ещё %s с); сегменты идут в missing.",
+            len(todo), ", ".join(sorted(lost_sites)), _fmt_secs(max_wait_seconds), _fmt_secs(delay),
+        )
+        return 0, 0
+    logging.info("Повтор потерянных сегментов: %s шт. (потеряны на сайтах: %s).",
+                 len(todo), ", ".join(sorted(lost_sites)))
+    for i in todo:
+        del ctx.lost_segments[i]  # если снова потеряется - запишется заново
+    tasks = [asyncio.ensure_future(process_segment(ctx, by_idx[i])) for i in todo]
+    found: dict = {}
+    try:
+        for coro in asyncio.as_completed(tasks):
+            idx, url, backup_url = await coro
+            if url:
+                found[idx] = (url, backup_url)
+    except FatalConfigError:
+        for t in tasks:
+            t.cancel()
+        raise
+    for idx, (url, backup_url) in found.items():
+        results[idx] = url
+        if backup_url:
+            backups[idx] = backup_url
+    missing[:] = [i for i in missing if i not in found]
+    return len(todo), len(found)
+
+
+def format_rate_summary_line(ctx: Context, retried: int, retry_found: int) -> str:
+    c = ctx.closures.close_counts
+    return (
+        f"Лимиты API: запросов pexels {ctx.request_counts['pexels']}, "
+        f"pixabay {ctx.request_counts['pixabay']}; закрытий сайта pexels {c['pexels']}, "
+        f"pixabay {c['pixabay']}; повторено сегментов {retried}, из них найдено {retry_found}."
+    )
 
 
 def split_skipped(specs: list[SegmentSpec]) -> tuple[list[SegmentSpec], list[int]]:
@@ -2808,6 +3309,13 @@ async def amain(args: argparse.Namespace) -> int:
         logging.error("%s", e)
         return 1
     logging.info("Режим медиа: %s (%s; MEDIA_MODE).", media_mode, MEDIA_MODE_NAMES[media_mode])
+    try:
+        direct_links = parse_direct_links(os.environ.get("SEARCH_DIRECT_LINKS"))
+    except ValueError as e:
+        logging.error("%s", e)
+        return 1
+    logging.info("Прямые ссылки Pexels/Pixabay в links.txt: %s (SEARCH_DIRECT_LINKS).",
+                 "вкл" if direct_links else "выкл, всегда page_url")
     if media_mode == 2:
         for _site in SITE_SEARCH_FUNCS:
             if site_skipped_in_video_only(_site):
@@ -2846,7 +3354,7 @@ async def amain(args: argparse.Namespace) -> int:
                             (args.backup_missing_output, [])):
             with open(path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-        write_min_durations(args.links_output, all_segments)  # все skip -> {}
+        write_min_durations(args.links_output, all_segments, found=())  # все skip -> {}
         logging.info(
             "Готово: найдено 0 из 0 сегментов, пропущено по skip %s (все записаны в %s).",
             len(skipped), args.missing_output,
@@ -2883,6 +3391,19 @@ async def amain(args: argparse.Namespace) -> int:
             "(в т.ч. broad-вариант каскада всегда идёт через pixabay/pexels)."
         )
         return 1
+    try:
+        rate_cfg = load_rate_config()
+    except ValueError as e:
+        logging.error("Ошибка настроек лимитов: %s", e)
+        return 1
+    logging.info(
+        "Лимиты: pixabay %s запросов за %.0f с (PIXABAY_REQUESTS_PER_MINUTE), pexels %s за %.0f с "
+        "(PEXELS_REQUESTS_PER_HOUR), пауза Pexels после 429 %.0f с (PEXELS_COOLDOWN_SECONDS), "
+        "ожидание перед повтором потерянных сегментов до %.0f с (RETRY_WAIT_MAX_SECONDS).",
+        rate_cfg.pixabay_requests_per_minute, PIXABAY_WINDOW_SECONDS,
+        rate_cfg.pexels_requests_per_hour, PEXELS_WINDOW_SECONDS,
+        rate_cfg.pexels_cooldown_seconds, rate_cfg.retry_wait_max_seconds,
+    )
 
     if LOC_MIN_INTERVAL_SECONDS > 0:
         logging.info(
@@ -2926,6 +3447,12 @@ async def amain(args: argparse.Namespace) -> int:
             clip_semaphore=asyncio.Semaphore(CLIP_CONCURRENCY),
             used_files_lock=asyncio.Lock(),
             media_mode=media_mode,
+            direct_links=direct_links,
+            rate_cfg=rate_cfg,
+            budgets={
+                "pixabay": SlidingWindowBudget(rate_cfg.pixabay_requests_per_minute, PIXABAY_WINDOW_SECONDS),
+                "pexels": SlidingWindowBudget(rate_cfg.pexels_requests_per_hour, PEXELS_WINDOW_SECONDS),
+            },
             rate_limiters={
                 "loc": RateLimiter(LOC_MIN_INTERVAL_SECONDS),
                 "loc_preview": RateLimiter(LOC_PREVIEW_MIN_INTERVAL_SECONDS),
@@ -2966,10 +3493,22 @@ async def amain(args: argparse.Namespace) -> int:
         # backup-проход ниже идёт по results, пропущенных там нет.
         missing.extend(skipped)
 
+        # Повтор сегментов, потерянных из-за временного закрытия pexels/pixabay (до backup-прохода).
+        try:
+            n_retried, n_retry_found = await run_retry_pass(
+                ctx, segments, results, backups, missing, rate_cfg.retry_wait_max_seconds,
+            )
+        except FatalConfigError as e:
+            logging.error("Структурная ошибка конфигурации: %s", e)
+            log_site_stats_summary(ctx.site_stats)
+            return 1
+
         backup_missing = await run_backup_pass(ctx, segments, results, backups)
 
         logging.info(summarize_choices(ctx.choice_reasons, ctx.choice_own_sims, "primary"))
         logging.info(summarize_choices(ctx.backup_reasons, ctx.backup_own_sims, "backup"))
+        logging.info(summarize_direct_links("primary", results, ctx.direct_fallbacks))
+        logging.info(summarize_direct_links("backup", backups, ctx.direct_fallbacks))
         if media_mode == 1:
             logging.info(summarize_type_switch(
                 len(ctx.switch_attempted), len(ctx.switch_final), ctx.switch_how,
@@ -2977,6 +3516,8 @@ async def amain(args: argparse.Namespace) -> int:
 
         log_site_stats_summary(ctx.site_stats)
         log_timing_stats_summary()
+        ctx.closures.sweep()  # дописать в лог открытия, которые никто не успел заметить
+        logging.info(format_rate_summary_line(ctx, n_retried, n_retry_found))
 
     with open(args.links_output, "w", encoding="utf-8") as f:
         for idx in sorted(results):
@@ -2988,8 +3529,11 @@ async def amain(args: argparse.Namespace) -> int:
 
     # по ИТОГОВОМУ типу (после переключения и backup-прохода)
     final_segs = final_segments(all_segments, ctx.switch_final)
-    md_path = write_min_durations(args.links_output, final_segs)
-    logging.info("Записан %s (видео-сегментов: %s).", md_path, len(build_min_durations(final_segs)))
+    md_path = write_min_durations(args.links_output, final_segs, found=results.keys())
+    logging.info(
+        "Записан %s (видео-сегментов со ссылкой: %s; видео без ссылки в файл не попадают).",
+        md_path, len(build_min_durations(final_segs, found=results.keys())),
+    )
 
     with open(args.missing_output, "w", encoding="utf-8") as f:
         for idx in sorted(missing):
@@ -3543,13 +4087,26 @@ def _selftest() -> int:
 
     _segs = [_sg(10, "video", 7.25), _sg(2, "video", 5.0), _sg(3, "image", None),
              _sg(4, "video", 9.0, skip=True), _sg(5, "image", 4.0)]
-    _md = build_min_durations(_segs)
+    _all_found = {2, 3, 4, 5, 10}
+    _md = build_min_durations(_segs, found=_all_found)
     assert _md == {"2": 5.0, "10": 7.25} and list(_md) == ["2", "10"], _md
     assert all(isinstance(v, float) for v in _md.values())
-    assert build_min_durations([_sg(1, "image", None)]) == {} and build_min_durations([]) == {}
-    assert build_min_durations([_sg(1, "video", 3.0, skip=True)]) == {}
+    # только сегменты со ссылкой в links.txt: видео 10 не найдено (в missing) -> ключа нет
+    assert build_min_durations(_segs, found={2, 3, 5}) == {"2": 5.0}
+    assert build_min_durations(_segs, found=[]) == {} and build_min_durations(_segs, found=()) == {}
+    assert build_min_durations(_segs, found={10}) == {"10": 7.25}
+    assert build_min_durations(_segs, found={999}) == {}  # номер без сегмента игнорируется
+    assert build_min_durations(_segs, found={4}) == {}    # skip не попадает даже если номер "найден"
+    assert build_min_durations(_segs, found={3, 5}) == {}  # найденные image в файл не идут
+    # найденных видео меньше, чем всего: 34 из 40 без ссылки -> в файле только 6
+    _many = [_sg(i, "video", 5.0) for i in range(1, 41)]
+    assert list(build_min_durations(_many, found=range(1, 7))) == [str(i) for i in range(1, 7)]
+    assert build_min_durations([_sg(1, "image", None)], found={1}) == {} and build_min_durations([], found={1}) == {}
+    assert build_min_durations([_sg(1, "video", 3.0, skip=True)], found={1}) == {}
+    # видео без min_duration, но НЕ найденное, не мешает; найденное - останавливает
+    assert build_min_durations([_sg(1, "video", None)], found=()) == {}
     try:
-        build_min_durations([_sg(1, "video", None)])
+        build_min_durations([_sg(1, "video", None)], found={1})
     except ValueError as e:
         assert "Сегмент 1" in str(e) and "min_duration" in str(e), e
     else:
@@ -3557,15 +4114,18 @@ def _selftest() -> int:
     with tempfile.TemporaryDirectory() as _d:
         _links = os.path.join(_d, "sub", "links.txt")
         os.makedirs(os.path.dirname(_links))
-        _pth = write_min_durations(_links, _segs)
+        _pth = write_min_durations(_links, _segs, found=_all_found)
         assert _pth == os.path.join(_d, "sub", "min_durations.json"), _pth
         with open(_pth, "r", encoding="utf-8") as fh:
             _raw = fh.read()
         assert json.loads(_raw) == {"2": 5.0, "10": 7.25} and "5.0" in _raw, _raw
         assert os.listdir(os.path.dirname(_pth)) == ["min_durations.json"]  # tmp-файла не осталось
-        write_min_durations(_links, [_sg(1, "image", None)])  # нет видео -> пустой объект, файл есть
+        write_min_durations(_links, [_sg(1, "image", None)], found={1})  # нет видео -> пустой объект, файл есть
         with open(_pth, "r", encoding="utf-8") as fh:
             assert json.load(fh) == {}
+        write_min_durations(_links, _segs, found={2})  # итоговый links.txt содержит только сегмент 2
+        with open(_pth, "r", encoding="utf-8") as fh:
+            assert json.load(fh) == {"2": 5.0}
 
     # load_requests: min_duration
     _gv = good["1"]
@@ -3686,7 +4246,8 @@ def _selftest() -> int:
     _sw = {1: "video", 2: "image"}
     _fs = final_segments([_bs(1, "image", 4.0), _bs(2, "video", 6.0), _bs(3, "video", 7.0)], _sw)
     assert [x.type for x in _fs] == ["video", "image", "video"]
-    assert build_min_durations(_fs) == {"1": 4.0, "3": 7.0}, build_min_durations(_fs)
+    assert build_min_durations(_fs, found={1, 2, 3}) == {"1": 4.0, "3": 7.0}
+    assert build_min_durations(_fs, found={2, 3}) == {"3": 7.0}  # 2 стал image, 1 не найден
     _orig = _bs(1, "image", 4.0)
     assert effective_segment(_orig, {}) is _orig and _orig.type == "image"
 
@@ -3883,6 +4444,474 @@ def _selftest() -> int:
     asyncio.run(_rl_check())
     _n1, _tot1, _, _mx1 = RATE_LIMITER_WAIT_STATS.snapshot()
     assert _n1 - _n0 == 3 and _mx1 > 0.0
+
+    # --- Лимиты Pexels/Pixabay: окно, закрытия, 429, повтор потерянных (время и HTTP подменены) ---
+    class _Clock:
+        def __init__(self):
+            self.t = 1000.0
+
+        def __call__(self):
+            return self.t
+
+    _ck = _Clock()
+    _bd = SlidingWindowBudget(3, 10.0, now_fn=_ck)
+    assert _bd.seconds_until_free() == 0.0
+    _t0 = _ck.t
+    for _dt in (0, 2, 2):  # взятия в t0, t0+2, t0+4
+        _ck.t += _dt
+        assert _bd.try_acquire() is True
+    assert _bd.seconds_until_free() == 6.0  # первое выйдет из окна в t0+10
+    _ck.t = _t0 + 5
+    assert _bd.try_acquire() is False and _bd.seconds_until_free() == 5.0
+    _ck.t = _t0 + 10  # граница: первое взятие уже вне окна
+    assert _bd.seconds_until_free() == 0.0 and _bd.try_acquire() is True
+    _ck.t = _t0 + 11  # в окне t0+2, t0+4, t0+10
+    assert _bd.try_acquire() is False and _bd.seconds_until_free() == 1.0
+    for _bad in ((0, 10.0), (3, 0.0), (3, -1.0), (2.5, 10.0)):
+        try:
+            SlidingWindowBudget(*_bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"SlidingWindowBudget{_bad} должен падать")
+
+    _lg: list = []
+    _cl = SiteClosures(now_fn=_ck, log_fn=_lg.append)
+    assert _cl.is_closed("pexels") is False and _cl.seconds_until_open("pexels") == 0.0
+    _cl.close("pexels", 900, "получен 429 от Pexels")
+    assert _cl.is_closed("pexels") and _cl.seconds_until_open("pexels") == 900.0
+    _cl.close("pexels", 100, "ещё раз")  # короче текущего: срок не уменьшается, строки/счёта нет
+    assert _cl.seconds_until_open("pexels") == 900.0 and _cl.close_counts["pexels"] == 1
+    assert len(_lg) == 1 and "закрыт на 900 с" in _lg[0] and "429" in _lg[0], _lg
+    _ck.t += 899
+    assert _cl.is_closed("pexels") and len(_lg) == 1
+    _ck.t += 1
+    assert _cl.is_closed("pexels") is False and len(_lg) == 2 and "снова открыт" in _lg[1], _lg
+    _cl.is_closed("pexels")
+    assert len(_lg) == 2  # открытие логируется один раз
+    _cl.close("pexels", 5, "x")
+    assert _cl.close_counts["pexels"] == 2
+    _ck.t += 5
+    _cl.sweep()
+    assert len(_lg) == 4 and "снова открыт" in _lg[3]
+    try:
+        _cl.close("pexels", 0, "x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("close(seconds=0) должен падать")
+
+    assert pixabay_reset_pause("12") == (13.0, "X-RateLimit-Reset=12 + запас 1 с")
+    assert pixabay_reset_pause("0")[0] == 1.0
+    for _raw in (None, "abc", "-3", "99999", "nan"):
+        assert pixabay_reset_pause(_raw)[0] == 61.0, _raw
+
+    _cfg = load_rate_config({})
+    assert (_cfg.pixabay_requests_per_minute, _cfg.pexels_requests_per_hour,
+            _cfg.pexels_cooldown_seconds, _cfg.retry_wait_max_seconds) == (90, 190, 900.0, 120.0)
+    _cfg = load_rate_config({"PIXABAY_REQUESTS_PER_MINUTE": "50", "PEXELS_REQUESTS_PER_HOUR": "100",
+                             "PEXELS_COOLDOWN_SECONDS": "30.5", "RETRY_WAIT_MAX_SECONDS": "0",
+                             "X": ""})
+    assert (_cfg.pixabay_requests_per_minute, _cfg.pexels_requests_per_hour,
+            _cfg.pexels_cooldown_seconds, _cfg.retry_wait_max_seconds) == (50, 100, 30.5, 0.0)
+    assert load_rate_config({"PEXELS_REQUESTS_PER_HOUR": "  "}).pexels_requests_per_hour == 190
+    for _env in ({"PIXABAY_REQUESTS_PER_MINUTE": "abc"}, {"PIXABAY_REQUESTS_PER_MINUTE": "0"},
+                 {"PIXABAY_REQUESTS_PER_MINUTE": "1.5"}, {"PEXELS_REQUESTS_PER_HOUR": "-1"},
+                 {"PEXELS_COOLDOWN_SECONDS": "0"}, {"PEXELS_COOLDOWN_SECONDS": "nan"},
+                 {"RETRY_WAIT_MAX_SECONDS": "-1"}):
+        try:
+            load_rate_config(_env)
+        except ValueError as _e:
+            assert list(_env)[0] in str(_e), _e
+        else:
+            raise AssertionError(f"load_rate_config({_env}) должен падать")
+
+    _ck2 = _Clock()
+    _cl2 = SiteClosures(now_fn=_ck2, log_fn=lambda m: None)
+    try:
+        retry_wait_plan(set(), _cl2, 120.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("retry_wait_plan(пустой набор) должен падать")
+    assert retry_wait_plan({"pexels"}, _cl2, 120.0) == ("now", 0.0)
+    _cl2.close("pexels", 50, "t")
+    assert retry_wait_plan({"pexels"}, _cl2, 120.0) == ("wait", 50.0)
+    assert retry_wait_plan({"pexels", "pixabay"}, _cl2, 0.0) == ("now", 0.0)  # pixabay открыт
+    _cl2.close("pexels", 500, "t")
+    assert retry_wait_plan({"pexels"}, _cl2, 120.0)[0] == "skip"
+
+    class _FakeResp:
+        def __init__(self, status, headers, body):
+            self.status, self.headers, self._body = status, headers, body
+
+        async def json(self, content_type=None):
+            return self._body
+
+        async def text(self):
+            return str(self._body)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeSession:
+        def __init__(self, script):
+            self.script, self.calls = list(script), []
+
+        def get(self, url, headers=None, params=None, timeout=None):
+            self.calls.append(url)
+            status, hdrs, body = self.script.pop(0)  # пустой сценарий = лишний реальный запрос
+            return _FakeResp(status, hdrs, body)
+
+    def _rl_ctx(script, budgets=None):
+        clk, logs, sleeps = _Clock(), [], []
+
+        async def _sleep(sec):
+            sleeps.append(sec)
+            clk.t += sec
+
+        c = Context(
+            session=_FakeSession(script), pexels_api_key="k", pixabay_api_key="k",
+            site_semaphores={"pexels": asyncio.Semaphore(5), "pixabay": asyncio.Semaphore(5)},
+            global_semaphore=asyncio.Semaphore(1), clip_semaphore=asyncio.Semaphore(1),
+            used_files_lock=asyncio.Lock(), now_fn=clk, sleep_fn=_sleep,
+            closures=SiteClosures(now_fn=clk, log_fn=logs.append),
+            budgets={site: SlidingWindowBudget(n, w, now_fn=clk) for site, (n, w) in (budgets or {}).items()},
+        )
+        return c, clk, logs, sleeps
+
+    _PX = "https://pixabay.com/api/"
+    _PE = "https://api.pexels.com/v1/search"
+
+    async def _get(c, site, url):
+        return await http_get_json(c, site, url, params={"q": "x"}, treat_429_as_exhaustion=True)
+
+    # Pixabay: 429 -> пауза по X-RateLimit-Reset -> повтор того же запроса; сайт не закрыт и не исчерпан
+    c, clk, logs, sleeps = _rl_ctx(
+        [(429, {"X-RateLimit-Reset": "5"}, None), (200, {}, {"hits": []})], {"pixabay": (90, 60.0)})
+    assert asyncio.run(_get(c, "pixabay", _PX)) == {"hits": []}
+    assert sleeps == [6.0] and not c.exhausted_sites and not c.closures.is_closed("pixabay")
+    assert len(c.session.calls) == 2 and c.request_counts["pixabay"] == 2 and not logs
+
+    # Pixabay: 429 без заголовка, 3 повтора исчерпаны -> закрыт на 120 с (не до конца запуска)
+    c, clk, logs, sleeps = _rl_ctx([(429, {}, None)] * 4, {"pixabay": (90, 60.0)})
+    try:
+        asyncio.run(_get(c, "pixabay", _PX))
+    except SiteTemporarilyClosed as e:
+        assert e.site == "pixabay"
+    else:
+        raise AssertionError("после 3 повторов 429 ждали SiteTemporarilyClosed")
+    assert sleeps == [61.0, 61.0, 61.0] and len(c.session.calls) == 4 and not c.exhausted_sites
+    assert c.closures.is_closed("pixabay") and c.closures.seconds_until_open("pixabay") == 120.0
+    assert len(logs) == 1 and "закрыт на 120 с" in logs[0], logs
+    try:  # закрытый сайт: HTTP не уходит (сценарий пуст - IndexError выдал бы лишний запрос)
+        asyncio.run(_get(c, "pixabay", _PX))
+    except SiteTemporarilyClosed:
+        pass
+    else:
+        raise AssertionError("закрытый pixabay должен бросать SiteTemporarilyClosed")
+    assert len(c.session.calls) == 4
+
+    # Pixabay: окно 2 за 60 с - третий запрос ЖДЁТ, а не пропускается
+    c, clk, logs, sleeps = _rl_ctx([(200, {}, {"hits": [1]})] * 3, {"pixabay": (2, 60.0)})
+
+    async def _three():
+        return [await _get(c, "pixabay", _PX) for _ in range(3)]
+
+    assert asyncio.run(_three()) == [{"hits": [1]}] * 3
+    assert sleeps == [60.0] and c.request_counts["pixabay"] == 3 and not c.closures.is_closed("pixabay")
+
+    # Pexels: реальный 429 -> закрыт на 900 с, потом снова работает
+    c, clk, logs, sleeps = _rl_ctx([(429, {}, None)], {"pexels": (190, 3600.0)})
+    try:
+        asyncio.run(_get(c, "pexels", _PE))
+    except SiteTemporarilyClosed:
+        pass
+    else:
+        raise AssertionError("429 Pexels должен закрывать сайт")
+    assert c.closures.seconds_until_open("pexels") == 900.0 and not c.exhausted_sites
+    assert c.request_counts["pexels"] == 1 and sleeps == []
+    try:
+        asyncio.run(_get(c, "pexels", _PE))
+    except SiteTemporarilyClosed:
+        pass
+    assert len(c.session.calls) == 1  # закрытый сайт запросов не шлёт
+    clk.t += 900
+    c.session.script.append((200, {}, {"photos": []}))
+    assert asyncio.run(_get(c, "pexels", _PE)) == {"photos": []}
+    assert c.request_counts["pexels"] == 2 and len(logs) == 2 and "снова открыт" in logs[1], logs
+
+    # Pexels: окно 2 за 3600 с - после второго запроса сайт закрыт до освобождения места
+    c, clk, logs, sleeps = _rl_ctx([(200, {}, {"photos": []})] * 3, {"pexels": (2, 3600.0)})
+
+    async def _pexels_window():
+        await _get(c, "pexels", _PE)
+        assert not c.closures.is_closed("pexels")
+        await _get(c, "pexels", _PE)
+        assert c.closures.is_closed("pexels") and c.closures.seconds_until_open("pexels") == 3600.0
+        try:
+            await _get(c, "pexels", _PE)
+        except SiteTemporarilyClosed:
+            return True
+        return False
+
+    assert asyncio.run(_pexels_window()) is True and len(c.session.calls) == 2 and sleeps == []
+    clk.t += 3600
+    assert asyncio.run(_get(c, "pexels", _PE)) == {"photos": []} and c.request_counts["pexels"] == 3
+
+    # cached_search не кэширует потерю из-за закрытия; fetch_and_filter и run_variant помечают сегмент
+    c, clk, logs, sleeps = _rl_ctx([])
+    _fcalls: list = []
+
+    async def _boom():
+        _fcalls.append("boom")
+        raise SiteTemporarilyClosed("pexels")
+
+    async def _fine():
+        _fcalls.append("fine")
+        return ["x"]
+
+    async def _cache_check():
+        try:
+            await cached_search(c, "pexels", "video", "q", _boom)
+        except SiteTemporarilyClosed:
+            pass
+        else:
+            raise AssertionError("cached_search должен пробросить SiteTemporarilyClosed")
+        assert ("pexels", "video", "q") not in c.search_cache
+        return await cached_search(c, "pexels", "video", "q", _fine)
+
+    assert asyncio.run(_cache_check()) == ["x"] and _fcalls == ["boom", "fine"]
+
+    _seg_rl = mk(["pexels"])
+    _funcs_bak = dict(SITE_SEARCH_FUNCS)
+
+    async def _closed_search(ctx_, q, mt):
+        raise SiteTemporarilyClosed("pexels")
+
+    SITE_SEARCH_FUNCS["pexels"] = _closed_search
+    try:
+        assert asyncio.run(fetch_and_filter(c, "pexels", _seg_rl, "q", "broad")) == []
+        assert c.lost_segments == {1: {"pexels"}}, c.lost_segments
+        c.lost_segments.clear()
+        c.closures.close("pexels", 50, "t")
+        _var = Variant(name="broad", query="q", sites=["pexels", "nasa"], apply_entity_filter=False)
+        async def _empty_search(ctx_, q, mt):
+            return []
+
+        SITE_SEARCH_FUNCS["nasa"] = _empty_search
+        asyncio.run(run_variant(c, _seg_rl, _var))
+        assert c.lost_segments == {1: {"pexels"}}, c.lost_segments  # nasa открыт - потерян только pexels
+    finally:
+        SITE_SEARCH_FUNCS.clear()
+        SITE_SEARCH_FUNCS.update(_funcs_bak)
+
+    # run_retry_pass: повторяет только потерянные и всё ещё не найденные, ждёт открытия не дольше лимита
+    def _spec(i):
+        return SegmentSpec(index=i, scene="s", sites=["pexels"], query_narrow="n", query_medium="m",
+                           query_broad="b", type="image", is_entity=False, entity_keywords=[])
+
+    _segs_rp = [_spec(i) for i in (3, 4, 5, 7, 9)]
+    _ps_calls: list = []
+    _ps_bak = _g["process_segment"]
+
+    async def _fake_ps(ctx_, seg_):
+        _ps_calls.append(seg_.index)
+        return (seg_.index, f"u{seg_.index}", f"b{seg_.index}") if seg_.index == 3 else (seg_.index, None, None)
+
+    _g["process_segment"] = _fake_ps
+    try:
+        # 1) pexels откроется через 50 с (<= 120): ждём, повторяем 3 и 4; 5 и 9 не потеряны; 7 уже найден
+        c, clk, logs, sleeps = _rl_ctx([])
+        c.closures.close("pexels", 50, "t")
+        c.lost_segments = {3: {"pexels"}, 4: {"pexels"}, 7: {"pexels"}}
+        res, bak, miss = {7: "u7"}, {}, [3, 4, 5, 9]
+        assert asyncio.run(run_retry_pass(c, _segs_rp, res, bak, miss, 120.0)) == (2, 1)
+        assert sorted(_ps_calls) == [3, 4] and sleeps == [50.05], (_ps_calls, sleeps)
+        assert res == {7: "u7", 3: "u3"} and bak == {3: "b3"} and miss == [4, 5, 9], (res, bak, miss)
+        assert any("снова открыт" in m for m in logs) and 3 not in c.lost_segments
+
+        # 2) pexels закрыт на 500 с > лимита 120: повтор пропущен, ничего не трогаем
+        _ps_calls.clear()
+        c, clk, logs, sleeps = _rl_ctx([])
+        c.closures.close("pexels", 500, "t")
+        c.lost_segments = {3: {"pexels"}, 4: {"pexels"}}
+        res, bak, miss = {}, {}, [3, 4, 5]
+        assert asyncio.run(run_retry_pass(c, _segs_rp, res, bak, miss, 120.0)) == (0, 0)
+        assert _ps_calls == [] and sleeps == [] and res == {} and miss == [3, 4, 5]
+
+        # 3) потерян на pexels (закрыт) и pixabay (уже открыт): идём сразу, без ожидания
+        c, clk, logs, sleeps = _rl_ctx([])
+        c.closures.close("pexels", 500, "t")
+        c.lost_segments = {3: {"pexels"}, 4: {"pixabay"}}
+        res, bak, miss = {}, {}, [3, 4]
+        assert asyncio.run(run_retry_pass(c, _segs_rp, res, bak, miss, 120.0)) == (2, 1)
+        assert sleeps == [] and miss == [4]
+
+        # 4) потерянных нет - ничего не делаем
+        c, clk, logs, sleeps = _rl_ctx([])
+        assert asyncio.run(run_retry_pass(c, _segs_rp, {}, {}, [3, 4], 120.0)) == (0, 0)
+    finally:
+        _g["process_segment"] = _ps_bak
+
+    c, clk, logs, sleeps = _rl_ctx([])
+    c.request_counts.update({"pexels": 3, "pixabay": 7})
+    c.closures.close_counts.update({"pexels": 2})
+    assert format_rate_summary_line(c, 5, 2) == (
+        "Лимиты API: запросов pexels 3, pixabay 7; закрытий сайта pexels 2, pixabay 0; "
+        "повторено сегментов 5, из них найдено 2.")
+
+    # ---- прямые ссылки Pexels/Pixabay ----
+    assert [parse_direct_links(x) for x in (None, "", "  ", "1", " 1 ")] == [True] * 5
+    assert parse_direct_links("0") is False and parse_direct_links(" 0 ") is False
+    for _bad in ("2", "true", "off", "01", "-1", "1,0"):
+        try:
+            parse_direct_links(_bad)
+        except ValueError as e:
+            assert "SEARCH_DIRECT_LINKS" in str(e) and "0" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError для SEARCH_DIRECT_LINKS=%r" % (_bad,))
+
+    # правила выбора файла (зеркало download_pexels_*/download_pixabay_*)
+    assert pexels_photo_direct({"src": {"original": "O", "large": "L"}}) == "O"
+    assert pexels_photo_direct({"src": {"original": "", "large": "L"}}) == "L"
+    assert pexels_photo_direct({"src": {"medium": "M"}}) is None and pexels_photo_direct({}) is None
+    assert pexels_photo_direct({"src": None}) is None
+    _vf = [
+        {"file_type": "video/mp4", "link": "a_hd", "width": 1280},
+        {"file_type": "video/mp4", "link": "b_uhd", "width": 3840},
+        {"file_type": "video/webm", "link": "c_webm", "width": 5000},   # не mp4 - игнор
+        {"file_type": "video/mp4", "link": "", "width": 9000},          # нет link - игнор
+        {"file_type": "video/mp4", "link": "d_sd", "width": None},
+        {"file_type": "video/mp4", "link": "e_uhd2", "width": 3840},    # ничья - первый
+    ]
+    assert pexels_video_direct({"video_files": _vf}) == "b_uhd"
+    assert pexels_video_direct({"video_files": [_vf[2], _vf[3]]}) is None
+    assert pexels_video_direct({"video_files": []}) is None and pexels_video_direct({}) is None
+    assert pexels_video_direct({"video_files": [{"file_type": "video/mp4", "link": "x"}]}) == "x"
+    assert pixabay_photo_direct({"largeImageURL": "LG", "imageURL": "I"}) == "LG"
+    assert pixabay_photo_direct({"imageURL": "I"}) == "I"
+    assert pixabay_photo_direct({"webformatURL": "W"}) is None
+    assert pixabay_video_direct({"videos": {"large": {"url": "L"}, "medium": {"url": "M"}}}) == "L"
+    assert pixabay_video_direct({"videos": {"medium": {"url": "M"}, "small": {"url": "S"}}}) == "M"
+    assert pixabay_video_direct({"videos": {"small": {"url": "S"}}}) == "S"
+    # как в download.py: large - непустой словарь с пустым url -> к medium НЕ переходим
+    assert pixabay_video_direct({"videos": {"large": {"url": ""}, "medium": {"url": "M"}}}) is None
+    assert pixabay_video_direct({"videos": {"large": {"width": 1}}}) is None
+    assert pixabay_video_direct({"videos": {"tiny": {"url": "T"}}}) is None
+    assert pixabay_video_direct({}) is None
+
+    # проверка расширения/хоста: путь без query; расширение должно соответствовать типу
+    _PEX_J = "https://images.pexels.com/photos/1/pexels-photo-1.jpeg?auto=compress&cs=tinysrgb&h=650&w=940"
+    assert direct_fallback_reason(_PEX_J, "photo") is None
+    assert direct_fallback_reason("https://images.pexels.com/photos/1/a.PNG", "photo") is None
+    assert direct_fallback_reason("https://images.pexels.com/photos/1/a.jpg", "video") == "ext"   # не тот тип
+    assert direct_fallback_reason("https://videos.pexels.com/video-files/1/1-hd.mp4", "photo") == "ext"
+    for _ext_ok in ("mp4", "mov", "avi"):
+        assert direct_fallback_reason(f"https://videos.pexels.com/video-files/1/v.{_ext_ok}", "video") is None, _ext_ok
+    assert direct_fallback_reason("https://cdn.pixabay.com/video/2020/01/01/clip_large.mp4", "video") is None
+    for _ext_bad in ("https://images.pexels.com/photos/1/a.gif", "https://images.pexels.com/photos/1/a.webp",
+                     "https://images.pexels.com/photos/1/noext", "https://images.pexels.com/photos/1/",
+                     "https://videos.pexels.com/v/x.webm", "https://cdn.pixabay.com/a.jpg.php",
+                     "https://images.pexels.com/photos/1/get?file=a.jpg"):  # расширение только в query - не считается
+        assert direct_fallback_reason(_ext_bad, "photo") == "ext" or direct_fallback_reason(_ext_bad, "video") == "ext", _ext_bad
+    assert direct_fallback_reason("https://pixabay.com/get/g123_1280.jpg", "photo") == "host"   # download.py не примет как прямую
+    assert direct_fallback_reason("https://images.pexels.com.evil.com/a.jpg", "photo") == "host"
+    assert direct_fallback_reason("https://example.org/a.jpg", "photo") == "host"
+    assert direct_fallback_reason("https://example.org/a.gif", "photo") == "ext"   # сначала расширение
+
+    # pick_final_url
+    def _dc(direct, kind="photo", site="pexels", page="https://www.pexels.com/photo/x-1/"):
+        return Candidate(site=site, cand_id="1", text="", license_ok=True, preview_url=None,
+                         page_url=page, kind=kind, direct_url=direct)
+    assert pick_final_url(_dc(_PEX_J), True) == (_PEX_J, None)
+    assert pick_final_url(_dc(_PEX_J), False) == ("https://www.pexels.com/photo/x-1/", None)   # откат переключателем
+    assert pick_final_url(_dc(None), True) == ("https://www.pexels.com/photo/x-1/", None)     # поля нет - не откат
+    assert pick_final_url(_dc("https://images.pexels.com/photos/1/a.gif"), True) == (
+        "https://www.pexels.com/photo/x-1/", "ext")
+    assert pick_final_url(_dc("https://pixabay.com/get/g1_1280.jpg", site="pixabay",
+                              page="https://pixabay.com/photos/x-1/"), True) == ("https://pixabay.com/photos/x-1/", "host")
+    assert pick_final_url(_dc("https://images.pexels.com/photos/1/a.jpg", kind="video"), True)[1] == "ext"
+    assert _dc(None).direct_url is None and dc_replace(_dc(_PEX_J), variant="x").direct_url == _PEX_J
+    # wikimedia/loc/nasa не затронуты: direct_url у них None -> page_url
+    assert pick_final_url(_dc(None, site="wikimedia", page="https://commons.wikimedia.org/wiki/File:A.jpg"), True) == (
+        "https://commons.wikimedia.org/wiki/File:A.jpg", None)
+
+    # finalize_candidate: URL + учёт откатов (сеть не нужна)
+    _fctx = _types.SimpleNamespace(direct_links=True, direct_fallbacks={})
+    assert asyncio.run(finalize_candidate(_fctx, _dc(_PEX_J))) == _PEX_J and _fctx.direct_fallbacks == {}
+    _gif = _dc("https://images.pexels.com/photos/9/a.gif", page="https://www.pexels.com/photo/g-9/")
+    assert asyncio.run(finalize_candidate(_fctx, _gif)) == "https://www.pexels.com/photo/g-9/"
+    assert _fctx.direct_fallbacks == {"https://www.pexels.com/photo/g-9/": "ext"}
+    _fctx_off = _types.SimpleNamespace(direct_links=False, direct_fallbacks={})
+    assert asyncio.run(finalize_candidate(_fctx_off, _dc(_PEX_J))) == "https://www.pexels.com/photo/x-1/"
+    assert _fctx_off.direct_fallbacks == {}
+    # у NASA resolver по-прежнему главнее
+    async def _res(_c):
+        return "https://images-assets.nasa.gov/x~orig.jpg"
+    _nasa = dc_replace(_dc(None, site="nasa", page=None), final_url_resolver=_res)
+    assert asyncio.run(finalize_candidate(_fctx, _nasa)) == "https://images-assets.nasa.gov/x~orig.jpg"
+
+    # search_pexels / search_pixabay заполняют direct_url из ответа поиска (HTTP подменён)
+    def _run_search(fn, payload, media_type, qtag):
+        async def _fake_http(ctx_, site, url, headers=None, params=None, treat_429_as_exhaustion=False):
+            return payload
+
+        class _SCtx:
+            exhausted_sites: set = set()
+            pixabay_api_key = pexels_api_key = "K"
+            search_cache: dict = {}
+            search_cache_lock = asyncio.Lock()
+
+        _old_http = _g["http_get_json"]
+        _g["http_get_json"] = _fake_http
+        try:
+            return asyncio.run(fn(_SCtx(), "q-" + qtag, media_type))
+        finally:
+            _g["http_get_json"] = _old_http
+
+    _r = _run_search(search_pexels, {"photos": [
+        {"id": 1, "alt": "a", "url": "https://www.pexels.com/photo/a-1/", "src": {"original": _PEX_J, "large": "L", "medium": "M"}},
+        {"id": 2, "alt": "b", "url": "https://www.pexels.com/photo/b-2/", "src": {"medium": "M"}}]}, "image", "pp")
+    assert [(c.cand_id, c.direct_url, c.kind) for c in _r] == [("1", _PEX_J, "photo"), ("2", None, "photo")]
+    assert _r[0].page_url == "https://www.pexels.com/photo/a-1/" and _r[0].preview_url == "M"
+    _r = _run_search(search_pexels, {"videos": [
+        {"id": 5, "url": "https://www.pexels.com/video/v-5/", "image": "I", "duration": 9, "video_files": _vf},
+        {"id": 6, "url": "https://www.pexels.com/video/w-6/", "image": "I", "video_files": []}]}, "video", "pv")
+    assert [(c.cand_id, c.direct_url, c.kind) for c in _r] == [("5", "b_uhd", "video"), ("6", None, "video")]
+    _r = _run_search(search_pixabay, {"hits": [
+        {"id": 7, "pageURL": "https://pixabay.com/photos/x-7/", "tags": "t", "previewURL": "P",
+         "largeImageURL": "https://pixabay.com/get/g7_1280.jpg"},
+        {"id": 8, "pageURL": "https://pixabay.com/photos/y-8/", "tags": "t", "previewURL": "P"}]}, "image", "xp")
+    assert [(c.cand_id, c.direct_url, c.kind) for c in _r] == [
+        ("7", "https://pixabay.com/get/g7_1280.jpg", "photo"), ("8", None, "photo")]
+    _r = _run_search(search_pixabay, {"hits": [
+        {"id": 9, "pageURL": "https://pixabay.com/videos/x-9/", "tags": "t", "duration": 12,
+         "videos": {"large": {"url": "https://cdn.pixabay.com/video/9_large.mp4", "thumbnail": "T"}}},
+        {"id": 10, "pageURL": "https://pixabay.com/videos/y-10/", "tags": "t",
+         "videos": {"large": {"url": "", "thumbnail": "T"}, "medium": {"url": "M", "thumbnail": "T"}}}]}, "video", "xv")
+    assert [(c.cand_id, c.direct_url, c.kind) for c in _r] == [
+        ("9", "https://cdn.pixabay.com/video/9_large.mp4", "video"), ("10", None, "video")]
+
+    # сводка: по фактически записанным ссылкам, primary и backup отдельно
+    _fb = {"https://www.pexels.com/photo/g-9/": "ext", "https://pixabay.com/photos/y-8/": "host",
+           "https://www.pexels.com/photo/not-used-1/": "ext"}   # запись, не попавшая в файл, не считается
+    _prim = {1: _PEX_J, 2: "https://www.pexels.com/photo/g-9/", 3: "https://www.pexels.com/photo/n-3/",
+             4: "https://cdn.pixabay.com/photo/2020/a.jpg", 5: "https://commons.wikimedia.org/wiki/File:A.jpg",
+             6: "https://www.loc.gov/item/1/"}
+    assert summarize_direct_links("primary", _prim, _fb) == (
+        "Прямых ссылок (primary): 2 из 4 (pexels 1/3, pixabay 1/1); откатов на page_url: по расширению 1, по хосту 0")
+    _bk = {1: "https://videos.pexels.com/video-files/1/1-hd.mp4", 2: "https://pixabay.com/photos/y-8/"}
+    assert summarize_direct_links("backup", _bk, _fb) == (
+        "Прямых ссылок (backup): 1 из 2 (pexels 1/1, pixabay 0/1); откатов на page_url: по расширению 0, по хосту 1")
+    assert summarize_direct_links("backup", {}, {}) == (
+        "Прямых ссылок (backup): 0 из 0 (pexels 0/0, pixabay 0/0); откатов на page_url: по расширению 0, по хосту 0")
+
+    # формат строк в файлах не менялся: "номер: URL"
+    assert f"{3}: {_PEX_J}\n" == "3: " + _PEX_J + "\n"
 
     print("selftest OK")
     return 0
