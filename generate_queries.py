@@ -72,6 +72,7 @@ import re
 import sys
 import time
 from collections import Counter
+from functools import partial
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -134,6 +135,11 @@ SITES = ["pexels", "pixabay", "wikimedia", "nasa", "loc"]
 
 DEFAULT_SOURCES_MODE = 2
 DEFAULT_STRICT = 1
+# Режим типа медиа (env MEDIA_MODE): 1 = смешанный (тип выбирает Gemini), 2 = только видео,
+# 3 = только фото. Не зависит от режима источников.
+DEFAULT_MEDIA_MODE = 1
+MEDIA_MODE_FORCED_TYPE = {2: "video", 3: "image"}
+MEDIA_MODE_NAMES = {1: "смешанный", 2: "только видео", 3: "только фото"}
 
 # Мусорные типы кадра (не должны присутствовать ни в scene, ни в запросах).
 # Базовый список слов в единственном числе в ОДНОЙ константе; регулярное выражение
@@ -178,6 +184,23 @@ def parse_sources_mode(cli_val: Optional[str | int], env_val: Optional[str | int
         val, DEFAULT_SOURCES_MODE,
     )
     return DEFAULT_SOURCES_MODE
+
+
+def parse_media_mode(env_val: Optional[str | int]) -> int:
+    """Режим типа медиа из env MEDIA_MODE: \"1\"/\"2\"/\"3\" (пробелы обрезаются).
+    None или пустая строка - 1 (смешанный). Любое другое значение - ValueError с понятным
+    сообщением (без молчаливой подстановки по умолчанию)."""
+    if env_val is None:
+        return DEFAULT_MEDIA_MODE
+    val_str = str(env_val).strip()
+    if val_str == "":
+        return DEFAULT_MEDIA_MODE
+    if val_str in ("1", "2", "3"):
+        return int(val_str)
+    raise ValueError(
+        f"Некорректное значение MEDIA_MODE: {env_val!r}. Допустимо: 1 (смешанный, тип выбирает "
+        f"Gemini), 2 (только видео), 3 (только фото); пустое значение или не задано = 1."
+    )
 
 
 def parse_strict_mode(cli_val: Optional[str | int], env_val: Optional[str | int]) -> int:
@@ -228,7 +251,8 @@ MAX_NORMALIZE_WARNINGS = 20
 
 
 def build_system_instruction(
-    mode: int = DEFAULT_SOURCES_MODE, junk_words: tuple[str, ...] = JUNK_KIND_WORDS
+    mode: int = DEFAULT_SOURCES_MODE, junk_words: tuple[str, ...] = JUNK_KIND_WORDS,
+    media_mode: int = DEFAULT_MEDIA_MODE,
 ) -> str:
     """Генерирует системный промпт с учётом выбранного режима источников (1/2/3)
     и запрещённых типов кадра из junk_words."""
@@ -256,6 +280,18 @@ def build_system_instruction(
         ),
     }
     mode_rule = mode_blocks.get(mode, mode_blocks[2])
+
+    # Подсказка режима типа медиа (MEDIA_MODE): только при 2 или 3, в режиме 1 текст не меняется.
+    media_hint = {
+        2: (
+            " MEDIA MODE: every segment will be sourced as VIDEO only, so write scene as a MOVING "
+            "shot: describe an action and the movement of the camera or of the subject."
+        ),
+        3: (
+            " MEDIA MODE: every segment will be sourced as PHOTO only, so write scene as a STILL "
+            "frame: describe the composition, with no action unfolding in time."
+        ),
+    }.get(media_mode, "")
 
     instruction = f"""\
 You generate search-query instructions for stock/archival video and photo sourcing for a video's \
@@ -328,7 +364,7 @@ happening. When in doubt, fill it in rather than returning null. query_narrow an
 never null. This rule is about query_broad only.
 
 4. type - "image" or "video", whichever fits the described scene better (a still, motionless view -> \
-"image"; a dynamic action or a generic/modern/abstract scene -> "video").
+"image"; a dynamic action or a generic/modern/abstract scene -> "video").{media_hint}
 
 5. entity_keywords - the MAIN entity field. List EVERY proper name (person, place, event, \
 organization, treaty, building) that appears in your query_narrow or query_medium, each in TWO \
@@ -1279,7 +1315,7 @@ def _parse_visual_value(raw, seg_index: int) -> tuple[int, bool]:
 
 def _normalize_entry(
     item: dict, seg_index: int, stats: Optional[Counter] = None,
-    segment_text: Optional[str] = None,
+    segment_text: Optional[str] = None, media_mode: int = DEFAULT_MEDIA_MODE,
 ) -> dict:
     """Детерминированно проверяет и чинит запись сегмента (без новых вызовов Gemini).
 
@@ -1380,12 +1416,16 @@ def _normalize_entry(
     is_entity = bool(keywords)
     entity_derived = is_entity is not gemini_is_entity
 
-    # type
-    seg_type = item["type"]
-    if seg_type not in ("image", "video"):
-        _warn_limited("Сегмент %s: недопустимый type %r - поставил 'video'.", seg_index, seg_type)
-        seg_type = "video"
-        fixes.append("type_fixed")
+    # type: режимы 2/3 (MEDIA_MODE) принудительно задают тип независимо от ответа Gemini
+    # (единственное место); режим 1 - как раньше: валидация и запасная ветка.
+    if media_mode in MEDIA_MODE_FORCED_TYPE:
+        seg_type = MEDIA_MODE_FORCED_TYPE[media_mode]
+    else:
+        seg_type = item["type"]
+        if seg_type not in ("image", "video"):
+            _warn_limited("Сегмент %s: недопустимый type %r - поставил 'video'.", seg_index, seg_type)
+            seg_type = "video"
+            fixes.append("type_fixed")
 
     if stats is not None:
         for reason in set(fixes):
@@ -1687,13 +1727,14 @@ def call_gemini_batch(
     mode: int = DEFAULT_SOURCES_MODE,
     repair_info: dict[int, dict] | None = None,
     sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
+    media_mode: int = DEFAULT_MEDIA_MODE,
 ) -> dict:
     prompt = build_prompt(
         batch, context_before, context_after, repair_info=repair_info, sentence_index=sentence_index
     )
 
     config = types.GenerateContentConfig(
-        system_instruction=build_system_instruction(mode),
+        system_instruction=build_system_instruction(mode, media_mode=media_mode),
         response_mime_type="application/json",
         response_schema=RESPONSE_SCHEMA,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
@@ -1721,7 +1762,7 @@ def call_gemini_batch(
                 if not isinstance(item, dict) or "segment_index" not in item:
                     raise ValueError(f"В элементе ответа нет segment_index: {item}")
                 idx = item.pop("segment_index")
-                result[str(idx)] = _normalize_entry(item, idx, fix_stats, seg_texts.get(idx))
+                result[str(idx)] = _normalize_entry(item, idx, fix_stats, seg_texts.get(idx), media_mode=media_mode)
 
             got_indices = {int(k) for k in result.keys()}
             missing = expected_indices - got_indices
@@ -3420,6 +3461,33 @@ def run_self_tests() -> int:
         check("parse strict: невалидный -> дефолт 1", parse_strict_mode("bad", None), 1)
         check("parse strict: None -> дефолт 1", parse_strict_mode(None, None), 1)
 
+        # 11. MEDIA_MODE: разбор, принудительный тип, подсказка в инструкции
+        check("media_mode: None -> 1", parse_media_mode(None), 1)
+        check("media_mode: пусто и пробелы -> 1", (parse_media_mode(""), parse_media_mode("  ")), (1, 1))
+        check("media_mode: 1/2/3 с пробелами", [parse_media_mode(v) for v in ("1", " 2 ", "3\n")], [1, 2, 3])
+        for bad_mm in ("0", "4", "video", "1.0", "1,2", "-1"):
+            try:
+                parse_media_mode(bad_mm)
+                got_mm = "нет ошибки"
+            except ValueError as e_mm:
+                got_mm = "ошибка" if (repr(bad_mm) in str(e_mm) and "1" in str(e_mm)) else "плохое сообщение"
+            check(f"media_mode: мусор {bad_mm!r} -> ошибка", got_mm, "ошибка")
+        check("media_mode: режим 2 -> video при ответе image", _normalize_entry(entry(type="image"), 1, media_mode=2)["type"], "video")
+        check("media_mode: режим 3 -> image при ответе video", _normalize_entry(entry(type="video"), 1, media_mode=3)["type"], "image")
+        check("media_mode: режим 2/3 игнорируют битый type",
+              (_normalize_entry(entry(type="gif"), 1, media_mode=2)["type"], _normalize_entry(entry(type="gif"), 1, media_mode=3)["type"]),
+              ("video", "image"))
+        st_mm = Counter()
+        _normalize_entry(entry(type="gif"), 1, st_mm, media_mode=2)
+        check("media_mode: режим 2 не пишет type_fixed", st_mm.get("type_fixed", 0), 0)
+        check("media_mode: режим 1 оставляет ответ Gemini", _normalize_entry(entry(type="image"), 1)["type"], "image")
+        check("media_mode: режим 1 битый type -> video", _normalize_entry(entry(type="gif"), 1)["type"], "video")
+        base_si = build_system_instruction(2)
+        check("media_mode: режим 1 не меняет инструкцию", build_system_instruction(2, media_mode=1), base_si)
+        check("media_mode: подсказка только в 2/3",
+              ("MOVING" in build_system_instruction(2, media_mode=2), "STILL" in build_system_instruction(2, media_mode=3),
+               "MEDIA MODE" in base_si), (True, True, False))
+
     finally:
         _normalize_warn_left[0] = saved_warn
 
@@ -3470,6 +3538,15 @@ def main() -> int:
 
     sources_mode = parse_sources_mode(args.sources_mode, os.environ.get("GENQ_SOURCES_MODE"))
     strict_mode = parse_strict_mode(args.strict, os.environ.get("GENQ_STRICT"))
+
+    try:
+        media_mode = parse_media_mode(os.environ.get("MEDIA_MODE"))
+    except ValueError as e:
+        logging.error("%s", e)
+        return 1
+    # Режим типа медиа доходит до call_gemini_batch через partial (и в основном цикле, и в REPAIR)
+    call_batch = partial(call_gemini_batch, media_mode=media_mode)
+    logging.info("Режим типа медиа: %s (%s)", media_mode, MEDIA_MODE_NAMES[media_mode])
 
     mode_names = {1: "только архив", 2: "микс", 3: "только сток"}
     logging.info(
@@ -3576,7 +3653,7 @@ def main() -> int:
 
         while True:
             try:
-                batch_result = call_gemini_batch(
+                batch_result = call_batch(
                     client, current_model, batch, context_before, context_after,
                     mode=sources_mode, sentence_index=sentence_index,
                 )
@@ -3632,6 +3709,7 @@ def main() -> int:
         sources_mode=sources_mode,
         strict_mode=strict_mode,
         output_path=args.output,
+        call_batch_fn=call_batch,
         sentence_index=sentence_index,
     )
 
