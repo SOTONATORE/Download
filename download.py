@@ -9,6 +9,8 @@ import threading
 import urllib.parse
 from urllib.parse import urlparse
 import subprocess
+import math
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests as cffi_requests
 from media_formats import (
@@ -572,6 +574,8 @@ def parse_and_download_links(env_name: str, backup_env_name: str = "") -> None:
         + (f" (с backup-ссылкой: {len(backup_links)})" if backup_env_name else "")
     )
 
+    prepare_duration_check(links, backup_links)
+
     # Раунд 5: LOC остаётся полностью последовательным (не трогаем его rate-limiter
     # логику), всё остальное идёт через ThreadPoolExecutor - см. подробное обоснование
     # в блоке комментариев "Раунд 5" в начале файла. Важно: LOC-цикл ниже запускается
@@ -810,6 +814,239 @@ def _url_gets_external_retry(url: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Строгая проверка реальной длительности скачанных ВИДЕО (фото не трогаем).
+# Видео короче нужного даёт чёрные кадры в автомонтаже. Нужная длина берётся из
+# min_durations.json {"номер сегмента": секунды} (артефакт search-links). Проверка
+# встроена в _attempt_download, поэтому backup-ссылка скачивается и проверяется
+# ровно тем же правилом, а итоговая причина попадает в download_failed.txt.
+# Сравнение СТРОГОЕ: длительность >= нужной, без допусков и округлений.
+# ---------------------------------------------------------------------------
+
+FFPROBE_TIMEOUT_SECONDS = 30
+MIN_DURATIONS: dict[int, float] | None = None  # None - файл не загружен
+
+
+class FfprobeError(RuntimeError):
+    """ffprobe завершился с ошибкой (ненулевой код)."""
+
+
+def _run_ffprobe(args: list[str]) -> str:
+    """Единственное место запуска ffprobe (в selftest подменяется через
+    _FFPROBE_RUNNER). Возвращает stdout; бросает subprocess.TimeoutExpired,
+    OSError (в т.ч. FileNotFoundError) или FfprobeError."""
+    res = subprocess.run(args, capture_output=True, text=True, timeout=FFPROBE_TIMEOUT_SECONDS)
+    if res.returncode != 0:
+        raise FfprobeError(f"код {res.returncode}: {(res.stderr or '').strip()[:200]}")
+    return res.stdout
+
+
+_FFPROBE_RUNNER = _run_ffprobe
+
+
+def parse_ffprobe_duration(text: str) -> float | None:
+    """Число секунд из вывода ffprobe или None ("N/A", пусто, мусор, nan/inf, <= 0)."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = float(line)
+        except ValueError:
+            return None
+        return value if math.isfinite(value) and value > 0 else None
+    return None
+
+
+def duration_ok(actual: float, required: float) -> bool:
+    """Строго: равно проходит, на сколько угодно меньше - нет."""
+    return actual >= required
+
+
+def parse_min_durations(text: str) -> dict[int, float]:
+    """{"номер": секунды} -> {int: float}. ValueError с русским текстом при любой ошибке."""
+    try:
+        raw = json.loads(text)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"не удалось разобрать JSON: {e}")
+    if not isinstance(raw, dict):
+        raise ValueError("ожидался объект вида {\"номер сегмента\": секунды}")
+    result: dict[int, float] = {}
+    for key, value in raw.items():
+        k = str(key).strip()
+        if not k.isdigit():
+            raise ValueError(f"ключ {key!r} не является номером сегмента")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"значение для сегмента {k} не число: {value!r}")
+        v = float(value)
+        if not math.isfinite(v) or v < 0:
+            raise ValueError(f"значение для сегмента {k} некорректно: {value!r}")
+        result[int(k)] = v
+    return result
+
+
+def load_min_durations() -> tuple[dict[int, float] | None, str]:
+    """(данные, "") или (None, причина). Источник: INPUT_MIN_DURATIONS (путь к файлу;
+    если значение начинается с "{" - это сам JSON, как INPUT_LINKS несёт сам текст),
+    по умолчанию min_durations.json в текущей папке (туда же скачивается search-links
+    с links.txt)."""
+    value = os.environ.get("INPUT_MIN_DURATIONS", "").strip()
+    if value.startswith("{"):
+        source, text = "INPUT_MIN_DURATIONS", value
+    else:
+        path = value or "min_durations.json"
+        source = path
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError as e:
+            return None, f"файл {path} не найден или не читается ({e})"
+    try:
+        return parse_min_durations(text), ""
+    except ValueError as e:
+        return None, f"{source}: {e}"
+
+
+def measure_duration(path: str) -> tuple[float | None, str]:
+    """(секунды, "") или (None, причина). Сначала видеопоток, запасной вариант - контейнер."""
+    probes = (
+        ("видеопотока", ["-select_streams", "v:0", "-show_entries", "stream=duration"]),
+        ("контейнера", ["-show_entries", "format=duration"]),
+    )
+    for what, extra in probes:
+        args = ["ffprobe", "-v", "error", *extra, "-of", "default=nw=1:nk=1", path]
+        try:
+            out = _FFPROBE_RUNNER(args)
+        except subprocess.TimeoutExpired:
+            return None, f"ffprobe: таймаут {FFPROBE_TIMEOUT_SECONDS} с при чтении длительности {what}"
+        except FileNotFoundError:
+            return None, "ffprobe не найден в PATH"
+        except OSError as e:
+            return None, f"не удалось запустить ffprobe: {e}"
+        except FfprobeError as e:
+            return None, f"ffprobe завершился с ошибкой при чтении {what} ({e})"
+        value = parse_ffprobe_duration(out)
+        if value is not None:
+            return value, ""
+    return None, "ffprobe не вернул длительность ни у видеопотока, ни у контейнера"
+
+
+def check_video_duration(number: int, path: str,
+                         min_durations: dict[int, float] | None) -> tuple[bool, str]:
+    """(прошло, причина). Не прошло = любой случай, когда нельзя доказать длительность >= нужной."""
+    if min_durations is None:
+        return False, "проверка длительности невозможна: min_durations.json не загружен"
+    if number not in min_durations:
+        return False, f"в min_durations.json нет записи для сегмента {number}"
+    required = min_durations[number]
+    actual, reason = measure_duration(path)
+    if actual is None:
+        return False, f"не удалось измерить длительность видео: {reason}"
+    if not duration_ok(actual, required):
+        return False, f"видео короче нужного: {actual} с < {required} с"
+    return True, ""
+
+
+class DurationStats:
+    """Потокобезопасные счётчики: проверено / отсеяно / заменено backup."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.checked = 0
+        self.rejected = 0
+        self.replaced = 0
+        self._rejected_numbers: set[int] = set()
+
+    def add_check(self, number: int, ok: bool) -> None:
+        with self._lock:
+            self.checked += 1
+            if not ok:
+                self.rejected += 1
+                self._rejected_numbers.add(number)
+
+    def note_backup_success(self, number: int) -> None:
+        """Backup спас номер, чей primary был отсеян проверкой длительности."""
+        with self._lock:
+            if number in self._rejected_numbers:
+                self.replaced += 1
+
+    def summary_line(self) -> str:
+        with self._lock:
+            return (f"Проверка длительности: проверено видео {self.checked}, "
+                    f"отсеяно по длительности {self.rejected}, заменено backup {self.replaced}")
+
+
+DURATION_STATS = DurationStats()
+
+
+def _url_looks_video(url: str) -> bool:
+    """Эвристика по URL (до скачивания): похоже ли, что там видео."""
+    u = url.lower()
+    if kind_of_ext(ext_from_name(url)) == "video":
+        return True
+    return (("pexels.com" in u and "/video/" in u) or ("pixabay.com" in u and "/videos/" in u)
+            or "coverr.co" in u or "mixkit.co" in u)
+
+
+def _stop(message: str) -> None:
+    print(f"[КРИТИЧНО] {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def prepare_duration_check(links: dict, backup_links: dict) -> None:
+    """Вызывается до скачивания. Если среди primary/backup-ссылок есть хоть одно видео -
+    без min_durations.json или без ffprobe останавливаемся. Если видео не ожидается,
+    файл грузится "по возможности" (на случай видео, не распознанного по URL); а если
+    оно всё же скачается без данных - _attempt_download засчитает его неудачей."""
+    global MIN_DURATIONS
+    any_video = any(_url_looks_video(u) for u in [*links.values(), *backup_links.values()])
+    data, err = load_min_durations()
+    MIN_DURATIONS = data
+    if not any_video:
+        return
+    if data is None:
+        _stop(f"В списке ссылок есть видео, но min_durations.json не загружен: {err}. "
+              f"Укажите путь в INPUT_MIN_DURATIONS или положите min_durations.json "
+              f"рядом с links.txt (артефакт search-links).")
+    if shutil.which("ffprobe") is None:
+        _stop("В списке ссылок есть видео, но ffprobe не найден в PATH: "
+              "установите ffmpeg (например: sudo apt-get install -y ffmpeg).")
+
+
+def _is_video_file(path: str) -> bool:
+    kind = kind_of_ext(ext_from_name(path))
+    if kind is None:
+        try:
+            with open(path, "rb") as f:
+                head = f.read(16)
+        except OSError:
+            return False
+        kind = kind_of_ext(sniff_format(head) or "")
+    return kind == "video"
+
+
+def verify_downloaded_video(number: int) -> tuple[bool, str]:
+    """Проверяет скачанные видео номера (фото пропускает, ffprobe для них не запускается).
+    Короткое/непроверяемое видео удаляется. (True, "") если всё в порядке или видео нет."""
+    paths = sorted(p for p in glob.glob(os.path.join(OUTPUT_DIR, f"{number}.*"))
+                   if not p.endswith((".part", ".ytdl", ".temp")))
+    for path in paths:
+        if not _is_video_file(path):
+            continue
+        ok, reason = check_video_duration(number, path, MIN_DURATIONS)
+        DURATION_STATS.add_check(number, ok)
+        if not ok:
+            for p in paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            return False, reason
+        print(f"[ИНФО] {number}: длительность видео подходит "
+              f"(нужно {MIN_DURATIONS[number]} с)")
+    return True, ""
+
+
 def _attempt_download(number: int, url: str) -> tuple[bool, str]:
     """Один вызов существующего download_media_item (без изменений внутри
     него) - возвращает (успех, текст_ошибки). Текст ошибки берётся из
@@ -823,6 +1060,10 @@ def _attempt_download(number: int, url: str) -> tuple[bool, str]:
         entries = [item for item in FAILED_ITEMS if item.startswith(prefix)]
     if len(entries) > before:
         return False, entries[-1][len(prefix):]
+    ok, reason = verify_downloaded_video(number)
+    if not ok:
+        fail(number, reason)
+        return False, reason
     return True, ""
 
 
@@ -874,6 +1115,7 @@ def download_number_with_backup(number: int, primary_url: str, backup_url: str =
         ok, backup_message = _attempt_download(number, backup_url)
         if ok:
             print(f"[OK] {number}: файл успешно скачан [через backup] ({backup_url})")
+            DURATION_STATS.note_backup_success(number)
             return
         message = f"primary не скачался ({message}); backup тоже не скачался ({backup_message})"
 
@@ -1260,7 +1502,126 @@ def write_failed_report(path: str = "download_failed.txt") -> None:
     print(f"[ИНФО] Не удалось скачать {len(FAILED_ITEMS)} файлов - записано в {path}")
 
 
+def _selftest() -> None:
+    """python download.py --selftest - проверка чистых частей без сети и без ffprobe."""
+    global MIN_DURATIONS, _FFPROBE_RUNNER, OUTPUT_DIR
+    import tempfile
+
+    # разбор вывода ffprobe
+    assert parse_ffprobe_duration("12.345000\n") == 12.345
+    assert parse_ffprobe_duration("5") == 5.0
+    assert parse_ffprobe_duration("N/A\n") is None
+    assert parse_ffprobe_duration("") is None
+    assert parse_ffprobe_duration("  \n") is None
+    assert parse_ffprobe_duration("garbage") is None
+    assert parse_ffprobe_duration("nan") is None and parse_ffprobe_duration("inf") is None
+    assert parse_ffprobe_duration("0") is None and parse_ffprobe_duration("-3") is None
+
+    # строгое сравнение
+    assert duration_ok(5.0, 5.0)
+    assert duration_ok(5.001, 5.0)
+    assert not duration_ok(4.999, 5.0)
+    assert not duration_ok(5.0 - 1e-9, 5.0)
+
+    # разбор min_durations.json
+    assert parse_min_durations('{"1": 3.5, "12": 4}') == {1: 3.5, 12: 4.0}
+    for bad in ("", "not json", "[1,2]", '{"a": 1}', '{"1": "x"}', '{"1": true}',
+                '{"1": -1}', '{"1": null}', '{"1": NaN}'):
+        try:
+            parse_min_durations(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"должно быть ValueError: {bad!r}")
+
+    # measure_duration с подменой запуска ffprobe
+    def fake(outputs):
+        calls = []
+        def runner(args):
+            calls.append(args)
+            r = outputs[len(calls) - 1]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        return runner, calls
+
+    saved = _FFPROBE_RUNNER
+    try:
+        runner, calls = fake(["7.5\n"])
+        _FFPROBE_RUNNER = runner
+        assert measure_duration("x.mp4") == (7.5, "") and len(calls) == 1
+        assert "stream=duration" in calls[0] and "v:0" in calls[0]
+
+        runner, calls = fake(["N/A\n", "6.0\n"])  # поток N/A -> контейнер
+        _FFPROBE_RUNNER = runner
+        assert measure_duration("x.mp4") == (6.0, "") and len(calls) == 2
+        assert "format=duration" in calls[1]
+
+        runner, calls = fake(["\n", "N/A"])
+        _FFPROBE_RUNNER = runner
+        v, why = measure_duration("x.mp4")
+        assert v is None and "ни у видеопотока, ни у контейнера" in why
+
+        for exc, text in ((subprocess.TimeoutExpired("ffprobe", 30), "таймаут"),
+                          (FileNotFoundError(), "не найден"),
+                          (PermissionError("x"), "не удалось запустить"),
+                          (FfprobeError("код 1"), "ошибкой")):
+            runner, _ = fake([exc])
+            _FFPROBE_RUNNER = runner
+            v, why = measure_duration("x.mp4")
+            assert v is None and text in why, (exc, why)
+
+        # check_video_duration: строго, нет записи, нет файла данных
+        runner, _ = fake(["5.0\n"])
+        _FFPROBE_RUNNER = runner
+        assert check_video_duration(1, "x.mp4", {1: 5.0}) == (True, "")
+        runner, _ = fake(["4.999\n"])
+        _FFPROBE_RUNNER = runner
+        ok, why = check_video_duration(1, "x.mp4", {1: 5.0})
+        assert not ok and why == "видео короче нужного: 4.999 с < 5.0 с", why
+        ok, why = check_video_duration(2, "x.mp4", {1: 5.0})
+        assert not ok and "нет записи" in why
+        ok, why = check_video_duration(1, "x.mp4", None)
+        assert not ok and "не загружен" in why
+
+        # verify_downloaded_video: фото не проверяется, короткое видео удаляется
+        with tempfile.TemporaryDirectory() as tmp:
+            OUTPUT_DIR = tmp
+            MIN_DURATIONS = {1: 5.0, 2: 5.0}
+            open(os.path.join(tmp, "1.jpg"), "wb").write(b"\xff\xd8\xff" + b"\0" * 20)
+            runner, calls = fake([])
+            _FFPROBE_RUNNER = runner
+            assert verify_downloaded_video(1) == (True, "") and not calls  # ffprobe не вызван
+            open(os.path.join(tmp, "2.mp4"), "wb").write(b"x")
+            runner, _ = fake(["4.5\n"])
+            _FFPROBE_RUNNER = runner
+            ok, why = verify_downloaded_video(2)
+            assert not ok and "короче" in why and not os.path.exists(os.path.join(tmp, "2.mp4"))
+    finally:
+        _FFPROBE_RUNNER = saved
+        MIN_DURATIONS = None
+
+    # счётчики
+    st = DurationStats()
+    st.add_check(1, False)
+    st.add_check(2, True)
+    st.note_backup_success(1)
+    st.note_backup_success(2)  # 2 не отсеивался - не считается
+    assert (st.checked, st.rejected, st.replaced) == (2, 1, 1)
+    assert st.summary_line().endswith("проверено видео 2, отсеяно по длительности 1, заменено backup 1")
+
+    # эвристика видео по URL
+    assert _url_looks_video("https://x.org/a/clip.MP4?x=1")
+    assert _url_looks_video("https://www.pexels.com/video/foo-123/")
+    assert not _url_looks_video("https://x.org/a/photo.jpg")
+
+    print("ok")
+
+
 def main():
+    if "--selftest" in sys.argv:
+        _selftest()
+        return
     if os.path.exists(OUTPUT_DIR):
         import shutil
         shutil.rmtree(OUTPUT_DIR)
@@ -1268,6 +1629,7 @@ def main():
 
     parse_and_download_links("INPUT_LINKS", "INPUT_BACKUP_LINKS")
     write_failed_report()
+    print("[ИНФО] " + DURATION_STATS.summary_line())
 
     counts = {}
     for name in os.listdir(OUTPUT_DIR):
