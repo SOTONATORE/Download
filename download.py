@@ -307,6 +307,268 @@ def _pexels_pixabay_throttled(func):
     wrapper.__name__ = func.__name__
     return wrapper
 
+
+# ---------------------------------------------------------------------------
+# Лимит Pixabay API (100 запросов за 60 с на ключ): скользящее окно + общая пауза после 429.
+#
+# Относится ТОЛЬКО к запросам к API Pixabay (pixabay.com/api/ и /api/videos/ по id). Прямые ссылки
+# (cdn.pixabay.com, is_direct_media_url) и скачивание самого файла - не API, в окне не считаются.
+# Pexels не затронут.
+#
+# Почему не декоратор: _pexels_pixabay_throttled держит семафор на ВСЮ функцию, а ожидание места в окне
+# и пауза после 429 могут длиться десятки секунд - Pexels-скачивания встали бы в очередь за Pixabay.
+# Поэтому download_pixabay_* больше не обёрнуты декоратором: место в окне и общая пауза берутся ДО
+# входа в семафор, а сам семафор держится только на время одного HTTP-запроса (запрос к API и,
+# отдельно, скачивание файла). Пауза после 429 тоже спится вне семафора.
+# ---------------------------------------------------------------------------
+
+PIXABAY_WINDOW_SECONDS = 60.0
+PIXABAY_RPM_DEFAULT = 90                    # запас от официальных 100/мин
+PIXABAY_429_MAX_RETRIES = 3                 # повторов того же запроса после 429
+PIXABAY_429_FALLBACK_PAUSE_SECONDS = 61.0   # нет заголовка / значение вне 0...600
+PIXABAY_429_RESET_MARGIN_SECONDS = 1.0      # запас к X-RateLimit-Reset
+PIXABAY_429_RESET_MAX_SECONDS = 600.0       # Reset выше этого - мусор в заголовке
+
+
+def load_pixabay_rpm(environ=None) -> int:
+    """PIXABAY_REQUESTS_PER_MINUTE: пусто/не задано -> 90; не целое число или < 1 -> ValueError
+    с названием переменной (вызывающий останавливает запуск)."""
+    env = os.environ if environ is None else environ
+    raw = env.get("PIXABAY_REQUESTS_PER_MINUTE")
+    if raw is None or not raw.strip():
+        return PIXABAY_RPM_DEFAULT
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise ValueError(f"PIXABAY_REQUESTS_PER_MINUTE={raw!r}: ожидается целое число >= 1") from None
+    if value < 1:
+        raise ValueError(f"PIXABAY_REQUESTS_PER_MINUTE={raw!r}: значение должно быть не меньше 1")
+    return value
+
+
+def pixabay_reset_pause(raw) -> tuple:
+    """(пауза в секундах, откуда взята) по заголовку X-RateLimit-Reset (секунды до сброса окна):
+    значение + 1 с; нет заголовка / не число / вне 0...600 -> 61 с."""
+    if raw is None:
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, "X-RateLimit-Reset отсутствует"
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, f"X-RateLimit-Reset={raw!r} не число"
+    if not math.isfinite(v) or v < 0 or v > PIXABAY_429_RESET_MAX_SECONDS:
+        return PIXABAY_429_FALLBACK_PAUSE_SECONDS, f"X-RateLimit-Reset={raw!r} вне 0...{PIXABAY_429_RESET_MAX_SECONDS:g}"
+    return v + PIXABAY_429_RESET_MARGIN_SECONDS, f"X-RateLimit-Reset={raw} + {PIXABAY_429_RESET_MARGIN_SECONDS:g} с"
+
+
+class ThreadSlidingWindow:
+    """Не более max_requests взятий за любые window_seconds (скользящее окно), потокобезопасно.
+    acquire() берёт место, а если мест нет - спит (sleep_fn, без удержания собственной блокировки)
+    до освобождения и берёт его. Возвращает True, если пришлось ждать. Время и сон передаются
+    снаружи (now_fn/sleep_fn) - в selftest подменяются."""
+
+    def __init__(self, max_requests: int, window_seconds: float,
+                 now_fn=time.monotonic, sleep_fn=time.sleep) -> None:
+        if not isinstance(max_requests, int) or isinstance(max_requests, bool) or max_requests < 1:
+            raise ValueError(f"max_requests должен быть целым >= 1, получено {max_requests!r}")
+        if not window_seconds > 0:
+            raise ValueError(f"window_seconds должен быть > 0, получено {window_seconds!r}")
+        self.max_requests = max_requests
+        self.window_seconds = float(window_seconds)
+        self._now = now_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._stamps: list = []
+
+    def acquire(self) -> bool:
+        waited = False
+        while True:
+            with self._lock:
+                now = self._now()
+                self._stamps = [t for t in self._stamps if t + self.window_seconds > now]
+                if len(self._stamps) < self.max_requests:
+                    self._stamps.append(now)
+                    return waited
+                wait = self._stamps[0] + self.window_seconds - now
+            waited = True
+            self._sleep(max(wait, 0.001))
+
+
+class SharedPause:
+    """Общая для всех потоков "пауза до": после 429 один раз выставляется, и ВСЕ потоки перед
+    следующим запросом ждут её конца (иначе параллельные запросы получили бы 429 по очереди и
+    сожгли бы свои повторы). Время и сон - снаружи."""
+
+    def __init__(self, now_fn=time.monotonic, sleep_fn=time.sleep) -> None:
+        self._now = now_fn
+        self._sleep = sleep_fn
+        self._lock = threading.Lock()
+        self._until = 0.0
+
+    def extend(self, seconds: float) -> None:
+        with self._lock:
+            self._until = max(self._until, self._now() + seconds)
+
+    def wait(self) -> float:
+        """Спит, пока пауза не кончится; возвращает сколько секунд проспал (0.0 - паузы нет)."""
+        slept = 0.0
+        while True:
+            with self._lock:
+                remaining = self._until - self._now()
+            if remaining <= 0:
+                return slept
+            self._sleep(remaining)
+            slept += remaining
+
+
+class PixabayApiStats:
+    """Потокобезопасные счётчики для итоговой строки."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.requests = 0
+        self.rate_limited = 0
+        self.retries = 0
+        self.window_waits = 0
+
+    def add(self, **kw) -> None:
+        with self._lock:
+            for k, v in kw.items():
+                setattr(self, k, getattr(self, k) + v)
+
+    def summary_line(self) -> str:
+        with self._lock:
+            return (f"Pixabay API: запросов {self.requests}, получено 429: {self.rate_limited}, "
+                    f"повторов: {self.retries}, ожиданий места в окне: {self.window_waits}")
+
+
+class PixabayApiLimiter:
+    """Окно + общая пауза + счётчики. before_request() вызывается ДО входа в семафор."""
+
+    def __init__(self, rpm: int, now_fn=time.monotonic, sleep_fn=time.sleep) -> None:
+        self.window = ThreadSlidingWindow(rpm, PIXABAY_WINDOW_SECONDS, now_fn, sleep_fn)
+        self.pause = SharedPause(now_fn, sleep_fn)
+        self.stats = PixabayApiStats()
+
+    def before_request(self) -> None:
+        self.pause.wait()
+        if self.window.acquire():
+            self.stats.add(window_waits=1)
+        self.pause.wait()  # 429 мог прийти, пока ждали место в окне
+
+
+_pixabay_limiter = None
+_pixabay_limiter_lock = threading.Lock()
+
+
+def get_pixabay_limiter() -> PixabayApiLimiter:
+    """Один экземпляр на все потоки. Создаётся при первом обращении из PIXABAY_REQUESTS_PER_MINUTE
+    (main() вызывает его в самом начале, чтобы неверное значение остановило запуск до скачивания)."""
+    global _pixabay_limiter
+    with _pixabay_limiter_lock:
+        if _pixabay_limiter is None:
+            _pixabay_limiter = PixabayApiLimiter(load_pixabay_rpm())
+        return _pixabay_limiter
+
+
+def set_pixabay_limiter(limiter) -> None:
+    """Подмена экземпляра (selftest)."""
+    global _pixabay_limiter
+    with _pixabay_limiter_lock:
+        _pixabay_limiter = limiter
+
+
+def pixabay_api_get(number: int, api_url: str, what: str):
+    """GET к API Pixabay с окном и обработкой 429. Возвращает ответ со статусом < 400.
+    429: пауза до сброса окна (X-RateLimit-Reset + 1 с, иначе 61 с) и повтор того же запроса, до
+    PIXABAY_429_MAX_RETRIES повторов; пауза > DIRECT_MAX_RETRY_WAIT_SECONDS не ждётся. Повторы тоже
+    берут место в окне. Окончательный провал по 429 - RuntimeError с текстом "HTTP 429 ..." (так
+    classify_failure_message не запускает внешний повтор, сразу backup); остальные ошибки HTTP -
+    как раньше (raise_for_status). Вне семафора спит и ждёт место; под семафором - только сам запрос."""
+    limiter = get_pixabay_limiter()
+    retries = 0
+    while True:
+        limiter.before_request()
+        with _pexels_pixabay_semaphore:
+            resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
+        limiter.stats.add(requests=1)
+        if resp.status_code != 429:
+            resp.raise_for_status()
+            return resp
+        limiter.stats.add(rate_limited=1)
+        log_429_details("Pixabay", f"API {what}, номер {number}, попытка {retries + 1}", resp)
+        pause, src = pixabay_reset_pause(resp.headers.get("X-RateLimit-Reset"))
+        if retries >= PIXABAY_429_MAX_RETRIES:
+            raise RuntimeError(f"HTTP 429: лимит Pixabay API не сбросился после {retries} повторов")
+        if pause > DIRECT_MAX_RETRY_WAIT_SECONDS:
+            raise RuntimeError(
+                f"HTTP 429: пауза {pause:.0f} с ({src}) больше предела "
+                f"{DIRECT_MAX_RETRY_WAIT_SECONDS:.0f} с, не жду"
+            )
+        retries += 1
+        limiter.stats.add(retries=1)
+        limiter.pause.extend(pause)
+        print(f"[ИНФО] Pixabay API 429 ({what}, номер {number}): общая пауза {pause:.1f} с ({src}), "
+              f"повтор {retries}/{PIXABAY_429_MAX_RETRIES}")
+
+
+# ---------------------------------------------------------------------------
+# Прямые ссылки на файлы Pexels/Pixabay (их CDN). Такая ссылка качается сразу по
+# URL: без запроса к API за метаданными и без API-ключа. Все остальные ссылки
+# Pexels/Pixabay считаются страницами и идут прежним путём через API.
+# Сравнивается ИМЕННО hostname целиком (не подстрока), поэтому
+# "images.pexels.com.evil.com" или "evil.com/images.pexels.com/x.jpg" - не прямые.
+# ---------------------------------------------------------------------------
+DIRECT_MEDIA_DOMAINS = frozenset({"images.pexels.com", "videos.pexels.com", "cdn.pixabay.com"})
+DIRECT_DOWNLOAD_ATTEMPTS = 3            # попыток на одну прямую ссылку при 429
+DIRECT_MAX_RETRY_WAIT_SECONDS = 120.0   # Retry-After больше этого - не ждём, сразу провал (-> backup)
+
+
+def is_direct_media_url(url: str) -> bool:
+    """True, если хост URL - один из DIRECT_MEDIA_DOMAINS."""
+    try:
+        host = (urlparse((url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in DIRECT_MEDIA_DOMAINS
+
+
+def classify_pexels_pixabay_source(url: str) -> str | None:
+    """'direct' - прямая ссылка; 'api' - URL, который download_media_item отдаёт в
+    download_pexels_*/download_pixabay_* (те же условия, что в диспетчере); иначе None."""
+    if is_direct_media_url(url):
+        return "direct"
+    u = (url or "").strip().lower()
+    if "pexels.com" in u and ("/video/" in u or "/photo/" in u):
+        return "api"
+    if "pixabay.com" in u:
+        return "api"
+    return None
+
+
+class SourceStats:
+    """Потокобезопасный счётчик УСПЕШНО скачанных (и прошедших проверку длительности)
+    файлов Pexels/Pixabay: по прямой ссылке и через API. Backup-ссылки считаются так же."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.direct = 0
+        self.api = 0
+
+    def add(self, url: str) -> None:
+        kind = classify_pexels_pixabay_source(url)
+        with self._lock:
+            if kind == "direct":
+                self.direct += 1
+            elif kind == "api":
+                self.api += 1
+
+    def summary_line(self) -> str:
+        with self._lock:
+            return f"Скачано по прямой ссылке: {self.direct}, через API: {self.api}"
+
+
+SOURCE_STATS = SourceStats()
+
 # Состояние LOC: лок гарантирует строгую последовательность (concurrency=1) даже
 # если фоновые потоки ThreadPoolExecutor обращаются к backup на loc.gov.
 _loc_lock = threading.Lock()
@@ -680,6 +942,12 @@ def download_media_item(number: int, url: str) -> None:
     url = url.strip()
     url_lower = url.lower()
 
+    # 0. ПРЯМАЯ ССЫЛКА PEXELS/PIXABAY (CDN): без API и без ключа. Должна идти ПЕРВОЙ:
+    # cdn.pixabay.com / videos.pexels.com иначе совпали бы с проверками ниже по подстроке.
+    if is_direct_media_url(url):
+        download_direct_media(number, url)
+        return
+
     # 1. PEXELS ВИДЕО
     if "pexels.com" in url_lower and "/video/" in url_lower:
         video_id = extract_id(url)
@@ -804,6 +1072,10 @@ def _url_gets_external_retry(url: str) -> bool:
     Всем остальным маршрутам (pexels/pixabay/coverr/generic-cffi - у них
     сейчас 0 внутренних ретраев) - положен новый внешний "1 повтор на
     транзиентный сбой"."""
+    if is_direct_media_url(url):
+        # Свой цикл только на 429; транзиентные сбои (как у pexels/pixabay-страниц)
+        # получают внешний повтор. Без этой строки прямой .mp4 попал бы в yt-dlp-ветку ниже.
+        return True
     url_lower = url.lower()
     if "wikimedia.org" in url_lower or "wikipedia.org" in url_lower:
         return False
@@ -1064,6 +1336,7 @@ def _attempt_download(number: int, url: str) -> tuple[bool, str]:
     if not ok:
         fail(number, reason)
         return False, reason
+    SOURCE_STATS.add(url)
     return True, ""
 
 
@@ -1251,33 +1524,32 @@ def download_direct_via_cffi(number: int, url: str) -> None:
         fail(number, f"Не удалось скачать {number}: {e}")
 
 
-@_pexels_pixabay_throttled
 def download_pixabay_photo(number: int, photo_id: str) -> None:
+    # Без декоратора _pexels_pixabay_throttled: окно/пауза - вне семафора (см. pixabay_api_get)
     api_url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&id={photo_id}"
     try:
-        resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
-        resp.raise_for_status()
+        resp = pixabay_api_get(number, api_url, "фото")
         data = resp.json()
         hits = data.get("hits", [])
         if hits:
             direct_url = hits[0].get("largeImageURL") or hits[0].get("imageURL")
             if direct_url:
-                img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
-                img_resp.raise_for_status()
-                save_media(number, img_resp.content, direct_url,
-                           img_resp.headers.get("Content-Type", ""), "pixabay")
+                with _pexels_pixabay_semaphore:
+                    img_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=30)
+                    img_resp.raise_for_status()
+                    save_media(number, img_resp.content, direct_url,
+                               img_resp.headers.get("Content-Type", ""), "pixabay")
                 return
         fail(number, f"Не удалось получить фото Pixabay {number}")
     except Exception as e:
         fail(number, f"Pixabay API ошибка {number}: {e}")
 
 
-@_pexels_pixabay_throttled
 def download_pixabay_video(number: int, video_id: str) -> None:
+    # Без декоратора _pexels_pixabay_throttled: окно/пауза - вне семафора (см. pixabay_api_get)
     api_url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&id={video_id}"
     try:
-        resp = cffi_requests.get(api_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=20)
-        resp.raise_for_status()
+        resp = pixabay_api_get(number, api_url, "видео")
         data = resp.json()
         hits = data.get("hits", [])
         if hits:
@@ -1285,10 +1557,11 @@ def download_pixabay_video(number: int, video_id: str) -> None:
             best_video = videos.get("large") or videos.get("medium") or videos.get("small")
             if best_video and "url" in best_video:
                 direct_url = best_video["url"]
-                vid_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
-                vid_resp.raise_for_status()
-                save_media(number, vid_resp.content, direct_url,
-                           vid_resp.headers.get("Content-Type", ""), "pixabay")
+                with _pexels_pixabay_semaphore:
+                    vid_resp = cffi_requests.get(direct_url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=60)
+                    vid_resp.raise_for_status()
+                    save_media(number, vid_resp.content, direct_url,
+                               vid_resp.headers.get("Content-Type", ""), "pixabay")
                 return
         fail(number, f"Не удалось получить видео Pixabay {number}")
     except Exception as e:
@@ -1351,6 +1624,42 @@ def download_pexels_video(number: int, video_id: str) -> None:
         save_media(number, resp.content, direct_url, resp.headers.get("Content-Type", ""), "pexels")
     except Exception as e:
         fail(number, f"Не удалось скачать файл видео {number}: {e}")
+
+
+def download_direct_media(number: int, url: str) -> None:
+    """Прямая ссылка на файл Pexels/Pixabay (см. DIRECT_MEDIA_DOMAINS): один GET по URL,
+    без API и без ключа. 429 -> повтор с учётом Retry-After (до DIRECT_DOWNLOAD_ATTEMPTS
+    попыток; Retry-After > DIRECT_MAX_RETRY_WAIT_SECONDS - не ждём). Формат - по
+    содержимому, имя N.<ext> - через save_media. Семафор держится только на время
+    самого запроса, но не на паузе - новых ожиданий под семафором нет. Откат на API
+    не делается: провал = обычный провал primary (дальше backup в download_number_with_backup)."""
+    host = (urlparse(url).hostname or "").lower()
+    site = "pexels" if "pexels" in host else "pixabay"
+    timeout = 60 if _url_looks_video(url) else 30
+    try:
+        resp = None
+        for attempt in range(DIRECT_DOWNLOAD_ATTEMPTS):
+            with _pexels_pixabay_semaphore:
+                resp = cffi_requests.get(url, headers=BROWSER_HEADERS, impersonate="chrome", timeout=timeout)
+            if resp.status_code != 429:
+                break
+            log_429_details(site.capitalize(), f"прямая ссылка, номер {number}, попытка {attempt + 1}", resp)
+            if attempt == DIRECT_DOWNLOAD_ATTEMPTS - 1:
+                break  # последняя попытка: спать уже незачем
+            sleep_sec = _extract_retry_after_seconds(resp, float(4 * (attempt + 1)))
+            if sleep_sec > DIRECT_MAX_RETRY_WAIT_SECONDS:
+                fail(number, f"Прямая ссылка {site} {number}: 429, Retry-After слишком большой "
+                             f"({sleep_sec:.0f} с) ({url})")
+                return
+            print(f"[ИНФО] {site.capitalize()} 429 limit (прямая ссылка), пауза {sleep_sec:.1f} сек для {number}...")
+            time.sleep(sleep_sec)
+        if resp.status_code == 429:
+            fail(number, f"Прямая ссылка {site} {number}: лимит запросов 429 не сбросился ({url})")
+            return
+        resp.raise_for_status()
+        save_media(number, resp.content, url, resp.headers.get("Content-Type", ""), site)
+    except Exception as e:
+        fail(number, f"Не удалось скачать по прямой ссылке {site} {number}: {e}")
 
 
 def download_coverr_video(number: int, url: str) -> None:
@@ -1615,6 +1924,344 @@ def _selftest() -> None:
     assert _url_looks_video("https://www.pexels.com/video/foo-123/")
     assert not _url_looks_video("https://x.org/a/photo.jpg")
 
+    # прямые ссылки Pexels/Pixabay: определение по hostname
+    for u in ("https://images.pexels.com/photos/1/pexels-photo-1.jpeg?auto=compress",
+              "https://videos.pexels.com/video-files/1/1-hd.mp4",
+              "https://cdn.pixabay.com/photo/2020/01/01/a.jpg",
+              "https://cdn.pixabay.com/video/2020/01/01/clip.mp4",
+              "HTTPS://Images.Pexels.COM/photos/1/a.png"):
+        assert is_direct_media_url(u), u
+        assert classify_pexels_pixabay_source(u) == "direct", u
+    for u in ("https://www.pexels.com/photo/foo-123/", "https://www.pexels.com/video/foo-123/",
+              "https://pixabay.com/photos/foo-123/", "https://pixabay.com/videos/foo-123/",
+              "https://api.pexels.com/v1/photos/1", "https://commons.wikimedia.org/wiki/File:A.jpg",
+              "https://images.pexels.com.evil.com/a.jpg", "https://evil.com/images.pexels.com/a.jpg",
+              "https://evil.com/?u=cdn.pixabay.com", "", "not a url"):
+        assert not is_direct_media_url(u), u
+    assert classify_pexels_pixabay_source("https://www.pexels.com/photo/foo-123/") == "api"
+    assert classify_pexels_pixabay_source("https://www.pexels.com/video/foo-123/") == "api"
+    assert classify_pexels_pixabay_source("https://pixabay.com/videos/foo-123/") == "api"
+    assert classify_pexels_pixabay_source("https://pixabay.com/photos/foo-123/") == "api"
+    assert classify_pexels_pixabay_source("https://www.pexels.com/@user/") is None  # диспетчер отдаст в generic
+    assert classify_pexels_pixabay_source("https://x.org/a.jpg") is None
+    assert _url_gets_external_retry("https://videos.pexels.com/video-files/1/1-hd.mp4")  # не yt-dlp-ветка
+    assert not _url_gets_external_retry("https://x.org/a.mp4")  # прежнее поведение
+
+    st = SourceStats()
+    assert st.summary_line() == "Скачано по прямой ссылке: 0, через API: 0"
+    st.add("https://images.pexels.com/a.jpg")
+    st.add("https://cdn.pixabay.com/a.jpg")
+    st.add("https://www.pexels.com/photo/x-1/")
+    st.add("https://commons.wikimedia.org/wiki/File:A.jpg")  # не считается
+    assert st.summary_line() == "Скачано по прямой ссылке: 2, через API: 1"
+
+    # скачивание по прямой ссылке, сеть заглушена (cffi_requests.get, time.sleep)
+    class _Resp:
+        def __init__(self, status=200, content=b"", headers=None):
+            self.status_code, self.content, self.headers = status, content, headers or {}
+            self.text = ""
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP Error {self.status_code}")
+
+    jpg = b"\xff\xd8\xff\xe0" + b"\0" * 32
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+    global SOURCE_STATS
+    saved_get, saved_sleep = cffi_requests.get, time.sleep
+    saved_out, saved_stats = OUTPUT_DIR, SOURCE_STATS
+    saved_keys = (globals()["PEXELS_API_KEY"], globals()["PIXABAY_API_KEY"])
+    saved_failed = FAILED_ITEMS[:]
+    saved_md = MIN_DURATIONS
+    try:
+        globals()["PEXELS_API_KEY"] = globals()["PIXABAY_API_KEY"] = ""  # ключ не нужен
+        with tempfile.TemporaryDirectory() as tmp:
+            OUTPUT_DIR = tmp
+            MIN_DURATIONS = {}
+            script, urls, sleeps = [], [], []
+
+            def fake_get(url, **kw):
+                urls.append(url)
+                r = script.pop(0)
+                if isinstance(r, Exception):
+                    raise r
+                return r
+
+            cffi_requests.get = fake_get
+            time.sleep = lambda sec: sleeps.append(sec)
+
+            def reset(*responses):
+                script[:] = list(responses)
+                urls.clear()
+                sleeps.clear()
+                FAILED_ITEMS.clear()
+
+            def fails(n):
+                return [x for x in FAILED_ITEMS if x.startswith(f"{n}: ")]
+
+            # успех: один GET по самому URL, без ключа, имя по содержимому
+            reset(_Resp(200, jpg))
+            u1 = "https://images.pexels.com/photos/1/pexels-photo-1.jpeg?auto=compress"
+            download_media_item(7, u1)
+            assert urls == [u1] and not fails(7) and os.path.exists(os.path.join(tmp, "7.jpg"))
+
+            # формат по содержимому: расширение в URL не совпадает -> отказ, файла нет
+            reset(_Resp(200, png))
+            download_media_item(8, "https://cdn.pixabay.com/photo/a.jpg")
+            assert fails(8) and "неподдерживаемый формат" in fails(8)[0]
+            assert not glob.glob(os.path.join(tmp, "8.*"))
+
+            # 429 с Retry-After: пауза max(RA+1, 4) и повтор
+            reset(_Resp(429, headers={"Retry-After": "10"}), _Resp(200, jpg))
+            download_media_item(9, "https://images.pexels.com/photos/9/a.jpg")
+            assert sleeps == [11.0] and len(urls) == 2 and not fails(9)
+            assert os.path.exists(os.path.join(tmp, "9.jpg"))
+
+            # 429 на всех попытках: провал с "429" (внешнего повтора нет), после последней - без сна
+            reset(*[_Resp(429) for _ in range(DIRECT_DOWNLOAD_ATTEMPTS)])
+            download_media_item(10, "https://images.pexels.com/photos/10/a.jpg")
+            assert len(urls) == DIRECT_DOWNLOAD_ATTEMPTS and len(sleeps) == DIRECT_DOWNLOAD_ATTEMPTS - 1
+            assert fails(10) and classify_failure_message(fails(10)[-1]) == "429"
+
+            # огромный Retry-After: не ждём
+            reset(_Resp(429, headers={"Retry-After": "99999"}))
+            download_media_item(11, "https://images.pexels.com/photos/11/a.jpg")
+            assert not sleeps and len(urls) == 1 and fails(11)
+
+            # провал primary (404) -> backup (тоже прямая ссылка); запросов к API нет
+            SOURCE_STATS = SourceStats()
+            reset(_Resp(404), _Resp(200, jpg))
+            p, b = "https://images.pexels.com/photos/12/a.jpg", "https://cdn.pixabay.com/photo/b.jpg"
+            download_number_with_backup(12, p, b)
+            assert urls == [p, b] and not fails(12) and os.path.exists(os.path.join(tmp, "12.jpg"))
+            assert (SOURCE_STATS.direct, SOURCE_STATS.api) == (1, 0)
+
+            # провал primary и backup: одна итоговая запись, откат на API не делается
+            reset(_Resp(404), _Resp(404))
+            download_number_with_backup(13, p, b)
+            assert urls == [p, b] and len(fails(13)) == 1 and "backup тоже не скачался" in fails(13)[0]
+            assert (SOURCE_STATS.direct, SOURCE_STATS.api) == (1, 0)
+            assert all(is_direct_media_url(x) for x in urls)
+    finally:
+        cffi_requests.get, time.sleep = saved_get, saved_sleep
+        OUTPUT_DIR, SOURCE_STATS, MIN_DURATIONS = saved_out, saved_stats, saved_md
+        globals()["PEXELS_API_KEY"], globals()["PIXABAY_API_KEY"] = saved_keys
+        FAILED_ITEMS[:] = saved_failed
+
+    # ---- лимит Pixabay API: окно, общая пауза, 429 (время и сон подменены, HTTP заглушен) ----
+    assert load_pixabay_rpm({}) == 90 and load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": ""}) == 90
+    assert load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": "   "}) == 90
+    assert load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": " 50 "}) == 50
+    for _bad in ("0", "-5", "abc", "1.5", "90 запросов"):
+        try:
+            load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": _bad})
+        except ValueError as e:
+            assert "PIXABAY_REQUESTS_PER_MINUTE" in str(e), e
+        else:
+            raise AssertionError(f"PIXABAY_REQUESTS_PER_MINUTE={_bad!r} должно останавливать")
+
+    assert pixabay_reset_pause("5")[0] == 6.0 and pixabay_reset_pause("0")[0] == 1.0
+    assert pixabay_reset_pause("600")[0] == 601.0 and pixabay_reset_pause("2.5")[0] == 3.5
+    for _raw in (None, "", "abc", "9999", "601", "-1", "nan", "inf"):
+        assert pixabay_reset_pause(_raw)[0] == 61.0, _raw
+
+    class _Clk:
+        def __init__(self):
+            self.t = 1000.0
+
+        def __call__(self):
+            return self.t
+
+    _ck = _Clk()
+    _sl: list = []
+
+    def _fsleep(sec):
+        _sl.append(sec)
+        _ck.t += sec
+
+    _w = ThreadSlidingWindow(90, 60.0, now_fn=_ck, sleep_fn=_fsleep)
+    assert [_w.acquire() for _ in range(90)] == [False] * 90 and _sl == []   # 90 проходят сразу
+    assert _w.acquire() is True and _sl == [60.0]                           # 91-й ждёт 60 с
+    assert _w.acquire() is False and _sl == [60.0]                          # окно освободилось
+    for _args in ((0, 60.0), (-1, 60.0), (1.5, 60.0), (True, 60.0), (5, 0), (5, -1.0)):
+        try:
+            ThreadSlidingWindow(*_args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"ThreadSlidingWindow{_args} должен падать")
+    # частичное освобождение: ждём только до выхода ПЕРВОГО места из окна
+    _ck2 = _Clk(); _sl2: list = []
+    _w2 = ThreadSlidingWindow(2, 10.0, now_fn=_ck2, sleep_fn=lambda sec: (_sl2.append(sec), setattr(_ck2, "t", _ck2.t + sec)))
+    _w2.acquire(); _ck2.t += 4; _w2.acquire()
+    assert _w2.acquire() is True and _sl2 == [6.0], _sl2
+    # потокобезопасность: 8 потоков x 10 взятий в окне на 80 - все проходят без сна, ровно 80 записей
+    _ck3 = _Clk(); _sl3: list = []
+    _w3 = ThreadSlidingWindow(80, 60.0, now_fn=_ck3, sleep_fn=_sl3.append)
+    _ths = [threading.Thread(target=lambda: [_w3.acquire() for _ in range(10)]) for _ in range(8)]
+    for _t in _ths:
+        _t.start()
+    for _t in _ths:
+        _t.join()
+    assert _sl3 == [] and len(_w3._stamps) == 80
+
+    _ck4 = _Clk(); _sl4: list = []
+    _sp = SharedPause(now_fn=_ck4, sleep_fn=lambda sec: (_sl4.append(sec), setattr(_ck4, "t", _ck4.t + sec)))
+    assert _sp.wait() == 0.0 and _sl4 == []
+    _sp.extend(5.0); _sp.extend(3.0)   # берётся максимум, а не сумма
+    assert _sp.wait() == 5.0 and _sl4 == [5.0] and _sp.wait() == 0.0
+
+    # --- download_pixabay_*: окно/429/семафор (cffi_requests.get заглушен) ---
+    class _JResp(_Resp):
+        def __init__(self, status=200, content=b"", headers=None, body=None):
+            super().__init__(status, content, headers)
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    _OK_PHOTO = {"hits": [{"largeImageURL": "https://cdn.pixabay.com/photo/a.jpg"}]}
+    _saved_get2 = cffi_requests.get
+    _saved_state2 = (globals()["PIXABAY_API_KEY"], OUTPUT_DIR, FAILED_ITEMS[:], _pixabay_limiter,
+                     os.environ.get("PIXABAY_REQUESTS_PER_MINUTE"), sys.argv[:])
+    try:
+        globals()["PIXABAY_API_KEY"] = "K"
+        with tempfile.TemporaryDirectory() as tmp:
+            OUTPUT_DIR = tmp
+
+            def _setup(script, rpm=90):
+                clk, sleeps, sem_free, calls, held = _Clk(), [], [], [], []
+
+                def _probe():
+                    got = [_pexels_pixabay_semaphore.acquire(blocking=False) for _ in range(PEXELS_PIXABAY_CONCURRENCY)]
+                    for g in got:
+                        if g:
+                            _pexels_pixabay_semaphore.release()
+                    return all(got)  # True - семафор целиком свободен
+
+                def sl(sec):
+                    sem_free.append(_probe())
+                    sleeps.append(sec)
+                    clk.t += sec
+
+                lim = PixabayApiLimiter(rpm, now_fn=clk, sleep_fn=sl)
+                set_pixabay_limiter(lim)
+
+                def fake_get(url, **kw):
+                    calls.append(url)
+                    held.append(not _probe())  # True - текущий поток держит семафор во время запроса
+                    r = script.pop(0)
+                    if isinstance(r, Exception):
+                        raise r
+                    return r
+
+                cffi_requests.get = fake_get
+                FAILED_ITEMS.clear()
+                return lim, sleeps, sem_free, calls, held
+
+            def _fails(n):
+                return [x for x in FAILED_ITEMS if x.startswith(f"{n}: ")]
+
+            # 429 с Reset: 5 -> пауза 6 с, повтор проходит; во сне семафор свободен, в запросе - занят
+            lim, sleeps, sem_free, calls, held = _setup([
+                _JResp(429, headers={"X-RateLimit-Reset": "5"}), _JResp(200, body=_OK_PHOTO), _Resp(200, jpg)])
+            download_pixabay_photo(31, "123")
+            assert sleeps == [6.0] and sem_free == [True] and not _fails(31), (sleeps, sem_free, FAILED_ITEMS)
+            assert len(calls) == 3 and calls[0] == calls[1] and "pixabay.com/api/?key=K&id=123" in calls[0]
+            assert held == [True, True, True], held
+            assert os.path.exists(os.path.join(tmp, "31.jpg"))
+            assert lim.stats.summary_line() == (
+                "Pixabay API: запросов 2, получено 429: 1, повторов: 1, ожиданий места в окне: 0")
+
+            # три 429 подряд и успех на 4-м запросе (3 повтора - допустимо)
+            lim, sleeps, sem_free, calls, held = _setup(
+                [_JResp(429, headers={"X-RateLimit-Reset": "1"})] * 3 + [_JResp(200, body=_OK_PHOTO), _Resp(200, jpg)])
+            download_pixabay_photo(32, "5")
+            assert sleeps == [2.0, 2.0, 2.0] and not _fails(32) and all(sem_free)
+            assert (lim.stats.requests, lim.stats.rate_limited, lim.stats.retries) == (4, 3, 3)
+
+            # 429 на всех 4 запросах (запрос + 3 повтора): ошибка со словом "429", сразу в backup
+            lim, sleeps, sem_free, calls, held = _setup([_JResp(429, headers={"X-RateLimit-Reset": "1"})] * 4)
+            download_pixabay_photo(33, "5")
+            assert len(calls) == 4 and sleeps == [2.0, 2.0, 2.0] and all(sem_free)
+            assert len(_fails(33)) == 1 and "429" in _fails(33)[0], FAILED_ITEMS
+            assert classify_failure_message(_fails(33)[0][len("33: "):]) == "429"
+            assert (lim.stats.requests, lim.stats.rate_limited, lim.stats.retries) == (4, 4, 3)
+
+            # 429 без заголовка / с мусором (abc, 9999): пауза 61 с
+            for _num, _hdr in ((34, {}), (35, {"X-RateLimit-Reset": "abc"}), (36, {"X-RateLimit-Reset": "9999"})):
+                lim, sleeps, sem_free, calls, held = _setup(
+                    [_JResp(429, headers=_hdr), _JResp(200, body=_OK_PHOTO), _Resp(200, jpg)])
+                download_pixabay_photo(_num, "7")
+                assert sleeps == [61.0] and not _fails(_num) and sem_free == [True], (_num, sleeps)
+
+            # огромная пауза (Reset=300 -> 301 с > 120): немедленная ошибка без сна и без общей паузы
+            lim, sleeps, sem_free, calls, held = _setup([_JResp(429, headers={"X-RateLimit-Reset": "300"})])
+            download_pixabay_photo(37, "7")
+            assert sleeps == [] and len(calls) == 1 and lim.pause.wait() == 0.0 and sleeps == []
+            assert len(_fails(37)) == 1 and "429" in _fails(37)[0] and "не жду" in _fails(37)[0]
+            assert lim.stats.retries == 0
+
+            # общая пауза: после 429 в одном потоке следующий запрос (в т.ч. другого номера) ждёт её конца
+            lim, sleeps, sem_free, calls, held = _setup([_JResp(200, body={"hits": []}), _JResp(200, body={"hits": []})])
+            lim.pause.extend(7.0)
+            download_pixabay_video(38, "9")
+            assert sleeps == [7.0] and sem_free == [True] and "pixabay.com/api/videos/?key=K&id=9" in calls[0]
+            assert len(_fails(38)) == 1 and "Не удалось получить видео Pixabay" in _fails(38)[0]
+            download_pixabay_photo(39, "9")   # пауза уже кончилась - без сна
+            assert sleeps == [7.0] and lim.stats.requests == 2
+
+            # ожидание места в окне - вне семафора: окно на 1 запрос, второй вызов ждёт 60 с
+            lim, sleeps, sem_free, calls, held = _setup(
+                [_JResp(200, body=_OK_PHOTO), _Resp(200, jpg), _JResp(200, body=_OK_PHOTO), _Resp(200, jpg)], rpm=1)
+            download_pixabay_photo(40, "1")
+            assert sleeps == [] and lim.stats.window_waits == 0
+            download_pixabay_photo(41, "2")
+            assert sleeps == [60.0] and sem_free == [True] and lim.stats.window_waits == 1
+            assert not _fails(40) and not _fails(41) and lim.stats.requests == 2
+
+            # прямая ссылка cdn.pixabay.com в окне не считается: окно на 1 запрос, а API-запрос не ждёт
+            lim, sleeps, sem_free, calls, held = _setup(
+                [_Resp(200, jpg), _JResp(200, body=_OK_PHOTO), _Resp(200, jpg)], rpm=1)
+            download_media_item(42, "https://cdn.pixabay.com/photo/2020/a.jpg")
+            assert lim.stats.requests == 0 and not _fails(42) and os.path.exists(os.path.join(tmp, "42.jpg"))
+            download_pixabay_photo(43, "3")
+            assert sleeps == [] and lim.stats.requests == 1 and lim.stats.window_waits == 0
+
+            # PIXABAY_REQUESTS_PER_MINUTE: лениво читается из окружения; неверное значение - остановка
+            set_pixabay_limiter(None)
+            os.environ["PIXABAY_REQUESTS_PER_MINUTE"] = ""
+            assert get_pixabay_limiter().window.max_requests == 90
+            assert get_pixabay_limiter() is get_pixabay_limiter()   # один экземпляр на все потоки
+            for _bad in ("0", "-5", "abc"):
+                set_pixabay_limiter(None)
+                os.environ["PIXABAY_REQUESTS_PER_MINUTE"] = _bad
+                try:
+                    get_pixabay_limiter()
+                except ValueError as e:
+                    assert "PIXABAY_REQUESTS_PER_MINUTE" in str(e)
+                else:
+                    raise AssertionError(_bad)
+                sys.argv = ["download.py"]   # main() должен остановиться ДО очистки папки и скачивания
+                set_pixabay_limiter(None)
+                try:
+                    main()
+                except SystemExit as e:
+                    assert e.code == 1, e.code
+                else:
+                    raise AssertionError(f"main() не остановился при PIXABAY_REQUESTS_PER_MINUTE={_bad!r}")
+                assert os.path.isdir(tmp)
+    finally:
+        cffi_requests.get = _saved_get2
+        globals()["PIXABAY_API_KEY"], OUTPUT_DIR = _saved_state2[0], _saved_state2[1]
+        FAILED_ITEMS[:] = _saved_state2[2]
+        set_pixabay_limiter(_saved_state2[3])
+        if _saved_state2[4] is None:
+            os.environ.pop("PIXABAY_REQUESTS_PER_MINUTE", None)
+        else:
+            os.environ["PIXABAY_REQUESTS_PER_MINUTE"] = _saved_state2[4]
+        sys.argv = _saved_state2[5]
+
     print("ok")
 
 
@@ -1622,6 +2269,10 @@ def main():
     if "--selftest" in sys.argv:
         _selftest()
         return
+    try:
+        get_pixabay_limiter()  # неверный PIXABAY_REQUESTS_PER_MINUTE - остановка до скачивания
+    except ValueError as e:
+        _stop(str(e))
     if os.path.exists(OUTPUT_DIR):
         import shutil
         shutil.rmtree(OUTPUT_DIR)
@@ -1638,6 +2289,8 @@ def main():
     saved = ", ".join(f"{e}: {counts.get(e, 0)}" for e in ("jpg", "png", "mp4", "mov", "avi"))
     rejects = FORMAT_REJECTS.summary_line()
     print("[ИНФО] " + (f"(до backup) {rejects}. " if rejects else "") + f"Сохранено: {saved}")
+    print("[ИНФО] " + SOURCE_STATS.summary_line())
+    print("[ИНФО] " + get_pixabay_limiter().stats.summary_line())
 
 
 if __name__ == "__main__":
