@@ -7,11 +7,11 @@ on:
         required: false
         type: string
       sources:
-        description: 'Источники: 1 = архив, 2 = микс, 3 = сток'
+        description: 'Источники: 1 = микс, 2 = архив, 3 = сток'
         required: false
         type: choice
         options: ["1", "2", "3"]
-        default: "2"
+        default: "1"
       media_mode:
         description: 'Тип медиа: 1 = смешанный (тип выбирает Gemini), 2 = только видео, 3 = только фото. Не зависит от sources. Работает только вместе с srt_path.'
         required: false
@@ -23,7 +23,7 @@ on:
         required: false
         type: choice
         options: ["1", "2"]
-        default: "1"
+        default: "2"
       coverage_percent:
         description: 'Процент покрытия: какую долю хронометража (по секундам) закрывать поиском медиа. 100 = искать для всех сегментов (skip не ставится, но длина видео для сегментов всё равно считается). Работает только вместе с srt_path.'
         required: false
@@ -104,16 +104,23 @@ jobs:
 
     # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
     # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.
-    # final.srt едет в том же артефакте: он нужен в search_media (select_coverage.py),
-    # а оттуда уходит дальше - см. search-links и шаг публикации релиза.
+    # final.srt лежит в отдельном артефакте final-srt: он нужен в search_media
+    # (select_coverage.py), а также в job download (шаг публикации релиза).
     - name: Upload requests.json as artifact
       if: always()
       uses: actions/upload-artifact@v6
       with:
         name: requests-json
-        path: |
-          requests.json
-          final.srt
+        path: requests.json
+        retention-days: 14
+        if-no-files-found: ignore
+
+    - name: Upload final.srt as artifact
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: final-srt
+        path: final.srt
         retention-days: 14
         if-no-files-found: ignore
 
@@ -145,9 +152,14 @@ jobs:
       with:
         name: requests-json
 
+    - name: Download final.srt artifact
+      uses: actions/download-artifact@v7
+      with:
+        name: final-srt
+
     # Отбор сегментов по проценту покрытия: проставляет skip в requests.json (skip=true -
     # search.py такой сегмент не ищет и пишет в missing.txt). SRT берётся НЕ из репозитория,
-    # а склеенный final.srt из артефакта requests-json (номера сегментов должны совпадать
+    # а склеенный final.srt из артефакта final-srt (номера сегментов должны совпадать
     # с requests.json, а не с исходным srt_path). Только stdlib, поэтому
     # идёт до установки torch/CLIP. Выполняется ВСЕГДА, в том числе при 100%: помимо skip
     # шаг проставляет в requests.json min_duration (нужен search.py). Правит файл на месте
@@ -210,9 +222,8 @@ jobs:
           echo "Нет пропущенных сегментов." >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    # final.srt добавлен сюда, чтобы job download получил его тем же скачиванием search-links
-    # и приложил к релизу (отдельный артефакт не нужен).
-    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt / min_durations.json / final.srt as artifact
+    # final.srt здесь не едет: job download получает его отдельным артефактом final-srt.
+    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt / min_durations.json as artifact
       uses: actions/upload-artifact@v6
       with:
         name: search-links
@@ -222,7 +233,6 @@ jobs:
           missing.txt
           backup_missing.txt
           min_durations.json
-          final.srt
         retention-days: 14
 
   # -------------------------------------------------------------------------
@@ -262,6 +272,14 @@ jobs:
       with:
         name: search-links
 
+    # final.srt (склеенный SRT) идёт в релиз на шаге Publish; кладётся в корень рабочей
+    # папки (path по умолчанию), туда же, где раньше его оставлял search-links.
+    - name: Download final.srt artifact (если ссылки пришли из search.py)
+      if: needs.search_media.result == 'success'
+      uses: actions/download-artifact@v7
+      with:
+        name: final-srt
+
     - name: Load INPUT_LINKS / INPUT_BACKUP_LINKS from search.py output
       if: needs.search_media.result == 'success'
       run: |
@@ -296,8 +314,8 @@ jobs:
     # (если он уже есть, apt-get ничего не переустановит).
     - name: Install ffmpeg (ffprobe)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq ffmpeg
         ffprobe -version | head -n1
 
     - name: Run download script with input
