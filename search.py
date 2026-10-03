@@ -821,6 +821,7 @@ class SegmentSpec:
     type: str  # "image" | "video"
     is_entity: bool
     entity_keywords: list[str]
+    skip: bool = False  # select_coverage.py: True - сегмент не искать, сразу в missing
 
 
 @dataclass
@@ -2292,6 +2293,11 @@ async def run_search(ctx: Context, segments: list[SegmentSpec]) -> tuple[dict, d
     return results, backups, missing
 
 
+def split_skipped(specs: list[SegmentSpec]) -> tuple[list[SegmentSpec], list[int]]:
+    """(сегменты для поиска, отсортированные номера сегментов со skip == True)."""
+    return [sg for sg in specs if not sg.skip], sorted(sg.index for sg in specs if sg.skip)
+
+
 def load_requests(path: str) -> list[SegmentSpec]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -2337,6 +2343,11 @@ def load_requests(path: str) -> list[SegmentSpec]:
         seg_type = raw_type.strip().lower()
         if seg_type not in ("image", "video"):
             raise bad(k, "type", f"должно быть \"image\" или \"video\", получено {raw_type!r}")
+        skip = v.get("skip")
+        if skip is None:
+            skip = False  # поля нет (старый requests.json) или null - искать как раньше
+        elif not isinstance(skip, bool):
+            raise bad(k, "skip", "должно быть true или false")
         norm_sites = [x.strip().lower() for x in sites]
         unknown = [x for x in norm_sites if x not in SITE_SEARCH_FUNCS]
         if unknown:
@@ -2367,6 +2378,7 @@ def load_requests(path: str) -> list[SegmentSpec]:
                 type=seg_type,
                 is_entity=bool(v["is_entity"]),
                 entity_keywords=list(v.get("entity_keywords") or []),
+                skip=skip,
             ))
         except (KeyError, TypeError, ValueError) as e:
             raise ValueError(f"Сегмент {k!r} в requests.json имеет некорректную структуру: {e}") from e
@@ -2398,12 +2410,33 @@ async def amain(args: argparse.Namespace) -> int:
          3: "только стоки: pexels/pixabay"}[SOURCES_MODE],
     )
     try:
-        segments = load_requests(args.input)
+        all_segments = load_requests(args.input)
     except (ValueError, json.JSONDecodeError) as e:
         logging.error("Ошибка чтения %s: %s", args.input, e)
         return 1
 
-    logging.info("Загружено сегментов: %s", len(segments))
+    # skip == True: не ищем (ни сайты, ни CLIP, ни каскад, ни backup), в конце идут в missing.
+    # Дальше `segments` - только сегменты для поиска, поэтому encode_scenes, rel_top_n,
+    # прогресс run_search и backup-проход считаются от них, а не от полного списка.
+    segments, skipped = split_skipped(all_segments)
+    logging.info("Загружено сегментов: %s", len(all_segments))
+    if skipped:
+        logging.info(
+            "Пропущено по skip (не ищутся, попадут в %s как не найденные): %s; к поиску: %s.",
+            args.missing_output, len(skipped), len(segments),
+        )
+    if not segments:
+        logging.warning("Все сегменты помечены skip - поиск не выполняется, CLIP не загружается.")
+        for path, lines in ((args.links_output, []), (args.backup_links_output, []),
+                            (args.missing_output, [f"{i}\n" for i in skipped]),
+                            (args.backup_missing_output, [])):
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        logging.info(
+            "Готово: найдено 0 из 0 сегментов, пропущено по skip %s (все записаны в %s).",
+            len(skipped), args.missing_output,
+        )
+        return 0
     rel_top_n = effective_top_n(len(segments))
     logging.info(
         "Относительная оценка CLIP: SIM_MIN_THRESHOLD(floor)=%.3f, SIM_ACCEPT_THRESHOLD(abs)=%.3f, "
@@ -2513,6 +2546,10 @@ async def amain(args: argparse.Namespace) -> int:
             log_site_stats_summary(ctx.site_stats)
             return 1
 
+        # Пропущенные по skip - в тот же список missing (формат/сортировка при записи общие).
+        # backup-проход ниже идёт по results, пропущенных там нет.
+        missing.extend(skipped)
+
         backup_missing = await run_backup_pass(ctx, segments, results, backups)
 
         logging.info(summarize_choices(ctx.choice_reasons, ctx.choice_own_sims, "primary"))
@@ -2540,13 +2577,21 @@ async def amain(args: argparse.Namespace) -> int:
     if reject_line:
         logging.info(reject_line)
 
+    # Статистика считается от сегментов, которые реально искались (len(segments)); пропущенные
+    # по skip в неё не входят и показаны отдельной строкой ниже (в missing.txt они есть).
     logging.info(
         "Готово: найдено %s из %s сегментов (из них с backup - %s), не найдено %s, "
         "backup_missing %s. Результаты: %s, backup: %s, пропуски: %s, без backup: %s",
-        len(results), len(segments), len(backups), len(missing), len(backup_missing),
+        len(results), len(segments), len(backups), len(missing) - len(skipped), len(backup_missing),
         args.links_output, args.backup_links_output, args.missing_output,
         args.backup_missing_output,
     )
+    if skipped:
+        logging.info(
+            "Пропущено по skip: %s (не искались; не входят в числа выше; всего сегментов %s, "
+            "строк в %s: %s).",
+            len(skipped), len(all_segments), args.missing_output, len(missing),
+        )
     return 0
 
 
@@ -2635,6 +2680,42 @@ def _selftest() -> int:
 
     specs = load(good)
     assert specs[0].query_broad is None and specs[0].sites == ["pexels"]
+    # skip: нет поля / null -> False; true/false читаются; не bool -> ошибка
+    assert specs[0].skip is False
+    assert load({"1": dict(good["1"], skip=None)})[0].skip is False
+    assert load({"1": dict(good["1"], skip=True)})[0].skip is True
+    assert load({"1": dict(good["1"], skip=False)})[0].skip is False
+    for bad_skip in ("true", 1, 0):
+        try:
+            load({"1": dict(good["1"], skip=bad_skip)})
+        except ValueError as e:
+            assert "skip" in str(e) and "Сегмент" in str(e), e
+        else:
+            raise AssertionError("ожидалась ValueError для skip=%r" % (bad_skip,))
+    # skip-сегменты не идут в поиск и оказываются в missing; без skip - как раньше
+    _sp = load({"1": good["1"], "2": dict(good["1"], skip=True), "3": dict(good["1"], skip=False),
+                "10": dict(good["1"], skip=True)})
+    _act, _skp = split_skipped(_sp)
+    assert [x.index for x in _act] == [1, 3] and _skp == [2, 10], (_act, _skp)
+    _act, _skp = split_skipped(load({"1": good["1"], "2": good["1"]}))
+    assert [x.index for x in _act] == [1, 2] and _skp == []
+
+    _searched: list[int] = []
+
+    async def _spy_process(ctx, seg):
+        _searched.append(seg.index)
+        return seg.index, (None if seg.index == 3 else f"u{seg.index}"), None
+
+    _old_ps = globals()["process_segment"]
+    globals()["process_segment"] = _spy_process
+    try:
+        _act, _skp = split_skipped(_sp)
+        _res_, _bk_, _miss_ = asyncio.run(run_search(None, _act))
+    finally:
+        globals()["process_segment"] = _old_ps
+    assert _searched == [1, 3] and sorted(_res_) == [1] and _miss_ == [3], (_searched, _res_, _miss_)
+    _miss_.extend(_skp)  # ровно так amain собирает список для missing.txt ("номер" на строку)
+    assert sorted(_miss_) == [2, 3, 10]
     notype = {"3": {k2: v2 for k2, v2 in good["1"].items() if k2 != "type"}}
     gif = {"4": dict(good["1"], type="gif")}
     assert load({"1": dict(good["1"], type="Video", sites=["flickr", "pexels"])})[0].type == "video"
