@@ -28,6 +28,21 @@ on:
         required: false
         type: string
         default: "10"
+      min_seconds:
+        description: 'Склейка SRT: минимальная длина одного склеенного куска, сек. Соседние короткие реплики склеиваются, пока кусок не достигнет этой длины.'
+        required: false
+        type: string
+        default: "3.5"
+      sentence_min_seconds:
+        description: 'Склейка SRT: минимальная длина куска, сек, при которой его можно закончить на конце предложения (. ! ? …), не дожидаясь min_seconds. Должна быть <= min_seconds.'
+        required: false
+        type: string
+        default: "2.0"
+      max_seconds:
+        description: 'Склейка SRT: потолок длины одного склеенного куска, сек. Должен быть >= min_seconds. Одиночная реплика длиннее потолка остаётся как есть (с предупреждением в логе).'
+        required: false
+        type: string
+        default: "5.0"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно.'
         required: false
@@ -53,6 +68,18 @@ jobs:
       with:
         python-version: '3.12'
 
+    # Склейка коротких реплик SRT в final.srt. Выполняется ВСЕГДА (независимо от
+    # coverage_percent). normalize_srt.py нумерует реплики заново с 1, поэтому ВСЕ
+    # последующие шаги (generate_queries, select_coverage, итоговые загрузки) читают
+    # только final.srt - иначе номера сегментов разойдутся. Только stdlib.
+    - name: Normalize SRT
+      env:
+        MIN_SECONDS: ${{ inputs.min_seconds || '3.5' }}
+        SENTENCE_MIN_SECONDS: ${{ inputs.sentence_min_seconds || '2.0' }}
+        MAX_SECONDS: ${{ inputs.max_seconds || '5.0' }}
+        PYTHONUNBUFFERED: "1"
+      run: python normalize_srt.py "${{ inputs.srt_path }}" final.srt
+
     - name: Install query-generation deps
       run: pip install -U google-genai
 
@@ -66,16 +93,20 @@ jobs:
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
         PYTHONUNBUFFERED: "1"
-      run: python generate_queries.py --input "${{ inputs.srt_path }}" --output requests.json
+      run: python generate_queries.py --input final.srt --output requests.json
 
     # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
     # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.
+    # final.srt едет в том же артефакте: он нужен в search_media (select_coverage.py),
+    # а оттуда уходит дальше - см. search-links и шаг публикации релиза.
     - name: Upload requests.json as artifact
       if: always()
       uses: actions/upload-artifact@v6
       with:
         name: requests-json
-        path: requests.json
+        path: |
+          requests.json
+          final.srt
         retention-days: 14
         if-no-files-found: ignore
 
@@ -108,8 +139,9 @@ jobs:
         name: requests-json
 
     # Отбор сегментов по проценту покрытия: проставляет skip в requests.json (skip=true -
-    # search.py такой сегмент не ищет и пишет в missing.txt). SRT берётся из репозитория
-    # (checkout выше) по тому же srt_path, что и generate_queries. Только stdlib, поэтому
+    # search.py такой сегмент не ищет и пишет в missing.txt). SRT берётся НЕ из репозитория,
+    # а склеенный final.srt из артефакта requests-json (номера сегментов должны совпадать
+    # с requests.json, а не с исходным srt_path). Только stdlib, поэтому
     # идёт до установки torch/CLIP. При 100% шаг пропускается: ничего не меняет, а без
     # skip search.py работает как раньше. Падение шага (код 1) останавливает прогон до поиска.
     - name: Select segments by coverage percent
@@ -118,7 +150,7 @@ jobs:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
         INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
         PYTHONUNBUFFERED: "1"
-      run: python select_coverage.py requests.json "${{ inputs.srt_path }}"
+      run: python select_coverage.py requests.json final.srt
 
     # Кэш весов CLIP (open_clip тянет их через huggingface_hub) - без кэша каждый
     # запуск заново качает ~350МБ для ViT-B-32-quickgelu. Ключ включает модель/pretrained,
@@ -170,7 +202,9 @@ jobs:
           echo "Нет пропущенных сегментов." >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt as artifact
+    # final.srt добавлен сюда, чтобы job download получил его тем же скачиванием search-links
+    # и приложил к релизу (отдельный артефакт не нужен).
+    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt / final.srt as artifact
       uses: actions/upload-artifact@v6
       with:
         name: search-links
@@ -179,6 +213,7 @@ jobs:
           backup_links.txt
           missing.txt
           backup_missing.txt
+          final.srt
         retention-days: 14
 
   # -------------------------------------------------------------------------
@@ -332,6 +367,12 @@ jobs:
         UPLOAD_EXTRA="missing.txt"
         if [ -s download_failed.txt ]; then
           UPLOAD_EXTRA="$UPLOAD_EXTRA download_failed.txt"
+        fi
+        # final.srt (склеенный SRT, по нему нумеруются все сегменты) прикладываем только
+        # в сценарии srt_path: в ручном сценарии с inputs.links его нет, а проверка по
+        # needs.search_media.result не даст случайному final.srt из репозитория попасть в релиз.
+        if [ "${{ needs.search_media.result }}" = "success" ] && [ -f final.srt ]; then
+          UPLOAD_EXTRA="$UPLOAD_EXTRA final.srt"
         fi
         gh release upload "$TAG" $UPLOAD_EXTRA \
           --repo "${{ github.repository }}" \
