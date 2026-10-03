@@ -300,6 +300,7 @@ import random
 import re
 import statistics
 import sys
+import threading
 import time
 import unicodedata
 from collections import Counter
@@ -405,18 +406,29 @@ PIXABAY_STRICT_TYPES: bool = (
     os.environ.get("SEARCH_PIXABAY_STRICT_TYPES", "1").strip().lower() not in ("0", "false", "no", "off")
 )
 
-# Режим источников: 1 = только архивные, 2 = микс (по умолчанию), 3 = только стоки.
-# Любое другое значение игнорируется (WARNING в amain) и берётся 2.
-SOURCES_MODE_DEFAULT = 2
+# Режим источников (SEARCH_SOURCES_MODE): 1 = микс (по умолчанию), 2 = только архивные,
+# 3 = только стоки. Любое другое значение игнорируется (WARNING в amain) и берётся микс.
+# Числа 1/2/3 нигде в коде не используются напрямую - только эти константы.
+# (Не путать с MEDIA_MODE: тот независим и нумеруется иначе.)
+SOURCES_MIX = 1
+SOURCES_ARCHIVE = 2
+SOURCES_STOCK = 3
+SOURCES_MODE_DEFAULT = SOURCES_MIX
+SOURCES_MODE_NAMES = {
+    SOURCES_MIX: "микс, без ограничений",
+    SOURCES_ARCHIVE: "только архивные: wikimedia/loc/nasa, broad не выполняется",
+    SOURCES_STOCK: "только стоки: pexels/pixabay",
+}
 _SOURCES_MODE_RAW = os.environ.get("SEARCH_SOURCES_MODE")
 
 
 def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
-    """(режим, значение_корректно). Пустое/не заданное -> (2, True); мусор -> (2, False)."""
+    """(режим, значение_корректно). Пустое/не заданное -> (SOURCES_MIX, True);
+    мусор -> (SOURCES_MIX, False)."""
     if raw is None or not raw.strip():
         return SOURCES_MODE_DEFAULT, True
     v = raw.strip()
-    if v in ("1", "2", "3"):
+    if v in {str(m) for m in SOURCES_MODE_NAMES}:
         return int(v), True
     return SOURCES_MODE_DEFAULT, False
 
@@ -866,8 +878,9 @@ def log_site_stats_summary(site_stats: dict) -> None:
         "keyword=0 при лиценз.>0 -> entity_keywords/is_entity слишком узкие или не совпадают "
         "с текстом кандидатов. нет_прев.=raw (или близко) -> превью не скачиваются (сайт "
         "блокирует PREVIEW_HEADERS/Referer/хотлинкинг - точный статус-код и тело ответа по "
-        "каждому провалу теперь всегда пишется отдельным логгером 'search.fetch_preview_bytes' "
-        "на уровне DEBUG, см. его вывод выше). scored>0, но "
+        "каждому провалу пишется отдельным логгером 'search.fetch_preview_bytes', но только на "
+        "уровне DEBUG: в обычном запуске этого вывода нет, он появляется, лишь если вручную "
+        "поставить уровень DEBUG для этого логгера). scored>0, но "
         "принято = кандидаты, принятые по рангу своей сцены среди всех сегментов или по "
         "абсолютному порогу; чужие = отсеяны, т.к. другая сцена подходит им заметно лучше "
         "своей; best-eff = никто не принят, взят лучший по own_sim (полный автомат). "
@@ -886,9 +899,57 @@ def log_site_stats_summary(site_stats: dict) -> None:
 # ---------------------------------------------------------------------------
 
 RATE_LIMITER_DEBUG_LOGGER = logging.getLogger("search.rate_limiter")
-RATE_LIMITER_DEBUG_LOGGER.setLevel(logging.DEBUG)
 CLIP_TIMING_DEBUG_LOGGER = logging.getLogger("search.clip_timing")
-CLIP_TIMING_DEBUG_LOGGER.setLevel(logging.DEBUG)
+
+
+class TimingStats:
+    """Потокобезопасные счётчики: число событий, суммарное время, максимум.
+    Чистая логика, без логирования. Вместо построчных DEBUG-сообщений по каждому событию."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+        self._total = 0.0
+        self._max = 0.0
+
+    def add(self, seconds: float) -> None:
+        with self._lock:
+            self._count += 1
+            self._total += seconds
+            if seconds > self._max:
+                self._max = seconds
+
+    def snapshot(self) -> tuple[int, float, float, float]:
+        """(число событий, сумма, среднее, максимум); для 0 событий все нули."""
+        with self._lock:
+            avg = (self._total / self._count) if self._count else 0.0
+            return self._count, self._total, avg, self._max
+
+
+CLIP_ENCODE_STATS = TimingStats()
+RATE_LIMITER_WAIT_STATS = TimingStats()
+PREVIEW_FETCH_STATS = TimingStats()
+
+
+def format_timing_summary_lines(
+    clip: TimingStats, limiter: TimingStats, preview: TimingStats,
+) -> list[str]:
+    n, tot, avg, mx = clip.snapshot()
+    line_clip = (f"Время CLIP-кодирования: картинок {n}, всего {tot:.1f} с, "
+                 f"в среднем {avg:.3f} с, максимум {mx:.2f} с")
+    n, tot, _avg, mx = limiter.snapshot()
+    line_rl = f"Ожидание rate-limiter: запросов {n}, всего {tot:.1f} с, максимум {mx:.2f} с"
+    n, tot, avg, mx = preview.snapshot()
+    line_pv = (f"Загрузка превью: файлов {n}, всего {tot:.1f} с, "
+               f"в среднем {avg:.3f} с, максимум {mx:.2f} с")
+    return [line_clip, line_rl, line_pv]
+
+
+def log_timing_stats_summary() -> None:
+    for line in format_timing_summary_lines(
+        CLIP_ENCODE_STATS, RATE_LIMITER_WAIT_STATS, PREVIEW_FETCH_STATS,
+    ):
+        logging.info(line)
 
 
 class RateLimiter:
@@ -903,7 +964,9 @@ class RateLimiter:
 
     async def wait_turn(self) -> None:
         if self.min_interval <= 0:
+            RATE_LIMITER_WAIT_STATS.add(0.0)
             return
+        waited = 0.0
         async with self._lock:
             loop = asyncio.get_running_loop()
             now = loop.time()
@@ -914,12 +977,14 @@ class RateLimiter:
                     wait_start = time.monotonic()
                     await asyncio.sleep(remaining)
                     actual_wait = time.monotonic() - wait_start
+                    waited = actual_wait
                     RATE_LIMITER_DEBUG_LOGGER.debug(
                         "RateLimiter.wait_turn: реально ждал %.3fs (запрошено %.3fs, "
                         "min_interval=%.2fs)", actual_wait, remaining, self.min_interval,
                     )
                     now = loop.time()
             self._last_start_ts = now
+        RATE_LIMITER_WAIT_STATS.add(waited)
 
 
 # ---------------------------------------------------------------------------
@@ -1192,6 +1257,7 @@ class ClipScorer:
             return await loop.run_in_executor(None, self.encode_image_sync, image_bytes)
         finally:
             elapsed = time.monotonic() - start
+            CLIP_ENCODE_STATS.add(elapsed)
             CLIP_TIMING_DEBUG_LOGGER.debug("CLIP-кодирование картинки (%s, %s): %.3fs", self.model_name, self.pretrained, elapsed)
 
     def similarities(self, image_vec) -> list[float]:
@@ -1694,10 +1760,20 @@ SITE_SEARCH_FUNCS: dict = {
 # ---------------------------------------------------------------------------
 
 PREVIEW_DEBUG_LOGGER = logging.getLogger("search.fetch_preview_bytes")
-PREVIEW_DEBUG_LOGGER.setLevel(logging.DEBUG)
 
 
 async def fetch_preview_bytes(ctx: Context, cand: Candidate) -> Optional[bytes]:
+    """Обёртка: замеряет время вызова (только если запрос реально уходит в сеть)."""
+    if not cand.preview_url:
+        return await _fetch_preview_bytes_impl(ctx, cand)
+    started = time.perf_counter()
+    try:
+        return await _fetch_preview_bytes_impl(ctx, cand)
+    finally:
+        PREVIEW_FETCH_STATS.add(time.perf_counter() - started)
+
+
+async def _fetch_preview_bytes_impl(ctx: Context, cand: Candidate) -> Optional[bytes]:
     if not cand.preview_url:
         PREVIEW_DEBUG_LOGGER.debug(
             "Превью %s/%s: у кандидата нет preview_url вообще (текст кандидата: %r) - "
@@ -1854,7 +1930,8 @@ async def score_candidates(
     if candidates and not scored:
         logging.info(
             "Сегмент %s/%s: %s кандидатов, но ни для одного не удалось получить вектор превью "
-            "(скачивание/кодирование) - проверьте лог 'search.fetch_preview_bytes' на уровне DEBUG.",
+            "(скачивание/кодирование) - причину покажет лог 'search.fetch_preview_bytes', но в обычном запуске его вывода нет: "
+            "вручную поставьте для этого логгера уровень DEBUG.",
             seg_index, key, len(candidates),
         )
     elif scored and not any(c.accepted for c in scored):
@@ -1926,19 +2003,20 @@ SOURCES_WARN_LIMIT = 10
 
 
 def filter_sites_by_mode(sites, mode: Optional[int] = None) -> list:
-    """Режим 1: только ARCHIVE_SITES; режим 3: только STOCK_SITES; режим 2: без изменений.
+    """SOURCES_ARCHIVE: только ARCHIVE_SITES; SOURCES_STOCK: только STOCK_SITES;
+    SOURCES_MIX: без изменений.
     Порядок и дубликаты сохраняются."""
     if mode is None:
         mode = SOURCES_MODE
-    if mode == 1:
+    if mode == SOURCES_ARCHIVE:
         return [x for x in sites if x in ARCHIVE_SITES]
-    if mode == 3:
+    if mode == SOURCES_STOCK:
         return [x for x in sites if x in STOCK_SITES]
     return list(sites)
 
 
 def fallback_sites(mode: int) -> list:
-    return ["wikimedia", "loc"] if mode == 1 else ["pexels", "pixabay"]
+    return ["wikimedia", "loc"] if mode == SOURCES_ARCHIVE else ["pexels", "pixabay"]
 
 
 def candidates_cap(
@@ -2000,7 +2078,7 @@ def _entity_name_query(seg: SegmentSpec) -> Optional[str]:
 
 def build_cascade(seg: SegmentSpec, mode: Optional[int] = None) -> list[Variant]:
     """Чистая функция (без сети и ctx): упорядоченный список вариантов запроса.
-    Режим источников 1 (только архивные): broad (он идёт только на pixabay/pexels) не строится."""
+    Режим источников SOURCES_ARCHIVE (только архивные): broad (он идёт только на pixabay/pexels) не строится."""
     if mode is None:
         mode = SOURCES_MODE
     seg_sites = [x for x in _pixabay_first(list(seg.sites)) if x in SITE_SEARCH_FUNCS]
@@ -2024,7 +2102,7 @@ def build_cascade(seg: SegmentSpec, mode: Optional[int] = None) -> list[Variant]
         q = queries[name]
         if not q or not q.strip():
             continue
-        if name == "broad" and mode == 1:
+        if name == "broad" and mode == SOURCES_ARCHIVE:
             continue
         sites = broad_sites if name == "broad" else list(narrow_medium_sites)
         if not sites:
@@ -2439,7 +2517,7 @@ async def _claim_first(
 
 def backup_candidate_sites(seg_sites, primary_site: str, mode: Optional[int] = None) -> list:
     """Сайты для backup: seg.sites + SEARCH_BACKUP_EXTRA_SITES (+ pexels/pixabay, если primary - loc).
-    Режим источников фильтрует результат целиком (режим 2 - без изменений)."""
+    Режим источников фильтрует результат целиком (SOURCES_MIX - без изменений)."""
     candidate_sites = list(seg_sites) + BACKUP_EXTRA_SITES
     # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
     if primary_site == "loc":
@@ -2672,7 +2750,7 @@ def load_requests(path: str) -> list[SegmentSpec]:
             logging.warning(
                 "Сегмент %s: неизвестные сайты в sites %s - они будут проигнорированы.", k, unknown,
             )
-        if SOURCES_MODE != 2:
+        if SOURCES_MODE != SOURCES_MIX:
             filtered = filter_sites_by_mode(norm_sites)
             if not filtered:
                 filtered = fallback_sites(SOURCES_MODE)
@@ -2742,9 +2820,7 @@ async def amain(args: argparse.Namespace) -> int:
         )
     logging.info(
         "Режим источников: %s (%s; SEARCH_SOURCES_MODE).", SOURCES_MODE,
-        {1: "только архивные: wikimedia/loc/nasa, broad не выполняется",
-         2: "микс, без ограничений",
-         3: "только стоки: pexels/pixabay"}[SOURCES_MODE],
+        SOURCES_MODE_NAMES[SOURCES_MODE],
     )
     try:
         all_segments = load_requests(args.input)
@@ -2900,6 +2976,7 @@ async def amain(args: argparse.Namespace) -> int:
             ))
 
         log_site_stats_summary(ctx.site_stats)
+        log_timing_stats_summary()
 
     with open(args.links_output, "w", encoding="utf-8") as f:
         for idx in sorted(results):
@@ -2966,7 +3043,7 @@ def _selftest() -> int:
     import tempfile
 
     # self-test не зависит от SEARCH_SOURCES_MODE / SEARCH_WIKIMEDIA_STRICT_BLOCK в окружении
-    globals()["SOURCES_MODE"] = 2
+    globals()["SOURCES_MODE"] = SOURCES_MIX
     globals()["WIKIMEDIA_STRICT_BLOCK"] = True
     _selftest_pixabay_strict_env = PIXABAY_STRICT_TYPES  # реальное значение из окружения (для проверки env-режима)
 
@@ -3223,26 +3300,43 @@ def _selftest() -> int:
         assert w.lower() in _DEFAULT_WM_BLOCKLIST, w
 
     # --- режим источников ---
-    assert parse_sources_mode(None) == (2, True)
-    assert parse_sources_mode("") == (2, True)
-    assert parse_sources_mode("1") == (1, True)
-    assert parse_sources_mode(" 3 ") == (3, True)
-    assert parse_sources_mode("4") == (2, False)
-    assert parse_sources_mode("abc") == (2, False)
+    assert (SOURCES_MIX, SOURCES_ARCHIVE, SOURCES_STOCK) == (1, 2, 3)  # контракт SEARCH_SOURCES_MODE
+    assert SOURCES_MODE_DEFAULT == SOURCES_MIX
+    assert parse_sources_mode(None) == (SOURCES_MIX, True)
+    assert parse_sources_mode("") == (SOURCES_MIX, True)
+    assert parse_sources_mode("   ") == (SOURCES_MIX, True)
+    assert parse_sources_mode("abc") == (SOURCES_MIX, False)
+    assert parse_sources_mode("4") == (SOURCES_MIX, False)
+    assert parse_sources_mode("0") == (SOURCES_MIX, False)
+    assert parse_sources_mode("1") == (SOURCES_MIX, True)
+    assert parse_sources_mode("2") == (SOURCES_ARCHIVE, True)
+    assert parse_sources_mode(" 3 ") == (SOURCES_STOCK, True)
     mixed = ["pexels", "wikimedia", "pixabay", "loc", "nasa"]
-    assert filter_sites_by_mode(mixed, 1) == ["wikimedia", "loc", "nasa"]
-    assert filter_sites_by_mode(mixed, 3) == ["pexels", "pixabay"]
-    assert filter_sites_by_mode(mixed, 2) == mixed
-    assert filter_sites_by_mode(["pexels"], 1) == []
-    # broad в режиме 1 не выполняется, в 2 и 3 - как раньше
+    assert filter_sites_by_mode(mixed, SOURCES_MIX) == mixed
+    assert filter_sites_by_mode(mixed, SOURCES_ARCHIVE) == ["wikimedia", "loc", "nasa"]
+    assert filter_sites_by_mode(mixed, SOURCES_STOCK) == ["pexels", "pixabay"]
+    assert filter_sites_by_mode(["pexels"], SOURCES_ARCHIVE) == []
+    assert filter_sites_by_mode(["wikimedia"], SOURCES_STOCK) == []
+    assert filter_sites_by_mode(["pexels", "wikimedia"], SOURCES_MIX) == ["pexels", "wikimedia"]
+    # без аргумента берётся глобальный SOURCES_MODE (в self-test это SOURCES_MIX)
+    assert filter_sites_by_mode(mixed) == mixed
+    # fallback_sites: архив -> wikimedia/loc, иначе (сток) -> pexels/pixabay
+    assert fallback_sites(SOURCES_ARCHIVE) == ["wikimedia", "loc"]
+    assert fallback_sites(SOURCES_STOCK) == ["pexels", "pixabay"]
+    # названия режимов для INFO-строки запуска: ровно три, у каждого своё описание
+    assert set(SOURCES_MODE_NAMES) == {SOURCES_MIX, SOURCES_ARCHIVE, SOURCES_STOCK}
+    assert SOURCES_MODE_NAMES[SOURCES_MIX].startswith("микс")
+    assert SOURCES_MODE_NAMES[SOURCES_ARCHIVE].startswith("только архивные")
+    assert SOURCES_MODE_NAMES[SOURCES_STOCK].startswith("только стоки")
+    # broad в архивном режиме не выполняется, в миксе и стоке - как раньше
     seg_a = mk(["wikimedia", "pexels"])
-    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 1)]] == ["narrow", "medium"]
-    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 2)]] == ["narrow", "medium", "broad"]
-    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, 3)]] == ["narrow", "medium", "broad"]
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, SOURCES_ARCHIVE)]] == ["narrow", "medium"]
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, SOURCES_MIX)]] == ["narrow", "medium", "broad"]
+    assert [n for n, _ in [(v.name, v.sites) for v in build_cascade(seg_a, SOURCES_STOCK)]] == ["narrow", "medium", "broad"]
     seg_s = mk(["pexels", "pixabay"])
-    assert [v.name for v in build_cascade(seg_s, 3)] == ["medium", "narrow", "broad"]
+    assert [v.name for v in build_cascade(seg_s, SOURCES_STOCK)] == ["medium", "narrow", "broad"]
 
-    # load_requests: режимы 1/3, пустой sites после фильтра, лимит warning'ов
+    # load_requests: архивный/стоковый режимы, пустой sites после фильтра, лимит warning'ов
     def _write_req(sites_list):
         data = {}
         for i, st in enumerate(sites_list, 1):
@@ -3258,19 +3352,19 @@ def _selftest() -> int:
     _old_mode = _g["SOURCES_MODE"]
     try:
         path = _write_req([["pexels", "wikimedia", "loc"], ["pexels", "pixabay"], ["wikimedia"]])
-        _g["SOURCES_MODE"] = 1
+        _g["SOURCES_MODE"] = SOURCES_ARCHIVE
         r = load_requests(path)
         assert [x.sites for x in r] == [["wikimedia", "loc"], ["wikimedia", "loc"], ["wikimedia"]], r
-        _g["SOURCES_MODE"] = 3
+        _g["SOURCES_MODE"] = SOURCES_STOCK
         r = load_requests(path)
         assert [x.sites for x in r] == [["pexels"], ["pexels", "pixabay"], ["pexels", "pixabay"]], r
-        _g["SOURCES_MODE"] = 2
+        _g["SOURCES_MODE"] = SOURCES_MIX
         r = load_requests(path)
         assert [x.sites for x in r] == [["pexels", "wikimedia", "loc"], ["pexels", "pixabay"], ["wikimedia"]]
         os.remove(path)
         # пустой после фильтра: WARNING с номером сегмента, лимит строк
         path = _write_req([["pexels"]] * (SOURCES_WARN_LIMIT + 3))
-        _g["SOURCES_MODE"] = 1
+        _g["SOURCES_MODE"] = SOURCES_ARCHIVE
         with _CaptureWarnings() as cap:
             r = load_requests(path)
         assert all(x.sites == ["wikimedia", "loc"] for x in r)
@@ -3286,13 +3380,13 @@ def _selftest() -> int:
     _old_extra = list(BACKUP_EXTRA_SITES)
     try:
         BACKUP_EXTRA_SITES[:] = ["nasa", "pixabay"]
-        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 2) == \
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", SOURCES_MIX) == \
             ["wikimedia", "pexels", "nasa", "pixabay"]
-        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 1) == ["wikimedia", "nasa"]
-        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", 3) == ["pexels", "pixabay"]
-        assert backup_candidate_sites(["loc"], "loc", 1) == ["loc", "nasa"]
-        assert backup_candidate_sites(["loc"], "loc", 2) == ["loc", "nasa", "pixabay", "pexels"]
-        assert backup_candidate_sites(["loc"], "loc", 3) == ["pixabay", "pexels"]
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", SOURCES_ARCHIVE) == ["wikimedia", "nasa"]
+        assert backup_candidate_sites(["wikimedia", "pexels"], "wikimedia", SOURCES_STOCK) == ["pexels", "pixabay"]
+        assert backup_candidate_sites(["loc"], "loc", SOURCES_ARCHIVE) == ["loc", "nasa"]
+        assert backup_candidate_sites(["loc"], "loc", SOURCES_MIX) == ["loc", "nasa", "pixabay", "pexels"]
+        assert backup_candidate_sites(["loc"], "loc", SOURCES_STOCK) == ["pixabay", "pexels"]
     finally:
         BACKUP_EXTRA_SITES[:] = _old_extra
 
@@ -3738,6 +3832,57 @@ def _selftest() -> int:
     assert asyncio.run(_cc.get_or_compute(cand_key(_kp), _enc_p)) == "vec_photo"
     assert asyncio.run(_cc.get_or_compute(cand_key(_kv), _enc_v)) == "vec_video"
     assert asyncio.run(_cc.get_or_compute(cand_key(_kp), _enc_v)) == "vec_photo"
+
+    # --- TimingStats и итоговые строки ---
+    _ts = TimingStats()
+    assert _ts.snapshot() == (0, 0.0, 0.0, 0.0)
+    _ts.add(0.5)
+    assert _ts.snapshot() == (1, 0.5, 0.5, 0.5)
+    _ts.add(1.5)
+    _ts.add(1.0)
+    _n, _tot, _avg, _mx = _ts.snapshot()
+    assert (_n, _tot, _avg, _mx) == (3, 3.0, 1.0, 1.5)
+
+    _tp, _N, _M = TimingStats(), 8, 500
+    def _worker():
+        for _ in range(_M):
+            _tp.add(0.01)
+    _threads = [threading.Thread(target=_worker) for _ in range(_N)]
+    for _t in _threads:
+        _t.start()
+    for _t in _threads:
+        _t.join()
+    _n, _tot, _avg, _mx = _tp.snapshot()
+    assert _n == _N * _M and abs(_tot - _N * _M * 0.01) < 1e-6 and _mx == 0.01
+
+    _e = format_timing_summary_lines(TimingStats(), TimingStats(), TimingStats())
+    assert _e == [
+        "Время CLIP-кодирования: картинок 0, всего 0.0 с, в среднем 0.000 с, максимум 0.00 с",
+        "Ожидание rate-limiter: запросов 0, всего 0.0 с, максимум 0.00 с",
+        "Загрузка превью: файлов 0, всего 0.0 с, в среднем 0.000 с, максимум 0.00 с",
+    ], _e
+    _c, _r, _p = TimingStats(), TimingStats(), TimingStats()
+    for _v in (0.1, 0.2, 0.31):
+        _c.add(_v)
+    _r.add(0.25)
+    _r.add(0.35)
+    _p.add(2.1)
+    _p.add(0.5)
+    _f = format_timing_summary_lines(_c, _r, _p)
+    assert _f[0] == "Время CLIP-кодирования: картинок 3, всего 0.6 с, в среднем 0.203 с, максимум 0.31 с", _f[0]
+    assert _f[1] == "Ожидание rate-limiter: запросов 2, всего 0.6 с, максимум 0.35 с", _f[1]
+    assert _f[2] == "Загрузка превью: файлов 2, всего 2.6 с, в среднем 1.300 с, максимум 2.10 с", _f[2]
+
+    # RateLimiter пишет в счётчик и при нулевом интервале, и при реальном ожидании
+    _n0 = RATE_LIMITER_WAIT_STATS.snapshot()[0]
+    async def _rl_check():
+        await RateLimiter(0.0).wait_turn()
+        _rl = RateLimiter(0.05)
+        await _rl.wait_turn()
+        await _rl.wait_turn()
+    asyncio.run(_rl_check())
+    _n1, _tot1, _, _mx1 = RATE_LIMITER_WAIT_STATS.snapshot()
+    assert _n1 - _n0 == 3 and _mx1 > 0.0
 
     print("selftest OK")
     return 0
