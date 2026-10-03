@@ -12,6 +12,12 @@ on:
         type: choice
         options: ["1", "2", "3"]
         default: "2"
+      media_mode:
+        description: 'Тип медиа: 1 = смешанный (тип выбирает Gemini), 2 = только видео, 3 = только фото. Не зависит от sources. Работает только вместе с srt_path.'
+        required: false
+        type: choice
+        options: ["1", "2", "3"]
+        default: "1"
       strict:
         description: 'Проверка запросов: 1 = калибровка (стоп), 2 = мягко (варнинг)'
         required: false
@@ -19,7 +25,7 @@ on:
         options: ["1", "2"]
         default: "1"
       coverage_percent:
-        description: 'Процент покрытия: какую долю хронометража (по секундам) закрывать поиском медиа. 100 = искать для всех сегментов (шаг отбора пропускается). Работает только вместе с srt_path.'
+        description: 'Процент покрытия: какую долю хронометража (по секундам) закрывать поиском медиа. 100 = искать для всех сегментов (skip не ставится, но длина видео для сегментов всё равно считается). Работает только вместе с srt_path.'
         required: false
         type: string
         default: "100"
@@ -44,7 +50,7 @@ on:
         type: string
         default: "5.0"
       links:
-        description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно.'
+        description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
         required: false
         type: string
 
@@ -92,6 +98,7 @@ jobs:
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
+        MEDIA_MODE: ${{ inputs.media_mode }}
         PYTHONUNBUFFERED: "1"
       run: python generate_queries.py --input final.srt --output requests.json
 
@@ -142,10 +149,10 @@ jobs:
     # search.py такой сегмент не ищет и пишет в missing.txt). SRT берётся НЕ из репозитория,
     # а склеенный final.srt из артефакта requests-json (номера сегментов должны совпадать
     # с requests.json, а не с исходным srt_path). Только stdlib, поэтому
-    # идёт до установки torch/CLIP. При 100% шаг пропускается: ничего не меняет, а без
-    # skip search.py работает как раньше. Падение шага (код 1) останавливает прогон до поиска.
+    # идёт до установки torch/CLIP. Выполняется ВСЕГДА, в том числе при 100%: помимо skip
+    # шаг проставляет в requests.json min_duration (нужен search.py). Правит файл на месте
+    # в рабочей папке, откуда его читает search.py. Падение шага (код 1) останавливает прогон до поиска.
     - name: Select segments by coverage percent
-      if: ${{ (inputs.coverage_percent || '100') != '100' }}
       env:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
         INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
@@ -176,6 +183,7 @@ jobs:
         SEARCH_CLIP_MODEL: ${{ env.SEARCH_CLIP_MODEL || 'ViT-B-32-quickgelu' }}
         SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
         SEARCH_SOURCES_MODE: ${{ inputs.sources }}
+        MEDIA_MODE: ${{ inputs.media_mode }}
         # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
         # Значения ниже включены по итогам прогона на 126 сегментах
         SEARCH_SIM_MIN_THRESHOLD: "0.22"
@@ -192,7 +200,7 @@ jobs:
 
     - name: Show missing segments summary
       run: |
-        echo "## Пропущенные сегменты (ничего не найдено)" >> "$GITHUB_STEP_SUMMARY"
+        echo "## Пропущенные сегменты (не найдено, пропущено отбором или видео короче нужного)" >> "$GITHUB_STEP_SUMMARY"
         if [ -s missing.txt ]; then
           echo "Количество: $(wc -l < missing.txt)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -204,7 +212,7 @@ jobs:
 
     # final.srt добавлен сюда, чтобы job download получил его тем же скачиванием search-links
     # и приложил к релизу (отдельный артефакт не нужен).
-    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt / final.srt as artifact
+    - name: Upload links.txt / backup_links.txt / missing.txt / backup_missing.txt / min_durations.json / final.srt as artifact
       uses: actions/upload-artifact@v6
       with:
         name: search-links
@@ -213,6 +221,7 @@ jobs:
           backup_links.txt
           missing.txt
           backup_missing.txt
+          min_durations.json
           final.srt
         retention-days: 14
 
@@ -264,6 +273,14 @@ jobs:
         cat backup_links.txt >> "$GITHUB_ENV"
         echo "EOF" >> "$GITHUB_ENV"
 
+        # Путь (не содержимое) к min_durations.json из артефакта search-links:
+        # search.py создаёт его всегда ({} если видео нет). Нет файла - явная ошибка.
+        if [ ! -f min_durations.json ]; then
+          echo "::error::В артефакте search-links нет min_durations.json (его должен создавать search.py)"
+          exit 1
+        fi
+        echo "INPUT_MIN_DURATIONS=min_durations.json" >> "$GITHUB_ENV"
+
     - name: Load INPUT_LINKS from manual input (старый сценарий, без backup)
       if: needs.search_media.result != 'success'
       run: |
@@ -274,6 +291,14 @@ jobs:
         # ссылками backup-файла просто не существует (search.py не запускался).
         # download.py трактует отсутствующую/пустую INPUT_BACKUP_LINKS как
         # "backup ни для одного номера нет" - это нормальный случай.
+
+    # download.py проверяет длину видео через ffprobe; ffmpeg ставим явно, не полагаясь на образ
+    # (если он уже есть, apt-get ничего не переустановит).
+    - name: Install ffmpeg (ffprobe)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+        ffprobe -version | head -n1
 
     - name: Run download script with input
       env:
