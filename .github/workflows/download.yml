@@ -18,6 +18,16 @@ on:
         type: choice
         options: ["1", "2"]
         default: "1"
+      coverage_percent:
+        description: 'Процент покрытия: какую долю хронометража (по секундам) закрывать поиском медиа. 100 = искать для всех сегментов (шаг отбора пропускается). Работает только вместе с srt_path.'
+        required: false
+        type: string
+        default: "100"
+      intro_seconds:
+        description: 'Вступление, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком).'
+        required: false
+        type: string
+        default: "10"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно.'
         required: false
@@ -96,6 +106,19 @@ jobs:
       uses: actions/download-artifact@v7
       with:
         name: requests-json
+
+    # Отбор сегментов по проценту покрытия: проставляет skip в requests.json (skip=true -
+    # search.py такой сегмент не ищет и пишет в missing.txt). SRT берётся из репозитория
+    # (checkout выше) по тому же srt_path, что и generate_queries. Только stdlib, поэтому
+    # идёт до установки torch/CLIP. При 100% шаг пропускается: ничего не меняет, а без
+    # skip search.py работает как раньше. Падение шага (код 1) останавливает прогон до поиска.
+    - name: Select segments by coverage percent
+      if: ${{ (inputs.coverage_percent || '100') != '100' }}
+      env:
+        COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
+        PYTHONUNBUFFERED: "1"
+      run: python select_coverage.py requests.json "${{ inputs.srt_path }}"
 
     # Кэш весов CLIP (open_clip тянет их через huggingface_hub) - без кэша каждый
     # запуск заново качает ~350МБ для ViT-B-32-quickgelu. Ключ включает модель/pretrained,
