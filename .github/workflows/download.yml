@@ -84,7 +84,7 @@ jobs:
         SENTENCE_MIN_SECONDS: ${{ inputs.sentence_min_seconds || '2.0' }}
         MAX_SECONDS: ${{ inputs.max_seconds || '5.0' }}
         PYTHONUNBUFFERED: "1"
-      run: python normalize_srt.py "${{ inputs.srt_path }}" final.srt
+      run: python Download/normalize_srt.py "${{ inputs.srt_path }}" final.srt
 
     - name: Install query-generation deps
       run: pip install -U google-genai
@@ -100,7 +100,7 @@ jobs:
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
         PYTHONUNBUFFERED: "1"
-      run: python generate_queries.py --input final.srt --output requests.json
+      run: python Download/generate_queries.py --input final.srt --output requests.json
 
     # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
     # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.
@@ -169,7 +169,7 @@ jobs:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
         INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
         PYTHONUNBUFFERED: "1"
-      run: python select_coverage.py requests.json final.srt
+      run: python Download/select_coverage.py requests.json final.srt
 
     # Кэш весов CLIP (open_clip тянет их через huggingface_hub) - без кэша каждый
     # запуск заново качает ~350МБ для ViT-B-32-quickgelu. Ключ включает модель/pretrained,
@@ -206,7 +206,7 @@ jobs:
         # SEARCH_WIKIMEDIA_PREVIEW_MIN_INTERVAL_SECONDS: "0.35"
         # SEARCH_WIKIMEDIA_PREVIEW_CONCURRENCY: "3"
       run: >
-        python search.py --input requests.json --links-output links.txt
+        python Download/search.py --input requests.json --links-output links.txt
         --backup-links-output backup_links.txt --missing-output missing.txt
         --backup-missing-output backup_missing.txt
 
@@ -339,7 +339,7 @@ jobs:
         # DOWNLOAD_WIKIMEDIA_CONCURRENCY: "2"
         # DOWNLOAD_LOC_MIN_INTERVAL_SECONDS: "3.2"
         # DOWNLOAD_LOC_RETRIES: "3"
-      run: python download.py
+      run: python Download/download.py
 
     # download.py пишет download_failed.txt ТОЛЬКО если что-то реально не скачалось
     # (см. write_failed_report в download.py). Здесь их номера подмешиваются в
