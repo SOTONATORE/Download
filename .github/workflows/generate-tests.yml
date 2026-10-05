@@ -1,0 +1,23 @@
+name: generate-tests
+
+on:
+  push:
+    paths:
+      - "Generate/**"
+      - ".github/workflows/generate-tests.yml"
+  pull_request:
+    paths:
+      - "Generate/**"
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r Generate/requirements-dev.txt
+      - run: python -m pytest Generate/tests -q
