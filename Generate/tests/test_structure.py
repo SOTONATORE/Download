@@ -41,6 +41,8 @@ def test_core_does_not_import_app():
 
 def test_core_has_no_github_specifics():
     for f in _core_files():
+        if f.name == "release_adapter.py":
+            continue  # SPEC 9: единственное место в core, где живут gh, GITHUB_*, GH_TOKEN
         text = f.read_text(encoding="utf-8")
         assert "GITHUB_" not in text, f"{f.name}: GITHUB_*"
         assert "gh release" not in text, f"{f.name}: gh release"
