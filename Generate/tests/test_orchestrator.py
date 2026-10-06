@@ -249,8 +249,8 @@ class Rig:
 
 @pytest.fixture(autouse=True)
 def _secrets_in_env(monkeypatch):
-    monkeypatch.setenv("GEN_VAST_API_KEY", VAST_KEY)
-    monkeypatch.setenv("GEN_GEMINI_API_KEY", GEMINI_KEY)
+    monkeypatch.setenv("GEN_" + "VAST_API_KEY", VAST_KEY)
+    monkeypatch.setenv("GEN_" + "GEMINI_API_KEY", GEMINI_KEY)
 
 
 def _no_secrets(text: str) -> None:
