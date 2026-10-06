@@ -1,5 +1,6 @@
-"""Тесты каркаса cli.py: всё через main(argv), без сети и ключей."""
+"""Тесты cli.py: всё через main(argv), без сети и ключей (всё внешнее подменено)."""
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +8,8 @@ from Generate import cli
 from Generate.core.srt_parser import parse_srt, srt_hash
 
 DATA = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
+VAST_KEY_ENV = "GEN_" + "VAST_API_KEY"
+SECRET_VALUE = "СЕКРЕТНОЕ-ЗНАЧЕНИЕ-КЛЮЧА"
 
 
 @pytest.fixture
@@ -15,6 +18,8 @@ def missing_file(tmp_path):
     p.write_text("1\n2\n", encoding="utf-8")
     return p
 
+
+# ---------------------------------------------------------------- check
 
 def test_check_ok(capsys, missing_file):
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file)])
@@ -84,12 +89,7 @@ def test_defaults_are_in_cwd(capsys, tmp_path, monkeypatch):
     assert cli.main(["check"]) == 0
 
 
-@pytest.mark.parametrize("cmd", ["run", "kill-cards"])
-def test_stubs_return_3(cmd, capsys):
-    code = cli.main([cmd])
-    assert code == 3
-    assert "ещё не реализована" in capsys.readouterr().err
-
+# ---------------------------------------------------------------- общие
 
 def test_unknown_command(capsys):
     assert cli.main(["нет-такой"]) == 2
@@ -119,3 +119,247 @@ def test_unexpected_exception_gives_3(capsys, monkeypatch):
     assert "RuntimeError" in cap.err
     # текст исключения не печатается (SPEC 0.1)
     assert "СЕКРЕТНЫЙ-ТЕКСТ-ИСКЛЮЧЕНИЯ" not in cap.err + cap.out
+
+
+# ---------------------------------------------------------------- run
+
+class FakeVast:
+    """Подмена VastClient: ключ не читается, сети нет."""
+    instances = []
+
+    def __init__(self, *a, **k):
+        self.closed = False
+        FakeVast.instances.append(self)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def run_env(monkeypatch):
+    """Подменяет всё внешнее для команды run; возвращает список вызовов оркестратора."""
+    calls = []
+    FakeVast.instances = []
+    monkeypatch.setattr(cli, "_build_timing", lambda: "TIMING")
+    monkeypatch.setattr(cli, "_build_prompt_config", lambda profile, brief: ("CFG", profile, brief))
+    monkeypatch.setattr(cli, "_make_transport", lambda: "TRANSPORT")
+    monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
+    monkeypatch.setattr(cli, "VastClient", FakeVast)
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return fake_run.summary
+
+    fake_run.summary = SimpleNamespace(
+        total_needed=2, completed=2, failed=0, pending=0, skipped_done=1,
+        spent_usd=0.5, exit_code=0, deadline_reached=False,
+        budget_exceeded=False, cleanup_ok=True, cards_rented=1)
+    monkeypatch.setattr(cli, "run_generation", fake_run)
+    fake_run.calls = calls
+    return fake_run
+
+
+def _run_args(srt, missing, *extra):
+    return ["run", "--srt", str(srt), "--missing", str(missing), *extra]
+
+
+def test_run_no_srt(capsys, run_env, missing_file, tmp_path):
+    code = cli.main(_run_args(tmp_path / "нет.srt", missing_file))
+    assert code == 2
+    assert "SRT" in capsys.readouterr().err
+    assert run_env.calls == []
+
+
+def test_run_broken_srt(capsys, run_env, missing_file, tmp_path):
+    bad = tmp_path / "bad.srt"
+    bad.write_text("1\nэто не тайминг\nтекст\n", encoding="utf-8")
+    assert cli.main(_run_args(bad, missing_file)) == 2
+    assert run_env.calls == []
+
+
+def test_run_no_missing(capsys, run_env, tmp_path):
+    code = cli.main(_run_args(DATA, tmp_path / "нет.txt"))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "missing" in err and "Traceback" not in err
+    assert run_env.calls == []
+
+
+def test_run_success(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--repo", "o/r", "--run-id", "77",
+                              "--limit-clips", "3", "--max-cards", "2",
+                              "--budget-limit", "1.5", "--release-tag", "v1",
+                              "--model-profile", "ltx25", "--style-brief", "стиль",
+                              "--prompts-path", "p.json"))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Итоги запуска" in out
+    (args, kwargs), = run_env.calls
+    assert args[1] == str(missing_file)
+    assert args[2] == ("CFG", "ltx25", "стиль")
+    assert args[3] == "TIMING"
+    assert args[4] == ("STORE", "o/r")
+    assert isinstance(args[5], FakeVast)
+    assert args[6] == "TRANSPORT"
+    assert args[7] == "p.json"
+    assert kwargs["limit_clips"] == 3
+    assert kwargs["max_cards"] == 2
+    assert kwargs["budget_limit_usd"] == 1.5
+    assert kwargs["release_tag"] == "v1"
+    assert kwargs["run_id"] == "77"
+    assert kwargs["repo"] == "o/r"
+    assert FakeVast.instances[0].closed
+
+
+def test_run_nothing_to_generate_is_ok(capsys, run_env, missing_file):
+    run_env.summary = SimpleNamespace(exit_code=0)
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+
+
+def test_run_partial_gives_3(capsys, run_env, missing_file):
+    run_env.summary = SimpleNamespace(total_needed=3, completed=1, failed=2,
+                                      exit_code=3, cleanup_ok=True)
+    code = cli.main(_run_args(DATA, missing_file))
+    assert code == 3
+    assert FakeVast.instances[0].closed
+
+
+def test_run_defaults_without_repo_and_run_id(capsys, run_env, missing_file, monkeypatch):
+    """Без --repo и --run-id значения пустые; окружение cli не читает (SPEC 0.2)."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "env/repo")
+    monkeypatch.setenv("GITHUB_RUN_ID", "555")
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["repo"] == ""
+    assert kwargs["run_id"] == ""
+    assert kwargs["limit_clips"] == 0
+    assert kwargs["max_cards"] == 4
+
+
+def test_run_explicit_repo_and_run_id(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--repo", "arg/repo", "--run-id", "321"))
+    assert code == 0
+    (args, kwargs), = run_env.calls
+    assert args[4] == ("STORE", "arg/repo")
+    assert kwargs["repo"] == "arg/repo"
+    assert kwargs["run_id"] == "321"
+
+
+def test_run_vast_key_missing_gives_2(capsys, run_env, missing_file, monkeypatch):
+    class NoKey(cli.VastError):
+        exit_code = 2
+
+    def boom(*a, **k):
+        raise NoKey("Не задан ключ Vast")
+
+    monkeypatch.setattr(cli, "VastClient", boom)
+    code = cli.main(_run_args(DATA, missing_file))
+    cap = capsys.readouterr()
+    assert code == 2
+    assert "Traceback" not in cap.err
+    assert run_env.calls == []
+
+
+def test_run_setup_error_hides_text(capsys, run_env, missing_file, monkeypatch):
+    def boom():
+        raise ValueError(SECRET_VALUE)
+
+    monkeypatch.setattr(cli, "_make_transport", boom)
+    code = cli.main(_run_args(DATA, missing_file))
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "ValueError" in cap.err
+    assert SECRET_VALUE not in cap.err + cap.out
+
+
+# ---------------------------------------------------------------- kill-cards
+
+class KillVast:
+    """Подмена VastClient для kill-cards."""
+    result = [11, 22]
+    error = None
+    labels = []
+
+    def __init__(self, *a, **k):
+        self.closed = False
+
+    def destroy_by_label(self, label):
+        KillVast.labels.append(label)
+        if KillVast.error is not None:
+            raise KillVast.error
+        return list(KillVast.result)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def kill_env(monkeypatch):
+    KillVast.result = [11, 22]
+    KillVast.error = None
+    KillVast.labels = []
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+    monkeypatch.setattr(cli, "VastClient", KillVast)
+    return KillVast
+
+
+def test_kill_no_label_no_run_id(capsys, kill_env):
+    code = cli.main(["kill-cards", "--run-id", ""])
+    assert code == 2
+    assert capsys.readouterr().err
+    assert kill_env.labels == []
+
+
+def test_kill_by_run_id(capsys, kill_env):
+    code = cli.main(["kill-cards", "--run-id", "123"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert kill_env.labels == ["gen-123"]
+    assert "2" in out
+
+
+def test_kill_by_label_wins(capsys, kill_env):
+    code = cli.main(["kill-cards", "--label", "моя", "--run-id", "123"])
+    assert code == 0
+    assert kill_env.labels == ["моя"]
+
+
+def test_kill_explicit_run_id(capsys, kill_env):
+    assert cli.main(["kill-cards", "--run-id", "999"]) == 0
+    assert kill_env.labels == ["gen-999"]
+
+
+def test_kill_ignores_env_run_id(capsys, kill_env, monkeypatch):
+    """Номер запуска из окружения не подхватывается: без аргументов метки нет (SPEC 0.2)."""
+    monkeypatch.setenv("GITHUB_RUN_ID", "999")
+    assert cli.main(["kill-cards"]) == 2
+    assert kill_env.labels == []
+
+
+def test_kill_nothing_to_destroy_is_ok(capsys, kill_env):
+    kill_env.result = []
+    assert cli.main(["kill-cards", "--label", "x"]) == 0
+    assert "0" in capsys.readouterr().out
+
+
+def test_kill_vast_failure_gives_3(capsys, kill_env):
+    kill_env.error = cli.VastError("Не удалось уничтожить экземпляры Vast: [1]")
+    code = cli.main(["kill-cards", "--label", "x"])
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "Traceback" not in cap.err
+
+
+def test_kill_client_init_failure_gives_3(capsys, monkeypatch):
+    def boom(*a, **k):
+        raise cli.VastError("Не задан ключ Vast")
+
+    monkeypatch.setattr(cli, "VastClient", boom)
+    assert cli.main(["kill-cards", "--label", "x"]) == 3
+
+
+def test_kill_does_not_leak_key(capsys, kill_env, monkeypatch):
+    monkeypatch.setenv(VAST_KEY_ENV, SECRET_VALUE)
+    cli.main(["kill-cards", "--label", "x"])
+    cap = capsys.readouterr()
+    assert SECRET_VALUE not in cap.out + cap.err
