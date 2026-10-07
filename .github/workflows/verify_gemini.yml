@@ -1,3 +1,4 @@
+# .github/workflows/verify_gemini.yml
 name: Verify Gemini
 
 # Бесплатная изолированная проверка генерации промптов Gemini.
@@ -116,8 +117,8 @@ jobs:
           if not secret:
               fail("секрет для Gemini не задан в настройках репозитория")
 
-          # ПРЕДПОЛОЖЕНИЕ: точное расположение generate_and_store/RealTransport
-          # в cli.py не видно, поэтому ищем по нескольким модулям.
+          # generate_and_store находится в Generate/core/gemini_orchestrator.py;
+          # остальные символы ищем по нескольким модулям.
           generate_and_store = find_symbol(
               "generate_and_store", ("gemini_orchestrator", "gemini_prompts"))
           RealTransport = find_symbol(
@@ -133,6 +134,8 @@ jobs:
 
           for label, obj in (("generate_and_store", generate_and_store),
                              ("RealTransport", RealTransport),
+                             ("PromptConfig", PromptConfig),
+                             ("TimingParams", TimingParams),
                              ("parse_srt", parse_srt)):
               if obj is None:
                   fail(f"в проекте не найден символ {label}")
@@ -168,32 +171,35 @@ jobs:
           if not missing:
               fail("нет клипов для проверки")
 
-          # Собираем аргументы по реальной сигнатуре функции
+          # Аргументы по реальной сигнатуре generate_and_store:
+          # (segments, wanted_nums, cfg, inner_transport, prompts_path, *, profile, timing)
           style_file = f"Generate/model_profiles/prompt_styles/{profile}.md"
+          try:
+              cfg = PromptConfig(style_file=style_file, style_brief=style_brief)
+          except TypeError as exc:
+              fail("не удалось создать PromptConfig: " + mask(exc))
+
+          try:
+              timing = TimingParams(
+                  fps=24,
+                  frame_rule={"kind": "8k+1"},
+                  clip_min_sec=2.5,
+                  clip_max_sec=5.0,
+                  gpu_max_sec=10.0,
+                  tail_pad_sec=0.5,
+              )
+          except TypeError as exc:
+              fail("не удалось создать TimingParams: " + mask(exc))
+
           candidates = {
               "segments": segments,
-              "srt_segments": segments,
-              "missing": missing,
-              "missing_numbers": missing,
-              "numbers": missing,
-              "clips": missing,
-              "model_profile": profile,
-              "profile": profile,
-              "style_brief": style_brief,
-              "transport": RealTransport(),
-              "out_path": out_path,
+              "wanted_nums": missing,
+              "cfg": cfg,
+              "inner_transport": RealTransport(),
               "prompts_path": out_path,
-              "path": out_path,
+              "profile": profile,
+              "timing": timing,
           }
-          if PromptConfig is not None:
-              try:
-                  candidates["config"] = PromptConfig(
-                      style_file=style_file, style_brief=style_brief)
-                  candidates["prompt_config"] = candidates["config"]
-              except TypeError:
-                  pass
-          if TimingParams is not None:
-              pass  # параметры тайминга берутся функцией по умолчанию
 
           params = inspect.signature(generate_and_store).parameters
           kwargs = {k: v for k, v in candidates.items() if k in params}
