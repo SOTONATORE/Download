@@ -39,8 +39,10 @@ class VastRuntimeError(VastError):
 
 @dataclass
 class OfferFilter:
-    gpu_name: Optional[str] = None
+    gpu_name: Optional[str] = "RTX 5090"
     min_vram_gb: float = 0.0
+    # Нижняя граница цены отсекает подозрительно дешёвые (нерабочие) хосты.
+    min_price: float = 0.35
     max_price: float = 0.9
     min_reliability: float = 0.95
     min_inet_mbps: float = 2000.0
@@ -180,6 +182,8 @@ class VastClient:
             "order": [["dph_total", "asc"]],
             "limit": 100,
         }
+        if f.min_price > 0:
+            q["dph_total"]["gte"] = f.min_price
         if f.verified:
             q["verified"] = {"eq": True}
         if f.min_vram_gb > 0:
@@ -213,6 +217,12 @@ class VastClient:
     def search_offers(self, filters: OfferFilter) -> list[GpuOffer]:
         if filters.max_price <= 0:
             raise VastInputError("Неверный фильтр: max_price должен быть больше нуля")
+        if filters.min_price < 0:
+            raise VastInputError("Неверный фильтр: min_price не может быть отрицательным")
+        if filters.min_price > filters.max_price:
+            raise VastInputError(
+                "Неверный фильтр: min_price не может быть больше max_price"
+            )
         if not 0.0 <= filters.min_reliability <= 1.0:
             raise VastInputError("Неверный фильтр: min_reliability должен быть от 0 до 1")
         if filters.min_inet_mbps < 0 or filters.min_vram_gb < 0:
@@ -228,6 +238,8 @@ class VastClient:
             if offer is None:
                 continue
             # Повторная проверка на клиенте: сервер может вернуть лишнее.
+            if offer.price_per_hr < filters.min_price:
+                continue
             if offer.price_per_hr > filters.max_price:
                 continue
             if offer.reliability < filters.min_reliability:

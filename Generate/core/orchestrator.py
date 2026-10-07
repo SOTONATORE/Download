@@ -232,6 +232,7 @@ class Orchestrator:
         self._failed: set = set()
         self._durations: list = []
         self._bad_machines: set = set()
+        self._bad_offers: set = set()
         self._next_rent = 0.0
         self._budget_blocked = False
         self._cards_rented = 0
@@ -418,7 +419,8 @@ class Orchestrator:
         except VastError as exc:
             log.warning("Поиск предложений Vast не удался: %s", exc)
             return "retry"
-        offers = [o for o in offers if not (o.machine_id and o.machine_id in self._bad_machines)]
+        offers = [o for o in offers if o.offer_id not in self._bad_offers
+                  and not (o.machine_id and o.machine_id in self._bad_machines)]
         if not offers:
             log.warning("Подходящих предложений Vast нет, повтор позже.")
             return "retry"
@@ -439,6 +441,7 @@ class Orchestrator:
             inst_id = self.vast.create_instance(
                 offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label)
         except VastError as exc:
+            self._bad_offers.add(offer.offer_id)
             log.warning("Не удалось создать карту по предложению %d: %s", offer.offer_id, exc)
             return "retry"
         self.budget.track_instance_start(inst_id, offer.price_per_hr, now)
