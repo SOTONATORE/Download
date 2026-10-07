@@ -268,6 +268,28 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
     assert f.min_inet_mbps == 1500.0
 
 
+def test_run_default_card_params(capsys, run_env, missing_file):
+    """Без флагов docker_image/disk_gb/silent_host_timeout_min получают значения по умолчанию."""
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["docker_image"] == ""
+    assert kwargs["disk_gb"] == 50
+    assert kwargs["silent_host_timeout_min"] == 15
+
+
+def test_run_custom_card_params(capsys, run_env, missing_file):
+    """Пользовательские значения флагов доходят до run_generation."""
+    code = cli.main(_run_args(DATA, missing_file,
+                              "--docker-image", "my-image:v1",
+                              "--disk-gb", "60",
+                              "--silent-host-timeout-min", "20"))
+    assert code == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["docker_image"] == "my-image:v1"
+    assert kwargs["disk_gb"] == 60
+    assert kwargs["silent_host_timeout_min"] == 20
+
+
 def test_run_empty_gpu_name_means_any(capsys, run_env, missing_file):
     """Пустое имя карты превращается в None (любая модель)."""
     assert cli.main(_run_args(DATA, missing_file, "--gpu-name", "")) == 0
