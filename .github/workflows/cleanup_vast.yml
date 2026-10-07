@@ -1,0 +1,153 @@
+name: Cleanup Vast
+
+# SPEC 8.3(г): страховочная уборка зависших арендованных карт.
+# SPEC 0.1: запуск по расписанию и вручную; push / pull_request не используются.
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+# Не допускать параллельных уборок; запущенную не отменять.
+concurrency:
+  group: cleanup-vast
+  cancel-in-progress: false
+
+permissions:
+  actions: read    # gh run view
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash   # bash -e -o pipefail
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r Generate/requirements-dev.txt
+
+      - name: Cleanup orphan Vast cards
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+
+          from Generate.core.vast_client import VastClient, VastError
+
+          MAX_AGE_SEC = 6 * 3600  # Rule 3: аварийный предел возраста карты
+          LABEL_RE = re.compile(r"^gen-(\d+)$")
+          repo = os.environ["REPO"]
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+
+          def run_state(run_id):
+              """Возвращает 'active', 'finished', 'missing' или 'unknown'."""
+              proc = subprocess.run(
+                  ["gh", "run", "view", run_id, "--repo", repo, "--json", "status,conclusion"],
+                  capture_output=True, text=True, timeout=60,
+              )
+              if proc.returncode != 0:
+                  err = (proc.stderr or "").lower()
+                  if "404" in err or "could not resolve" in err or "not found" in err:
+                      return "missing"
+                  print(f"Не удалось получить статус запуска {run_id} (код gh {proc.returncode}).")
+                  return "unknown"
+              try:
+                  status = json.loads(proc.stdout).get("status")
+              except ValueError:
+                  return "unknown"
+              if status == "completed":
+                  return "finished"
+              if status in ("in_progress", "queued", "waiting", "requested", "pending"):
+                  return "active"
+              return "unknown"
+
+
+          def age_sec(inst):
+              try:
+                  start = float(inst.raw.get("start_date"))
+              except (TypeError, ValueError):
+                  return None
+              return max(0.0, time.time() - start)
+
+
+          spared = 0
+          destroyed = 0
+          failed = 0
+
+          try:
+              with VastClient() as client:
+                  cards = [i for i in client.list_instances() if (i.label or "").startswith("gen-")]
+                  if not cards:
+                      print("Карт с меткой gen-* нет — убирать нечего.")
+                  for inst in cards:
+                      iid = inst.instance_id
+                      m = LABEL_RE.match(inst.label or "")
+                      age = age_sec(inst)
+                      too_old = age is not None and age > MAX_AGE_SEC
+                      reason = None
+
+                      if m is None:
+                          reason = f"Метка «{inst.label}» не разобрана. Уничтожаем карту {iid}."
+                      elif too_old:
+                          reason = (f"Карта {iid} работает дольше {MAX_AGE_SEC // 60} мин "
+                                    f"(запуск {m.group(1)}). Уничтожаем карту.")
+                      else:
+                          run_id = m.group(1)
+                          state = run_state(run_id)
+                          if state == "active":
+                              print(f"Запуск {run_id} ещё выполняется — карта {iid} оставлена в работе.")
+                              spared += 1
+                              continue
+                          if state in ("finished", "missing"):
+                              reason = (f"Запуск {run_id} завершён (или не найден). "
+                                        f"Уничтожаем зависшую карту {iid}.")
+                          else:
+                              print(f"Статус запуска {run_id} неизвестен — карта {iid} оставлена до следующей проверки.")
+                              spared += 1
+                              continue
+
+                      print(reason)
+                      try:
+                          client.destroy_instance(iid)
+                          destroyed += 1
+                      except VastError as exc:
+                          failed += 1
+                          print(f"Ошибка уничтожения карты {iid}: {type(exc).__name__}")
+          except VastError as exc:
+              print(f"Ошибка клиента Vast: {type(exc).__name__}")
+              sys.exit(getattr(exc, "exit_code", 1))
+
+          lines = [
+              "## Уборка карт Vast",
+              f"- Оставлено в работе (активные запуски): {spared}",
+              f"- Уничтожено зависших карт: {destroyed}",
+              f"- Ошибок уничтожения: {failed}",
+          ]
+          text = "\n".join(lines)
+          print(text)
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write(text + "\n")
+          sys.exit(1 if failed else 0)
+          PY
