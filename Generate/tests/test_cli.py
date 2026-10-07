@@ -363,3 +363,156 @@ def test_kill_does_not_leak_key(capsys, kill_env, monkeypatch):
     cli.main(["kill-cards", "--label", "x"])
     cap = capsys.readouterr()
     assert SECRET_VALUE not in cap.out + cap.err
+
+
+# ---------------------------------------------------------------- finalize-release
+
+class FakeStore:
+    """Подмена хранилища: find_releases возвращает заранее заданный список."""
+    def __init__(self, releases):
+        self.releases = releases
+        self.tags = []
+
+    def find_releases(self, tag):
+        self.tags.append(tag)
+        return list(self.releases)
+
+
+class FakeUploader:
+    """Подмена ReleaseUploader: запоминает загрузки и содержимое файлов."""
+    instances = []
+    done = {1, 2}
+    error = None
+
+    def __init__(self, store, segments, model, release_tag=None, **kw):
+        self.store = store
+        self.model = model
+        self.release_tag = release_tag
+        self.done = set(FakeUploader.done)
+        self.prepared = False
+        self.uploaded = {}  # имя файла -> содержимое
+        FakeUploader.instances.append(self)
+
+    def prepare(self):
+        if FakeUploader.error is not None:
+            raise FakeUploader.error
+        self.prepared = True
+        return set(self.done)
+
+    def upload_service_file(self, path):
+        with open(path, encoding="utf-8") as fh:
+            self.uploaded[pathlib.Path(path).name] = fh.read()
+
+    def links_text(self, repo):
+        return f"https://github.com/{repo}/releases/download/t/1.mp4\n"
+
+
+@pytest.fixture
+def fin_env(monkeypatch):
+    FakeUploader.instances = []
+    FakeUploader.done = {1, 2}
+    FakeUploader.error = None
+    store = FakeStore([SimpleNamespace(tag="x")])
+    monkeypatch.setattr(cli, "_make_release_store", lambda repo: store)
+    monkeypatch.setattr(cli, "ReleaseUploader", FakeUploader)
+    store.fake_uploader = FakeUploader
+    return store
+
+
+@pytest.fixture
+def prompts_file(tmp_path):
+    p = tmp_path / "prompts.json"
+    p.write_text('{"1": "промпт"}', encoding="utf-8")
+    return p
+
+
+def _fin_args(*extra):
+    return ["finalize-release", "--srt", str(DATA), *extra]
+
+
+def test_finalize_bad_srt(capsys, fin_env, tmp_path):
+    code = cli.main(["finalize-release", "--srt", str(tmp_path / "нет.srt")])
+    assert code == 2
+    assert FakeUploader.instances == []
+
+
+def test_finalize_release_missing_is_ok(capsys, fin_env, prompts_file):
+    fin_env.releases = []
+    code = cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(prompts_file)))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "не создан" in out
+    assert FakeUploader.instances == []
+
+
+def test_finalize_uploads_prompts_and_links(capsys, fin_env, prompts_file):
+    code = cli.main(_fin_args("--repo", "o/r", "--model-profile", "ltx25",
+                              "--prompts-path", str(prompts_file)))
+    out = capsys.readouterr().out
+    assert code == 0
+    (up,) = FakeUploader.instances
+    assert up.prepared
+    assert up.model == "ltx25"
+    assert up.uploaded["prompts.json"] == '{"1": "промпт"}'
+    assert up.uploaded["generated_links.txt"].startswith("https://github.com/o/r/")
+    assert "Выдача клипов завершена" in out
+
+
+def test_finalize_prompts_custom_name_is_renamed(capsys, fin_env, tmp_path):
+    custom = tmp_path / "мои.json"
+    custom.write_text("{}", encoding="utf-8")
+    assert cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(custom))) == 0
+    assert "prompts.json" in FakeUploader.instances[0].uploaded
+
+
+def test_finalize_without_prompts_file(capsys, fin_env, tmp_path):
+    code = cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(tmp_path / "нет.json")))
+    assert code == 0
+    (up,) = FakeUploader.instances
+    assert "prompts.json" not in up.uploaded
+    assert "generated_links.txt" in up.uploaded
+
+
+def test_finalize_no_repo_skips_links(capsys, fin_env, prompts_file):
+    assert cli.main(_fin_args("--prompts-path", str(prompts_file))) == 0
+    (up,) = FakeUploader.instances
+    assert "generated_links.txt" not in up.uploaded
+    assert "prompts.json" in up.uploaded
+
+
+def test_finalize_no_clips_skips_links(capsys, fin_env, prompts_file):
+    FakeUploader.done = set()
+    assert cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(prompts_file))) == 0
+    assert "generated_links.txt" not in FakeUploader.instances[0].uploaded
+
+
+def test_finalize_custom_release_tag(capsys, fin_env, prompts_file):
+    cli.main(_fin_args("--repo", "o/r", "--release-tag", "мой-тег",
+                       "--prompts-path", str(prompts_file)))
+    assert fin_env.tags == ["мой-тег"]
+    assert FakeUploader.instances[0].release_tag == "мой-тег"
+
+
+def test_finalize_failure_gives_3_and_hides_text(capsys, fin_env, prompts_file):
+    FakeUploader.error = ValueError(SECRET_VALUE)
+    code = cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(prompts_file)))
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "ValueError" in cap.err
+    assert SECRET_VALUE not in cap.err + cap.out
+    assert "Traceback" not in cap.err
+
+
+# ---------------------------------------------------------------- структура
+
+CLI_SOURCE = pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+
+
+def test_no_api_key_names_in_code():
+    for name in ("GEN_" + "VAST_API_KEY", "GEN_" + "GEMINI_API_KEY"):
+        assert name not in CLI_SOURCE
+
+
+def test_no_environment_reading_in_cli():
+    assert "os." + "environ" not in CLI_SOURCE
+    assert "get" + "env" not in CLI_SOURCE
