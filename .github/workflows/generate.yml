@@ -36,6 +36,26 @@ on:
         description: "Краткое описание стиля/сюжета от пользователя"
         type: string
         default: ""
+      gpu_name:
+        description: "Модель видеокарты на Vast.ai"
+        type: string
+        default: "RTX 5090"
+      min_price_per_hour:
+        description: "Минимальная цена аренды ($/ч, отсекает битые карты)"
+        type: string
+        default: "0.35"
+      max_price_per_hour:
+        description: "Максимальная цена аренды ($/ч)"
+        type: string
+        default: "0.90"
+      min_reliability:
+        description: "Минимальная надёжность хоста (0-1)"
+        type: string
+        default: "0.95"
+      min_inet_mbps:
+        description: "Минимальная скорость интернета карты (Мбит/с)"
+        type: string
+        default: "2000"
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -90,6 +110,11 @@ jobs:
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MODEL_PROFILE: ${{ inputs.model_profile }}
           STYLE_BRIEF: ${{ inputs.style_brief }}
+          GPU_NAME: ${{ inputs.gpu_name }}
+          MIN_PRICE: ${{ inputs.min_price_per_hour }}
+          MAX_PRICE: ${{ inputs.max_price_per_hour }}
+          MIN_RELIABILITY: ${{ inputs.min_reliability }}
+          MIN_INET: ${{ inputs.min_inet_mbps }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -101,6 +126,11 @@ jobs:
             --budget-limit "$BUDGET_LIMIT"
             --model-profile "$MODEL_PROFILE"
             --style-brief "$STYLE_BRIEF"
+            --gpu-name "$GPU_NAME"
+            --min-price-per-hour "$MIN_PRICE"
+            --max-price-per-hour "$MAX_PRICE"
+            --min-reliability "$MIN_RELIABILITY"
+            --min-inet-mbps "$MIN_INET"
             --repo "$REPO"
             --run-id "$RUN_ID"
           )
