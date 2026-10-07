@@ -129,7 +129,7 @@ jobs:
               "TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
           parse_srt = find_symbol("parse_srt", ("srt_parser",))
           parse_missing = find_symbol(
-              "parse_missing", ("srt_parser", "missing_parser", "missing"))
+              "parse_missing", ("missing", "srt_parser", "missing_parser"))
 
           for label, obj in (("generate_and_store", generate_and_store),
                              ("RealTransport", RealTransport),
@@ -154,7 +154,8 @@ jobs:
 
           segments = parse_srt(srt_path)
           if parse_missing is not None:
-              missing = list(parse_missing(missing_path))
+              # Сигнатура: parse_missing(missing_path, segments)
+              missing = list(parse_missing(missing_path, segments))
           else:
               with open(missing_path, encoding="utf-8") as fh:
                   missing = [int(x) for x in fh.read().split() if x.strip().isdigit()]
@@ -168,7 +169,7 @@ jobs:
               fail("нет клипов для проверки")
 
           # Собираем аргументы по реальной сигнатуре функции
-          style_file = f"Generate/styles/{profile}.md"
+          style_file = f"Generate/model_profiles/prompt_styles/{profile}.md"
           candidates = {
               "segments": segments,
               "srt_segments": segments,
