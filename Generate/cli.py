@@ -3,7 +3,9 @@
 Команды:
     check       проверка входных файлов (SRT разбирается, missing.txt существует);
     run         основной запуск генерации (оркестратор, Gemini, Vast.ai, Release);
-    kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``).
+    kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``);
+    finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt
+                (шаг ``if: always()``, в том числе после отмены запуска).
 
 Коды завершения:
     0  успех (в том числе «генерировать нечего»);
@@ -20,15 +22,21 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import shutil
 import sys
+import tempfile
 
 from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 
 try:  # пакетный и «плоский» импорт
     from Generate.core.orchestrator import run_generation
+    from Generate.core.release_adapter import (
+        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
     from Generate.core.vast_client import VastClient, VastError
 except ImportError:  # pragma: no cover
     from orchestrator import run_generation  # type: ignore
+    from release_adapter import (  # type: ignore
+        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
     from vast_client import VastClient, VastError  # type: ignore
 
 EXIT_OK = 0
@@ -227,6 +235,62 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_finalize_release(args: argparse.Namespace) -> int:
+    """Доводит выдачу до конца: prompts.json и generated_links.txt по уже загруженным клипам.
+
+    Безопасна при повторном запуске и после отмены: если Release ещё не создан,
+    завершается с кодом 0 (финализировать нечего).
+    """
+    segments, code = _load_srt(args.srt)
+    if code is not None:
+        return code
+
+    try:
+        tag = make_tag(segments, args.release_tag)
+        store = _make_release_store(args.repo)
+        if not store.find_releases(tag):
+            print(f"Release {tag} ещё не создан: финализировать нечего.")
+            return EXIT_OK
+
+        uploader = ReleaseUploader(store, segments, args.model_profile,
+                                   release_tag=args.release_tag)
+        uploader.prepare()
+        clips = len(uploader.done)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prompts_uploaded = False
+            if os.path.isfile(args.prompts_path):
+                # служебный файл должен называться строго prompts.json
+                prompts_copy = os.path.join(tmp, PROMPTS_FILENAME)
+                shutil.copyfile(args.prompts_path, prompts_copy)
+                uploader.upload_service_file(prompts_copy)
+                prompts_uploaded = True
+            else:
+                print(f"Файл промптов не найден ({args.prompts_path}): он не загружен.")
+
+            links_uploaded = False
+            if args.repo and uploader.done:
+                links_path = os.path.join(tmp, LINKS_FILENAME)
+                with open(links_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(uploader.links_text(args.repo))
+                uploader.upload_service_file(links_path)
+                links_uploaded = True
+    except Exception as e:  # noqa: BLE001
+        # текст берём только у своих ошибок проекта (у них есть exit_code); иначе только тип
+        if hasattr(e, "exit_code"):
+            _err(f"Не удалось завершить выдачу клипов: {e}")
+        else:
+            _err(f"Не удалось завершить выдачу клипов ({type(e).__name__}).")
+        return EXIT_RUNTIME
+
+    print("Выдача клипов завершена.")
+    print(f"  релиз: {tag}")
+    print(f"  клипов в релизах: {clips}")
+    print(f"  prompts.json загружен: {'да' if prompts_uploaded else 'нет'}")
+    print(f"  generated_links.txt загружен: {'да' if links_uploaded else 'нет'}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--srt", default=DEFAULT_SRT,
@@ -267,6 +331,17 @@ def build_parser() -> argparse.ArgumentParser:
     kill_p.add_argument("--run-id", default="",
                         help="номер запуска (передаётся явно)")
     kill_p.set_defaults(func=lambda a: cmd_kill_cards(a))
+
+    fin_p = sub.add_parser("finalize-release",
+                           help="загрузить prompts.json и generated_links.txt в Release")
+    fin_p.add_argument("--srt", default=DEFAULT_SRT,
+                       help=f"путь к файлу SRT (по умолчанию {DEFAULT_SRT})")
+    fin_p.add_argument("--repo", default="", help="репозиторий owner/name (передаётся явно)")
+    fin_p.add_argument("--model-profile", default=DEFAULT_PROFILE, help="профиль модели")
+    fin_p.add_argument("--release-tag", default=None, help="тег Release (необязательно)")
+    fin_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
+                       help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
+    fin_p.set_defaults(func=lambda a: cmd_finalize_release(a))
     return parser
 
 
