@@ -236,6 +236,45 @@ def test_run_defaults_without_repo_and_run_id(capsys, run_env, missing_file, mon
     assert kwargs["max_cards"] == 4
 
 
+def test_run_default_offer_filter(capsys, run_env, missing_file):
+    """Без флагов фильтр поиска карт получает значения по умолчанию."""
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    _, kwargs = run_env.calls[0]
+    f = kwargs["offer_filter"]
+    assert isinstance(f, cli.OfferFilter)
+    assert f.gpu_name == "RTX 5090"
+    assert f.min_price == 0.35
+    assert f.max_price == 0.90
+    assert f.min_reliability == 0.95
+    assert f.min_inet_mbps == 2000.0
+
+
+def test_run_custom_offer_filter(capsys, run_env, missing_file):
+    """Флаги поиска карт доходят до run_generation через offer_filter."""
+    code = cli.main(_run_args(DATA, missing_file,
+                              "--gpu-name", "RTX 4090",
+                              "--min-price-per-hour", "0.2",
+                              "--max-price-per-hour", "0.6",
+                              "--min-reliability", "0.9",
+                              "--min-inet-mbps", "1500"))
+    assert code == 0
+    _, kwargs = run_env.calls[0]
+    f = kwargs["offer_filter"]
+    assert isinstance(f, cli.OfferFilter)
+    assert f.gpu_name == "RTX 4090"
+    assert f.min_price == 0.2
+    assert f.max_price == 0.6
+    assert f.min_reliability == 0.9
+    assert f.min_inet_mbps == 1500.0
+
+
+def test_run_empty_gpu_name_means_any(capsys, run_env, missing_file):
+    """Пустое имя карты превращается в None (любая модель)."""
+    assert cli.main(_run_args(DATA, missing_file, "--gpu-name", "")) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["offer_filter"].gpu_name is None
+
+
 def test_run_explicit_repo_and_run_id(capsys, run_env, missing_file):
     code = cli.main(_run_args(DATA, missing_file, "--repo", "arg/repo", "--run-id", "321"))
     assert code == 0

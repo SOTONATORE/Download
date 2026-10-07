@@ -41,7 +41,7 @@ def make(handler):
     return VastClient(client=http)
 
 
-def bundle(i, price=0.5, rel=0.99, down=3000.0, ram=24576, name="RTX 4090", bid=None):
+def bundle(i, price=0.5, rel=0.99, down=3000.0, ram=24576, name="RTX 5090", bid=None):
     d = {"id": i, "gpu_name": name, "num_gpus": 1, "gpu_ram": ram, "dph_total": price,
          "reliability2": rel, "inet_down": down, "inet_up": 1000.0, "machine_id": 100 + i}
     if bid is not None:
@@ -53,6 +53,13 @@ def test_exit_codes():
     assert VastError.exit_code == 1
     assert VastInputError.exit_code == 2
     assert VastRuntimeError.exit_code == 3
+
+
+def test_offer_filter_defaults():
+    f = OfferFilter()
+    assert f.gpu_name == "RTX 5090"
+    assert f.min_price == 0.35
+    assert f.max_price == 0.9
 
 
 def test_missing_key_raises(monkeypatch):
@@ -81,11 +88,13 @@ def test_search_serialization_filter_sort(key):
         seen["body"] = json.loads(req.content)
         return httpx.Response(200, json={"offers": [
             bundle(1, price=0.8),
-            bundle(2, price=0.3),
+            bundle(2, price=0.4),
             bundle(3, price=1.5),            # дорого
             bundle(4, rel=0.5),              # ненадёжный
             bundle(5, down=100.0),           # медленная сеть
             bundle(6, price=0.6, ram=8192),  # мало VRAM
+            bundle(7, price=0.1),            # подозрительно дёшево
+            bundle(8, price=0.5, name="RTX 4090"),  # другая карта
         ]})
 
     with make(handler) as c:
@@ -97,11 +106,70 @@ def test_search_serialization_filter_sort(key):
     assert seen["auth"] == f"Bearer {SECRET}"
     assert SECRET not in seen["query"]
     q = seen["body"]
-    assert q["dph_total"] == {"lte": 0.9}
+    assert q["dph_total"] == {"lte": 0.9, "gte": 0.35}
     assert q["reliability2"] == {"gte": 0.95}
     assert q["inet_down"] == {"gte": 2000.0}
     assert q["type"] == "bid"
     assert q["gpu_ram"] == {"gte": 16 * 1024}
+    assert q["gpu_name"] == {"eq": "RTX 5090"}
+
+
+def test_search_min_price_serialization_custom(key):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"offers": []})
+
+    make(handler).search_offers(OfferFilter(min_price=0.5, max_price=1.0))
+    assert seen["body"]["dph_total"] == {"lte": 1.0, "gte": 0.5}
+
+
+def test_search_min_price_zero_omits_gte(key):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"offers": []})
+
+    make(handler).search_offers(OfferFilter(min_price=0.0))
+    assert seen["body"]["dph_total"] == {"lte": 0.9}
+
+
+def test_search_filters_cheaper_than_min_price(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        bundle(1, price=0.10),
+        bundle(2, price=0.34),
+        bundle(3, price=0.35),   # граница включается
+        bundle(4, price=0.60),
+    ]}))
+    offers = c.search_offers(OfferFilter())
+    assert [o.offer_id for o in offers] == [3, 4]
+    assert all(o.price_per_hr >= 0.35 for o in offers)
+
+
+def test_search_min_price_applies_to_min_bid(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        bundle(1, price=0.8, bid=0.2),   # ставка ниже минимума
+        bundle(2, price=0.8, bid=0.5),
+    ]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
+
+
+def test_search_sorted_ascending(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        bundle(1, price=0.8), bundle(2, price=0.4), bundle(3, price=0.6), bundle(4, price=0.35),
+    ]}))
+    prices = [o.price_per_hr for o in c.search_offers(OfferFilter())]
+    assert prices == sorted(prices) == [0.35, 0.4, 0.6, 0.8]
+
+
+def test_search_gpu_name_none_allows_any_gpu(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        bundle(1, price=0.5, name="RTX 4090"), bundle(2, price=0.6),
+    ]}))
+    offers = c.search_offers(OfferFilter(gpu_name=None))
+    assert [o.offer_id for o in offers] == [1, 2]
 
 
 def test_search_uses_min_bid_for_interruptible(key):
@@ -115,6 +183,17 @@ def test_search_invalid_filter(key):
         c.search_offers(OfferFilter(max_price=0))
     with pytest.raises(VastInputError):
         c.search_offers(OfferFilter(min_reliability=1.5))
+
+
+def test_search_invalid_min_price(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": []}))
+    with pytest.raises(VastInputError) as e1:
+        c.search_offers(OfferFilter(min_price=-0.1))
+    assert e1.value.exit_code == 2
+    with pytest.raises(VastInputError):
+        c.search_offers(OfferFilter(min_price=1.0, max_price=0.9))
+    # min_price == max_price допустимо
+    assert c.search_offers(OfferFilter(min_price=0.9, max_price=0.9)) == []
 
 
 def test_create_instance_payload(key):

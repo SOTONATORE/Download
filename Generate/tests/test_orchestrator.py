@@ -103,6 +103,7 @@ class FakeVast:
         self.search_calls = 0
         self.stuck_offers: set = set()  # предложения, чьи карты не выходят из loading
         self.create_exc = None
+        self.fail_offers: set = set()   # предложения, создание которых завершается ошибкой
         self.label_exc = None
         self._offer_of: dict = {}
         self._next = 100
@@ -114,6 +115,8 @@ class FakeVast:
     def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None):
         if self.create_exc is not None:
             raise self.create_exc
+        if offer_id in self.fail_offers:
+            raise vc.VastRuntimeError("тестовый сбой создания карты")
         self.events.append("vast_create")
         self._next += 1
         self._offer_of[self._next] = offer_id
@@ -389,6 +392,20 @@ def test_silent_host_is_retired_and_replaced(tmp_path, monkeypatch, caplog):
     assert summary.completed == 1 and summary.exit_code == 0
     assert summary.cards_rented == 2
     assert "хост не вышел на связь" in caplog.text
+
+
+def test_failed_cheapest_offer_climbs_to_next_cheapest(tmp_path, monkeypatch):
+    offers = [make_offer(1, 11, price=0.2), make_offer(2, 22, price=0.3),
+              make_offer(3, 33, price=0.4)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    rig.vast.fail_offers = {1}
+    summary = rig.run()
+
+    # самое дешёвое предложение не создалось, следующее по цене выбрано сразу
+    assert [c["offer_id"] for c in rig.vast.created] == [2]
+    assert 1 in rig.orc._bad_offers
+    assert summary.completed == 1 and summary.exit_code == 0
+    assert summary.cards_rented == 1
 
 
 # ---------------------------------------------------------------------------
