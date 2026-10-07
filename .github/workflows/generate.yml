@@ -1,0 +1,131 @@
+name: Generate
+
+# SPEC 0.1: только ручной запуск. Никаких push / pull_request.
+on:
+  workflow_dispatch:
+    inputs:
+      srt_path:
+        description: "Путь к файлу SRT"
+        type: string
+        default: "final.srt"
+      missing_path:
+        description: "Путь к файлу missing"
+        type: string
+        default: "missing.txt"
+      limit_clips:
+        description: "0 = все клипы; N > 0 = первые N клипов (пробный прогон)"
+        type: string
+        default: "0"
+      release_tag:
+        description: "Пользовательский тег Release (необязательно)"
+        type: string
+        default: ""
+      max_cards:
+        description: "Максимальное число параллельных видеокарт"
+        type: string
+        default: "4"
+      budget_limit_usd:
+        description: "Жёсткий потолок бюджета на запуск (USD)"
+        type: string
+        default: "5.0"
+      model_profile:
+        description: "Профиль видеомодели"
+        type: string
+        default: "ltx25"
+      style_brief:
+        description: "Краткое описание стиля/сюжета от пользователя"
+        type: string
+        default: ""
+
+# SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
+concurrency:
+  group: generate
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # создание/обновление Release через gh CLI
+  actions: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash   # bash -e -o pipefail
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r Generate/requirements-dev.txt
+
+      # Значения входов передаются через env, а не подстановкой в текст скрипта:
+      # так свободный текст (style_brief и др.) не может внедрить shell-команды.
+      - name: Preflight check
+        env:
+          SRT_PATH: ${{ inputs.srt_path }}
+          MISSING_PATH: ${{ inputs.missing_path }}
+        run: |
+          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH"
+
+      - name: Run generation
+        env:
+          GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRT_PATH: ${{ inputs.srt_path }}
+          MISSING_PATH: ${{ inputs.missing_path }}
+          LIMIT_CLIPS: ${{ inputs.limit_clips }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MAX_CARDS: ${{ inputs.max_cards }}
+          BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
+          MODEL_PROFILE: ${{ inputs.model_profile }}
+          STYLE_BRIEF: ${{ inputs.style_brief }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          args=(
+            --srt "$SRT_PATH"
+            --missing "$MISSING_PATH"
+            --limit-clips "$LIMIT_CLIPS"
+            --max-cards "$MAX_CARDS"
+            --budget-limit "$BUDGET_LIMIT"
+            --model-profile "$MODEL_PROFILE"
+            --style-brief "$STYLE_BRIEF"
+            --repo "$REPO"
+            --run-id "$RUN_ID"
+          )
+          if [ -n "$RELEASE_TAG" ]; then
+            args+=(--release-tag "$RELEASE_TAG")
+          fi
+
+          {
+            echo '## Итоги генерации'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # pipefail: код завершения берётся от python, а не от tee;
+          # rc сохраняем, чтобы закрыть блок кода и затем завершить шаг тем же кодом
+          rc=0
+          python -m Generate.cli run "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # SPEC 8.3 (в): выполняется всегда — при ошибке, таймауте и отмене.
+      - name: Kill rented cards
+        if: always()
+        timeout-minutes: 10
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python -m Generate.cli kill-cards --run-id "$RUN_ID"
