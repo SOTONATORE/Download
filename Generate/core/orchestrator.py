@@ -8,7 +8,7 @@
 Время и пауза внедряются (clock/sleep), поэтому модуль детерминирован в тестах.
 
 Протокол воркера (HTTP, порт 8000, заголовок X-Worker-Token):
-  POST /task          {num, prompt, num_frames, seed} -> {"id": ...}
+  POST /task          {num, prompt, num_frames, seed} -> {"task_id": ...}  (допустим и {"id": ...})
   GET  /task/{id}     -> {"state"|"status": "queued|running|done|error|failed", "error": ...}
   GET  /file/{id}     -> байты mp4
   POST /ack/{id}      воркер удаляет клип со своего диска
@@ -118,8 +118,13 @@ class _CardSlot:
 
 
 def _prompt_ready(entry) -> bool:
-    return (isinstance(entry, dict) and entry.get("status") == "ready"
-            and bool(str(entry.get("prompt", "")).strip()))
+    if not isinstance(entry, dict):
+        return False
+    num_frames = entry.get("num_frames")
+    return (entry.get("status") == "ready"
+            and bool(str(entry.get("prompt", "")).strip())
+            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
+            and num_frames > 0)
 
 
 class Orchestrator:
@@ -140,11 +145,11 @@ class Orchestrator:
         budget_limit_usd: float = 5.0,
         job_deadline_min: int = 330,
         card_max_lifetime_min: int = 90,
-        silent_host_timeout_min: int = 5,
+        silent_host_timeout_min: int = 15,
         worker_idle_timeout_min: int = 5,
         offer_filter: Optional[OfferFilter] = None,
         docker_image: str = "",
-        disk_gb: int = 40,
+        disk_gb: int = 50,
         limit_clips: int = 0,
         repo: str = "",
         run_id: str = "",
@@ -550,9 +555,16 @@ class Orchestrator:
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
         num = self._queue.popleft()
-        entry = self._prompts[str(num)]
+        entry = self._prompts.get(str(num))
+        entry = entry if isinstance(entry, dict) else {}
+        num_frames = entry.get("num_frames")
+        if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
+            # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
+            self._attempts[num] = MAX_ATTEMPTS
+            self._fail_clip(num, "в prompts.json нет корректного num_frames")
+            return
         payload = {"num": num, "prompt": entry["prompt"],
-                   "num_frames": entry.get("num_frames"), "seed": self.seed_base + num}
+                   "num_frames": num_frames, "seed": self.seed_base + num}
         try:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:
