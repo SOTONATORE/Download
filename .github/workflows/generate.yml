@@ -56,6 +56,18 @@ on:
         description: "Минимальная скорость интернета карты (Мбит/с)"
         type: string
         default: "2000"
+      docker_image:
+        description: "Docker-образ для карты Vast.ai (пусто = по умолчанию)"
+        type: string
+        default: ""
+      disk_gb:
+        description: "Размер диска карты Vast.ai, ГБ"
+        type: number
+        default: 50
+      silent_host_timeout_min:
+        description: "Таймаут первого ответа хоста, минут"
+        type: number
+        default: 15
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -115,6 +127,9 @@ jobs:
           MAX_PRICE: ${{ inputs.max_price_per_hour }}
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
           MIN_INET: ${{ inputs.min_inet_mbps }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
+          DISK_GB: ${{ inputs.disk_gb }}
+          SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -131,9 +146,15 @@ jobs:
             --max-price-per-hour "$MAX_PRICE"
             --min-reliability "$MIN_RELIABILITY"
             --min-inet-mbps "$MIN_INET"
+            --disk-gb "$DISK_GB"
+            --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
             --repo "$REPO"
             --run-id "$RUN_ID"
           )
+          # пустой образ = значение по умолчанию внутри CLI
+          if [ -n "$DOCKER_IMAGE" ]; then
+            args+=(--docker-image "$DOCKER_IMAGE")
+          fi
           if [ -n "$RELEASE_TAG" ]; then
             args+=(--release-tag "$RELEASE_TAG")
           fi

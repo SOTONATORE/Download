@@ -1,0 +1,297 @@
+name: Verify Gemini
+
+# Бесплатная изолированная проверка генерации промптов Gemini.
+# Видеокарты не арендуются, ключ Vast.ai не нужен.
+on:
+  workflow_dispatch:
+    inputs:
+      srt_path:
+        description: "Путь к файлу SRT"
+        type: string
+        default: "final.srt"
+      missing_path:
+        description: "Путь к файлу missing"
+        type: string
+        default: "missing.txt"
+      model_profile:
+        description: "Профиль модели"
+        type: string
+        default: "ltx25"
+      style_brief:
+        description: "Описание стиля/мира"
+        type: string
+        default: ""
+      limit_clips:
+        # GitHub Actions не поддерживает type: integer, поэтому number
+        description: "Лимит сегментов для проверки (0 = все)"
+        type: number
+        default: 3
+
+concurrency:
+  group: verify-gemini
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Получение репозитория
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Установка зависимостей
+        run: pip install -r Generate/requirements-dev.txt
+
+      # Входы передаются через env, а не подстановкой в текст скрипта (SPEC 0.2).
+      - name: Проверка генерации промптов Gemini
+        env:
+          GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
+          SRT_PATH: ${{ inputs.srt_path }}
+          MISSING_PATH: ${{ inputs.missing_path }}
+          MODEL_PROFILE: ${{ inputs.model_profile }}
+          STYLE_BRIEF: ${{ inputs.style_brief }}
+          LIMIT_CLIPS: ${{ inputs.limit_clips }}
+        run: |
+          python - <<'PY'
+          import importlib
+          import inspect
+          import json
+          import os
+          import sys
+
+          # Имя секрета собирается из частей (SPEC 0.1)
+          KEY_NAME = "GEN_" + "GEMINI_API_KEY"
+          secret = os.environ.get(KEY_NAME, "")
+          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
+
+
+          def mask(text) -> str:
+              text = str(text)
+              return text.replace(secret, "***") if secret else text
+
+
+          def say(text: str = "") -> None:
+              print(mask(text))
+
+
+          def summary(text: str = "") -> None:
+              if SUMMARY:
+                  with open(SUMMARY, "a", encoding="utf-8") as fh:
+                      fh.write(mask(text) + "\n")
+
+
+          def fail(text: str) -> None:
+              say("ОШИБКА: " + text)
+              summary("## Проверка Gemini: ОШИБКА\n\n" + text)
+              sys.exit(1)
+
+
+          def find_symbol(name, modules):
+              for prefix in ("Generate.core.", "core.", ""):
+                  for mod in modules:
+                      try:
+                          module = importlib.import_module(prefix + mod)
+                      except ImportError:
+                          continue
+                      obj = getattr(module, name, None)
+                      if obj is not None:
+                          return obj
+              return None
+
+
+          if not secret:
+              fail("секрет для Gemini не задан в настройках репозитория")
+
+          # ПРЕДПОЛОЖЕНИЕ: точное расположение generate_and_store/RealTransport
+          # в cli.py не видно, поэтому ищем по нескольким модулям.
+          generate_and_store = find_symbol(
+              "generate_and_store", ("gemini_orchestrator", "gemini_prompts"))
+          RealTransport = find_symbol(
+              "RealTransport", ("gemini_client", "gemini_transport",
+                                "gemini_orchestrator", "gemini_prompts"))
+          PromptConfig = find_symbol(
+              "PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
+          TimingParams = find_symbol(
+              "TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
+          parse_srt = find_symbol("parse_srt", ("srt_parser",))
+          parse_missing = find_symbol(
+              "parse_missing", ("srt_parser", "missing_parser", "missing"))
+
+          for label, obj in (("generate_and_store", generate_and_store),
+                             ("RealTransport", RealTransport),
+                             ("parse_srt", parse_srt)):
+              if obj is None:
+                  fail(f"в проекте не найден символ {label}")
+
+          srt_path = os.environ["SRT_PATH"]
+          missing_path = os.environ["MISSING_PATH"]
+          profile = os.environ["MODEL_PROFILE"]
+          style_brief = os.environ.get("STYLE_BRIEF", "")
+          try:
+              limit = int(float(os.environ.get("LIMIT_CLIPS") or 0))
+          except ValueError:
+              fail("limit_clips должен быть числом")
+          out_path = "prompts.json"
+
+          if not os.path.isfile(srt_path):
+              fail(f"файл SRT не найден: {srt_path}")
+          if not os.path.isfile(missing_path):
+              fail(f"файл missing не найден: {missing_path}")
+
+          segments = parse_srt(srt_path)
+          if parse_missing is not None:
+              missing = list(parse_missing(missing_path))
+          else:
+              with open(missing_path, encoding="utf-8") as fh:
+                  missing = [int(x) for x in fh.read().split() if x.strip().isdigit()]
+          say(f"Загружено сегментов SRT: {len(segments)}")
+          say(f"Номеров в missing: {len(missing)}")
+
+          if limit > 0:
+              missing = missing[:limit]
+              say(f"Применён лимит: проверяем первые {len(missing)} клипов")
+          if not missing:
+              fail("нет клипов для проверки")
+
+          # Собираем аргументы по реальной сигнатуре функции
+          style_file = f"Generate/styles/{profile}.md"
+          candidates = {
+              "segments": segments,
+              "srt_segments": segments,
+              "missing": missing,
+              "missing_numbers": missing,
+              "numbers": missing,
+              "clips": missing,
+              "model_profile": profile,
+              "profile": profile,
+              "style_brief": style_brief,
+              "transport": RealTransport(),
+              "out_path": out_path,
+              "prompts_path": out_path,
+              "path": out_path,
+          }
+          if PromptConfig is not None:
+              try:
+                  candidates["config"] = PromptConfig(
+                      style_file=style_file, style_brief=style_brief)
+                  candidates["prompt_config"] = candidates["config"]
+              except TypeError:
+                  pass
+          if TimingParams is not None:
+              pass  # параметры тайминга берутся функцией по умолчанию
+
+          params = inspect.signature(generate_and_store).parameters
+          kwargs = {k: v for k, v in candidates.items() if k in params}
+          say("Параметры вызова generate_and_store: " + ", ".join(sorted(kwargs)))
+          required = [n for n, p in params.items()
+                      if p.default is inspect.Parameter.empty
+                      and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+                      and n not in kwargs]
+          if required:
+              fail("не удалось подобрать обязательные параметры: " + ", ".join(required))
+
+          try:
+              generate_and_store(**kwargs)
+          except Exception as exc:  # noqa: BLE001
+              fail("генерация не удалась: " + type(exc).__name__ + ": " + mask(exc))
+
+          if not os.path.isfile(out_path):
+              fail("файл prompts.json не создан")
+          with open(out_path, encoding="utf-8") as fh:
+              data = json.load(fh)
+
+          # Допускаем список, {"clips": [...]} или словарь по номерам
+          model_used = "не указана"
+          if isinstance(data, dict):
+              model_used = str(data.get("model") or data.get("model_name") or model_used)
+              body = data.get("clips", data.get("prompts", data))
+          else:
+              body = data
+          if isinstance(body, dict):
+              items = []
+              for key, val in body.items():
+                  if isinstance(val, dict):
+                      items.append(dict(val, number=val.get("number", key)))
+          elif isinstance(body, list):
+              items = [x for x in body if isinstance(x, dict)]
+          else:
+              items = []
+
+          by_number = {}
+          for it in items:
+              num = it.get("number", it.get("index", it.get("id")))
+              try:
+                  by_number[int(num)] = it
+              except (TypeError, ValueError):
+                  continue
+              if model_used == "не указана" and it.get("model"):
+                  model_used = str(it["model"])
+
+          problems = []
+          rows = []
+          for num in missing:
+              it = by_number.get(num)
+              if it is None:
+                  problems.append(f"клип {num}: нет в prompts.json")
+                  continue
+              prompt = it.get("prompt")
+              frames = it.get("num_frames")
+              ok_prompt = isinstance(prompt, str) and prompt.strip() != ""
+              ok_frames = (isinstance(frames, int) and not isinstance(frames, bool)
+                           and frames > 0)
+              if not ok_prompt:
+                  problems.append(f"клип {num}: пустой или отсутствует prompt")
+              if not ok_frames:
+                  problems.append(f"клип {num}: num_frames не целое число > 0 ({frames!r})")
+              review = "да" if it.get("needs_review") else "нет"
+              rows.append((num, len(prompt) if ok_prompt else 0,
+                           frames, review))
+
+          summary("## Проверка Gemini")
+          summary()
+          summary(f"- Запрошено клипов: {len(missing)}")
+          summary(f"- Получено промптов: {len(rows)}")
+          summary(f"- Модель: {model_used}")
+          summary(f"- Профиль: {profile}")
+          summary(f"- Итог: {'ОШИБКИ' if problems else 'всё в порядке'}")
+          summary()
+          summary("| Клип | Длина промпта | num_frames | Нужна проверка |")
+          summary("|---|---|---|---|")
+          for num, plen, frames, review in rows:
+              summary(f"| {num} | {plen} | {frames} | {review} |")
+          if problems:
+              summary()
+              summary("### Проблемы")
+              for p in problems:
+                  summary(f"- {p}")
+
+          for num, plen, frames, review in rows:
+              say(f"Клип {num}: промпт {plen} симв., кадров {frames}, проверка: {review}")
+          if problems:
+              for p in problems:
+                  say("ПРОБЛЕМА: " + p)
+              sys.exit(1)
+          say(f"Проверка пройдена: промптов {len(rows)}")
+          PY
+
+      - name: Загрузка prompts.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompts-json
+          path: prompts.json
+          if-no-files-found: warn
