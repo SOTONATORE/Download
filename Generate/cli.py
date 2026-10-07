@@ -32,12 +32,12 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.orchestrator import run_generation
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
-    from Generate.core.vast_client import VastClient, VastError
+    from Generate.core.vast_client import OfferFilter, VastClient, VastError
 except ImportError:  # pragma: no cover
     from orchestrator import run_generation  # type: ignore
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
-    from vast_client import VastClient, VastError  # type: ignore
+    from vast_client import OfferFilter, VastClient, VastError  # type: ignore
 
 EXIT_OK = 0
 EXIT_INPUT = 2
@@ -48,6 +48,12 @@ DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
 DEFAULT_PROFILE = "ltx25"
+# фильтры поиска карт по умолчанию (литералы; окружение не читается, SPEC 0.2)
+DEFAULT_GPU_NAME = "RTX 5090"
+DEFAULT_MIN_PRICE_PER_HOUR = 0.35
+DEFAULT_MAX_PRICE_PER_HOUR = 0.90
+DEFAULT_MIN_RELIABILITY = 0.95
+DEFAULT_MIN_INET_MBPS = 2000.0
 STYLE_DIR = "Generate/model_profiles/prompt_styles"
 
 # параметры таймингов по умолчанию (SPEC 3)
@@ -185,6 +191,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             _err(f"Ошибка подготовки запуска ({type(e).__name__}).")
         return exit_code
 
+    offer_filter = OfferFilter(
+        gpu_name=args.gpu_name if args.gpu_name else None,
+        min_price=args.min_price_per_hour,
+        max_price=args.max_price_per_hour,
+        min_reliability=args.min_reliability,
+        min_inet_mbps=args.min_inet_mbps,
+    )
+
     try:
         summary = run_generation(
             segments,
@@ -202,6 +216,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             profile=args.model_profile,
             release_tag=args.release_tag,
+            offer_filter=offer_filter,
         )
     finally:
         close = getattr(vast, "close", None)
@@ -324,6 +339,17 @@ def build_parser() -> argparse.ArgumentParser:
                        help="номер запуска (передаётся явно)")
     run_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
+    run_p.add_argument("--gpu-name", default=DEFAULT_GPU_NAME,
+                       help=f"модель GPU для поиска (по умолчанию {DEFAULT_GPU_NAME}; "
+                            "пустая строка = любая)")
+    run_p.add_argument("--min-price-per-hour", type=float, default=DEFAULT_MIN_PRICE_PER_HOUR,
+                       help="нижняя граница цены, USD/час (отсекает подозрительно дешёвые хосты)")
+    run_p.add_argument("--max-price-per-hour", type=float, default=DEFAULT_MAX_PRICE_PER_HOUR,
+                       help="верхняя граница цены, USD/час")
+    run_p.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY,
+                       help="минимальная надёжность хоста, от 0 до 1")
+    run_p.add_argument("--min-inet-mbps", type=float, default=DEFAULT_MIN_INET_MBPS,
+                       help="минимальная скорость входящего канала, Мбит/с")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
