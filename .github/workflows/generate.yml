@@ -121,11 +121,33 @@ jobs:
           exit "$rc"
 
       # SPEC 8.3 (в): выполняется всегда — при ошибке, таймауте и отмене.
+      # Шаг 1: сначала немедленно гасим карты, чтобы остановить списание денег.
       - name: Kill rented cards
         if: always()
-        timeout-minutes: 10
+        timeout-minutes: 5
         env:
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           RUN_ID: ${{ github.run_id }}
         run: |
           python -m Generate.cli kill-cards --run-id "$RUN_ID"
+
+      # Шаг 2: выдаём уже готовые клипы (prompts.json и generated_links.txt).
+      - name: Finalize release on completion or cancel
+        if: always()
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRT_PATH: ${{ inputs.srt_path }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MODEL_PROFILE: ${{ inputs.model_profile }}
+          REPO: ${{ github.repository }}
+        run: |
+          args=(
+            --repo "$REPO"
+            --srt "$SRT_PATH"
+            --model-profile "$MODEL_PROFILE"
+          )
+          if [ -n "$RELEASE_TAG" ]; then
+            args+=(--release-tag "$RELEASE_TAG")
+          fi
+          python -m Generate.cli finalize-release "${args[@]}"
