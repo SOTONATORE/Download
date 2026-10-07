@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import logging
 import os
 import shutil
 import sys
@@ -54,6 +55,10 @@ DEFAULT_MIN_PRICE_PER_HOUR = 0.35
 DEFAULT_MAX_PRICE_PER_HOUR = 0.90
 DEFAULT_MIN_RELIABILITY = 0.95
 DEFAULT_MIN_INET_MBPS = 2000.0
+# параметры карты Vast.ai по умолчанию
+DEFAULT_DISK_GB = 50
+DEFAULT_SILENT_HOST_TIMEOUT_MIN = 15
+DEFAULT_DOCKER_IMAGE = ""
 STYLE_DIR = "Generate/model_profiles/prompt_styles"
 
 # параметры таймингов по умолчанию (SPEC 3)
@@ -217,6 +222,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             profile=args.model_profile,
             release_tag=args.release_tag,
             offer_filter=offer_filter,
+            docker_image=args.docker_image,
+            disk_gb=args.disk_gb,
+            silent_host_timeout_min=args.silent_host_timeout_min,
         )
     finally:
         close = getattr(vast, "close", None)
@@ -350,6 +358,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="минимальная надёжность хоста, от 0 до 1")
     run_p.add_argument("--min-inet-mbps", type=float, default=DEFAULT_MIN_INET_MBPS,
                        help="минимальная скорость входящего канала, Мбит/с")
+    run_p.add_argument("--docker-image", default=DEFAULT_DOCKER_IMAGE,
+                       help="образ Docker для карты Vast.ai (по умолчанию пустая строка)")
+    run_p.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB,
+                       help="размер диска для карты Vast.ai, ГБ (по умолчанию 50)")
+    run_p.add_argument("--silent-host-timeout-min", type=int,
+                       default=DEFAULT_SILENT_HOST_TIMEOUT_MIN,
+                       help="таймаут первого ответа хоста, минут (по умолчанию 15)")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
@@ -373,6 +388,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Возвращает код завершения. Трейсбеки пользователю не показываются."""
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
     try:
         parser = build_parser()
         try:
