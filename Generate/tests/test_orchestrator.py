@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 import sys
 import types
 from pathlib import Path
@@ -121,6 +122,7 @@ class FakeVast:
         self._next += 1
         self._offer_of[self._next] = offer_id
         self.created.append({"id": self._next, "offer_id": offer_id,
+                             "image": image, "disk_gb": disk_gb,
                              "env": dict(env_vars or {}), "label": label})
         return self._next
 
@@ -522,3 +524,101 @@ def test_generated_token_not_in_repr(tmp_path, monkeypatch):
     token = rig.orc._token
     assert token and token != TOKEN
     assert token not in repr(rig.orc) and token not in str(rig.orc)
+
+
+# ---------------------------------------------------------------------------
+# Строгая проверка num_frames и проброс параметров
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("entry", [
+    {"num": 1, "status": "ready", "prompt": "промпт 1", "num_frames": None},
+    {"num": 1, "status": "ready", "prompt": "промпт 1", "num_frames": 0},
+    {"num": 1, "status": "ready", "prompt": "промпт 1", "num_frames": -5},
+    {"num": 1, "status": "ready", "prompt": "промпт 1", "num_frames": "49"},
+    {"num": 1, "status": "ready", "prompt": "промпт 1"},
+], ids=["none", "zero", "negative", "string", "missing"])
+def test_missing_or_invalid_num_frames_fails_immediately(tmp_path, monkeypatch, caplog, entry):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    orc = rig.orc
+    prompts = {"1": dict(entry)}
+    orc._state = {"prompts": prompts}
+    orc._prompts = prompts
+    orc._queue = deque([1])
+    slot = orch._CardSlot(index=0, generation=1, instance_id=101, machine_id=11,
+                          price=0.3, created=rig.clock())
+
+    orc._dispatch(slot, rig.clock())
+
+    assert rig.worker.posted == []                      # воркеру ничего не отправлено
+    assert slot.task is None
+    assert 1 in orc._failed
+    assert list(orc._queue) == []                       # без повторных попыток
+    assert prompts["1"]["render_status"] == "failed"
+    assert "в prompts.json нет корректного num_frames" in caplog.text
+    _no_secrets(caplog.text)
+
+
+@pytest.mark.parametrize("num_frames, ready", [
+    (49, True), (97, True), (1, True),
+    (0, False), (-1, False), (None, False), ("49", False), (True, False), (49.0, False),
+])
+def test_prompt_ready_requires_positive_int_num_frames(num_frames, ready):
+    entry = {"status": "ready", "prompt": "промпт", "num_frames": num_frames}
+    assert orch._prompt_ready(entry) is ready
+    assert orch._prompt_ready({"status": "ready", "prompt": "промпт"}) is False
+    assert orch._prompt_ready(None) is False
+
+
+def test_valid_num_frames_is_sent_to_worker_as_is(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.run()
+    assert rig.worker.posted == [1]
+    assert rig.store.clip_uploads() == ["1.mp4"]
+
+
+def test_orchestrator_defaults_for_new_parameters(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    # Rig задаёт docker_image явно; остальные значения — по умолчанию.
+    assert rig.orc.docker_image == "img:latest"
+    assert rig.orc.disk_gb == 50
+    assert rig.orc._silent_sec == 15 * 60.0
+
+
+def test_run_generation_passes_new_parameters(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        def run(self):
+            return "итог"
+
+    monkeypatch.setattr(orch, "Orchestrator", _Recorder)
+    result = orch.run_generation(
+        [], tmp_path / "missing.txt", None, None, object(), object(), object(),
+        tmp_path / "prompts.json",
+        docker_image="custom/img:1", disk_gb=77, silent_host_timeout_min=2)
+    assert result == "итог"
+    kw = captured["kwargs"]
+    assert (kw["docker_image"], kw["disk_gb"], kw["silent_host_timeout_min"]) == (
+        "custom/img:1", 77, 2)
+
+
+def test_new_parameters_reach_vast_and_silent_timeout(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    offers = [make_offer(1, 11, price=0.2), make_offer(2, 22, price=0.3)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers,
+              docker_image="custom/img:1", disk_gb=77, silent_host_timeout_min=2)
+    rig.vast.stuck_offers = {1}
+    assert rig.orc._silent_sec == 120.0
+    summary = rig.run()
+
+    assert [c["offer_id"] for c in rig.vast.created] == [1, 2]
+    assert all(c["image"] == "custom/img:1" and c["disk_gb"] == 77 for c in rig.vast.created)
+    assert rig.vast.created[0]["id"] in rig.vast.destroyed       # молчащий хост снят
+    assert "хост не вышел на связь за 2 мин" in caplog.text
+    assert summary.completed == 1 and summary.exit_code == 0
+    _no_secrets(caplog.text)
