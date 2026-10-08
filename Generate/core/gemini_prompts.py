@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
@@ -317,7 +317,19 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
         "No other segments, no duplicates, no markdown, no code fences. "
         "Never write the segment number, the word \"segment\" or any numbering into the prompt text. "
-        f"Each prompt must be at most {cfg.max_prompt_chars} characters.",
+        f"Each prompt must be at most {cfg.max_prompt_chars} characters.\n\n"
+        "# Hard rules for every prompt\n"
+        "- Show moods and ideas only through visible physical cues. Never use mood or emotion "
+        "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
+        "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
+        "- No negations (no, not, without, never, nothing), no quotation marks, "
+        "no keyword lists (4k, masterpiece, trending).\n"
+        "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
+        "the move ends (for a static camera: what the frame holds on).\n"
+        "- Give each person one consistent outfit; do not mix conflicting garments such as a "
+        "suit and an overcoat unless the layering is stated clearly.\n"
+        "- Before returning, check each prompt against the self-check checklist at the end of "
+        "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
     brief = (cfg.style_brief or "").strip()
@@ -402,6 +414,50 @@ def _garbage_reason(prompt: str) -> str:
     return ""
 
 
+# Проверка стиля по правилам ltx25.md: отрицания, кавычки, keyword spam, эмоциональные метки.
+# Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
+# Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
+_STYLE_RULES = [
+    (re.compile(r"\b(?:no|not|without|never|nothing|nobody|none|"
+                r"(?:don|doesn|isn|aren|can|won)['\u2019]?t|cannot)\b", re.I),
+     "стиль: отрицание",
+     "Remove negations (no, not, without, never, nothing); describe only what is present."),
+    (re.compile(r"[\"\u201c\u201d\u00ab\u00bb]"),
+     "стиль: кавычки",
+     "Remove quotation marks and any spoken or written words."),
+    (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
+                r"photorealistic|hyperrealistic)\b", re.I),
+     "стиль: keyword spam",
+     "Remove quality keywords such as 4k, masterpiece, trending, ultra detailed."),
+    (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
+                r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
+                r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
+                r"confused|happy|angry|afraid|scared|joyful|stillness)\b", re.I),
+     "стиль: эмоциональная метка",
+     "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
+     "with visible physical cues or concrete objects."),
+]
+_STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
+
+
+def _style_reasons(prompt: str) -> list:
+    return [reason for rx, reason, _ in _STYLE_RULES if rx.search(prompt)]
+
+
+def _retry_note(nums, problems: list) -> str:
+    """Текст для повторного запроса: что именно исправить. Пусто, если стилевых нарушений нет."""
+    lines = []
+    for n in nums:
+        hints = [_STYLE_HINTS[p.reason] for p in problems
+                 if p.num == n and p.reason in _STYLE_HINTS]
+        if hints:
+            lines.append(f"- segment_index: {n}: " + " ".join(dict.fromkeys(hints)))
+    if not lines:
+        return ""
+    return ("\n\nThe previous attempt broke style rules. Fix these issues and keep the rest "
+            "of the idea:\n" + "\n".join(lines))
+
+
 def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
     """Разбирает ответ Gemini. Возвращает (results, problems).
 
@@ -461,6 +517,7 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
+        reasons.extend(_style_reasons(prompt))
         extra = {k: v for k, v in item.items() if k not in ("segment_index", "prompt")}
         res = PromptResult(n, prompt, bool(reasons), "; ".join(reasons), extra)
         results[n] = res
@@ -495,6 +552,9 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                     expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
+            note = _retry_note(rb.nums, problems)
+            if note:
+                rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
             res2, prob2 = parse_and_validate(raw2, list(rb.nums), builder.cfg)
             for n in rb.nums:
