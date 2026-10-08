@@ -49,9 +49,9 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 
 1. **Shot.** Shot scale and angle in cinematography terms (wide establishing shot, medium shot, close-up, low angle, overhead view). Close-ups need more detail than wide shots.
 2. **Scene.** Place, time of day, one lighting setup, colour palette, surface textures, atmosphere (fog, rain, dust, smoke, particles).
-3. **Subject.** For people: age, hair, clothing, distinguishing features. Express emotion with physical cues ("her jaw tightens and she looks away"), never with labels like "sad" or "confused".
+3. **Subject.** For people: age, hair, clothing, distinguishing features. Express emotion with physical cues ("her jaw tightens and she looks away"), never with labels like "sad" or "confused". Give each person one consistent outfit; do not combine conflicting garments (a suit and an overcoat) unless the layering is stated clearly.
 4. **Action.** The core action as a natural sequence from beginning to end, moment to moment. If you want a pause, write it ("she pauses", "a beat of silence"); the model will not invent one.
-5. **Camera.** How and when the camera moves, described relative to the subject (follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, handheld, static frame). Say how the subject appears after the movement ends ("the camera pushes in until her face fills the frame").
+5. **Camera.** How and when the camera moves, described relative to the subject (follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, handheld, static frame). Say how the subject appears after the movement ends ("the camera pushes in until her face fills the frame"). **(recommendation)** Always finish the camera sentence with the end state, also for a static frame ("the frame holds on the crown").
 6. **Style.** Optional, one short phrase: film characteristics (film grain, shallow depth of field), a genre or look (documentary, film noir, painterly, claymation) when the brief asks for it.
 
 ## 4. Length
@@ -98,6 +98,8 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - Overloaded scenes with many characters and many actions.
 - Tag syntax, keyword lists ("4k, masterpiece, trending"), shot lists, scene headers, timestamps, labels like "Camera:" or "Audio:".
 - **(recommendation)** Negations ("no people", "without blur", "not dark"). Describe what is present instead. Never write a negative prompt; the pipeline supplies its own.
+- **(recommendation)** Mood and atmosphere words used as description: thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, cinematic, "quiet stillness". Show them as visible cues or concrete objects instead.
+- **(recommendation)** Sound details (a click, a hum, a whisper, an echo). Sound is not described in this pipeline; show it as visible motion.
 - **(recommendation)** Commentary, apologies, alternatives, or explanations around the prompt.
 
 ## 10. Bad / Good pairs
@@ -161,7 +163,7 @@ Before answering, verify each prompt:
 3. Does every sentence contain a concrete visible action or detail (no abstract nouns, no emotion labels)?
 4. Is there exactly one scene, one moment, one coherent light source, and no cut, time jump or place change?
 5. Is it free of readable text, signs with words, dates, numbers, logos, brands, real people's names and spoken lines in quotation marks?
-6. Is it free of negations ("no", "without", "don't") and numeric specifications?
+6. Is it free of negations ("no", "without", "don't") and numeric specifications? Does it contain no mood words (thoughtful, solemn, serene, tense, cinematic) and no sound details?
 7. Is the length within the target (about 60-120 words, 3-6 sentences for a 2-6 second clip) and in English?
 8. Does the prompt show the idea of the passage through something filmable, and not repeat the subtitle wording?
 
