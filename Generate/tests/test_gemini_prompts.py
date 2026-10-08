@@ -343,6 +343,56 @@ def test_validate_normalizes_newlines():
     assert res[1].prompt == "A street. A baker."
 
 
+@pytest.mark.parametrize("bad, reason", [
+    ("A street with no cars at dawn.", "стиль: отрицание"),
+    ("A baker works without gloves.", "стиль: отрицание"),
+    ("A baker doesn\u2019t look up.", "стиль: отрицание"),
+    ('A baker says "good morning".', "стиль: кавычки"),
+    ("A street at dawn, 4k, masterpiece.", "стиль: keyword spam"),
+    ("The camera pushes in on his thoughtful face.", "стиль: эмоциональная метка"),
+    ("The camera stays static, capturing the quiet stillness.", "стиль: эмоциональная метка"),
+])
+def test_validate_style_rules(bad, reason):
+    res, probs = _pv([{"segment_index": 1, "prompt": bad}], [1])
+    assert res[1].needs_review and any(p.reason == reason for p in probs)
+
+
+@pytest.mark.parametrize("fine", [
+    "A close-up of a hand tracing the edge of a crown in warm candlelight.",
+    "A wide shot of a calm grey sea, a woman lowers her head onto folded arms.",
+    "A static wide shot of a quiet cobblestone street with a single lamp glowing.",
+    "Dramatic shadows fall across a rough stone wall as the camera pulls back.",
+])
+def test_validate_style_no_false_positive(fine):
+    res, probs = _pv([{"segment_index": 1, "prompt": fine}], [1])
+    assert not probs and not res[1].needs_review
+
+
+def test_style_violation_retry_gets_fix_note(tmp_path):
+    cfg = make_cfg(tmp_path)
+    t = FakeTransport([ok([1], "A baker looks thoughtful."), ok([1])])
+    res = generate_prompts(make_segments(), [1], cfg, t, "m")
+    assert len(t.calls) == 2 and not res[0].needs_review
+    assert "Fix these issues" not in t.calls[0]["user"]
+    assert "Fix these issues" in t.calls[1]["user"]
+    assert "segment_index: 1:" in t.calls[1]["user"] and "mood or emotion" in t.calls[1]["user"]
+
+
+def test_style_violation_stays_flagged_after_retry(tmp_path):
+    cfg = make_cfg(tmp_path)
+    bad = "A baker looks thoughtful."
+    t = FakeTransport([ok([1], bad), ok([1], bad)])
+    res = generate_prompts(make_segments(), [1], cfg, t, "m")
+    assert res[0].needs_review and res[0].prompt == bad
+    assert "эмоциональная метка" in res[0].review_reason
+
+
+def test_system_has_hard_rules(tmp_path):
+    system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
+    assert "# Hard rules for every prompt" in system
+    assert "Exactly one camera move" in system
+
+
 # ---------------------------------------------------------------- RealTransport и ключ
 
 def _transport(handler):
