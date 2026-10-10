@@ -58,7 +58,7 @@ DEFAULT_MIN_INET_MBPS = 2000.0
 # параметры карты Vast.ai по умолчанию
 DEFAULT_DISK_GB = 100
 DEFAULT_SILENT_HOST_TIMEOUT_MIN = 20
-DEFAULT_DOCKER_IMAGE = ""
+DEFAULT_DOCKER_IMAGE = "ghcr.io/sotonatore/download/videogen-worker:latest"
 STYLE_DIR = "Generate/model_profiles/prompt_styles"
 
 # параметры таймингов по умолчанию (SPEC 3)
@@ -359,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--min-inet-mbps", type=float, default=DEFAULT_MIN_INET_MBPS,
                        help="минимальная скорость входящего канала, Мбит/с")
     run_p.add_argument("--docker-image", default=DEFAULT_DOCKER_IMAGE,
-                       help="образ Docker для карты Vast.ai (по умолчанию пустая строка)")
+                       help="образ Docker для карты Vast.ai (по умолчанию ghcr.io/sotonatore/download/videogen-worker:latest)")
     run_p.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB,
                        help=f"размер диска для карты Vast.ai, ГБ (по умолчанию {DEFAULT_DISK_GB})")
     run_p.add_argument("--silent-host-timeout-min", type=int,

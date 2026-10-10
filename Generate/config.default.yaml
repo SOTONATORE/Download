@@ -61,7 +61,7 @@ budget_limit_usd: 5.0
 # Карта не вышла на связь после создания, минут (хватает на загрузку образа и старт ComfyUI).
 silent_host_timeout_min: 20
 # Образ Docker для карты; пустая строка = образ по умолчанию.
-docker_image: ""
+docker_image: "ghcr.io/sotonatore/download/videogen-worker:latest"
 # Диск карты, ГБ: ComfyUI + PyTorch + модели + выходные клипы.
 disk_gb: 100
 # Dead-man switch: карта без работы дольше этого срока уничтожает себя (раздел 8 (а)), минут.
