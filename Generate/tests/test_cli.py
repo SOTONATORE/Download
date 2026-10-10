@@ -19,9 +19,15 @@ def missing_file(tmp_path):
     return p
 
 
+@pytest.fixture
+def hf_token(monkeypatch):
+    """Preflight-проверка (S1) требует HF_TOKEN в os.environ при команде check."""
+    monkeypatch.setenv("HF_TOKEN", "test-hf-token")
+
+
 # ---------------------------------------------------------------- check
 
-def test_check_ok(capsys, missing_file):
+def test_check_ok(capsys, missing_file, hf_token):
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file)])
     out = capsys.readouterr().out
     segs = parse_srt(str(DATA))
@@ -30,14 +36,14 @@ def test_check_ok(capsys, missing_file):
     assert srt_hash(segs) in out
 
 
-def test_check_does_not_parse_missing(capsys, tmp_path):
+def test_check_does_not_parse_missing(capsys, tmp_path, hf_token):
     """Содержимое missing.txt не разбирается: любой текст допустим."""
     m = tmp_path / "missing.txt"
     m.write_text("это вообще не список номеров\n", encoding="utf-8")
     assert cli.main(["check", "--srt", str(DATA), "--missing", str(m)]) == 0
 
 
-def test_check_no_srt(capsys, missing_file, tmp_path):
+def test_check_no_srt(capsys, missing_file, tmp_path, hf_token):
     code = cli.main(["check", "--srt", str(tmp_path / "нет.srt"),
                      "--missing", str(missing_file)])
     err = capsys.readouterr().err
@@ -45,7 +51,7 @@ def test_check_no_srt(capsys, missing_file, tmp_path):
     assert "SRT" in err and "Traceback" not in err
 
 
-def test_check_no_missing(capsys, tmp_path):
+def test_check_no_missing(capsys, tmp_path, hf_token):
     code = cli.main(["check", "--srt", str(DATA),
                      "--missing", str(tmp_path / "нет.txt")])
     err = capsys.readouterr().err
@@ -53,7 +59,7 @@ def test_check_no_missing(capsys, tmp_path):
     assert "missing" in err and "Traceback" not in err
 
 
-def test_check_broken_srt(capsys, missing_file, tmp_path):
+def test_check_broken_srt(capsys, missing_file, tmp_path, hf_token):
     bad = tmp_path / "bad.srt"
     bad.write_text("1\nэто не тайминг\nтекст\n", encoding="utf-8")
     code = cli.main(["check", "--srt", str(bad), "--missing", str(missing_file)])
@@ -62,17 +68,17 @@ def test_check_broken_srt(capsys, missing_file, tmp_path):
     assert "Traceback" not in err
 
 
-def test_check_empty_srt(capsys, missing_file, tmp_path):
+def test_check_empty_srt(capsys, missing_file, tmp_path, hf_token):
     empty = tmp_path / "empty.srt"
     empty.write_text("", encoding="utf-8")
     assert cli.main(["check", "--srt", str(empty), "--missing", str(missing_file)]) == 2
 
 
-def test_check_srt_is_directory(capsys, missing_file, tmp_path):
+def test_check_srt_is_directory(capsys, missing_file, tmp_path, hf_token):
     assert cli.main(["check", "--srt", str(tmp_path), "--missing", str(missing_file)]) == 2
 
 
-def test_check_not_utf8(capsys, missing_file, tmp_path):
+def test_check_not_utf8(capsys, missing_file, tmp_path, hf_token):
     bad = tmp_path / "cp1251.srt"
     bad.write_bytes("1\n00:00:00,000 --> 00:00:01,000\nпривет\n".encode("cp1251"))
     code = cli.main(["check", "--srt", str(bad), "--missing", str(missing_file)])
@@ -80,7 +86,7 @@ def test_check_not_utf8(capsys, missing_file, tmp_path):
     assert "Traceback" not in capsys.readouterr().err
 
 
-def test_defaults_are_in_cwd(capsys, tmp_path, monkeypatch):
+def test_defaults_are_in_cwd(capsys, tmp_path, monkeypatch, hf_token):
     """Без параметров ищутся final.srt и missing.txt в текущей папке."""
     monkeypatch.chdir(tmp_path)
     assert cli.main(["check"]) == 2  # файлов нет
