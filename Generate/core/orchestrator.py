@@ -442,6 +442,11 @@ class Orchestrator:
             "WORKER_MAX_LIFETIME_MIN": str(self.card_max_lifetime_min),
             f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
         }
+        # HF_TOKEN пробрасывается в контейнер для скачивания закрытых моделей LTX-2.5
+        # (значение токена не логируется и не печатается).
+        hf_token = os.environ.get("HF_TOKEN", "").strip()
+        if hf_token:
+            env["HF_TOKEN"] = hf_token
         try:
             inst_id = self.vast.create_instance(
                 offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label)
