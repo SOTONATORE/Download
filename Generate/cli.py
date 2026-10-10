@@ -56,8 +56,8 @@ DEFAULT_MAX_PRICE_PER_HOUR = 0.90
 DEFAULT_MIN_RELIABILITY = 0.95
 DEFAULT_MIN_INET_MBPS = 2000.0
 # параметры карты Vast.ai по умолчанию
-DEFAULT_DISK_GB = 50
-DEFAULT_SILENT_HOST_TIMEOUT_MIN = 15
+DEFAULT_DISK_GB = 100
+DEFAULT_SILENT_HOST_TIMEOUT_MIN = 20
 DEFAULT_DOCKER_IMAGE = ""
 STYLE_DIR = "Generate/model_profiles/prompt_styles"
 
@@ -135,6 +135,11 @@ def _load_srt(srt_path: str):
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет входные файлы: SRT разбирается, missing.txt существует (не разбирается)."""
+    # S1: без HF_TOKEN карты не арендуем (закрытые модели LTX-2.5 не скачаются)
+    if not os.environ.get("HF_TOKEN", "").strip():
+        _err("[ОШИБКА] Не задана переменная окружения HF_TOKEN.")
+        return EXIT_INPUT
+
     segments, code = _load_srt(args.srt)
     if code is not None:
         return code
@@ -361,10 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--docker-image", default=DEFAULT_DOCKER_IMAGE,
                        help="образ Docker для карты Vast.ai (по умолчанию пустая строка)")
     run_p.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB,
-                       help="размер диска для карты Vast.ai, ГБ (по умолчанию 50)")
+                       help=f"размер диска для карты Vast.ai, ГБ (по умолчанию {DEFAULT_DISK_GB})")
     run_p.add_argument("--silent-host-timeout-min", type=int,
                        default=DEFAULT_SILENT_HOST_TIMEOUT_MIN,
-                       help="таймаут первого ответа хоста, минут (по умолчанию 15)")
+                       help=f"таймаут первого ответа хоста, минут (по умолчанию {DEFAULT_SILENT_HOST_TIMEOUT_MIN})")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
