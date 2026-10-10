@@ -3,10 +3,8 @@
 
 set -u
 
-CHECKPOINT_DIR="/workspace/ComfyUI/models/checkpoints"
-MODEL_NAME="ltx-video-2b-v0.9.1.safetensors"
-MODEL_URL="https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.1.safetensors"
-MODEL_PATH="${CHECKPOINT_DIR}/${MODEL_NAME}"
+COMFY_MODELS_DIR="/workspace/ComfyUI/models"
+HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
 COMFY_READY_URL="http://127.0.0.1:8188/system_stats"
 COMFY_TIMEOUT_SEC=180
@@ -34,33 +32,55 @@ stop_processes() {
 
 trap stop_processes SIGTERM SIGINT
 
-# --- 1. Проверка и загрузка чекпоинта модели ---
-mkdir -p "${CHECKPOINT_DIR}"
+# Загрузка одного файла модели: download_model <подкаталог в репозитории и в models/> <имя файла>
+download_model() {
+    local subdir="$1"
+    local name="$2"
+    local target_dir="${COMFY_MODELS_DIR}/${subdir}"
+    local path="${target_dir}/${name}"
+    local url="${HF_BASE_URL}/${subdir}/${name}"
+    local rc
 
-if [ -s "${MODEL_PATH}" ]; then
-    log "Чекпоинт модели уже существует: ${MODEL_NAME}"
-else
-    log "Чекпоинт модели не найден, начинаю загрузку: ${MODEL_NAME}"
-    rm -f "${MODEL_PATH}" "${MODEL_PATH}.aria2" 2>/dev/null || true
-    if command -v aria2c >/dev/null 2>&1; then
-        log "Загрузка через aria2c (8 соединений)..."
-        aria2c -x 8 -s 8 -k 1M \
-            -d "${CHECKPOINT_DIR}" -o "${MODEL_NAME}" \
-            --console-log-level=warn --summary-interval=0 \
-            "${MODEL_URL}"
-        DL_RC=$?
-    else
-        log "aria2c недоступен, загрузка через curl..."
-        curl -L --fail -o "${MODEL_PATH}" "${MODEL_URL}"
-        DL_RC=$?
+    mkdir -p "${target_dir}"
+
+    # Файл считается готовым, только если он непустой и нет контрольного файла незавершённой загрузки aria2
+    if [ -s "${path}" ] && [ ! -f "${path}.aria2" ]; then
+        log "Файл уже существует, пропускаю: ${subdir}/${name}"
+        return 0
     fi
-    if [ "${DL_RC}" -ne 0 ] || [ ! -s "${MODEL_PATH}" ]; then
-        log "ОШИБКА: не удалось загрузить чекпоинт модели (код ${DL_RC})."
-        rm -f "${MODEL_PATH}" 2>/dev/null || true
+
+    log "Начинаю загрузку: ${subdir}/${name}"
+    aria2c \
+        --header="Authorization: Bearer ${HF_TOKEN}" \
+        -x 16 -s 16 -k 1M -c --console-log-level=warn \
+        -d "${target_dir}" -o "${name}" \
+        "${url}"
+    rc=$?
+
+    if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
+        log "ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код ${rc})."
         exit 1
     fi
-    log "Чекпоинт модели успешно загружен."
+    log "Файл успешно загружен: ${subdir}/${name}"
+}
+
+# --- 1. Проверка токена и загрузка модульных файлов модели LTX-2.5 ---
+if [ -z "${HF_TOKEN:-}" ]; then
+    log "ОШИБКА: Не задана переменная окружения HF_TOKEN. Репозиторий Lightricks/LTX-2.5 закрыт (gated), скачивание весов невозможно."
+    exit 1
 fi
+
+if ! command -v aria2c >/dev/null 2>&1; then
+    log "ОШИБКА: aria2c недоступен, загрузка весов модели невозможна."
+    exit 1
+fi
+
+download_model "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+download_model "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+download_model "vae" "ltx-2.5-video-vae-bf16.safetensors"
+download_model "vae" "ltx-2.5-audio-vae-bf16.safetensors"
+download_model "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+log "Все файлы модели LTX-2.5 на месте."
 
 # --- 2. Запуск ComfyUI в headless-режиме ---
 log "Запускаю ComfyUI (127.0.0.1:8188)..."
