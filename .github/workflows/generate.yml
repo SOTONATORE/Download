@@ -57,9 +57,9 @@ on:
         type: string
         default: "2000"
       docker_image:
-        description: "Docker-образ для карты Vast.ai"
+        description: "Docker-образ для карты Vast.ai (пусто = по умолчанию)"
         type: string
-        default: "ghcr.io/sotonatore/download/videogen-worker:latest"
+        default: ""
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
