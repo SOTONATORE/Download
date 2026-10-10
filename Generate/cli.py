@@ -135,11 +135,6 @@ def _load_srt(srt_path: str):
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет входные файлы: SRT разбирается, missing.txt существует (не разбирается)."""
-    # S1: без HF_TOKEN карты не арендуем (закрытые модели LTX-2.5 не скачаются)
-    if not os.environ.get("HF_TOKEN", "").strip():
-        _err("[ОШИБКА] Не задана переменная окружения HF_TOKEN.")
-        return EXIT_INPUT
-
     segments, code = _load_srt(args.srt)
     if code is not None:
         return code
