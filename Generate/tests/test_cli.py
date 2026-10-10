@@ -273,8 +273,8 @@ def test_run_default_card_params(capsys, run_env, missing_file):
     assert cli.main(_run_args(DATA, missing_file)) == 0
     _, kwargs = run_env.calls[0]
     assert kwargs["docker_image"] == ""
-    assert kwargs["disk_gb"] == 50
-    assert kwargs["silent_host_timeout_min"] == 15
+    assert kwargs["disk_gb"] == 100
+    assert kwargs["silent_host_timeout_min"] == 20
 
 
 def test_run_custom_card_params(capsys, run_env, missing_file):
