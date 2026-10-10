@@ -145,11 +145,11 @@ class Orchestrator:
         budget_limit_usd: float = 5.0,
         job_deadline_min: int = 330,
         card_max_lifetime_min: int = 90,
-        silent_host_timeout_min: int = 15,
+        silent_host_timeout_min: int = 20,
         worker_idle_timeout_min: int = 5,
         offer_filter: Optional[OfferFilter] = None,
         docker_image: str = "",
-        disk_gb: int = 50,
+        disk_gb: int = 100,
         limit_clips: int = 0,
         repo: str = "",
         run_id: str = "",
@@ -468,8 +468,14 @@ class Orchestrator:
     def _retire(self, slot: _CardSlot, reason: str, *, bad: bool = False) -> None:
         log.warning("Карта %d (слот %d, поколение %d) снимается: %s.",
                     slot.instance_id, slot.index, slot.generation, reason)
+        self._budget_blocked = False
         if slot.task is not None:
-            self._requeue_free(slot.task.num)
+            if bad:
+                # аварийно завершившаяся карта засчитывается как попытка (MAX_ATTEMPTS),
+                # иначе «отравленный» клип может зацикливать аренду карт
+                self._fail_clip(slot.task.num, f"карта аварийно завершилась: {reason}")
+            else:
+                self._requeue_free(slot.task.num)
             slot.task = None
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
@@ -500,8 +506,13 @@ class Orchestrator:
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"
-                    slot.state = "ready"
-                    log.info("Карта %d запущена, воркер доступен по прямому порту.", slot.instance_id)
+                    # готовность только после ответа воркера на /health (не по статусу Vast)
+                    if self._health_ok(slot):
+                        slot.state = "ready"
+                        slot.contacted = True
+                        slot.net_fail = 0
+                        log.info("Карта %d готова к приёму задач (воркер ответил на healthcheck).",
+                                 slot.instance_id)
         if not slot.contacted and age >= self._silent_sec:
             self._retire(slot, f"хост не вышел на связь за {int(self._silent_sec // 60)} мин", bad=True)
             return
@@ -532,6 +543,17 @@ class Orchestrator:
         if resp.status_code >= 400:
             raise _WorkerHttpError(resp.status_code)
         return resp
+
+    def _health_ok(self, slot: _CardSlot) -> bool:
+        """Одна проверка GET /health; сбой не учитывается в net_fail (карта остаётся в booting)."""
+        try:
+            resp = self._http.get(slot.url + "/health", headers=self._headers, timeout=5.0)
+        except httpx.HTTPError:
+            return False
+        if resp.status_code != 200:
+            return False
+        data = self._json(resp)
+        return data.get("ok") is True
 
     @staticmethod
     def _json(resp) -> dict:
