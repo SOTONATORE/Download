@@ -63,11 +63,11 @@ on:
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
-        default: 50
+        default: 100
       silent_host_timeout_min:
         description: "Таймаут первого ответа хоста, минут"
         type: number
-        default: 15
+        default: 20
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -104,6 +104,7 @@ jobs:
       # так свободный текст (style_brief и др.) не может внедрить shell-команды.
       - name: Preflight check
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
         run: |
