@@ -1,1 +1,6 @@
-
+{
+  "prompt": { "node_id": "33", "field": "value" },
+  "num_frames": { "node_id": "31", "field": "value" },
+  "seed": { "node_id": "17", "field": "noise_seed" },
+  "filename_prefix": { "node_id": "1", "field": "filename_prefix" }
+}
