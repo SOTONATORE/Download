@@ -187,6 +187,9 @@ class FakeWorker:
             self.bad_token += 1
             return httpx.Response(401, json={"error": "токен"})
         path, method = request.url.path, request.method
+        # проверка готовности воркера (healthcheck gate: booting -> ready)
+        if method == "GET" and path == "/health":
+            return httpx.Response(200, json={"ok": True, "gpu": "FakeGPU", "vram_free": 12345})
         if method == "POST" and path == "/task":
             body = json.loads(request.content)
             num = body["num"]
