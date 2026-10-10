@@ -1,0 +1,33 @@
+# Generate/model_profiles/ltx25.yaml
+# Профиль модели LTX-2.5 (SPEC.md, раздел 5).
+# Всё, что зависит от модели, живёт только здесь.
+
+name: ltx25
+
+# Допустимое число кадров: 8k+1 (9, 17, 25, ... 97 ...). Не проверено по документации модели.
+frame_rule: {kind: "8k+1", min_frames: 9}
+
+# Параметры тайминга и вывода
+fps: 24
+clip_min_sec: 2.5          # короче: только предупреждение
+clip_max_sec: 5.0          # мягкий потолок, предупреждение в лог
+gpu_max_sec: 10.0          # выше: сообщение «выше максимума, который тянет карта»
+tail_pad_sec: 0.5          # хвост для последнего сегмента
+target_resolution: "1920x1080"   # итоговый размер после ImageScale (нода 36)
+
+# Граф ComfyUI (API-формат) и подстановки значений
+workflow:
+  file: "Generate/model_profiles/workflows/ltx25.json"
+  bindings_file: "Generate/model_profiles/workflows/ltx25_bindings.json"
+  # Нода, отдающая результат (SaveVideo), и тип результата
+  output: {node_id: "1", type: video}
+
+# Файл с инструкцией для Gemini под эту модель
+prompt_style: "Generate/model_profiles/prompt_styles/ltx25.md"
+
+# Параметры, зашитые в граф (для справки; меняются правкой графа)
+params:
+  cfg: 1.0                       # LTXVDualCFGGuider: video_cfg и audio_cfg
+  resolution: "1152x640"         # первый проход 576x320, апскейл x2
+  sampler: "euler_ancestral"
+  quantization: "int8-convrot"   # ltx-2.5-22b-distilled int8
