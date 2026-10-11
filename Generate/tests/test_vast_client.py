@@ -196,7 +196,10 @@ def test_search_excludes_offer_without_num_gpus(key, caplog):
     del no_field["num_gpus"]
     c = make(lambda r: httpx.Response(200, json={"offers": [no_field, bundle(2, price=0.6)]}))
     assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
-    assert "Пропущено предложение Vast 1" in caplog.text
+    # по одной строке на поиск, только счётчики: номера предложений не выводятся (SPEC 10)
+    assert "Пропущено предложение" not in caplog.text
+    assert "получено 2" in caplog.text and "не одиночная карта 1" in caplog.text
+    assert "подходит 1" in caplog.text
     assert SECRET not in caplog.text
 
 

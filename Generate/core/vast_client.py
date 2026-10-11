@@ -33,6 +33,17 @@ _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 _LIST_PAGE_LIMIT = 25
 # Предел страниц списка: защита от бесконечного цикла при сбое курсора.
 _LIST_MAX_PAGES = 200
+# Причины отказа при поиске: (ключ, подпись в строке итога поиска); порядок в логе фиксирован
+_REJECT_LABELS = (
+    ("unparsed", "не разобрано"),
+    ("single_gpu", "не одиночная карта"),
+    ("price_low", "цена ниже минимума"),
+    ("price_high", "цена выше максимума"),
+    ("reliability", "надёжность"),
+    ("network", "сеть"),
+    ("vram", "VRAM"),
+    ("gpu_name", "имя GPU"),
+)
 
 # Пути API Vast.ai (статус каждого: SPEC 8.3, блок «Эндпоинты Vast»).
 PATH_BUNDLES = "/api/v0/bundles/"            # POST: поиск предложений
@@ -287,42 +298,47 @@ class VastClient:
         data = self._request("POST", PATH_BUNDLES, json=self._build_query(filters))
         bundles = data.get("offers", []) if isinstance(data, dict) else []
         result: list[GpuOffer] = []
+        # Счётчики по причинам отказа: каждое предложение учитывается один раз, по первой
+        # причине, поэтому сумма счётчиков равна числу полученных предложений (SPEC 10).
+        rejected = {key: 0 for key, _label in _REJECT_LABELS}
         for b in bundles:
-            if not isinstance(b, dict):
-                continue
-            offer = self._parse_offer(b, filters.interruptible)
-            if offer is None:
-                continue
-            # Аренда только одиночных карт: проверяем сырое значение из ответа,
-            # а не GpuOffer.num_gpus (там пропуск уже заменён на 1).
-            raw_num_gpus = _to_int(b.get("num_gpus"))
-            if raw_num_gpus != 1:
-                if raw_num_gpus is None:
-                    detail = "число GPU не указано"
-                else:
-                    detail = f"GPU в предложении: {raw_num_gpus}"
-                log.info(
-                    "Пропущено предложение Vast %d: нужна одиночная карта (%s)",
-                    offer.offer_id, detail,
-                )
-                continue
-            # Повторная проверка на клиенте: сервер может вернуть лишнее.
-            if offer.price_per_hr < filters.min_price:
-                continue
-            if offer.price_per_hr > filters.max_price:
-                continue
-            if offer.reliability < filters.min_reliability:
-                continue
-            if offer.inet_down_mbps < filters.min_inet_mbps:
-                continue
-            if offer.vram_gb < filters.min_vram_gb:
-                continue
-            if filters.gpu_name and offer.gpu_name != filters.gpu_name:
+            reason, offer = self._check_offer(b, filters)
+            if reason is not None:
+                rejected[reason] += 1
                 continue
             result.append(offer)
         result.sort(key=lambda o: o.price_per_hr)
-        log.info("Найдено подходящих предложений Vast: %d", len(result))
+        parts = ", ".join(f"{label} {rejected[key]}" for key, label in _REJECT_LABELS)
+        log.info("Поиск предложений Vast: получено %d, отброшено: %s; подходит %d.",
+                 len(bundles), parts, len(result))
         return result
+
+    @staticmethod
+    def _check_offer(b: Any, filters: OfferFilter):
+        """(причина_отказа или None, предложение или None). Порядок проверок фиксирован."""
+        if not isinstance(b, dict):
+            return "unparsed", None
+        offer = VastClient._parse_offer(b, filters.interruptible)
+        if offer is None:
+            return "unparsed", None
+        # Аренда только одиночных карт: проверяем сырое значение из ответа,
+        # а не GpuOffer.num_gpus (там пропуск уже заменён на 1).
+        if _to_int(b.get("num_gpus")) != 1:
+            return "single_gpu", None
+        # Повторная проверка на клиенте: сервер может вернуть лишнее.
+        if offer.price_per_hr < filters.min_price:
+            return "price_low", None
+        if offer.price_per_hr > filters.max_price:
+            return "price_high", None
+        if offer.reliability < filters.min_reliability:
+            return "reliability", None
+        if offer.inet_down_mbps < filters.min_inet_mbps:
+            return "network", None
+        if offer.vram_gb < filters.min_vram_gb:
+            return "vram", None
+        if filters.gpu_name and offer.gpu_name != filters.gpu_name:
+            return "gpu_name", None
+        return None, offer
 
     # --- экземпляры ---
     def create_instance(

@@ -68,6 +68,9 @@ def test_no_api_key_names_in_code():
 
 
 def test_no_environment_reading_in_cli():
+    """Единственное чтение окружения в cli.py: GEN_LOG_LEVEL в _read_log_level (SPEC 10).
+    Любое другое чтение (ключи, os.environ целиком, getenv) запрещено."""
     code = _code_without_comments(GEN / "cli.py")
-    assert "os.environ" not in code
+    assert code.count("os.environ") == 1
+    assert "os.environ.get(LOG_LEVEL_ENV" in code
     assert "getenv" not in code
