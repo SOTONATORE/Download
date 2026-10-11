@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -168,6 +169,25 @@ class VastClient:
             raise VastRuntimeError(
                 f"Vast API вернул не JSON: {method} {path}"
             ) from None
+
+    # --- баланс аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
+    def get_balance_usd(self) -> float:
+        """Баланс аккаунта Vast, USD: поле balance ответа GET /api/v0/users/current.
+
+        Поле проверяется строго: отсутствие или нечисловое значение дают VastRuntimeError,
+        а не 0. Неизвестный баланс не должен пропускать запуск с пустым счётом.
+        Отрицательный баланс допустим (означает задолженность) и сравнивается дальше.
+        """
+        data = self._request("GET", "/users/current")
+        if not isinstance(data, dict):
+            raise VastRuntimeError("Vast API вернул неожиданный ответ при проверке баланса")
+        if "balance" not in data:
+            raise VastRuntimeError("В ответе Vast API нет поля баланса (balance)")
+        value = data["balance"]
+        # bool — подкласс int, но «true» баланс не является; строки не принимаем (схема: число)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise VastRuntimeError("Поле баланса в ответе Vast API не является числом")
+        return float(value)
 
     # --- поиск предложений ---
     @staticmethod
