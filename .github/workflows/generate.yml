@@ -96,7 +96,7 @@ jobs:
         shell: bash   # bash -e -o pipefail
     env:
       # полный вывод шага run (после маскирования секретов), артефакт шага «Upload run log»
-      RUN_LOG: ${{ runner.temp }}/generate-run.log
+      RUN_LOG: /tmp/generate-run.log
 
     steps:
       - name: Checkout
