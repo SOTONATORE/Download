@@ -43,12 +43,15 @@ jobs:
           images: ghcr.io/${{ github.repository }}/videogen-worker
           tags: |
             type=raw,value=latest
+            type=raw,value=${{ github.sha }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Generate/worker/Dockerfile
+          build-args: |
+            WORKER_BUILD=${{ github.sha }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

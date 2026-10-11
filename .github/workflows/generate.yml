@@ -61,9 +61,9 @@ on:
         type: string
         default: "2000"
       docker_image:
-        description: "Docker-образ для карты Vast.ai (пусто = по умолчанию)"
+        description: "пусто = образ этого коммита"
         type: string
-        default: "ghcr.io/sotonatore/download/videogen-worker:latest"
+        default: ""
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
@@ -72,6 +72,10 @@ on:
         description: "Таймаут первого ответа хоста, минут"
         type: number
         default: 20
+      debug_logs:
+        description: "Подробный лог (DEBUG) для разбора проблем"
+        type: boolean
+        default: false
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -81,6 +85,7 @@ concurrency:
 permissions:
   contents: write   # создание/обновление Release через gh CLI
   actions: read
+  packages: read    # проверка образа воркера в GHCR на шаге check (SPEC 8.4)
 
 jobs:
   generate:
@@ -89,6 +94,9 @@ jobs:
     defaults:
       run:
         shell: bash   # bash -e -o pipefail
+    env:
+      # полный вывод шага run (после маскирования секретов), артефакт шага «Upload run log»
+      RUN_LOG: ${{ runner.temp }}/generate-run.log
 
     steps:
       - name: Checkout
@@ -106,13 +114,20 @@ jobs:
 
       # Значения входов передаются через env, а не подстановкой в текст скрипта:
       # так свободный текст (style_brief и др.) не может внедрить shell-команды.
+      # Предстартовая проверка (SPEC 8.4): образ сборки этого коммита должен быть в GHCR до любого
+      # вызова Vast. GH_TOKEN передаётся в docker login через stdin, в аргументах команды его нет.
       - name: Preflight check
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
+          WORKER_BUILD: ${{ github.sha }}
         run: |
-          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" \
+            --docker-image "$DOCKER_IMAGE" --worker-build "$WORKER_BUILD"
 
       - name: Run generation
         env:
@@ -135,11 +150,14 @@ jobs:
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
           MIN_INET: ${{ inputs.min_inet_mbps }}
           DOCKER_IMAGE: ${{ inputs.docker_image }}
+          WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          GEN_LOG_LEVEL: ${{ inputs.debug_logs && 'DEBUG' || 'INFO' }}
         run: |
+          # --docker-image пусто = образ этого коммита (тег = WORKER_BUILD, SPEC 8.4)
           args=(
             --srt "$SRT_PATH"
             --missing "$MISSING_PATH"
@@ -158,24 +176,44 @@ jobs:
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
             --repo "$REPO"
             --run-id "$RUN_ID"
+            --docker-image "$DOCKER_IMAGE"
+            --worker-build "$WORKER_BUILD"
           )
-          # пустой образ = значение по умолчанию внутри CLI
-          if [ -n "$DOCKER_IMAGE" ]; then
-            args+=(--docker-image "$DOCKER_IMAGE")
-          fi
           if [ -n "$RELEASE_TAG" ]; then
             args+=(--release-tag "$RELEASE_TAG")
           fi
+
+          # Фильтр маскирует значения секретов до записи в сводку и в файл лога (SPEC 0.1):
+          # GitHub прячет секреты только в журнале шага, а файл артефакта публичен.
+          # Короткие значения (< 8 символов) не трогаем, чтобы не испортить обычный текст.
+          mask_filter="$RUNNER_TEMP/mask_filter.py"
+          cat > "$mask_filter" <<'PY'
+          import os
+          import sys
+
+          values = sorted(
+              {os.environ.get(k, "").strip() for k in (
+                  "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN")} - {""},
+              key=len, reverse=True)
+          values = [v for v in values if len(v) >= 8]
+          for line in sys.stdin:
+              for v in values:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          PY
 
           {
             echo '## Итоги генерации'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # pipefail: код завершения берётся от python, а не от tee;
+          # pipefail: код завершения берётся от python, а не от фильтра и tee;
           # rc сохраняем, чтобы закрыть блок кода и затем завершить шаг тем же кодом
           rc=0
-          python -m Generate.cli run "${args[@]}" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+          python -m Generate.cli run "${args[@]}" 2>&1 \
+            | python3 -I -u "$mask_filter" \
+            | tee -a "$GITHUB_STEP_SUMMARY" "$RUN_LOG" || rc=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -210,3 +248,13 @@ jobs:
             args+=(--release-tag "$RELEASE_TAG")
           fi
           python -m Generate.cli finalize-release "${args[@]}"
+
+      # Полный лог шага run (с маскированием) сохраняется даже при отмене и ошибке.
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generate-run-log-${{ github.run_id }}
+          path: ${{ env.RUN_LOG }}
+          retention-days: 30
+          if-no-files-found: warn
