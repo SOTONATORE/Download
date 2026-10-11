@@ -3,9 +3,16 @@
 Только стандартная библиотека + httpx. Ключ берётся ТОЛЬКО из переменной окружения
 и передаётся ТОЛЬКО в заголовке Authorization: Bearer. Ключ не попадает в URL,
 логи, repr и тексты исключений.
+
+Пути API заданы константами ниже, версия указана в самом пути. Статус каждого пути
+(подтверждён ли живым ответом или нет) записан в SPEC 8.3.
+
+Перенаправления (301/302/303/307/308) клиент НЕ выполняет: заголовок с ключом не уходит
+по адресу, который сервер назвал сам, а сбой виден сразу как ошибка с кодом 3.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -18,9 +25,21 @@ log = logging.getLogger("Generate.vast_client")
 
 # Имя секрета собрано из частей (test_structure.py: литерал в коде запрещён).
 ENV_KEY_NAME = "GEN_" + "VAST_API_KEY"
-DEFAULT_BASE_URL = "https://console.vast.ai/api/v0"
+# Корень сервера; версия API входит в каждый путь (см. константы ниже).
+DEFAULT_BASE_URL = "https://console.vast.ai"
 WORKER_HTTP_PORT = 8000
 _SNIPPET_LIMIT = 200
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+_LIST_PAGE_LIMIT = 25
+# Предел страниц списка: защита от бесконечного цикла при сбое курсора.
+_LIST_MAX_PAGES = 200
+
+# Пути API Vast.ai (статус каждого: SPEC 8.3, блок «Эндпоинты Vast»).
+PATH_BUNDLES = "/api/v0/bundles/"            # POST: поиск предложений
+PATH_ASKS = "/api/v0/asks/{id}/"             # PUT: аренда предложения
+PATH_INSTANCES = "/api/v1/instances/"        # GET: список экземпляров, постраничный (v1)
+PATH_INSTANCE = "/api/v0/instances/{id}/"    # GET, DELETE: один экземпляр
+PATH_USER = "/api/v0/users/current/"         # GET: баланс аккаунта
 
 
 class VastError(Exception):
@@ -158,10 +177,26 @@ class VastClient:
             ) from None
 
         if resp.status_code != 200:
+            code = resp.status_code
             snippet = self._redact(resp.text or "")[:_SNIPPET_LIMIT]
-            log.warning("Vast вернул HTTP %s: %s %s", resp.status_code, method, path)
+            if code in _REDIRECT_CODES:
+                # Клиент не следует перенаправлению: адрес сервера показываем, но не используем.
+                location = self._redact(str(resp.headers.get("location", "")))[:_SNIPPET_LIMIT]
+                log.warning("Vast ответил перенаправлением HTTP %s: %s %s", code, method, path)
+                raise VastRuntimeError(
+                    f"Vast API ответил перенаправлением HTTP {code}: {method} {path}. "
+                    f"Путь API устарел или записан неверно, перенаправления не выполняются. "
+                    f"Новый адрес по данным сервера: {location or 'не указан'}"
+                )
+            if code == 410:
+                log.warning("Vast вернул HTTP 410, конечная точка устарела: %s %s", method, path)
+                raise VastRuntimeError(
+                    f"Конечная точка Vast API устарела (HTTP 410): {method} {path}. "
+                    f"Путь клиента нужно перевести на актуальную версию API. Ответ: {snippet}"
+                )
+            log.warning("Vast вернул HTTP %s: %s %s", code, method, path)
             raise VastRuntimeError(
-                f"Vast API вернул HTTP {resp.status_code}: {method} {path}. Ответ: {snippet}"
+                f"Vast API вернул HTTP {code}: {method} {path}. Ответ: {snippet}"
             )
         try:
             return resp.json()
@@ -172,13 +207,13 @@ class VastClient:
 
     # --- баланс аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
     def get_balance_usd(self) -> float:
-        """Баланс аккаунта Vast, USD: поле balance ответа GET /api/v0/users/current.
+        """Баланс аккаунта Vast, USD: поле balance ответа GET /api/v0/users/current/.
 
         Поле проверяется строго: отсутствие или нечисловое значение дают VastRuntimeError,
         а не 0. Неизвестный баланс не должен пропускать запуск с пустым счётом.
         Отрицательный баланс допустим (означает задолженность) и сравнивается дальше.
         """
-        data = self._request("GET", "/users/current")
+        data = self._request("GET", PATH_USER)
         if not isinstance(data, dict):
             raise VastRuntimeError("Vast API вернул неожиданный ответ при проверке баланса")
         if "balance" not in data:
@@ -249,7 +284,7 @@ class VastClient:
         if filters.min_inet_mbps < 0 or filters.min_vram_gb < 0:
             raise VastInputError("Неверный фильтр: отрицательные значения не допускаются")
 
-        data = self._request("POST", "/bundles/", json=self._build_query(filters))
+        data = self._request("POST", PATH_BUNDLES, json=self._build_query(filters))
         bundles = data.get("offers", []) if isinstance(data, dict) else []
         result: list[GpuOffer] = []
         for b in bundles:
@@ -313,7 +348,7 @@ class VastClient:
             payload["label"] = label
         if onstart:
             payload["onstart"] = onstart
-        data = self._request("PUT", f"/asks/{int(offer_id)}/", json=payload)
+        data = self._request("PUT", PATH_ASKS.format(id=int(offer_id)), json=payload)
         inst_id = _to_int(data.get("new_contract")) if isinstance(data, dict) else None
         if inst_id is None or (isinstance(data, dict) and data.get("success") is False):
             raise VastRuntimeError("Vast API не вернул номер созданного экземпляра")
@@ -324,6 +359,12 @@ class VastClient:
     def _parse_instance(d: dict) -> InstanceInfo:
         direct_port = None
         ports = d.get("ports")
+        if isinstance(ports, str):
+            # схема v1 описывает ports строкой: разбираем как JSON; не разобрать значит порта нет
+            try:
+                ports = json.loads(ports)
+            except ValueError:
+                ports = None
         if isinstance(ports, dict):
             mapped = ports.get(f"{WORKER_HTTP_PORT}/tcp")
             if isinstance(mapped, list) and mapped and isinstance(mapped[0], dict):
@@ -343,7 +384,7 @@ class VastClient:
         )
 
     def get_instance(self, instance_id: int) -> InstanceInfo:
-        data = self._request("GET", f"/instances/{int(instance_id)}/")
+        data = self._request("GET", PATH_INSTANCE.format(id=int(instance_id)))
         inst = data.get("instances") if isinstance(data, dict) else None
         if isinstance(inst, list):
             inst = inst[0] if inst else None
@@ -352,16 +393,72 @@ class VastClient:
         return self._parse_instance(inst)
 
     def destroy_instance(self, instance_id: int) -> bool:
-        data = self._request("DELETE", f"/instances/{int(instance_id)}/")
+        data = self._request("DELETE", PATH_INSTANCE.format(id=int(instance_id)))
         if isinstance(data, dict) and data.get("success") is False:
             raise VastRuntimeError(f"Vast отклонил удаление экземпляра {instance_id}")
         log.info("Экземпляр Vast %d уничтожен", instance_id)
         return True
 
+    @staticmethod
+    def _list_params(after_token: Optional[str], limit: int) -> dict:
+        params: dict[str, Any] = {
+            "select_filters": json.dumps({}),
+            "order_by": json.dumps([{"col": "id", "dir": "asc"}]),
+            "limit": limit,
+        }
+        if after_token is not None:
+            params["after_token"] = after_token
+        return params
+
+    def _fetch_instance_page(self, after_token: Optional[str], limit: int) -> dict:
+        """Одна страница GET /api/v1/instances/. Отсутствие списка — ошибка, а не пустой список:
+        пустой список при уборке означал бы «карт нет», хотя ответ просто не распознан."""
+        data = self._request(
+            "GET", PATH_INSTANCES, params=self._list_params(after_token, limit)
+        )
+        if not isinstance(data, dict):
+            raise VastRuntimeError(
+                f"Vast API вернул неожиданный ответ при списке экземпляров: GET {PATH_INSTANCES}"
+            )
+        if not isinstance(data.get("instances"), list):
+            raise VastRuntimeError(
+                f"В ответе Vast API нет списка экземпляров (instances): GET {PATH_INSTANCES}"
+            )
+        return data
+
+    def check_instances_endpoint(self) -> None:
+        """Предстартовая проверка эндпоинта списка (SPEC 8.3): одна страница, только чтение."""
+        self._fetch_instance_page(None, limit=1)
+
     def list_instances(self, label: Optional[str] = None) -> list[InstanceInfo]:
-        data = self._request("GET", "/instances/")
-        items = data.get("instances", []) if isinstance(data, dict) else []
-        result = [self._parse_instance(d) for d in items if isinstance(d, dict)]
+        """Все экземпляры аккаунта (все страницы по next_token), опционально по метке.
+
+        Неполный список опасен: карта, не попавшая в него, останется арендованной.
+        Поэтому любой сбой страницы или повтор курсора прерывает весь список ошибкой.
+        """
+        rows: list[dict] = []
+        token: Optional[str] = None
+        seen: set[str] = set()
+        for _ in range(_LIST_MAX_PAGES):
+            data = self._fetch_instance_page(token, _LIST_PAGE_LIMIT)
+            rows.extend(d for d in data["instances"] if isinstance(d, dict))
+            nxt = data.get("next_token")
+            if not nxt:
+                break
+            nxt = str(nxt)
+            if nxt in seen:
+                raise VastRuntimeError(
+                    f"Vast API повторил страницу списка экземпляров: GET {PATH_INSTANCES}. "
+                    f"Список неполный, уборка прервана"
+                )
+            seen.add(nxt)
+            token = nxt
+        else:
+            raise VastRuntimeError(
+                f"Список экземпляров Vast длиннее допустимого числа страниц: "
+                f"GET {PATH_INSTANCES}. Список неполный, уборка прервана"
+            )
+        result = [self._parse_instance(d) for d in rows]
         if label is not None:
             result = [i for i in result if i.label == label]
         return result
