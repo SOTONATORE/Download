@@ -27,11 +27,11 @@ on:
       budget_limit_usd:
         description: "Жёсткий потолок бюджета на запуск (USD)"
         type: string
-        default: "5.0"
+        default: "2.0"
       min_balance_usd:
         description: "Минимальный баланс Vast.ai для старта (USD); не меньше бюджета, ниже = запуск не стартует"
         type: string
-        default: "5.0"
+        default: "2.0"
       model_profile:
         description: "Профиль видеомодели"
         type: string
@@ -51,7 +51,7 @@ on:
       max_price_per_hour:
         description: "Максимальная цена аренды ($/ч)"
         type: string
-        default: "0.90"
+        default: "0.55"
       min_reliability:
         description: "Минимальная надёжность хоста (0-1)"
         type: string
@@ -59,7 +59,11 @@ on:
       min_inet_mbps:
         description: "Минимальная скорость интернета карты (Мбит/с)"
         type: string
-        default: "2000"
+        default: "800"
+      max_inet_price_per_tb:
+        description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
+        type: string
+        default: "4.1"
       docker_image:
         description: "пусто = образ этого коммита"
         type: string
@@ -149,6 +153,7 @@ jobs:
           MAX_PRICE: ${{ inputs.max_price_per_hour }}
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
           MIN_INET: ${{ inputs.min_inet_mbps }}
+          MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
           DOCKER_IMAGE: ${{ inputs.docker_image }}
           WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
@@ -172,6 +177,7 @@ jobs:
             --max-price-per-hour "$MAX_PRICE"
             --min-reliability "$MIN_RELIABILITY"
             --min-inet-mbps "$MIN_INET"
+            --max-inet-price-per-tb "$MAX_INET_PRICE"
             --disk-gb "$DISK_GB"
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
             --repo "$REPO"
