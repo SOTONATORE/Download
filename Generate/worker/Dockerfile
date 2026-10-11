@@ -18,11 +18,17 @@ RUN pip install --no-cache-dir httpx
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/workspace \
+    GEN_LOG_LEVEL=INFO \
     COMFY_OUTPUT_DIR=/workspace/ComfyUI/output \
     COMFY_URL=http://127.0.0.1:8188 \
     WORKER_HTTP_PORT=8000 \
     WORKER_WORKFLOW_PATH=/workspace/Generate/model_profiles/workflows/ltx25.json \
     WORKER_BINDINGS_PATH=/workspace/Generate/model_profiles/workflows/ltx25_bindings.json
+
+# Номер коммита сборки: первая строка вывода воркера и GET /logs («Сборка воркера: <значение>»).
+# ARG стоит прямо перед копированием файлов, чтобы смена коммита не сбрасывала кэш установки пакетов.
+ARG WORKER_BUILD=unknown
+ENV WORKER_BUILD=$WORKER_BUILD
 
 # Файлы воркера и профили моделей
 COPY Generate/worker/server.py Generate/worker/comfy_client.py Generate/worker/setup.sh /workspace/Generate/worker/

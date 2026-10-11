@@ -18,9 +18,10 @@ Generate/core/config_loader.py (схема проверяется, см. SPEC 3)
 (аргументы CLI) переопределяют файл и проходят ту же проверку. Секреты сюда не попадают.
 
 Ключи читаются только внутри клиентов и нигде не печатаются (SPEC 0.1).
-Этот модуль сам ничего не читает из окружения (SPEC 0.2): репозиторий и номер
-запуска передаются явными параметрами командной строки (--repo, --run-id).
-Стандартная библиотека, httpx и PyYAML (конфиг). Пути не зашиты: берутся из параметров.
+Из окружения читается только GEN_LOG_LEVEL (INFO или DEBUG, по умолчанию INFO);
+он же передаётся карте. Репозиторий и номер запуска передаются явными параметрами
+командной строки (--repo, --run-id). Стандартная библиотека, httpx и PyYAML (конфиг).
+Пути не зашиты: берутся из параметров.
 """
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ import importlib
 import logging
 import math
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -62,6 +65,10 @@ EXIT_RUNTIME = 3
 
 log = logging.getLogger("Generate.cli")
 
+# уровень логов: единственная переменная окружения, которую читает этот модуль (SPEC 10)
+LOG_LEVEL_ENV = "GEN_LOG_LEVEL"
+LOG_LEVELS = ("INFO", "DEBUG")
+
 # имена входных файлов по умолчанию (раздел 0, п.7 SPEC: в корне репозитория; это не настройка)
 DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
@@ -71,6 +78,9 @@ STYLE_DIR = "Generate/model_profiles/prompt_styles"
 FALLBACK_STYLE_PROFILE = "ltx25"
 # значения по умолчанию, которых нет в config.default.yaml (описаны в профиле модели и SPEC 5)
 TIMING_FRAME_RULE = {"kind": "8k+1"}
+# образ воркера в GHCR: при пустом docker_image тег = номер коммита сборки (SPEC 8.4)
+WORKER_IMAGE_REPO = "ghcr.io/sotonatore/download/videogen-worker"
+WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
 
 
 def _err(text: str) -> None:
@@ -196,6 +206,50 @@ def _load_srt(srt_path: str):
         return None, EXIT_INPUT
 
 
+def _resolve_docker_image(docker_image: str, worker_build: str) -> str:
+    """Имя образа карты. Непустой вход берётся как есть; пустой = образ этого коммита (SPEC 8.4).
+
+    ValueError несёт текст для пользователя. Результат не содержит пробельных символов.
+    """
+    if docker_image:
+        ref = docker_image
+    else:
+        if not WORKER_BUILD_RE.fullmatch(worker_build or ""):
+            raise ValueError("пустой docker_image требует номер коммита --worker-build "
+                             "(7-64 символа 0-9 и a-f).")
+        ref = f"{WORKER_IMAGE_REPO}:{worker_build}"
+    if any(ch.isspace() for ch in ref):
+        raise ValueError("имя образа Docker содержит пробельные символы.")
+    return ref
+
+
+def _check_worker_image(docker_image: str, worker_build: str) -> Optional[int]:
+    """Проверка образа воркера в GHCR до любого вызова Vast (SPEC 8.4). None = можно продолжать.
+
+    docker manifest inspect требует входа в GHCR: его делает шаг workflow с GH_TOKEN.
+    Вывод команды не печатается: при сбое он может содержать заголовки запроса.
+    """
+    try:
+        ref = _resolve_docker_image(docker_image, worker_build)
+    except ValueError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    try:
+        proc = subprocess.run(["docker", "manifest", "inspect", ref],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=120, check=False)
+        found = proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        found = False
+    if not found:
+        _err(f"Образ воркера не найден в GHCR или недоступен: {ref}. "
+             "Запуск не начат, карты не арендованы. Соберите образ workflow «Build Worker Image» "
+             "на этом коммите и проверьте доступ к пакету.")
+        return EXIT_INPUT
+    print(f"Образ воркера найден в GHCR: {ref}")
+    return None
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет конфигурацию, SRT и наличие missing.txt (без разбора missing)."""
     _cfg, code = _load_cfg(args.config)
@@ -211,6 +265,12 @@ def cmd_check(args: argparse.Namespace) -> int:
         _err(f"Ошибка входных данных: файл missing не найден: {args.missing}")
         return EXIT_INPUT
 
+    # образ проверяется, только если вход передан (workflow передаёт всегда)
+    if args.docker_image is not None:
+        code = _check_worker_image(args.docker_image, args.worker_build)
+        if code is not None:
+            return code
+
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
     print(f"srt_hash: {srt_hash(segments)}")
@@ -221,6 +281,7 @@ def _print_summary(s) -> None:
     def g(name, default=0):
         return getattr(s, name, default)
 
+    avg = float(g("avg_render_sec", 0.0))
     print("Итоги запуска:")
     print(f"  нужно сделать клипов: {g('total_needed')}")
     print(f"  готово: {g('completed')}")
@@ -228,6 +289,9 @@ def _print_summary(s) -> None:
     print(f"  не обработано: {g('pending')}")
     print(f"  уже было в Release: {g('skipped_done')}")
     print(f"  арендовано карт: {g('cards_rented')}")
+    print(f"  уничтожено карт: {g('destroyed_cards')}")
+    print(f"  среднее время рендера клипа, с: {avg:.1f}" if avg > 0
+          else "  среднее время рендера клипа, с: нет данных")
     print(f"  потрачено, USD: {float(g('spent_usd', 0.0)):.2f}")
     if g("deadline_reached", False):
         print("  достигнут срок задания: новые клипы не брались")
@@ -239,6 +303,14 @@ def _print_summary(s) -> None:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Основной запуск генерации (этапы 4-9)."""
+    # пустой docker_image = образ этого коммита (SPEC 8.4); None = не задано, берётся из конфига
+    docker_image = args.docker_image
+    if docker_image is not None:
+        try:
+            docker_image = _resolve_docker_image(docker_image, args.worker_build)
+        except ValueError as e:
+            _err(f"Ошибка входных данных: {e}")
+            return EXIT_INPUT
     # входы workflow (None = не задано) переопределяют config.default.yaml и проверяются так же
     overrides = {
         "limit_clips": args.limit_clips,
@@ -252,7 +324,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "max_price_per_hour": args.max_price_per_hour,
         "min_reliability": args.min_reliability,
         "min_inet_mbps": args.min_inet_mbps,
-        "docker_image": args.docker_image,
+        "docker_image": docker_image,
         "disk_gb": args.disk_gb,
         "silent_host_timeout_min": args.silent_host_timeout_min,
     }
@@ -326,6 +398,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             clip_name_width=cfg.clip_name_width,
             release_asset_limit=cfg.release_asset_limit,
             gemini_options=_gemini_options(cfg),
+            log_level=getattr(args, "log_level", "INFO"),
         )
     finally:
         close = getattr(vast, "close", None)
@@ -356,6 +429,9 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
             close()
 
     print(f"Уничтожено карт: {len(destroyed)} (метка {label}).")
+    if destroyed:
+        # токен воркера создаётся в процессе run и здесь неизвестен: логи карт не запрашиваются
+        print("Логи карт в этой команде не выгружаются: токен воркера есть только у процесса run.")
     return EXIT_OK
 
 
@@ -437,9 +513,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="команда", required=True)
 
     # функции берутся из модуля при каждом вызове (удобно подменять в тестах)
-    sub.add_parser("check", parents=[common],
-                   help="проверить конфигурацию и входные файлы"
-                   ).set_defaults(func=lambda a: cmd_check(a))
+    check_p = sub.add_parser("check", parents=[common],
+                             help="проверить конфигурацию, входные файлы и образ воркера")
+    check_p.add_argument("--docker-image", default=None,
+                         help="образ воркера для проверки в GHCR; пусто = образ этого коммита")
+    check_p.add_argument("--worker-build", default="",
+                         help="номер коммита сборки воркера (SHA), нужен для пустого образа")
+    check_p.set_defaults(func=lambda a: cmd_check(a))
 
     # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
     run_p = sub.add_parser("run", parents=[common], help="основной запуск генерации")
@@ -473,7 +553,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--min-inet-mbps", type=float, default=None,
                        help="минимальная скорость входящего канала, Мбит/с; по умолчанию из конфига")
     run_p.add_argument("--docker-image", default=None,
-                       help="образ Docker для карты Vast.ai; по умолчанию из конфига")
+                       help="образ Docker для карты Vast.ai; пусто = образ этого коммита; "
+                            "не задано = из конфига")
+    run_p.add_argument("--worker-build", default="",
+                       help="номер коммита сборки воркера (SHA), нужен для пустого образа")
     run_p.add_argument("--disk-gb", type=int, default=None,
                        help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
@@ -502,6 +585,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _read_log_level() -> Optional[str]:
+    """INFO или DEBUG; пусто = INFO; иное = None (значение в сообщении не печатаем, SPEC 0.1)."""
+    value = os.environ.get(LOG_LEVEL_ENV, "").strip()
+    if not value:
+        return "INFO"
+    return value if value in LOG_LEVELS else None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Возвращает код завершения. Трейсбеки пользователю не показываются."""
     logging.basicConfig(level=logging.INFO,
@@ -513,6 +604,14 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit as e:  # argparse: 2 при ошибке аргументов, 0 для --help
             code = e.code
             return code if isinstance(code, int) else EXIT_INPUT
+        level = _read_log_level()
+        if level is None:
+            _err(f"Ошибка входных данных: {LOG_LEVEL_ENV} допускает только значения INFO и DEBUG.")
+            return EXIT_INPUT
+        logging.getLogger().setLevel(level)
+        # HTTP-библиотека на DEBUG выводит детали соединений: оставляем её на WARNING
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        args.log_level = level
         return int(args.func(args))
     except Exception as e:  # noqa: BLE001 - намеренно ловим всё непредвиденное
         # Печатаем только тип исключения: текст может содержать секреты (SPEC 0.1).

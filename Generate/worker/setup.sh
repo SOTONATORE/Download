@@ -13,6 +13,10 @@ COMFY_POLL_SEC=2
 COMFY_PID=""
 SERVER_PID=""
 
+# Счётчик файлов модели для строк лога: «[1/5] ...»
+MODEL_FILES_TOTAL=5
+MODEL_FILE_INDEX=0
+
 log() {
     echo "[setup] $*"
 }
@@ -41,28 +45,40 @@ download_model() {
     local url="${HF_BASE_URL}/${subdir}/${name}"
     local rc
 
+    MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
+    local tag="[${MODEL_FILE_INDEX}/${MODEL_FILES_TOTAL}]"
+
     mkdir -p "${target_dir}"
 
     # Файл считается готовым, только если он непустой и нет контрольного файла незавершённой загрузки aria2
     if [ -s "${path}" ] && [ ! -f "${path}.aria2" ]; then
-        log "Файл уже существует, пропускаю: ${subdir}/${name}"
+        log "${tag} Файл уже существует, пропускаю: ${subdir}/${name}"
         return 0
     fi
 
-    log "Начинаю загрузку: ${subdir}/${name}"
+    log "${tag} Начинаю загрузку: ${subdir}/${name}"
+    # --summary-interval=10: строка прогресса (процент, скорость) каждые 10 с.
+    # --console-log-level=warn снят: прогресс виден в логе контейнера. Служебные строки aria2
+    # (в т.ч. адреса перенаправлений) тоже попадают туда; в GET /logs воркера они не идут.
+    # Заголовок Authorization передаётся aria2 аргументом и не печатается (UNVERIFIED: вывод
+    # aria2 на живой карте не проверялся).
     aria2c \
         --header="Authorization: Bearer ${HF_TOKEN}" \
-        -x 16 -s 16 -k 1M -c --console-log-level=warn \
+        -x 16 -s 16 -k 1M -c --summary-interval=10 \
         -d "${target_dir}" -o "${name}" \
         "${url}"
     rc=$?
 
     if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
-        log "ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код ${rc})."
+        log "${tag} ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код ${rc})."
         exit 1
     fi
-    log "Файл успешно загружен: ${subdir}/${name}"
+    local size
+    size=$(stat -c %s "${path}" 2>/dev/null || echo "?")
+    log "${tag} Файл успешно загружен: ${subdir}/${name} (${size} байт)"
 }
+
+log "Запуск контейнера воркера. Уровень логов: ${GEN_LOG_LEVEL:-INFO}."
 
 # --- 1. Проверка токена и загрузка модульных файлов модели LTX-2.5 ---
 if [ -z "${HF_TOKEN:-}" ]; then
@@ -106,10 +122,12 @@ while [ "${ELAPSED}" -lt "${COMFY_TIMEOUT_SEC}" ]; do
 done
 
 if [ "${READY}" -ne 1 ]; then
+    log "Проверка готовности ComfyUI (${COMFY_READY_URL}): НЕ ПРОЙДЕНА за ${COMFY_TIMEOUT_SEC} сек."
     log "ОШИБКА: ComfyUI не стал готов за ${COMFY_TIMEOUT_SEC} сек."
     kill -TERM "${COMFY_PID}" 2>/dev/null || true
     exit 1
 fi
+log "Проверка готовности ComfyUI (${COMFY_READY_URL}): пройдена, прошло ${ELAPSED} сек."
 log "ComfyUI готов к работе (прошло ${ELAPSED} сек)."
 
 # --- 4. Запуск сервера воркера ---

@@ -15,10 +15,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
+import re
 import secrets
 import shutil
 import tempfile
@@ -62,9 +64,25 @@ MAX_ATTEMPTS = 3          # попыток рендера одного клип�
 MAX_NET_FAILS = 6         # подряд сбоев связи с воркером до снятия карты
 EXIT_OK = 0
 EXIT_PARTIAL = 3
+LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический и перед уничтожением карты), SPEC 8.4
+LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
+LOG_LEVELS = ("INFO", "DEBUG")
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
+
+# Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
+# Тот же набор шаблонов, что в worker/server.py (воркер собирается отдельно, модуль не импортируется).
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)(authorization\s*:)[^\r\n]*"), True),
+    (re.compile(r"(?i)(x-worker-token\s*[:=]\s*)\S+"), True),
+    (re.compile(r"(?i)(bearer\s+)\S+"), True),
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), False),
+    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), False),
+    (re.compile(r"hf_[A-Za-z0-9]{20,}"), False),
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), False),
+)
+_MASK = "***"
 
 
 class _WorkerNetError(Exception):
@@ -75,6 +93,10 @@ class _WorkerHttpError(Exception):
     def __init__(self, status: int) -> None:
         super().__init__(f"HTTP {status}")
         self.status = status
+
+
+class _LogCursorError(Exception):
+    """Ответ GET /logs без корректного заголовка X-Log-Next: курсор неизвестен, строки не печатаются."""
 
 
 @dataclass
@@ -90,6 +112,8 @@ class RunSummary:
     budget_exceeded: bool = False
     cleanup_ok: bool = True
     cards_rented: int = 0
+    destroyed_cards: int = 0   # карты, уничтоженные в этом запуске (по ходу и при уборке)
+    avg_render_sec: float = 0.0  # среднее время рендера клипа: от отправки до выдачи, с
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -114,7 +138,10 @@ class _CardSlot:
     url: str = ""
     contacted: bool = False    # воркер хотя бы раз ответил
     net_fail: int = 0
+    vast_status: str = ""      # последнее состояние Vast, для строк о переходах (не на каждый опрос)
     task: Optional[_Task] = None
+    log_next: Optional[int] = None    # курсор логов: номер последней строки, полученной с карты
+    log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
 
 
 def _prompt_ready(entry) -> bool:
@@ -170,6 +197,7 @@ class Orchestrator:
         render_estimate_sec: float = 120.0,
         rent_estimate_sec: float = 1800.0,
         http_timeout_sec: float = 60.0,
+        log_level: str = "INFO",
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -177,6 +205,9 @@ class Orchestrator:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
         if job_deadline_min <= 0 or card_max_lifetime_min <= 0 or silent_host_timeout_min <= 0:
             raise gp.GeminiInputError("Сроки (дедлайн, жизнь карты, молчание хоста) должны быть положительными.")
+        if log_level not in LOG_LEVELS:
+            raise gp.GeminiInputError("Уровень логов должен быть INFO или DEBUG.")
+        self.log_level = log_level
         self.segments = segments
         self.missing_path = missing_path
         self.cfg = cfg
@@ -241,6 +272,7 @@ class Orchestrator:
         self._next_rent = 0.0
         self._budget_blocked = False
         self._cards_rented = 0
+        self._destroyed = 0
         self.deadline_reached = False
         self.budget_exceeded = False
         self.cleanup_ok = True
@@ -253,6 +285,68 @@ class Orchestrator:
     # --- служебное ---------------------------------------------------------
     def _redact(self, text: str) -> str:
         return text.replace(self._token, "***") if self._token else text
+
+    def _mask_remote(self, text: str) -> str:
+        """Маскирует текст, пришедший с карты: токен воркера, HF_TOKEN, ключ Vast и шаблоны ключей."""
+        text = self._redact(text)
+        hf_token = os.environ.get("HF_TOKEN", "").strip()
+        if len(hf_token) >= 8:
+            text = text.replace(hf_token, _MASK)
+        vast_redact = getattr(self.vast, "_redact", None)  # метод клиента Vast маскирует свой ключ
+        if callable(vast_redact):
+            text = vast_redact(text)
+        for pattern, keep_prefix in _SECRET_PATTERNS:
+            if keep_prefix:
+                text = pattern.sub(lambda m: m.group(1) + _MASK, text)
+            else:
+                text = pattern.sub(_MASK, text)
+        return text
+
+    def _pull_card_logs(self, slot: _CardSlot, *, final: bool) -> bool:
+        """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
+
+        Печатаются только строки после курсора, каждая с префиксом «[карта N]» и после маскирования.
+        Курсор двигается только при успехе, поэтому при сбое строки запрашиваются снова и дублей нет.
+        Сбой даёт одно предупреждение с именем типа исключения; текст исключения не печатается:
+        в нём может быть адрес с заголовками.
+        """
+        params = {} if slot.log_next is None else {"since": slot.log_next}
+        try:
+            resp = self._http.get(slot.url + "/logs", headers=self._headers, params=params,
+                                  timeout=LOGS_TIMEOUT_SEC)
+            if resp.status_code != 200:
+                raise _WorkerHttpError(resp.status_code)
+            cursor = resp.headers.get("X-Log-Next", "")
+            if not cursor.isdigit():
+                raise _LogCursorError()
+            text = resp.text
+        except (httpx.HTTPError, _WorkerHttpError, _LogCursorError) as exc:
+            log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+            return False
+        lines = self._mask_remote(text).splitlines()
+        slot.log_next = int(cursor)
+        if final:
+            log.info("Логи карты %d перед уничтожением: новых строк %d.", slot.instance_id, len(lines))
+        for line in lines:
+            log.info("[карта %d] %s", slot.instance_id, line)
+        return True
+
+    def _pull_due_logs(self, now: float) -> None:
+        """Периодическая выгрузка: готовые карты, не чаще LOG_PULL_INTERVAL_SEC на карту.
+
+        Уничтоженная карта исчезает из _slots и больше не опрашивается. Любой сбой не выходит
+        из цикла: цикл продолжается, уничтожение не задерживается.
+        """
+        for slot in list(self._slots.values()):
+            if slot.state != "ready" or not slot.url:
+                continue
+            if slot.log_pulled is not None and now - slot.log_pulled < LOG_PULL_INTERVAL_SEC:
+                continue
+            slot.log_pulled = now  # время фиксируется и при сбое: повтор не раньше чем через минуту
+            try:
+                self._pull_card_logs(slot, final=False)
+            except Exception as exc:  # выгрузка логов не должна ронять конвейер
+                log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
@@ -307,10 +401,15 @@ class Orchestrator:
         summary.budget_exceeded = self.budget_exceeded
         summary.cleanup_ok = self.cleanup_ok
         summary.cards_rented = self._cards_rented
+        summary.destroyed_cards = self._destroyed
+        summary.avg_render_sec = (sum(self._durations) / len(self._durations)
+                                  if self._durations else 0.0)
         full = summary.completed == len(needed) and self.cleanup_ok
         summary.exit_code = EXIT_OK if full else EXIT_PARTIAL
-        log.info("Итог: готово %d из %d, ошибок %d, не начато %d, потрачено %.4f USD, код %d.",
+        log.info("Итог: готово %d из %d, ошибок %d, не начато %d, арендовано карт %d, "
+                 "уничтожено карт %d, среднее время клипа %.1f с, потрачено %.4f USD, код %d.",
                  summary.completed, len(needed), summary.failed, summary.pending,
+                 summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
                  summary.spent_usd, summary.exit_code)
         return summary
 
@@ -379,6 +478,7 @@ class Orchestrator:
 
             for slot in list(self._slots.values()):
                 self._step_slot(slot, now, stopping)
+            self._pull_due_logs(now)
 
             inflight = self._inflight()
             if stopping:
@@ -440,6 +540,7 @@ class Orchestrator:
             "WORKER_TOKEN": self._token,
             "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
             "WORKER_MAX_LIFETIME_MIN": str(self.card_max_lifetime_min),
+            "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
             f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
         }
         # HF_TOKEN пробрасывается в контейнер для скачивания закрытых моделей LTX-2.5
@@ -461,8 +562,9 @@ class Orchestrator:
         self._slots[index] = _CardSlot(index, gen, inst_id, offer.machine_id,
                                        offer.price_per_hr, now)
         self._cards_rented += 1
-        log.info("Арендована карта %d (слот %d, поколение %d): %.4f USD/ч.",
-                 inst_id, index, gen, offer.price_per_hr)
+        log.info("Арендована карта %d по предложению %d (слот %d, поколение %d): %.4f USD/ч.",
+                 inst_id, offer.offer_id, index, gen, offer.price_per_hr)
+        log.info("Карта %d создана, ждём загрузку образа.", inst_id)
         return "ok"
 
     def _retire(self, slot: _CardSlot, reason: str, *, bad: bool = False) -> None:
@@ -479,17 +581,32 @@ class Orchestrator:
             slot.task = None
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
+        self._dump_before_destroy(slot)
         try:
             self.vast.destroy_instance(slot.instance_id)
         except VastError as exc:
             log.error("Не удалось уничтожить карту %d: %s. Будет повтор при финальной уборке.",
                       slot.instance_id, exc)
         else:
+            self._destroyed += 1
             try:
                 self.budget.track_instance_stop(slot.instance_id, self.clock())
             except BudgetError:
                 pass
         self._slots.pop(slot.index, None)
+
+    def _dump_before_destroy(self, slot: _CardSlot) -> None:
+        """Логи карты запрашиваются до уничтожения; без адреса воркера запрос невозможен.
+
+        Любая ошибка здесь гасится: уничтожение карты от логов не зависит.
+        """
+        try:
+            if slot.url:
+                self._pull_card_logs(slot, final=True)
+            else:
+                log.info("Карта %d: адрес воркера неизвестен, логи не запрошены.", slot.instance_id)
+        except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
+            log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
     # --- шаг по карте ---------------------------------------------------------
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
@@ -501,6 +618,11 @@ class Orchestrator:
             except VastError as exc:
                 log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
             if info is not None:
+                # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
+                if info.actual_status != slot.vast_status:
+                    slot.vast_status = info.actual_status
+                    log.info("Карта %d: состояние Vast «%s».", slot.instance_id,
+                             info.actual_status or "неизвестно")
                 if info.actual_status == "exited" or info.intended_status == "stopped":
                     self._retire(slot, "карта остановлена хостом", bad=True)
                     return
@@ -511,9 +633,11 @@ class Orchestrator:
                         slot.state = "ready"
                         slot.contacted = True
                         slot.net_fail = 0
-                        log.info("Карта %d готова к приёму задач (воркер ответил на healthcheck).",
-                                 slot.instance_id)
+                        log.info("Карта %d: healthcheck OK через %.0f с после создания, "
+                                 "готова к приёму задач.", slot.instance_id, age)
         if not slot.contacted and age >= self._silent_sec:
+            log.error("Карта %d: healthcheck не прошёл за %d мин (таймаут).",
+                      slot.instance_id, int(self._silent_sec // 60))
             self._retire(slot, f"хост не вышел на связь за {int(self._silent_sec // 60)} мин", bad=True)
             return
         if age >= self._lifetime_sec:
@@ -611,8 +735,11 @@ class Orchestrator:
         data = self._json(resp)
         tid = str(data.get("id") or data.get("task_id") or num)
         slot.task = _Task(num, tid, now)
-        log.info("Клип %d отправлен на карту %d (попытка %d).",
-                 num, slot.instance_id, self._attempts[num])
+        # текст промпта не логируем: только длина и короткий SHA-256 (SPEC 0.1)
+        prompt = str(payload["prompt"])
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+        log.info("Клип %d отправлен на карту %d (попытка %d, промпт %d симв., sha256 %s).",
+                 num, slot.instance_id, self._attempts[num], len(prompt), digest)
 
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
@@ -674,9 +801,11 @@ class Orchestrator:
             self._fail_clip(task.num, reason)
             return
         self._done.add(task.num)
-        self._durations.append(max(0.0, now - task.started))
+        duration = max(0.0, now - task.started)
+        self._durations.append(duration)
         self._mark(task.num, "done")
-        log.info("Клип %d выдан в Release.", task.num)
+        log.info("Клип %d выдан в Release (рендер на карте %d: %.1f с).",
+                 task.num, slot.instance_id, duration)
         try:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):
@@ -684,8 +813,12 @@ class Orchestrator:
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:
+        # логи карт, которые ещё живы, запрашиваются до уборки по метке (SPEC 10)
+        for slot in list(self._slots.values()):
+            self._dump_before_destroy(slot)
         try:
             ids = self.vast.destroy_by_label(self.label)
+            self._destroyed += len(ids)
             log.info("Уничтожено карт по метке %s: %d.", self.label, len(ids))
         except Exception as exc:  # уборка не должна маскировать исходную ошибку
             self.cleanup_ok = False
