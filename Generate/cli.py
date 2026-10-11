@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import math
 import os
 import shutil
 import sys
@@ -43,7 +44,8 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.orchestrator import run_generation
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
-    from Generate.core.vast_client import OfferFilter, VastClient, VastError
+    from Generate.core.vast_client import (
+        OfferFilter, VastClient, VastError, VastRuntimeError)
 except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
@@ -51,11 +53,14 @@ except ImportError:  # pragma: no cover
     from orchestrator import run_generation  # type: ignore
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
-    from vast_client import OfferFilter, VastClient, VastError  # type: ignore
+    from vast_client import (  # type: ignore
+        OfferFilter, VastClient, VastError, VastRuntimeError)
 
 EXIT_OK = 0
 EXIT_INPUT = 2
 EXIT_RUNTIME = 3
+
+log = logging.getLogger("Generate.cli")
 
 # имена входных файлов по умолчанию (раздел 0, п.7 SPEC: в корне репозитория; это не настройка)
 DEFAULT_SRT = "final.srt"
@@ -70,6 +75,33 @@ TIMING_FRAME_RULE = {"kind": "8k+1"}
 
 def _err(text: str) -> None:
     print(text, file=sys.stderr)
+
+
+def _usd_floor(value: float) -> str:
+    """Баланс в USD до цента с округлением вниз: 4.996 не покажется как «5.00» при минимуме 5."""
+    return f"{math.floor(value * 100) / 100:.2f}"
+
+
+def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
+    """Предстартовая проверка баланса Vast.ai (SPEC 8.3, е).
+
+    Вызывается до поиска предложений и до любого вызова Gemini. Возвращает None, если
+    запуск можно продолжать, иначе код завершения (сообщение уже напечатано):
+    2 — баланса не хватает, 3 — баланс не удалось проверить. В обоих случаях ничего не потрачено.
+    """
+    try:
+        balance = vast.get_balance_usd()
+    except VastRuntimeError as e:
+        # текст ошибки клиента безопасен: ключ в нём уже замаскирован (SPEC 0.1)
+        _err(f"Не удалось проверить баланс Vast.ai: {e}. "
+             f"Запуск не начат, карты не арендованы.")
+        return EXIT_RUNTIME
+    if balance < min_balance_usd:
+        _err(f"Недостаточно средств на Vast.ai: баланс {_usd_floor(balance)} USD, "
+             f"нужно не менее {min_balance_usd:.2f} USD. Пополните баланс и запустите снова.")
+        return EXIT_INPUT
+    log.info("Баланс Vast.ai: %s USD, минимум %.2f USD.", _usd_floor(balance), min_balance_usd)
+    return None
 
 
 def _find_symbol(name: str, modules: tuple[str, ...]):
@@ -194,6 +226,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "limit_clips": args.limit_clips,
         "max_cards": args.max_cards,
         "budget_limit_usd": args.budget_limit,
+        "min_balance_usd": args.min_balance_usd,
         "model_profile": args.model_profile,
         "style_brief": args.style_brief,
         "gpu_name": args.gpu_name,
@@ -244,6 +277,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     try:
+        # предстартовая проверка баланса: до поиска предложений и любого вызова Gemini
+        code = _balance_preflight(vast, cfg.min_balance_usd)
+        if code is not None:
+            return code
         summary = run_generation(
             segments,
             args.missing,
@@ -395,6 +432,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="потолок параллельных карт; по умолчанию из конфига")
     run_p.add_argument("--budget-limit", type=float, default=None,
                        help="жёсткий потолок расходов на запуск, USD; по умолчанию из конфига")
+    run_p.add_argument("--min-balance-usd", type=float, default=None,
+                       help="минимальный баланс Vast.ai для старта, USD; по умолчанию из конфига")
     run_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
     run_p.add_argument("--style-brief", default=None,
