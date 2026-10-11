@@ -334,6 +334,78 @@ def test_network_errors(key):
         assert e.value.exit_code == 3
 
 
+# --- баланс аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
+
+def test_balance_normal_value(key):
+    seen = {}
+
+    def handler(req):
+        seen["method"] = req.method
+        seen["path"] = req.url.path
+        seen["auth"] = req.headers["Authorization"]
+        seen["query"] = str(req.url.query)
+        return httpx.Response(200, json={"id": 1, "email": "x@example.com", "balance": 12.5})
+
+    c = make(handler)
+    assert c.get_balance_usd() == 12.5
+    assert seen["method"] == "GET" and seen["path"].endswith("/users/current")
+    assert seen["auth"] == f"Bearer {SECRET}"
+    assert SECRET not in seen["query"]
+
+
+def test_balance_integer_and_negative_values(key):
+    # целое число допустимо и возвращается как float; отрицательный баланс (задолженность) не ошибка разбора
+    v = make(lambda r: httpx.Response(200, json={"balance": 5})).get_balance_usd()
+    assert v == 5.0 and isinstance(v, float)
+    assert make(lambda r: httpx.Response(200, json={"balance": -2.5})).get_balance_usd() == -2.5
+
+
+@pytest.mark.parametrize("payload", [
+    {"id": 1},                              # поля нет
+    {"id": 1, "balance": None},
+    {"id": 1, "balance": "12.5"},           # строка: схема Vast описывает число
+    {"id": 1, "balance": "много"},
+    {"id": 1, "balance": True},             # bool не считается числом
+])
+def test_balance_non_numeric_or_missing_raises(key, payload):
+    c = make(lambda r: httpx.Response(200, json=payload))
+    with pytest.raises(VastRuntimeError) as e:
+        c.get_balance_usd()
+    # ошибка, а не тихий ноль: неизвестный баланс не должен пропускать запуск
+    assert e.value.exit_code == 3
+    assert "баланс" in str(e.value).lower()
+
+
+def test_balance_nan_is_rejected(key):
+    # Python разбирает NaN из JSON, но баланс NaN не принимаем: сравнение с порогом было бы ложным
+    c = make(lambda r: httpx.Response(200, content=b'{"id": 1, "balance": NaN}'))
+    with pytest.raises(VastRuntimeError) as e:
+        c.get_balance_usd()
+    assert e.value.exit_code == 3
+
+
+def test_balance_unexpected_shape_raises(key):
+    c = make(lambda r: httpx.Response(200, json=[12.5]))
+    with pytest.raises(VastRuntimeError) as e:
+        c.get_balance_usd()
+    assert e.value.exit_code == 3
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_balance_http_error_raises(key, status):
+    c = make(lambda r: httpx.Response(status, text="error"))
+    with pytest.raises(VastRuntimeError) as e:
+        c.get_balance_usd()
+    assert e.value.exit_code == 3 and str(status) in str(e.value)
+
+
+def test_balance_error_does_not_leak_key(key):
+    c = make(lambda r: httpx.Response(401, text=f"bad {r.headers['Authorization']}"))
+    with pytest.raises(VastRuntimeError) as e:
+        c.get_balance_usd()
+    assert SECRET not in str(e.value)
+
+
 def test_key_never_leaks(key, caplog, capsys):
     caplog.set_level("DEBUG")
     texts = []

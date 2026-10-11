@@ -1,10 +1,13 @@
 """Тесты cli.py: всё через main(argv), без сети и ключей (всё внешнее подменено)."""
+import logging
 import pathlib
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from Generate import cli
+from Generate.core import vast_client
 from Generate.core.srt_parser import parse_srt, srt_hash
 
 DATA = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
@@ -132,10 +135,17 @@ def test_unexpected_exception_gives_3(capsys, monkeypatch):
 class FakeVast:
     """Подмена VastClient: ключ не читается, сети нет."""
     instances = []
+    balance = 10.0        # что вернёт предстартовая проверка баланса
+    balance_error = None  # если задано, проверка баланса падает с этой ошибкой
 
     def __init__(self, *a, **k):
         self.closed = False
         FakeVast.instances.append(self)
+
+    def get_balance_usd(self):
+        if FakeVast.balance_error is not None:
+            raise FakeVast.balance_error
+        return FakeVast.balance
 
     def close(self):
         self.closed = True
@@ -146,6 +156,8 @@ def run_env(monkeypatch):
     """Подменяет всё внешнее для команды run; возвращает список вызовов оркестратора."""
     calls = []
     FakeVast.instances = []
+    FakeVast.balance = 10.0
+    FakeVast.balance_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
                         lambda profile, brief, batch_size: ("CFG", profile, brief))
@@ -325,6 +337,84 @@ def test_run_vast_key_missing_gives_2(capsys, run_env, missing_file, monkeypatch
     cap = capsys.readouterr()
     assert code == 2
     assert "Traceback" not in cap.err
+    assert run_env.calls == []
+
+
+# ---------------------------------------------------------------- предстартовая проверка баланса
+
+TESTKEY = "TESTKEY-12345"
+
+
+def test_balance_below_minimum_gives_2(capsys, run_env, missing_file):
+    FakeVast.balance = 1.5
+    code = cli.main(_run_args(DATA, missing_file))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Недостаточно средств на Vast.ai: баланс 1.50 USD, нужно не менее 5.00 USD" in err
+    assert "Пополните баланс и запустите снова" in err
+    # до Gemini и до аренды карт дело не доходит: оркестратор не вызывается
+    assert run_env.calls == []
+    assert FakeVast.instances[0].closed
+
+
+def test_balance_query_fails_gives_3(capsys, run_env, missing_file):
+    FakeVast.balance_error = cli.VastRuntimeError("Vast API вернул HTTP 503: GET /users/current")
+    code = cli.main(_run_args(DATA, missing_file))
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "Не удалось проверить баланс Vast.ai" in cap.err
+    assert "карты не арендованы" in cap.err
+    assert "Traceback" not in cap.err
+    assert run_env.calls == []
+    assert FakeVast.instances[0].closed
+
+
+def test_balance_sufficient_continues_and_logs(capsys, run_env, missing_file, caplog):
+    caplog.set_level(logging.INFO, logger="Generate.cli")
+    FakeVast.balance = 12.5
+    code = cli.main(_run_args(DATA, missing_file))
+    assert code == 0
+    assert len(run_env.calls) == 1
+    assert "Баланс Vast.ai: 12.50 USD, минимум 5.00 USD." in caplog.text
+
+
+def test_balance_equal_to_minimum_continues(capsys, run_env, missing_file):
+    FakeVast.balance = 5.0
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    assert len(run_env.calls) == 1
+
+
+def test_min_balance_flag_reaches_preflight(capsys, run_env, missing_file):
+    """Вход --min-balance-usd переопределяет конфиг и действует на проверку."""
+    FakeVast.balance = 8.0
+    code = cli.main(_run_args(DATA, missing_file, "--min-balance-usd", "9.0"))
+    assert code == 2
+    assert "нужно не менее 9.00 USD" in capsys.readouterr().err
+    assert run_env.calls == []
+
+
+def test_balance_refusal_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
+    monkeypatch.setenv(VAST_KEY_ENV, TESTKEY)
+    FakeVast.balance = 1.0
+    assert cli.main(_run_args(DATA, missing_file)) == 2
+    cap = capsys.readouterr()
+    assert TESTKEY not in cap.out + cap.err
+
+
+def test_balance_http_error_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
+    """Настоящий клиент: ответ 401, который эхом возвращает заголовок, не выводит ключ (SPEC 0.1)."""
+    monkeypatch.setenv(VAST_KEY_ENV, TESTKEY)
+
+    def echo(req):
+        return httpx.Response(401, text=f"bad header {req.headers['Authorization']}")
+
+    real = vast_client.VastClient(client=httpx.Client(transport=httpx.MockTransport(echo)))
+    monkeypatch.setattr(cli, "VastClient", lambda *a, **k: real)
+    code = cli.main(_run_args(DATA, missing_file))
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "HTTP 401" in cap.err
+    assert TESTKEY not in cap.out + cap.err
     assert run_env.calls == []
 
 

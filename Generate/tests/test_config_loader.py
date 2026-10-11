@@ -181,6 +181,41 @@ def test_job_deadline_must_be_below_actions_limit():
     _assert_rejected(raw, "«job_deadline_min» должен быть меньше лимита")
 
 
+def test_min_balance_default_equals_budget():
+    cfg = cl.load_config()
+    assert cfg.min_balance_usd == 5.0 == cfg.budget_limit_usd
+
+
+def test_min_balance_below_budget_is_rejected_with_both_names():
+    raw = _base()
+    raw["min_balance_usd"] = 4.0
+    _assert_rejected(raw, "«min_balance_usd» не может быть меньше «budget_limit_usd»")
+
+
+def test_min_balance_equal_to_budget_is_allowed():
+    raw = _base()
+    raw["budget_limit_usd"] = 2.0
+    raw["min_balance_usd"] = 2.0
+    assert cl.parse_config(raw).min_balance_usd == 2.0
+
+
+def test_min_balance_below_budget_via_overrides_is_error():
+    with pytest.raises(GeminiInputError) as ei:
+        cl.load_config(overrides={"min_balance_usd": 1.0})
+    assert ei.value.exit_code == 2
+    assert "«min_balance_usd» не может быть меньше «budget_limit_usd»" in str(ei.value)
+
+
+@pytest.mark.parametrize("value, fragment", [
+    (-1, "«min_balance_usd»: должно быть не меньше 0"),
+    ("5.0", "«min_balance_usd»: нужно число"),
+])
+def test_min_balance_bounds_and_type(value, fragment):
+    raw = _base()
+    raw["min_balance_usd"] = value
+    _assert_rejected(raw, fragment)
+
+
 def test_all_problems_are_reported_together():
     raw = _base()
     raw["disk_gb"] = -1
