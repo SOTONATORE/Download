@@ -28,6 +28,10 @@ on:
         description: "Жёсткий потолок бюджета на запуск (USD)"
         type: string
         default: "5.0"
+      min_balance_usd:
+        description: "Минимальный баланс Vast.ai для старта (USD); не меньше бюджета, ниже = запуск не стартует"
+        type: string
+        default: "5.0"
       model_profile:
         description: "Профиль видеомодели"
         type: string
@@ -122,6 +126,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           MAX_CARDS: ${{ inputs.max_cards }}
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
+          MIN_BALANCE: ${{ inputs.min_balance_usd }}
           MODEL_PROFILE: ${{ inputs.model_profile }}
           STYLE_BRIEF: ${{ inputs.style_brief }}
           GPU_NAME: ${{ inputs.gpu_name }}
@@ -141,6 +146,7 @@ jobs:
             --limit-clips "$LIMIT_CLIPS"
             --max-cards "$MAX_CARDS"
             --budget-limit "$BUDGET_LIMIT"
+            --min-balance-usd "$MIN_BALANCE"
             --model-profile "$MODEL_PROFILE"
             --style-brief "$STYLE_BRIEF"
             --gpu-name "$GPU_NAME"
