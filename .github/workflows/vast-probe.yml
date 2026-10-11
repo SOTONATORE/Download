@@ -1,8 +1,10 @@
 name: Vast probe (read-only)
 
-# Диагностика Vast.ai: только чтение (поиск предложений). Ничего не арендует,
-# не создаёт, не меняет и не удаляет. Запуск только вручную; push и pull_request не используются.
-# Ключ передаётся только в шаг запуска; входы передаются через env, а не подстановкой в скрипт.
+# Диагностика Vast.ai и Hugging Face: только чтение. Проверяет поиск предложений Vast,
+# пути одиночного экземпляра Vast (GET на несуществующий id) и имена файлов модели на
+# Hugging Face (HEAD). Ничего не арендует, не создаёт, не меняет и не удаляет.
+# Запуск только вручную; push и pull_request не используются.
+# Ключи передаются только в шаг запуска; входы передаются через env, а не подстановкой в скрипт.
 on:
   workflow_dispatch:
     inputs:
@@ -58,6 +60,7 @@ jobs:
       - name: Run probe
         env:
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PROBE_GPU_NAME: ${{ inputs.gpu_name }}
           PROBE_MIN_PRICE: ${{ inputs.min_price_per_hour }}
           PROBE_MAX_PRICE: ${{ inputs.max_price_per_hour }}
