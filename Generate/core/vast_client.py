@@ -179,6 +179,7 @@ class VastClient:
             "reliability2": {"gte": f.min_reliability},
             "inet_down": {"gte": f.min_inet_mbps},
             "type": "bid" if f.interruptible else "on-demand",
+            "num_gpus": {"eq": 1},
             "order": [["dph_total", "asc"]],
             "limit": 100,
         }
@@ -236,6 +237,19 @@ class VastClient:
                 continue
             offer = self._parse_offer(b, filters.interruptible)
             if offer is None:
+                continue
+            # Аренда только одиночных карт: проверяем сырое значение из ответа,
+            # а не GpuOffer.num_gpus (там пропуск уже заменён на 1).
+            raw_num_gpus = _to_int(b.get("num_gpus"))
+            if raw_num_gpus != 1:
+                if raw_num_gpus is None:
+                    detail = "число GPU не указано"
+                else:
+                    detail = f"GPU в предложении: {raw_num_gpus}"
+                log.info(
+                    "Пропущено предложение Vast %d: нужна одиночная карта (%s)",
+                    offer.offer_id, detail,
+                )
                 continue
             # Повторная проверка на клиенте: сервер может вернуть лишнее.
             if offer.price_per_hr < filters.min_price:
