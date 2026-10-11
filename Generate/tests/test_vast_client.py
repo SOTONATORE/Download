@@ -172,6 +172,44 @@ def test_search_gpu_name_none_allows_any_gpu(key):
     assert [o.offer_id for o in offers] == [1, 2]
 
 
+def test_search_excludes_multi_gpu_offer(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        {**bundle(1, price=0.5), "num_gpus": 2},
+        bundle(2, price=0.6),
+    ]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
+
+
+def test_search_includes_single_gpu_offer(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        {**bundle(1, price=0.5), "num_gpus": 1},
+    ]}))
+    offers = c.search_offers(OfferFilter())
+    assert [o.offer_id for o in offers] == [1]
+    assert offers[0].num_gpus == 1 and offers[0].gpu_name == "RTX 5090"
+
+
+def test_search_excludes_offer_without_num_gpus(key, caplog):
+    caplog.set_level("INFO")
+    no_field = bundle(1, price=0.5)
+    del no_field["num_gpus"]
+    c = make(lambda r: httpx.Response(200, json={"offers": [no_field, bundle(2, price=0.6)]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
+    assert "Пропущено предложение Vast 1" in caplog.text
+    assert SECRET not in caplog.text
+
+
+def test_search_query_requires_single_gpu(key):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"offers": []})
+
+    make(handler).search_offers(OfferFilter())
+    assert seen["body"]["num_gpus"] == {"eq": 1}
+
+
 def test_search_uses_min_bid_for_interruptible(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1, price=2.0, bid=0.4)]}))
     assert c.search_offers(OfferFilter())[0].price_per_hr == 0.4
