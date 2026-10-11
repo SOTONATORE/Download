@@ -1,6 +1,7 @@
 """Офлайн-тесты клиента Vast (SPEC 0.1, 0.2, 0.5). Сеть не используется."""
 import json
 import pathlib
+import re
 import socket
 import traceback
 
@@ -348,7 +349,7 @@ def test_balance_normal_value(key):
 
     c = make(handler)
     assert c.get_balance_usd() == 12.5
-    assert seen["method"] == "GET" and seen["path"].endswith("/users/current")
+    assert seen["method"] == "GET" and seen["path"] == "/api/v0/users/current/"
     assert seen["auth"] == f"Bearer {SECRET}"
     assert SECRET not in seen["query"]
 
@@ -445,3 +446,295 @@ def test_source_has_no_secret_names():
         code = "\n".join(line.split("#", 1)[0] for line in p.read_text(encoding="utf-8").splitlines())
         for n in names:
             assert n not in code, f"{p.name}: литерал {n}"
+
+
+# --- пути API и перенаправления ---
+# Регрессия: прод упал на 301 (баланс) и 410 (список экземпляров). Старые тесты проверяли
+# только тело ответа, а не точный путь, поэтому сбой не был виден. Здесь путь проверяется точно.
+
+SRT = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
+
+
+def _ru(text: str) -> bool:
+    return re.search(r"[А-Яа-яЁё]", text) is not None
+
+
+def test_endpoint_paths_are_exact(key):
+    calls = []
+
+    def handler(req):
+        calls.append((req.method, req.url.path))
+        p = req.url.path
+        if p == "/api/v0/bundles/":
+            return httpx.Response(200, json={"offers": []})
+        if p == "/api/v0/users/current/":
+            return httpx.Response(200, json={"balance": 1.0})
+        if p == "/api/v1/instances/":
+            return httpx.Response(200, json={"instances": []})
+        if p == "/api/v0/asks/42/":
+            return httpx.Response(200, json={"success": True, "new_contract": 7})
+        if p == "/api/v0/instances/7/":
+            if req.method == "GET":
+                return httpx.Response(200, json={"instances": inst(7)})
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(404, text="нет такого пути")
+
+    c = make(handler)
+    c.search_offers(OfferFilter())
+    c.get_balance_usd()
+    c.list_instances()
+    c.create_instance(42, "img", 10)
+    c.get_instance(7)
+    c.destroy_instance(7)
+    assert calls == [
+        ("POST", "/api/v0/bundles/"),
+        ("GET", "/api/v0/users/current/"),
+        ("GET", "/api/v1/instances/"),
+        ("PUT", "/api/v0/asks/42/"),
+        ("GET", "/api/v0/instances/7/"),
+        ("DELETE", "/api/v0/instances/7/"),
+    ]
+
+
+def test_list_uses_v1_params(key):
+    seen = []
+
+    def handler(req):
+        seen.append((req.url.path, dict(req.url.params)))
+        return httpx.Response(200, json={"instances": []})
+
+    make(handler).list_instances()
+    assert len(seen) == 1
+    path, params = seen[0]
+    assert path == "/api/v1/instances/"
+    assert json.loads(params["select_filters"]) == {}
+    assert json.loads(params["order_by"]) == [{"col": "id", "dir": "asc"}]
+    assert params["limit"] == "25" and "after_token" not in params
+
+
+@pytest.mark.parametrize("code", [301, 302, 307, 308])
+def test_redirect_is_russian_error_without_key(key, code):
+    def handler(req):
+        # сервер назвал новый адрес, в котором случайно оказался ключ: он должен замаскироваться
+        return httpx.Response(
+            code,
+            headers={"location": f"https://console.vast.ai/api/v0/users/current/?x={SECRET}"},
+            text="moved",
+        )
+
+    with pytest.raises(VastRuntimeError) as e:
+        make(handler).get_balance_usd()
+    text = str(e.value)
+    assert e.value.exit_code == 3
+    assert f"перенаправлением HTTP {code}" in text
+    assert "GET /api/v0/users/current/" in text
+    assert "https://console.vast.ai/api/v0/users/current/" in text
+    assert _ru(text)
+    assert SECRET not in text
+
+
+def test_410_is_russian_error_naming_endpoint_without_key(key):
+    def handler(req):
+        return httpx.Response(410, json={
+            "success": False, "error": "deprecated_endpoint",
+            "msg": "/api/v0/instances/ is deprecated. Use /api/v1/instances/ instead.",
+            "echo": SECRET,
+        })
+
+    with pytest.raises(VastRuntimeError) as e:
+        make(handler).check_instances_endpoint()
+    text = str(e.value)
+    assert e.value.exit_code == 3
+    assert "устарела (HTTP 410)" in text and "GET /api/v1/instances/" in text
+    assert _ru(text) and SECRET not in text
+
+
+def test_check_instances_endpoint_is_one_read_only_request(key):
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path))
+        return httpx.Response(200, json={"instances": [], "next_token": "more"})
+
+    make(handler).check_instances_endpoint()
+    # одна страница, без следования next_token, без записи
+    assert seen == [("GET", "/api/v1/instances/")]
+
+
+@pytest.mark.parametrize("status", [301, 410, 500])
+def test_check_instances_endpoint_raises_on_bad_status(key, status):
+    c = make(lambda r: httpx.Response(status, text="x"))
+    with pytest.raises(VastRuntimeError) as e:
+        c.check_instances_endpoint()
+    assert e.value.exit_code == 3 and "GET /api/v1/instances/" in str(e.value)
+
+
+def test_list_follows_next_token_across_pages(key):
+    seen = []
+
+    def handler(req):
+        seen.append(dict(req.url.params))
+        if "after_token" not in req.url.params:
+            return httpx.Response(200, json={"instances": [inst(1, label="gen-a")],
+                                             "next_token": "t1"})
+        return httpx.Response(200, json={"instances": [inst(2, label="gen-b")],
+                                         "next_token": None})
+
+    rows = make(handler).list_instances()
+    assert [r.instance_id for r in rows] == [1, 2]
+    assert seen[1]["after_token"] == "t1"
+
+
+def test_destroy_by_label_covers_all_pages(key):
+    deleted = []
+
+    def handler(req):
+        if req.method == "DELETE":
+            deleted.append(req.url.path)
+            return httpx.Response(200, json={"success": True})
+        if "after_token" not in req.url.params:
+            return httpx.Response(200, json={"instances": [inst(1, label="gen-a")],
+                                             "next_token": "t1"})
+        return httpx.Response(200, json={"instances": [inst(3, label="gen-a")],
+                                         "next_token": None})
+
+    assert make(handler).destroy_by_label("gen-a") == [1, 3]
+    assert deleted == ["/api/v0/instances/1/", "/api/v0/instances/3/"]
+
+
+def test_list_page_failure_aborts_without_partial_kill(key):
+    """Вторая страница упала: ни одна карта не уничтожается по неполному списку."""
+    deleted = []
+
+    def handler(req):
+        if req.method == "DELETE":
+            deleted.append(req.url.path)
+            return httpx.Response(200, json={"success": True})
+        if "after_token" not in req.url.params:
+            return httpx.Response(200, json={"instances": [inst(1, label="gen-a")],
+                                             "next_token": "t1"})
+        return httpx.Response(410, text="gone")
+
+    with pytest.raises(VastRuntimeError) as e:
+        make(handler).destroy_by_label("gen-a")
+    assert e.value.exit_code == 3
+    assert deleted == []
+
+
+def test_repeated_next_token_is_error(key):
+    c = make(lambda r: httpx.Response(200, json={"instances": [inst(1)], "next_token": "same"}))
+    with pytest.raises(VastRuntimeError) as e:
+        c.list_instances()
+    assert e.value.exit_code == 3
+
+
+def test_missing_instances_key_is_error_not_empty_list(key):
+    """Без списка нельзя считать, что карт нет: уборка должна упасть, а не молча пройти."""
+    c = make(lambda r: httpx.Response(200, json={"next_token": None}))
+    with pytest.raises(VastRuntimeError) as e:
+        c.destroy_by_label("gen-a")
+    assert e.value.exit_code == 3
+
+
+def test_v1_ports_as_json_string_is_parsed(key):
+    d = inst(9)
+    d["ports"] = json.dumps(d["ports"])
+    assert VastClient._parse_instance(d).direct_port == 34567
+    d["ports"] = "не json"
+    assert VastClient._parse_instance(d).direct_port is None
+
+
+# --- предстартовая проверка в run: остановка до поиска и аренды (cli.py) ---
+
+@pytest.fixture
+def cli_run(monkeypatch):
+    """Внешнее для run подменено: оркестратор считает вызовы, Gemini и Release не трогаются."""
+    from Generate import cli
+    orchestrator_calls = []
+    monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "T")
+    monkeypatch.setattr(cli, "_build_prompt_config", lambda *a: "P")
+    monkeypatch.setattr(cli, "_make_transport", lambda: "X")
+    monkeypatch.setattr(cli, "_make_release_store", lambda repo: "S")
+
+    def fake_run(*a, **k):
+        orchestrator_calls.append(1)
+        import types
+        return types.SimpleNamespace(exit_code=0)
+
+    monkeypatch.setattr(cli, "run_generation", fake_run)
+    return cli, orchestrator_calls
+
+
+def _cli_run(cli, monkeypatch, tmp_path, handler):
+    monkeypatch.setattr(cli, "VastClient", lambda *a, **k: make(handler))
+    m = tmp_path / "missing.txt"
+    m.write_text("1\n", encoding="utf-8")
+    return cli.main(["run", "--srt", str(SRT), "--missing", str(m)])
+
+
+def test_preflight_list_410_stops_before_search_and_rental(key, monkeypatch, tmp_path,
+                                                           capsys, cli_run):
+    cli, orchestrator_calls = cli_run
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path))
+        return httpx.Response(410, json={"success": False, "error": "deprecated_endpoint"})
+
+    code = _cli_run(cli, monkeypatch, tmp_path, handler)
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "Предстартовая проверка Vast API не пройдена" in cap.err
+    assert "GET /api/v1/instances/" in cap.err and "карты не арендованы" in cap.err
+    assert seen == [("GET", "/api/v1/instances/")]       # ни баланса, ни поиска, ни аренды
+    assert orchestrator_calls == []
+    assert SECRET not in cap.err + cap.out
+
+
+def test_preflight_balance_301_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
+    cli, orchestrator_calls = cli_run
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path))
+        if req.url.path == "/api/v1/instances/":
+            return httpx.Response(200, json={"instances": []})
+        if req.url.path == "/api/v0/users/current/":
+            # прод: без слэша сервер отвечает 301 на адрес со слэшем
+            return httpx.Response(301, headers={"location": "https://console.vast.ai/api/v0/users/current/"})
+        return httpx.Response(200, json={"offers": []})
+
+    code = _cli_run(cli, monkeypatch, tmp_path, handler)
+    cap = capsys.readouterr()
+    assert code == 3
+    assert "GET /api/v0/users/current/" in cap.err
+    # порядок: список, баланс, и больше ничего (ни /bundles/, ни /asks/)
+    assert seen == [("GET", "/api/v1/instances/"), ("GET", "/api/v0/users/current/")]
+    assert orchestrator_calls == []
+
+
+def test_preflight_low_balance_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
+    cli, orchestrator_calls = cli_run
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path))
+        if req.url.path == "/api/v1/instances/":
+            return httpx.Response(200, json={"instances": []})
+        return httpx.Response(200, json={"balance": 1.0})
+
+    assert _cli_run(cli, monkeypatch, tmp_path, handler) == 2
+    assert [p for _, p in seen] == ["/api/v1/instances/", "/api/v0/users/current/"]
+    assert orchestrator_calls == []
+
+
+def test_preflight_all_ok_continues_to_orchestrator(key, monkeypatch, tmp_path, cli_run):
+    cli, orchestrator_calls = cli_run
+
+    def handler(req):
+        if req.url.path == "/api/v1/instances/":
+            return httpx.Response(200, json={"instances": []})
+        return httpx.Response(200, json={"balance": 12.5})
+
+    assert _cli_run(cli, monkeypatch, tmp_path, handler) == 0
+    assert orchestrator_calls == [1]

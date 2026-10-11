@@ -147,6 +147,10 @@ class FakeVast:
             raise FakeVast.balance_error
         return FakeVast.balance
 
+    def check_instances_endpoint(self):
+        """Предстартовая проверка эндпоинта списка (по умолчанию успешна)."""
+        return None
+
     def close(self):
         self.closed = True
 
