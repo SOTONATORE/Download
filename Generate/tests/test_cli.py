@@ -146,8 +146,9 @@ def run_env(monkeypatch):
     """Подменяет всё внешнее для команды run; возвращает список вызовов оркестратора."""
     calls = []
     FakeVast.instances = []
-    monkeypatch.setattr(cli, "_build_timing", lambda: "TIMING")
-    monkeypatch.setattr(cli, "_build_prompt_config", lambda profile, brief: ("CFG", profile, brief))
+    monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
+    monkeypatch.setattr(cli, "_build_prompt_config",
+                        lambda profile, brief, batch_size: ("CFG", profile, brief))
     monkeypatch.setattr(cli, "_make_transport", lambda: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
