@@ -104,6 +104,24 @@ def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
     return None
 
 
+def _vast_preflight(vast, min_balance_usd: float) -> Optional[int]:
+    """Предстартовая проверка Vast API (SPEC 8.3, е): только чтение, до любого поиска и аренды.
+
+    Сначала эндпоинт списка экземпляров: без него уборка (kill-cards) не сможет найти карты,
+    и ошибка выплыла бы уже после аренды. Затем баланс. Возвращает None (можно продолжать)
+    или код завершения; сообщение уже напечатано. В обоих случаях ничего не арендовано.
+    """
+    try:
+        vast.check_instances_endpoint()
+    except VastRuntimeError as e:
+        # текст ошибки клиента безопасен: ключ в нём уже замаскирован, путь эндпоинта назван (SPEC 0.1)
+        _err(f"Предстартовая проверка Vast API не пройдена: {e}. "
+             f"Запуск не начат, карты не арендованы.")
+        return EXIT_RUNTIME
+    log.info("Эндпоинт списка экземпляров Vast отвечает.")
+    return _balance_preflight(vast, min_balance_usd)
+
+
 def _find_symbol(name: str, modules: tuple[str, ...]):
     """Ищет класс в перечисленных модулях core (пакетный и плоский импорт)."""
     for mod in modules:
@@ -277,8 +295,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     try:
-        # предстартовая проверка баланса: до поиска предложений и любого вызова Gemini
-        code = _balance_preflight(vast, cfg.min_balance_usd)
+        # предстартовая проверка Vast API и баланса: до поиска предложений и любого вызова Gemini
+        code = _vast_preflight(vast, cfg.min_balance_usd)
         if code is not None:
             return code
         summary = run_generation(
