@@ -1,0 +1,76 @@
+name: Vast probe (read-only)
+
+# Диагностика Vast.ai: только чтение (поиск предложений). Ничего не арендует,
+# не создаёт, не меняет и не удаляет. Запуск только вручную; push и pull_request не используются.
+# Ключ передаётся только в шаг запуска; входы передаются через env, а не подстановкой в скрипт.
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_name:
+        description: "Точное имя модели карты в каталоге Vast"
+        required: false
+        default: "RTX 5090"
+        type: string
+      min_price_per_hour:
+        description: "Нижняя граница цены, USD в час"
+        required: false
+        default: "0.35"
+        type: string
+      max_price_per_hour:
+        description: "Верхняя граница цены, USD в час"
+        required: false
+        default: "0.55"
+        type: string
+      min_inet_mbps:
+        description: "Минимальная скорость сети хоста, Мбит/с"
+        required: false
+        default: "800"
+        type: string
+      min_reliability:
+        description: "Минимальная надёжность хоста, от 0 до 1"
+        required: false
+        default: "0.95"
+        type: string
+      show_count:
+        description: "Сколько первых предложений показать с сырыми значениями"
+        required: false
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install -r Generate/requirements-dev.txt
+
+      - name: Run probe
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          PROBE_GPU_NAME: ${{ inputs.gpu_name }}
+          PROBE_MIN_PRICE: ${{ inputs.min_price_per_hour }}
+          PROBE_MAX_PRICE: ${{ inputs.max_price_per_hour }}
+          PROBE_MIN_INET_MBPS: ${{ inputs.min_inet_mbps }}
+          PROBE_MIN_RELIABILITY: ${{ inputs.min_reliability }}
+          PROBE_SHOW_COUNT: ${{ inputs.show_count }}
+        run: python Generate/tools/vast_probe.py
+
+      - name: Upload probe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vast-probe-result
+          path: probe_result.json
+          retention-days: 3
+          if-no-files-found: warn
