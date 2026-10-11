@@ -1,25 +1,34 @@
-"""Диагностика Vast.ai: только чтение (SPEC 0.1, 0.5, 8.3).
+"""Диагностика Vast.ai и Hugging Face: только чтение (SPEC 0.1, 0.5, 8.3).
 
 Ничего не арендует, не создаёт, не меняет и не удаляет. Баланс аккаунта не запрашивается и не выводится.
 Вызовы:
-  • POST /api/v0/bundles/       — поиск предложений, сырой ответ (тот же запрос, что в production);
-  • POST /api/v0/bundles/       — VastClient.search_offers по текущим правилам.
+  • POST /api/v0/bundles/                    — поиск предложений, сырой ответ (тот же запрос, что в production);
+  • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
+  • GET  /api/v0/instances/999999999/        — проверка пути одного экземпляра (id заведомо не существует);
+  • GET  /api/v1/instances/999999999/        — то же для пути v1;
+  • HEAD <базовый адрес>/<подкаталог>/<имя>  — по одному на каждую строку download_model в
+    Generate/worker/setup.sh (Hugging Face, заголовок Authorization с HF_TOKEN, перенаправления выполняются).
 
-Ключ читается только из окружения (имя — ENV_KEY_NAME) и уходит только в заголовке
-Authorization через клиент. Всё, что печатается или пишется, проходит замену значения
-ключа на «***».
+Ключ Vast читается только из окружения (имя — ENV_KEY_NAME), токен Hugging Face — из переменной HF_TOKEN.
+Оба значения уходят только в заголовке Authorization. Всё, что печатается или пишется, проходит
+замену значений секретов на «***».
 
-Приватные члены VastClient: _request (тот же путь запроса и обработка ошибок, что у клиента)
-и _build_query (та же сборка запроса). Они нужны, чтобы сырой ответ совпадал с production.
-Generate/ при этом не меняется.
+Приватные члены VastClient: _request (тот же путь запроса и обработка ошибок, что у клиента),
+_build_query (та же сборка запроса), _base_url и _timeout (тот же адрес и таймаут). Они нужны,
+чтобы сырой ответ совпадал с production. Generate/ при этом не меняется.
+Проверка путей Vast не использует _request: он поднимает исключение на любом коде, кроме 200,
+и скрыл бы код ответа. Перенаправления для путей Vast не выполняются (поведение httpx по умолчанию).
 
 Коды выхода: 0 — поиск выполнен; 2 — нет ключа или неверные входы (сеть не трогается);
 3 — сбой вызова Vast; 1 — прочая ошибка (например, запись probe_result.json).
+Результаты проверок путей и файлов модели на код выхода не влияют: неуспешная проверка
+печатается и попадает в поле checks файла probe_result.json.
 
 Входы — переменные окружения, все необязательные (значения по умолчанию совпадают с
 Generate/config.default.yaml, кроме max_price и min_inet_mbps, которые заданы по запросу):
 PROBE_GPU_NAME, PROBE_MIN_PRICE, PROBE_MAX_PRICE, PROBE_MIN_INET_MBPS,
-PROBE_MIN_RELIABILITY, PROBE_SHOW_COUNT.
+PROBE_MIN_RELIABILITY, PROBE_SHOW_COUNT. HF_TOKEN необязателен: без него проверка файлов модели
+пропускается.
 """
 from __future__ import annotations
 
@@ -27,11 +36,15 @@ import json
 import logging
 import math
 import os
+import re
 import statistics
 import sys
 import traceback
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # файл в Generate/tools/
 if str(REPO_ROOT) not in sys.path:
@@ -84,12 +97,27 @@ SHOW_OPTIONAL_FIELDS = ("internet_down_cost_per_tb", "internet_up_cost_per_tb")
 LOG_NAME = "Generate.vast_client"
 SUMMARY_PREFIX = "Поиск предложений Vast"
 
-# Значение ключа: заменяется на «***» во всём выводе. Задаётся в main() до первого вывода.
-_secret = ""
+# Проверка путей Vast: id заведомо не существует; пути одиночного экземпляра в v0 и v1.
+VAST_CHECK_INSTANCE_ID = 999999999
+VAST_CHECK_PATHS = ("/api/v0/instances/{id}/", "/api/v1/instances/{id}/")
+
+# Проверка файлов модели: адрес по умолчанию совпадает с HF_BASE_URL в setup.sh.
+SETUP_SCRIPT = REPO_ROOT / "Generate" / "worker" / "setup.sh"
+HF_DEFAULT_BASE_URL = "https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
+HF_TIMEOUT_SEC = 30.0
+HF_BASE_RE = re.compile(r'^HF_BASE_URL="([^"]+)"\s*$', re.MULTILINE)
+HF_CALL_RE = re.compile(r'^\s*download_model\s+"([^"]+)"\s+"([^"]+)"\s*$')
+HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определение функции «download_model() {» не совпадает
+
+SNIPPET_LIMIT = 200
+
+# Значения секретов (ключ Vast, HF_TOKEN): заменяются на «***» во всём выводе.
+# Задаются в main() до первого вывода; самое длинное значение первым.
+_secrets: list[str] = []
 
 
 class ProbeInputError(Exception):
-    """Неверные переменные окружения пробы."""
+    """Неверные переменные окружения пробы или неразбираемый setup.sh."""
 
 
 class _Capture(logging.Handler):
@@ -107,7 +135,16 @@ class _Capture(logging.Handler):
 
 
 def _clean(text: str) -> str:
-    return text.replace(_secret, "***") if _secret else text
+    for secret in _secrets:
+        text = text.replace(secret, "***")
+    return text
+
+
+def _snippet(text: str) -> str:
+    """Первые SNIPPET_LIMIT символов тела с замёнными секретами. Текст берётся с запасом
+    на длину самого длинного секрета, чтобы секрет на границе заменился целиком, а не остался частью."""
+    margin = max((len(s) for s in _secrets), default=0)
+    return _clean(text[: SNIPPET_LIMIT + margin])[:SNIPPET_LIMIT].replace("\n", " ")
 
 
 def say(text: str = "") -> None:
@@ -221,8 +258,185 @@ def _sanitize(value: Any) -> Any:
     return value
 
 
+def _vast_path_note(code: int) -> str | None:
+    if code == 404:
+        return "путь жив, инстанса нет (ожидаемо)"
+    if code == 410:
+        return "путь устарел, нужен v1 или другой путь"
+    if code in (401, 403):
+        return "проблема с ключом или правами"
+    return None
+
+
+def _hf_file_note(code: int) -> str | None:
+    if code == 200:
+        return "файл доступен"
+    if code in (401, 403):
+        return "нет доступа: проверьте HF_TOKEN и принятие условий модели"
+    if code == 404:
+        return "имени файла нет в репозитории"
+    return None
+
+
+def _check_vast_paths(base_url: str, timeout: float, key: str) -> list[dict]:
+    """Проверка путей Vast: GET на несуществующий экземпляр (v0 и v1). Запрос строится напрямую,
+    с тем же базовым адресом, таймаутом и заголовком Bearer, что у клиента. Других методов нет."""
+    headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+    results: list[dict] = []
+    say("=== Проверка путей Vast ===")
+    with httpx.Client(timeout=timeout) as http:
+        for template in VAST_CHECK_PATHS:
+            path = template.format(id=VAST_CHECK_INSTANCE_ID)
+            entry: dict[str, Any] = {"method": "GET", "path": path}
+            try:
+                resp = http.get(f"{base_url}{path}", headers=headers)
+            except Exception as exc:
+                # Сбой запроса — строка отчёта, а не падение пробы. Текст исключения может
+                # содержать адрес и заголовки: берём только имя типа.
+                entry.update(status=None, error=type(exc).__name__)
+                results.append(entry)
+                say(f"GET {path}: сетевая ошибка ({type(exc).__name__})")
+                continue
+            note = _vast_path_note(resp.status_code)
+            snippet = _snippet(resp.text or "")
+            entry.update(status=resp.status_code, body_snippet=snippet, interpretation=note)
+            results.append(entry)
+            line = f"GET {path}: HTTP {resp.status_code}"
+            if note:
+                line += f" — {note}"
+            say(line)
+            say(f"  тело (первые {SNIPPET_LIMIT} символов): {snippet}")
+    return results
+
+
+def _read_setup_models() -> tuple[str, str, list[tuple[str, str]], int]:
+    """Разбор setup.sh: (базовый адрес, источник адреса, пары (подкаталог, имя), число непонятых строк).
+    ProbeInputError — если файл не читается, адрес содержит переменную оболочки или строк нет совсем."""
+    try:
+        text = SETUP_SCRIPT.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProbeInputError(
+            f"Generate/worker/setup.sh не прочитан ({type(exc).__name__})"
+        ) from None
+
+    match = HF_BASE_RE.search(text)
+    if match:
+        base, source = match.group(1), "setup.sh"
+    else:
+        base = HF_DEFAULT_BASE_URL
+        source = "значение по умолчанию: HF_BASE_URL в setup.sh не найден"
+    if "$" in base:
+        raise ProbeInputError("HF_BASE_URL в setup.sh содержит переменную оболочки, адрес не вычисляется")
+
+    files: list[tuple[str, str]] = []
+    unparsed = 0
+    for line in text.splitlines():
+        if not HF_CALL_PREFIX_RE.match(line):
+            continue
+        call = HF_CALL_RE.match(line)
+        if call and "$" not in call.group(1) + call.group(2):
+            files.append((call.group(1), call.group(2)))
+        else:
+            unparsed += 1
+    if not files:
+        raise ProbeInputError("в Generate/worker/setup.sh нет разбираемых строк download_model")
+    return base, source, files, unparsed
+
+
+def _check_hf_files(token: str) -> dict[str, Any]:
+    """Проверка файлов модели: HEAD на каждый файл из setup.sh с заголовком Authorization.
+    Перенаправления выполняются; заголовок с токеном не должен уйти на другой хост."""
+    state: dict[str, Any] = {
+        "status": None,
+        "reason": None,
+        "base_url": None,
+        "base_source": None,
+        "unparsed_lines": 0,
+        "files": [],
+    }
+    say("=== Проверка файлов модели Hugging Face ===")
+
+    if not token:
+        state.update(status="пропущено", reason="HF_TOKEN не задан или пуст")
+        err(
+            "Ошибка: не задан токен Hugging Face — переменная окружения HF_TOKEN пуста или отсутствует. "
+            "Проверка файлов модели пропущена; код выхода не меняется."
+        )
+        say("Статус: пропущено (HF_TOKEN не задан)")
+        return state
+
+    try:
+        base, source, files, unparsed = _read_setup_models()
+    except ProbeInputError as exc:
+        state.update(status="ошибка разбора", reason=str(exc))
+        err(
+            f"Ошибка разбора списка моделей: {exc}. "
+            "Проверка файлов модели не выполнена; код выхода не меняется."
+        )
+        say(f"Статус: ошибка разбора ({exc})")
+        return state
+
+    state.update(base_url=base, base_source=source, unparsed_lines=unparsed)
+    say(f"Базовый адрес: {base} (источник: {source})")
+    say(f"Файлов в списке: {len(files)}; строк download_model, которые не разобраны: {unparsed}")
+
+    auth = {"Authorization": f"Bearer {token}"}
+    original_host = urlsplit(base).hostname
+    stopped = False
+    with httpx.Client(timeout=HF_TIMEOUT_SEC, follow_redirects=True) as http:
+        for index, (subdir, name) in enumerate(files, start=1):
+            url = f"{base}/{subdir}/{name}"
+            label = f"[{index}/{len(files)}] {subdir}/{name}"
+            entry: dict[str, Any] = {"index": index, "subdir": subdir, "name": name, "url": url}
+            try:
+                resp = http.head(url, headers=auth)
+            except Exception as exc:
+                # Сбой одного файла не останавливает остальные; имя типа, без текста исключения.
+                entry.update(status=None, error=type(exc).__name__)
+                state["files"].append(entry)
+                say(f"{label}: сетевая ошибка ({type(exc).__name__})")
+                continue
+
+            # Защита: адрес последнего запроса (после перенаправлений) не на другом хосте
+            # с заголовком Authorization. httpx такой заголовок снимает (см. отчёт).
+            if resp.request.url.host != original_host and "Authorization" in resp.request.headers:
+                entry.update(status=resp.status_code, error="токен ушёл на другой хост")
+                state["files"].append(entry)
+                state.update(
+                    status="остановлена",
+                    reason="заголовок с токеном Bearer ушёл на другой хост при перенаправлении",
+                )
+                err(
+                    "ОШИБКА БЕЗОПАСНОСТИ: заголовок с токеном Bearer (HF_TOKEN) ушёл на другой хост "
+                    "при перенаправлении. Проверка файлов модели остановлена."
+                )
+                say("Статус: остановлена — угроза безопасности (токен ушёл на другой хост)")
+                stopped = True
+                break
+
+            code = resp.status_code
+            entry["status"] = code
+            line = f"{label}: HTTP {code}"
+            if code == 200:
+                length = resp.headers.get("content-length")
+                entry["content_length"] = length
+                line += f"; Content-Length: {length or 'нет'}"
+            note = _hf_file_note(code)
+            if note:
+                entry["interpretation"] = note
+                line += f" — {note}"
+            state["files"].append(entry)
+            say(line)
+
+    if not stopped:
+        state["status"] = "выполнена"
+        ok = sum(1 for f in state["files"] if f.get("status") == 200)
+        say(f"Итог: проверено файлов {len(state['files'])}, доступно (200): {ok}")
+    return state
+
+
 def main() -> int:
-    global _secret
+    global _secrets
 
     key = os.environ.get(ENV_KEY_NAME, "").strip()
     if not key:
@@ -231,7 +445,8 @@ def main() -> int:
             "пуста или отсутствует. Проверка не запущена."
         )
         return 2
-    _secret = key
+    hf_token = os.environ.get("HF_TOKEN", "").strip()
+    _secrets = sorted({s for s in (key, hf_token) if s}, key=len, reverse=True)
 
     try:
         offer_filter, show_count = _read_inputs()
@@ -245,6 +460,7 @@ def main() -> int:
     log.addHandler(capture)
 
     failed = False
+    checks: dict[str, Any] = {}
     say("=== Проверка Vast.ai (только чтение) ===")
     say(f"Фильтр: {_filter_text(offer_filter)}")
 
@@ -311,10 +527,21 @@ def main() -> int:
         )
         say(f"Строка итога поиска: {summary or 'не получена'}")
 
-    # Файл: сырой ответ, первые 200 предложений, без полей с ключами, токенами и секретами.
+        # 3. Проверка путей Vast (GET на несуществующий экземпляр). Код выхода не меняет.
+        say()
+        checks["vast_instance_endpoints"] = _check_vast_paths(
+            client._base_url, client._timeout, key
+        )
+
+    # 4. Проверка файлов модели Hugging Face (HEAD). Код выхода не меняет.
+    say()
+    checks["hf_model_files"] = _check_hf_files(hf_token)
+
+    # Файл: сырой ответ, первые 200 предложений, проверки; без полей с ключами, токенами и секретами.
     payload: Any = dict(raw) if isinstance(raw, dict) else {"response": raw}
     if isinstance(payload.get("offers"), list):
         payload["offers"] = payload["offers"][:RESULT_OFFERS_LIMIT]
+    payload["checks"] = checks
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")
