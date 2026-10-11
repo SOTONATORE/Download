@@ -268,9 +268,10 @@ def test_run_default_offer_filter(capsys, run_env, missing_file):
     assert isinstance(f, cli.OfferFilter)
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
-    assert f.max_price == 0.90
+    assert f.max_price == 0.55
     assert f.min_reliability == 0.95
-    assert f.min_inet_mbps == 2000.0
+    assert f.min_inet_mbps == 800.0
+    assert f.max_inet_price_per_tb == 4.1
 
 
 def test_run_custom_offer_filter(capsys, run_env, missing_file):
@@ -280,7 +281,8 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
                               "--min-price-per-hour", "0.2",
                               "--max-price-per-hour", "0.6",
                               "--min-reliability", "0.9",
-                              "--min-inet-mbps", "1500"))
+                              "--min-inet-mbps", "1500",
+                              "--max-inet-price-per-tb", "3.0"))
     assert code == 0
     _, kwargs = run_env.calls[0]
     f = kwargs["offer_filter"]
@@ -290,6 +292,7 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
     assert f.max_price == 0.6
     assert f.min_reliability == 0.9
     assert f.min_inet_mbps == 1500.0
+    assert f.max_inet_price_per_tb == 3.0
 
 
 def test_run_default_card_params(capsys, run_env, missing_file):
@@ -355,7 +358,7 @@ def test_balance_below_minimum_gives_2(capsys, run_env, missing_file):
     code = cli.main(_run_args(DATA, missing_file))
     err = capsys.readouterr().err
     assert code == 2
-    assert "Недостаточно средств на Vast.ai: баланс 1.50 USD, нужно не менее 5.00 USD" in err
+    assert "Недостаточно средств на Vast.ai: баланс 1.50 USD, нужно не менее 2.00 USD" in err
     assert "Пополните баланс и запустите снова" in err
     # до Gemini и до аренды карт дело не доходит: оркестратор не вызывается
     assert run_env.calls == []
@@ -380,11 +383,11 @@ def test_balance_sufficient_continues_and_logs(capsys, run_env, missing_file, ca
     code = cli.main(_run_args(DATA, missing_file))
     assert code == 0
     assert len(run_env.calls) == 1
-    assert "Баланс Vast.ai: 12.50 USD, минимум 5.00 USD." in caplog.text
+    assert "Баланс Vast.ai: 12.50 USD, минимум 2.00 USD." in caplog.text
 
 
 def test_balance_equal_to_minimum_continues(capsys, run_env, missing_file):
-    FakeVast.balance = 5.0
+    FakeVast.balance = 2.0
     assert cli.main(_run_args(DATA, missing_file)) == 0
     assert len(run_env.calls) == 1
 

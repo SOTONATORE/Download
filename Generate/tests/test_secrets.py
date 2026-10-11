@@ -88,7 +88,8 @@ def assert_clean(*texts: str) -> None:
 def _bundle(i: int = 1) -> dict:
     return {"id": i, "gpu_name": "RTX 5090", "num_gpus": 1, "gpu_ram": 24576,
             "dph_total": 0.5, "min_bid": 0.4, "reliability2": 0.99, "inet_down": 3000.0,
-            "inet_up": 1000.0, "machine_id": 100 + i}
+            "inet_up": 1000.0, "inet_up_cost": 0.001, "inet_down_cost": 0.001,
+            "machine_id": 100 + i}
 
 
 def _gemini_envelope(text: str) -> dict:

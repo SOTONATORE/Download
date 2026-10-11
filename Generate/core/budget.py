@@ -49,7 +49,7 @@ class BudgetTracker:
 
     def __init__(
         self,
-        budget_limit_usd: float = 5.0,
+        budget_limit_usd: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not budget_limit_usd > 0:

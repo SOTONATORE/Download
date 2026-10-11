@@ -282,6 +282,7 @@ def test_search_counts_add_up_and_no_per_offer_lines(monkeypatch, vast_key, capl
     def bundle(i, **over):
         b = {"id": i, "dph_total": 0.5, "min_bid": None, "reliability2": 0.99,
              "inet_down": 3000, "gpu_ram": 32768, "gpu_name": "RTX 5090",
+             "inet_up_cost": 0.001, "inet_down_cost": 0.001,
              "num_gpus": 1, "machine_id": 100 + i}
         b.update(over)
         return b

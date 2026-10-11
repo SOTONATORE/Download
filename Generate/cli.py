@@ -324,6 +324,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "max_price_per_hour": args.max_price_per_hour,
         "min_reliability": args.min_reliability,
         "min_inet_mbps": args.min_inet_mbps,
+        "max_inet_price_per_tb": args.max_inet_price_per_tb,
         "docker_image": docker_image,
         "disk_gb": args.disk_gb,
         "silent_host_timeout_min": args.silent_host_timeout_min,
@@ -363,6 +364,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_price=cfg.max_price_per_hour,
         min_reliability=cfg.min_reliability,
         min_inet_mbps=cfg.min_inet_mbps,
+        max_inet_price_per_tb=cfg.max_inet_price_per_tb,
         interruptible=cfg.interruptible,
     )
 
@@ -552,6 +554,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="минимальная надёжность хоста, от 0 до 1; по умолчанию из конфига")
     run_p.add_argument("--min-inet-mbps", type=float, default=None,
                        help="минимальная скорость входящего канала, Мбит/с; по умолчанию из конфига")
+    run_p.add_argument("--max-inet-price-per-tb", type=float, default=None,
+                       help="потолок цены трафика карты, USD за ТБ (загрузка и выгрузка); по умолчанию из конфига")
     run_p.add_argument("--docker-image", default=None,
                        help="образ Docker для карты Vast.ai; пусто = образ этого коммита; "
                             "не задано = из конфига")

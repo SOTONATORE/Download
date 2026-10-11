@@ -1,5 +1,6 @@
 """Офлайн-тесты клиента Vast (SPEC 0.1, 0.2, 0.5). Сеть не используется."""
 import json
+import logging
 import pathlib
 import re
 import socket
@@ -44,7 +45,8 @@ def make(handler):
 
 def bundle(i, price=0.5, rel=0.99, down=3000.0, ram=24576, name="RTX 5090", bid=None):
     d = {"id": i, "gpu_name": name, "num_gpus": 1, "gpu_ram": ram, "dph_total": price,
-         "reliability2": rel, "inet_down": down, "inet_up": 1000.0, "machine_id": 100 + i}
+         "reliability2": rel, "inet_down": down, "inet_up": 1000.0,
+         "inet_up_cost": 0.001, "inet_down_cost": 0.001, "machine_id": 100 + i}
     if bid is not None:
         d["min_bid"] = bid
     return d
@@ -60,7 +62,9 @@ def test_offer_filter_defaults():
     f = OfferFilter()
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
-    assert f.max_price == 0.9
+    assert f.max_price == 0.55
+    assert f.min_inet_mbps == 800.0
+    assert f.max_inet_price_per_tb == 4.1
 
 
 def test_missing_key_raises(monkeypatch):
@@ -88,7 +92,7 @@ def test_search_serialization_filter_sort(key):
         seen["auth"] = req.headers["Authorization"]
         seen["body"] = json.loads(req.content)
         return httpx.Response(200, json={"offers": [
-            bundle(1, price=0.8),
+            bundle(1, price=0.5),
             bundle(2, price=0.4),
             bundle(3, price=1.5),            # дорого
             bundle(4, rel=0.5),              # ненадёжный
@@ -107,9 +111,10 @@ def test_search_serialization_filter_sort(key):
     assert seen["auth"] == f"Bearer {SECRET}"
     assert SECRET not in seen["query"]
     q = seen["body"]
-    assert q["dph_total"] == {"lte": 0.9, "gte": 0.35}
+    assert q["dph_total"] == {"lte": 0.55, "gte": 0.35}
     assert q["reliability2"] == {"gte": 0.95}
-    assert q["inet_down"] == {"gte": 2000.0}
+    assert q["inet_down"] == {"gte": 800.0}
+    assert "inet_up_cost" not in q and "inet_down_cost" not in q  # цена трафика: клиентская проверка
     assert q["type"] == "bid"
     assert q["gpu_ram"] == {"gte": 16 * 1024}
     assert q["gpu_name"] == {"eq": "RTX 5090"}
@@ -134,7 +139,7 @@ def test_search_min_price_zero_omits_gte(key):
         return httpx.Response(200, json={"offers": []})
 
     make(handler).search_offers(OfferFilter(min_price=0.0))
-    assert seen["body"]["dph_total"] == {"lte": 0.9}
+    assert seen["body"]["dph_total"] == {"lte": 0.55}
 
 
 def test_search_filters_cheaper_than_min_price(key):
@@ -142,7 +147,7 @@ def test_search_filters_cheaper_than_min_price(key):
         bundle(1, price=0.10),
         bundle(2, price=0.34),
         bundle(3, price=0.35),   # граница включается
-        bundle(4, price=0.60),
+        bundle(4, price=0.50),
     ]}))
     offers = c.search_offers(OfferFilter())
     assert [o.offer_id for o in offers] == [3, 4]
@@ -159,15 +164,15 @@ def test_search_min_price_applies_to_min_bid(key):
 
 def test_search_sorted_ascending(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [
-        bundle(1, price=0.8), bundle(2, price=0.4), bundle(3, price=0.6), bundle(4, price=0.35),
+        bundle(1, price=0.55), bundle(2, price=0.4), bundle(3, price=0.5), bundle(4, price=0.35),
     ]}))
     prices = [o.price_per_hr for o in c.search_offers(OfferFilter())]
-    assert prices == sorted(prices) == [0.35, 0.4, 0.6, 0.8]
+    assert prices == sorted(prices) == [0.35, 0.4, 0.5, 0.55]
 
 
 def test_search_gpu_name_none_allows_any_gpu(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [
-        bundle(1, price=0.5, name="RTX 4090"), bundle(2, price=0.6),
+        bundle(1, price=0.5, name="RTX 4090"), bundle(2, price=0.5),
     ]}))
     offers = c.search_offers(OfferFilter(gpu_name=None))
     assert [o.offer_id for o in offers] == [1, 2]
@@ -176,7 +181,7 @@ def test_search_gpu_name_none_allows_any_gpu(key):
 def test_search_excludes_multi_gpu_offer(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [
         {**bundle(1, price=0.5), "num_gpus": 2},
-        bundle(2, price=0.6),
+        bundle(2, price=0.5),
     ]}))
     assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
 
@@ -194,7 +199,7 @@ def test_search_excludes_offer_without_num_gpus(key, caplog):
     caplog.set_level("INFO")
     no_field = bundle(1, price=0.5)
     del no_field["num_gpus"]
-    c = make(lambda r: httpx.Response(200, json={"offers": [no_field, bundle(2, price=0.6)]}))
+    c = make(lambda r: httpx.Response(200, json={"offers": [no_field, bundle(2, price=0.5)]}))
     assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
     # по одной строке на поиск, только счётчики: номера предложений не выводятся (SPEC 10)
     assert "Пропущено предложение" not in caplog.text
@@ -741,3 +746,87 @@ def test_preflight_all_ok_continues_to_orchestrator(key, monkeypatch, tmp_path, 
 
     assert _cli_run(cli, monkeypatch, tmp_path, handler) == 0
     assert orchestrator_calls == [1]
+
+
+# --- цена трафика: клиентская проверка в обе стороны, fail-closed (поля UNVERIFIED, vast_client.py) ---
+
+def _cost(usd_per_tb: float) -> float:
+    """Цена в ответе Vast задана USD за ГБ: переводим USD за ТБ обратно (коэффициент GB_PER_TB)."""
+    return usd_per_tb / vc.GB_PER_TB
+
+
+def _summary_line(caplog) -> str:
+    lines = [r.getMessage() for r in caplog.records if "Поиск предложений Vast" in r.getMessage()]
+    assert len(lines) == 1, "одна строка итога на поиск"
+    return lines[0]
+
+
+def test_inet_price_cap_checked_in_both_directions(key):
+    up_high = bundle(2)
+    up_high["inet_up_cost"] = _cost(5.0)
+    down_high = bundle(3)
+    down_high["inet_down_cost"] = _cost(5.0)
+    c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1), up_high, down_high]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [1]
+
+
+def test_inet_price_equal_to_cap_is_accepted(key):
+    b = bundle(1)
+    b["inet_up_cost"] = _cost(4.0)
+    b["inet_down_cost"] = _cost(4.0)
+    c = make(lambda r: httpx.Response(200, json={"offers": [b]}))
+    offers = c.search_offers(OfferFilter(max_inet_price_per_tb=4.0))
+    assert [o.offer_id for o in offers] == [1]
+    assert offers[0].inet_up_price_per_tb == 4.0 and offers[0].inet_down_price_per_tb == 4.0
+
+
+def test_inet_price_cap_comes_from_filter(key):
+    b = bundle(1)
+    b["inet_up_cost"] = _cost(3.0)
+    b["inet_down_cost"] = _cost(3.0)
+    c = make(lambda r: httpx.Response(200, json={"offers": [b]}))
+    assert c.search_offers(OfferFilter(max_inet_price_per_tb=2.0)) == []
+    assert [o.offer_id for o in c.search_offers(OfferFilter(max_inet_price_per_tb=3.5))] == [1]
+
+
+@pytest.mark.parametrize("bad", [None, "abc", True, -0.5])
+def test_unreadable_inet_price_is_rejected(key, bad):
+    b = bundle(1)
+    b["inet_down_cost"] = bad
+    c = make(lambda r: httpx.Response(200, json={"offers": [b]}))
+    assert c.search_offers(OfferFilter()) == []
+
+
+def test_missing_inet_price_fields_are_rejected_and_counted(key, caplog):
+    caplog.set_level(logging.INFO, logger="Generate.vast_client")
+    b = bundle(1)
+    del b["inet_up_cost"]
+    del b["inet_down_cost"]
+    c = make(lambda r: httpx.Response(200, json={"offers": [b]}))
+    assert c.search_offers(OfferFilter()) == []
+    line = _summary_line(caplog)
+    assert "цена трафика не разобрана 1" in line
+    assert "цена трафика выше максимума 0" in line
+    assert "подходит 0." in line
+
+
+def test_summary_counts_inet_price_rejections(key, caplog):
+    caplog.set_level(logging.INFO, logger="Generate.vast_client")
+    high = bundle(2)
+    high["inet_up_cost"] = _cost(5.0)
+    missing = bundle(3)
+    del missing["inet_down_cost"]
+    c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1), high, missing]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [1]
+    line = _summary_line(caplog)
+    assert "получено 3" in line
+    assert "цена трафика выше максимума 1" in line
+    assert "цена трафика не разобрана 1" in line
+    assert "подходит 1." in line
+    assert SECRET not in caplog.text
+
+
+def test_inet_price_cap_must_be_positive(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": []}))
+    with pytest.raises(VastInputError):
+        c.search_offers(OfferFilter(max_inet_price_per_tb=0))

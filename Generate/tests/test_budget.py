@@ -39,7 +39,7 @@ def tracker(clock):
 
 # --- инициализация ---
 def test_default_limit():
-    assert BudgetTracker().budget_limit_usd == 5.0
+    assert BudgetTracker().budget_limit_usd == 2.0
 
 
 @pytest.mark.parametrize("bad", [0, 0.0, -1, -5.5])

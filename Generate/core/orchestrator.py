@@ -169,7 +169,7 @@ class Orchestrator:
         prompts_path,
         *,
         max_cards: int = 4,
-        budget_limit_usd: float = 5.0,
+        budget_limit_usd: float = 2.0,
         job_deadline_min: int = 330,
         card_max_lifetime_min: int = 90,
         silent_host_timeout_min: int = 20,

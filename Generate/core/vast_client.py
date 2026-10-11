@@ -43,6 +43,8 @@ _REJECT_LABELS = (
     ("network", "сеть"),
     ("vram", "VRAM"),
     ("gpu_name", "имя GPU"),
+    ("inet_price", "цена трафика выше максимума"),
+    ("inet_price_unknown", "цена трафика не разобрана"),
 )
 
 # Пути API Vast.ai (статус каждого: SPEC 8.3, блок «Эндпоинты Vast»).
@@ -51,6 +53,18 @@ PATH_ASKS = "/api/v0/asks/{id}/"             # PUT: аренда предлож�
 PATH_INSTANCES = "/api/v1/instances/"        # GET: список экземпляров, постраничный (v1)
 PATH_INSTANCE = "/api/v0/instances/{id}/"    # GET, DELETE: один экземпляр
 PATH_USER = "/api/v0/users/current/"         # GET: баланс аккаунта
+
+# Поля цены сетевого трафика предложения Vast.
+# UNVERIFIED: имена и единица взяты из официального vast-cli (github.com/vast-ai/vast-cli, vast.py):
+# список полей поиска offers_fields и справка полей предложения, единица USD за ГБ. В ответе
+# /api/v0/bundles/ живым вызовом не проверялись: живые вызовы Vast в этой задаче запрещены.
+# Поле отсутствует или не читается: предложение отбрасывается и считается в
+# «цена трафика не разобрана» (fail-closed).
+INET_UP_COST_FIELD = "inet_up_cost"        # UNVERIFIED в ответе API; USD за ГБ по vast-cli
+INET_DOWN_COST_FIELD = "inet_down_cost"    # UNVERIFIED в ответе API; USD за ГБ по vast-cli
+# Пересчёт USD за ГБ в USD за ТБ: коэффициент 1024, как у vast-cli при выводе цены за ТБ.
+# UNVERIFIED: при десятичном ТБ (1000 ГБ) цена была бы примерно на 2.3% ниже.
+GB_PER_TB = 1024.0
 
 
 class VastError(Exception):
@@ -74,11 +88,13 @@ class OfferFilter:
     min_vram_gb: float = 0.0
     # Нижняя граница цены отсекает подозрительно дешёвые (нерабочие) хосты.
     min_price: float = 0.35
-    max_price: float = 0.9
+    max_price: float = 0.55
     min_reliability: float = 0.95
-    min_inet_mbps: float = 2000.0
+    min_inet_mbps: float = 800.0
     interruptible: bool = True
     verified: bool = False
+    # Потолок цены трафика, USD за ТБ. Проверка клиентская, в обе стороны (см. INET_*_FIELD).
+    max_inet_price_per_tb: float = 4.1
 
 
 @dataclass
@@ -93,6 +109,8 @@ class GpuOffer:
     inet_up_mbps: float
     machine_id: int
     is_interruptible: bool
+    inet_up_price_per_tb: Optional[float] = None
+    inet_down_price_per_tb: Optional[float] = None
 
 
 @dataclass
@@ -121,6 +139,26 @@ def _to_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_price_or_none(value: Any) -> Optional[float]:
+    """Цена из ответа Vast или None, если её не удалось прочитать: нет значения, не число,
+    отрицательное или не конечное. Логические значения не принимаются."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price < 0:
+        return None
+    return price
+
+
+def _per_tb_or_none(value: Any) -> Optional[float]:
+    """Цена трафика из ответа (USD за ГБ) в USD за ТБ; None, если не читается."""
+    per_gb = _to_price_or_none(value)
+    return None if per_gb is None else per_gb * GB_PER_TB
 
 
 class VastClient:
@@ -279,6 +317,8 @@ class VastClient:
             inet_up_mbps=_to_float(b.get("inet_up")),
             machine_id=_to_int(b.get("machine_id")) or 0,
             is_interruptible=interruptible,
+            inet_up_price_per_tb=_per_tb_or_none(b.get(INET_UP_COST_FIELD)),
+            inet_down_price_per_tb=_per_tb_or_none(b.get(INET_DOWN_COST_FIELD)),
         )
 
     def search_offers(self, filters: OfferFilter) -> list[GpuOffer]:
@@ -294,6 +334,8 @@ class VastClient:
             raise VastInputError("Неверный фильтр: min_reliability должен быть от 0 до 1")
         if filters.min_inet_mbps < 0 or filters.min_vram_gb < 0:
             raise VastInputError("Неверный фильтр: отрицательные значения не допускаются")
+        if not filters.max_inet_price_per_tb > 0:
+            raise VastInputError("Неверный фильтр: max_inet_price_per_tb должен быть больше нуля")
 
         data = self._request("POST", PATH_BUNDLES, json=self._build_query(filters))
         bundles = data.get("offers", []) if isinstance(data, dict) else []
@@ -338,6 +380,14 @@ class VastClient:
             return "vram", None
         if filters.gpu_name and offer.gpu_name != filters.gpu_name:
             return "gpu_name", None
+        # Цена трафика в обе стороны. Нечитаемая цена отбрасывается (fail-closed): предложение
+        # без цены нельзя признать подходящим. Серверного фильтра по полю нет: имя в живом ответе
+        # не подтверждено (UNVERIFIED).
+        if offer.inet_up_price_per_tb is None or offer.inet_down_price_per_tb is None:
+            return "inet_price_unknown", None
+        if (offer.inet_up_price_per_tb > filters.max_inet_price_per_tb
+                or offer.inet_down_price_per_tb > filters.max_inet_price_per_tb):
+            return "inet_price", None
         return None, offer
 
     # --- экземпляры ---

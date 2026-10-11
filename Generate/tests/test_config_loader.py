@@ -109,10 +109,10 @@ def test_optional_gpu_max_accepts_null_and_number():
 
 def test_int_field_accepts_int_float_field_accepts_int():
     raw = _base()
-    raw["budget_limit_usd"] = 5          # число без дроби допустимо для float
+    raw["budget_limit_usd"] = 2          # число без дроби допустимо для float (баланс по умолчанию 2.0)
     raw["max_cards"] = 2
     cfg = cl.parse_config(raw)
-    assert cfg.budget_limit_usd == 5.0 and isinstance(cfg.budget_limit_usd, float)
+    assert cfg.budget_limit_usd == 2.0 and isinstance(cfg.budget_limit_usd, float)
     assert cfg.max_cards == 2
 
 
@@ -183,12 +183,12 @@ def test_job_deadline_must_be_below_actions_limit():
 
 def test_min_balance_default_equals_budget():
     cfg = cl.load_config()
-    assert cfg.min_balance_usd == 5.0 == cfg.budget_limit_usd
+    assert cfg.min_balance_usd == 2.0 == cfg.budget_limit_usd
 
 
 def test_min_balance_below_budget_is_rejected_with_both_names():
     raw = _base()
-    raw["min_balance_usd"] = 4.0
+    raw["min_balance_usd"] = 1.0
     _assert_rejected(raw, "«min_balance_usd» не может быть меньше «budget_limit_usd»")
 
 
@@ -304,3 +304,21 @@ def test_profile_number_reads_value_and_rejects_bad_names():
         cl.load_profile_number("no_such_profile", "gpu_max_sec")
     with pytest.raises(GeminiInputError):
         cl.load_profile_number("ltx25", "no_such_key")
+
+
+def test_max_inet_price_per_tb_default_and_required():
+    assert cl.load_config().max_inet_price_per_tb == 4.1
+    raw = _base()
+    del raw["max_inet_price_per_tb"]
+    _assert_rejected(raw, "отсутствует обязательный ключ «max_inet_price_per_tb»")
+
+
+@pytest.mark.parametrize("value, fragment", [
+    (0, "«max_inet_price_per_tb»: должно быть больше 0"),
+    (-1, "«max_inet_price_per_tb»: должно быть больше 0"),
+    ("4.1", "«max_inet_price_per_tb»: нужно число"),
+])
+def test_max_inet_price_per_tb_bounds_and_type(value, fragment):
+    raw = _base()
+    raw["max_inet_price_per_tb"] = value
+    _assert_rejected(raw, fragment)
