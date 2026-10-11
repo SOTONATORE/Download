@@ -1,7 +1,7 @@
 """Точка входа второй части: ``python -m Generate.cli <команда> [параметры]``.
 
 Команды:
-    check       проверка входных файлов (SRT разбирается, missing.txt существует);
+    check       проверка конфигурации и входных файлов (SRT разбирается, missing.txt существует);
     run         основной запуск генерации (оркестратор, Gemini, Vast.ai, Release);
     kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``);
     finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt
@@ -9,13 +9,18 @@
 
 Коды завершения:
     0  успех (в том числе «генерировать нечего»);
-    2  ошибка входных данных до любых трат (нет файла, битый SRT, неверные аргументы);
+    2  ошибка входных данных или конфигурации до любых трат (нет файла, битый SRT,
+       неверный config, неверные аргументы);
     3  прочая ошибка выполнения или частичный результат.
+
+Настройки: значения по умолчанию берутся из Generate/config.default.yaml через
+Generate/core/config_loader.py (схема проверяется, см. SPEC 3). Входы workflow
+(аргументы CLI) переопределяют файл и проходят ту же проверку. Секреты сюда не попадают.
 
 Ключи читаются только внутри клиентов и нигде не печатаются (SPEC 0.1).
 Этот модуль сам ничего не читает из окружения (SPEC 0.2): репозиторий и номер
 запуска передаются явными параметрами командной строки (--repo, --run-id).
-Только стандартная библиотека + httpx. Пути не зашиты: берутся из параметров.
+Стандартная библиотека, httpx и PyYAML (конфиг). Пути не зашиты: берутся из параметров.
 """
 from __future__ import annotations
 
@@ -26,15 +31,23 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
+from typing import Optional
 
 from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 
 try:  # пакетный и «плоский» импорт
+    from Generate.core.config_loader import (
+        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
+    from Generate.core.gemini_prompts import GeminiInputError
     from Generate.core.orchestrator import run_generation
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
     from Generate.core.vast_client import OfferFilter, VastClient, VastError
 except ImportError:  # pragma: no cover
+    from config_loader import (  # type: ignore
+        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
+    from gemini_prompts import GeminiInputError  # type: ignore
     from orchestrator import run_generation  # type: ignore
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
@@ -44,34 +57,15 @@ EXIT_OK = 0
 EXIT_INPUT = 2
 EXIT_RUNTIME = 3
 
-# значения по умолчанию для входов (раздел 0, п.7 SPEC: имена файлов в корне репозитория)
+# имена входных файлов по умолчанию (раздел 0, п.7 SPEC: в корне репозитория; это не настройка)
 DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
-DEFAULT_PROFILE = "ltx25"
-# фильтры поиска карт по умолчанию (литералы; окружение не читается, SPEC 0.2)
-DEFAULT_GPU_NAME = "RTX 5090"
-DEFAULT_MIN_PRICE_PER_HOUR = 0.35
-DEFAULT_MAX_PRICE_PER_HOUR = 0.90
-DEFAULT_MIN_RELIABILITY = 0.95
-DEFAULT_MIN_INET_MBPS = 2000.0
-# параметры карты Vast.ai по умолчанию
-DEFAULT_DISK_GB = 100
-DEFAULT_SILENT_HOST_TIMEOUT_MIN = 20
-DEFAULT_DOCKER_IMAGE = "ghcr.io/sotonatore/download/videogen-worker:latest"
 STYLE_DIR = "Generate/model_profiles/prompt_styles"
-
-# параметры таймингов по умолчанию (SPEC 3)
-TIMING_DEFAULTS = {
-    "fps": 24,
-    "frame_rule": {"kind": "8k+1"},
-    "clip_min_sec": 2.5,
-    "clip_max_sec": 5.0,
-    "gpu_max_sec": 10.0,
-    "tail_pad_sec": 0.5,
-}
-
-_CORE_PREFIXES = ("Generate.core.", "")
+# запасной стиль, если файла стиля для профиля нет (прежнее поведение)
+FALLBACK_STYLE_PROFILE = "ltx25"
+# значения по умолчанию, которых нет в config.default.yaml (описаны в профиле модели и SPEC 5)
+TIMING_FRAME_RULE = {"kind": "8k+1"}
 
 
 def _err(text: str) -> None:
@@ -81,7 +75,7 @@ def _err(text: str) -> None:
 def _find_symbol(name: str, modules: tuple[str, ...]):
     """Ищет класс в перечисленных модулях core (пакетный и плоский импорт)."""
     for mod in modules:
-        for prefix in _CORE_PREFIXES:
+        for prefix in ("Generate.core.", ""):
             try:
                 module = importlib.import_module(prefix + mod)
             except ImportError:
@@ -92,17 +86,36 @@ def _find_symbol(name: str, modules: tuple[str, ...]):
     raise ImportError(f"не найден {name}")
 
 
-def _build_timing():
+def _load_cfg(path: Optional[str], overrides: Optional[dict] = None) -> tuple[Optional[Config], Optional[int]]:
+    """Возвращает (конфиг, None) или (None, код_ошибки); сообщение уже напечатано."""
+    try:
+        return load_config(path, overrides), None
+    except GeminiInputError as e:
+        _err(str(e))
+        return None, EXIT_INPUT
+
+
+def _build_timing(cfg: Config, profile: str):
     cls = _find_symbol("TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
-    return cls(**TIMING_DEFAULTS)
+    # gpu_max_sec в конфиге может быть null: тогда берётся из профиля модели
+    gpu_max = (cfg.gpu_max_sec if cfg.gpu_max_sec is not None
+               else load_profile_number(profile, "gpu_max_sec"))
+    return cls(fps=cfg.fps, frame_rule=dict(TIMING_FRAME_RULE),
+               clip_min_sec=cfg.clip_min_sec, clip_max_sec=cfg.clip_max_sec,
+               gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
 
 
-def _build_prompt_config(profile: str, style_brief: str):
+def _build_prompt_config(profile: str, style_brief: str, batch_size: int):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     style_file = f"{STYLE_DIR}/{profile}.md"
     if not os.path.isfile(style_file):
-        style_file = f"{STYLE_DIR}/{DEFAULT_PROFILE}.md"
-    return cls(style_file=style_file, style_brief=style_brief)
+        style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}.md"
+    return cls(style_file=style_file, style_brief=style_brief, batch_size=batch_size)
+
+
+def _gemini_options(cfg: Config) -> dict:
+    return {"models": tuple(cfg.gemini_models), "rpm_limit": cfg.gemini_rpm_limit,
+            "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit}
 
 
 def _make_transport():
@@ -134,7 +147,11 @@ def _load_srt(srt_path: str):
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """Проверяет входные файлы: SRT разбирается, missing.txt существует (не разбирается)."""
+    """Проверяет конфигурацию, SRT и наличие missing.txt (без разбора missing)."""
+    _cfg, code = _load_cfg(args.config)
+    if code is not None:
+        return code
+
     segments, code = _load_srt(args.srt)
     if code is not None:
         return code
@@ -144,6 +161,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         _err(f"Ошибка входных данных: файл missing не найден: {args.missing}")
         return EXIT_INPUT
 
+    print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
     print(f"srt_hash: {srt_hash(segments)}")
     return EXIT_OK
@@ -171,6 +189,26 @@ def _print_summary(s) -> None:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Основной запуск генерации (этапы 4-9)."""
+    # входы workflow (None = не задано) переопределяют config.default.yaml и проверяются так же
+    overrides = {
+        "limit_clips": args.limit_clips,
+        "max_cards": args.max_cards,
+        "budget_limit_usd": args.budget_limit,
+        "model_profile": args.model_profile,
+        "style_brief": args.style_brief,
+        "gpu_name": args.gpu_name,
+        "min_price_per_hour": args.min_price_per_hour,
+        "max_price_per_hour": args.max_price_per_hour,
+        "min_reliability": args.min_reliability,
+        "min_inet_mbps": args.min_inet_mbps,
+        "docker_image": args.docker_image,
+        "disk_gb": args.disk_gb,
+        "silent_host_timeout_min": args.silent_host_timeout_min,
+    }
+    cfg, code = _load_cfg(args.config, overrides)
+    if code is not None:
+        return code
+
     segments, code = _load_srt(args.srt)
     if code is not None:
         return code
@@ -179,8 +217,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         return EXIT_INPUT
 
     try:
-        timing = _build_timing()
-        prompt_cfg = _build_prompt_config(args.model_profile, args.style_brief)
+        timing = _build_timing(cfg, cfg.model_profile)
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.style_brief, cfg.gemini_batch_size)
         transport = _make_transport()
         store = _make_release_store(args.repo)
         vast = VastClient()
@@ -197,11 +235,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         return exit_code
 
     offer_filter = OfferFilter(
-        gpu_name=args.gpu_name if args.gpu_name else None,
-        min_price=args.min_price_per_hour,
-        max_price=args.max_price_per_hour,
-        min_reliability=args.min_reliability,
-        min_inet_mbps=args.min_inet_mbps,
+        gpu_name=cfg.gpu_name or None,
+        min_price=cfg.min_price_per_hour,
+        max_price=cfg.max_price_per_hour,
+        min_reliability=cfg.min_reliability,
+        min_inet_mbps=cfg.min_inet_mbps,
+        interruptible=cfg.interruptible,
     )
 
     try:
@@ -214,17 +253,24 @@ def cmd_run(args: argparse.Namespace) -> int:
             vast,
             transport,
             args.prompts_path,
-            max_cards=args.max_cards,
-            budget_limit_usd=args.budget_limit,
-            limit_clips=args.limit_clips,
+            max_cards=cfg.max_cards,
+            budget_limit_usd=cfg.budget_limit_usd,
+            limit_clips=cfg.limit_clips,
             repo=args.repo,
             run_id=args.run_id,
-            profile=args.model_profile,
+            profile=cfg.model_profile,
             release_tag=args.release_tag,
             offer_filter=offer_filter,
-            docker_image=args.docker_image,
-            disk_gb=args.disk_gb,
-            silent_host_timeout_min=args.silent_host_timeout_min,
+            docker_image=cfg.docker_image,
+            disk_gb=cfg.disk_gb,
+            silent_host_timeout_min=cfg.silent_host_timeout_min,
+            job_deadline_min=cfg.job_deadline_min,
+            card_max_lifetime_min=cfg.card_max_lifetime_min,
+            worker_idle_timeout_min=cfg.worker_idle_timeout_min,
+            filename_template=cfg.filename_template,
+            clip_name_width=cfg.clip_name_width,
+            release_asset_limit=cfg.release_asset_limit,
+            gemini_options=_gemini_options(cfg),
         )
     finally:
         close = getattr(vast, "close", None)
@@ -264,6 +310,10 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     Безопасна при повторном запуске и после отмены: если Release ещё не создан,
     завершается с кодом 0 (финализировать нечего).
     """
+    cfg, code = _load_cfg(args.config, {"model_profile": args.model_profile})
+    if code is not None:
+        return code
+
     segments, code = _load_srt(args.srt)
     if code is not None:
         return code
@@ -275,8 +325,10 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
             print(f"Release {tag} ещё не создан: финализировать нечего.")
             return EXIT_OK
 
-        uploader = ReleaseUploader(store, segments, args.model_profile,
-                                   release_tag=args.release_tag)
+        uploader = ReleaseUploader(store, segments, cfg.model_profile,
+                                   release_tag=args.release_tag,
+                                   release_asset_limit=cfg.release_asset_limit,
+                                   filename_template=cfg.filename_template)
         uploader.prepare()
         clips = len(uploader.done)
 
@@ -320,6 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"путь к файлу SRT (по умолчанию {DEFAULT_SRT})")
     common.add_argument("--missing", default=DEFAULT_MISSING,
                         help=f"путь к файлу missing (по умолчанию {DEFAULT_MISSING})")
+    common.add_argument("--config", default=None,
+                        help="путь к файлу конфигурации (по умолчанию Generate/config.default.yaml)")
 
     parser = argparse.ArgumentParser(
         prog="python -m Generate.cli",
@@ -329,42 +383,44 @@ def build_parser() -> argparse.ArgumentParser:
 
     # функции берутся из модуля при каждом вызове (удобно подменять в тестах)
     sub.add_parser("check", parents=[common],
-                   help="проверить входные файлы (SRT разбирается, missing существует)"
+                   help="проверить конфигурацию и входные файлы"
                    ).set_defaults(func=lambda a: cmd_check(a))
 
+    # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
     run_p = sub.add_parser("run", parents=[common], help="основной запуск генерации")
-    run_p.add_argument("--limit-clips", type=int, default=0,
-                       help="0 = все номера; N > 0 = первые N (пробный прогон)")
+    run_p.add_argument("--limit-clips", type=int, default=None,
+                       help="0 = все номера; N > 0 = первые N (пробный прогон); по умолчанию из конфига")
     run_p.add_argument("--release-tag", default=None, help="тег Release (необязательно)")
-    run_p.add_argument("--max-cards", type=int, default=4, help="потолок параллельных карт")
-    run_p.add_argument("--budget-limit", type=float, default=5.0,
-                       help="жёсткий потолок расходов на запуск, USD")
-    run_p.add_argument("--model-profile", default=DEFAULT_PROFILE, help="профиль модели")
-    run_p.add_argument("--style-brief", default="", help="общее описание стиля/мира")
+    run_p.add_argument("--max-cards", type=int, default=None,
+                       help="потолок параллельных карт; по умолчанию из конфига")
+    run_p.add_argument("--budget-limit", type=float, default=None,
+                       help="жёсткий потолок расходов на запуск, USD; по умолчанию из конфига")
+    run_p.add_argument("--model-profile", default=None,
+                       help="профиль модели; по умолчанию из конфига")
+    run_p.add_argument("--style-brief", default=None,
+                       help="общее описание стиля/мира; по умолчанию из конфига")
     run_p.add_argument("--repo", default="",
                        help="репозиторий owner/name (передаётся явно)")
     run_p.add_argument("--run-id", default="",
                        help="номер запуска (передаётся явно)")
     run_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
-    run_p.add_argument("--gpu-name", default=DEFAULT_GPU_NAME,
-                       help=f"модель GPU для поиска (по умолчанию {DEFAULT_GPU_NAME}; "
-                            "пустая строка = любая)")
-    run_p.add_argument("--min-price-per-hour", type=float, default=DEFAULT_MIN_PRICE_PER_HOUR,
-                       help="нижняя граница цены, USD/час (отсекает подозрительно дешёвые хосты)")
-    run_p.add_argument("--max-price-per-hour", type=float, default=DEFAULT_MAX_PRICE_PER_HOUR,
-                       help="верхняя граница цены, USD/час")
-    run_p.add_argument("--min-reliability", type=float, default=DEFAULT_MIN_RELIABILITY,
-                       help="минимальная надёжность хоста, от 0 до 1")
-    run_p.add_argument("--min-inet-mbps", type=float, default=DEFAULT_MIN_INET_MBPS,
-                       help="минимальная скорость входящего канала, Мбит/с")
-    run_p.add_argument("--docker-image", default=DEFAULT_DOCKER_IMAGE,
-                       help="образ Docker для карты Vast.ai (по умолчанию ghcr.io/sotonatore/download/videogen-worker:latest)")
-    run_p.add_argument("--disk-gb", type=int, default=DEFAULT_DISK_GB,
-                       help=f"размер диска для карты Vast.ai, ГБ (по умолчанию {DEFAULT_DISK_GB})")
-    run_p.add_argument("--silent-host-timeout-min", type=int,
-                       default=DEFAULT_SILENT_HOST_TIMEOUT_MIN,
-                       help=f"таймаут первого ответа хоста, минут (по умолчанию {DEFAULT_SILENT_HOST_TIMEOUT_MIN})")
+    run_p.add_argument("--gpu-name", default=None,
+                       help="модель GPU для поиска; пустая строка = любая; по умолчанию из конфига")
+    run_p.add_argument("--min-price-per-hour", type=float, default=None,
+                       help="нижняя граница цены, USD/час; по умолчанию из конфига")
+    run_p.add_argument("--max-price-per-hour", type=float, default=None,
+                       help="верхняя граница цены, USD/час; по умолчанию из конфига")
+    run_p.add_argument("--min-reliability", type=float, default=None,
+                       help="минимальная надёжность хоста, от 0 до 1; по умолчанию из конфига")
+    run_p.add_argument("--min-inet-mbps", type=float, default=None,
+                       help="минимальная скорость входящего канала, Мбит/с; по умолчанию из конфига")
+    run_p.add_argument("--docker-image", default=None,
+                       help="образ Docker для карты Vast.ai; по умолчанию из конфига")
+    run_p.add_argument("--disk-gb", type=int, default=None,
+                       help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
+    run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
+                       help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
@@ -377,8 +433,11 @@ def build_parser() -> argparse.ArgumentParser:
                            help="загрузить prompts.json и generated_links.txt в Release")
     fin_p.add_argument("--srt", default=DEFAULT_SRT,
                        help=f"путь к файлу SRT (по умолчанию {DEFAULT_SRT})")
+    fin_p.add_argument("--config", default=None,
+                       help="путь к файлу конфигурации (по умолчанию Generate/config.default.yaml)")
     fin_p.add_argument("--repo", default="", help="репозиторий owner/name (передаётся явно)")
-    fin_p.add_argument("--model-profile", default=DEFAULT_PROFILE, help="профиль модели")
+    fin_p.add_argument("--model-profile", default=None,
+                       help="профиль модели; по умолчанию из конфига")
     fin_p.add_argument("--release-tag", default=None, help="тег Release (необязательно)")
     fin_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
