@@ -1,8 +1,10 @@
 name: Vast probe (read-only)
 
 # Диагностика Vast.ai и Hugging Face: только чтение. Проверяет поиск предложений Vast,
-# пути одиночного экземпляра Vast (GET на несуществующий id) и имена файлов модели на
-# Hugging Face (HEAD). Ничего не арендует, не создаёт, не меняет и не удаляет.
+# баланс и кредит аккаунта (GET /api/v0/users/current/; печатаются только эти два поля,
+# чтобы по ним определить, какое поле совпадает с суммой в консоли Vast), пути одиночного
+# экземпляра Vast (GET на несуществующий id) и имена файлов модели на Hugging Face (HEAD).
+# Ничего не арендует, не создаёт, не меняет и не удаляет.
 # Запуск только вручную; push и pull_request не используются.
 # Ключи передаются только в шаг запуска; входы передаются через env, а не подстановкой в скрипт.
 on:
@@ -38,6 +40,11 @@ on:
         required: false
         default: "5"
         type: string
+      min_balance_usd:
+        description: "Минимум для сравнения с балансом и кредитом (USD)"
+        required: false
+        default: "2.0"
+        type: string
 
 permissions:
   contents: read
@@ -67,6 +74,7 @@ jobs:
           PROBE_MIN_INET_MBPS: ${{ inputs.min_inet_mbps }}
           PROBE_MIN_RELIABILITY: ${{ inputs.min_reliability }}
           PROBE_SHOW_COUNT: ${{ inputs.show_count }}
+          PROBE_MIN_BALANCE: ${{ inputs.min_balance_usd }}
         run: python Generate/tools/vast_probe.py
 
       - name: Upload probe result
