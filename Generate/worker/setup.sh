@@ -100,7 +100,17 @@ log "Все файлы модели LTX-2.5 на месте."
 
 # --- 2. Запуск ComfyUI в headless-режиме ---
 log "Запускаю ComfyUI (127.0.0.1:8188)..."
-python /workspace/ComfyUI/main.py --listen 127.0.0.1 --port 8188 &
+# Вывод ComfyUI (stdout и stderr) идёт и в лог контейнера, и в файл, который читает воркер (GET /logs).
+# ComfyUI по умолчанию пишет логи в stderr; --verbose DEBUG включает уровень DEBUG (в нём сообщения
+# «Unloading ...» и «freed ...»). Включается только при GEN_LOG_LEVEL=DEBUG.
+COMFY_LOG_PATH="${COMFY_LOG_PATH:-/workspace/comfyui.log}"
+COMFY_VERBOSE_ARGS=()
+if [ "${GEN_LOG_LEVEL:-INFO}" = "DEBUG" ]; then
+    COMFY_VERBOSE_ARGS=(--verbose DEBUG)
+fi
+log "Вывод ComfyUI пишется в файл ${COMFY_LOG_PATH} и в лог контейнера."
+python /workspace/ComfyUI/main.py --listen 127.0.0.1 --port 8188 "${COMFY_VERBOSE_ARGS[@]}" \
+    > >(tee -a "${COMFY_LOG_PATH}") 2>&1 &
 COMFY_PID=$!
 log "ComfyUI запущен, PID: ${COMFY_PID}"
 

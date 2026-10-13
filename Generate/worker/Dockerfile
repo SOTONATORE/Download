@@ -23,7 +23,8 @@ ENV PYTHONUNBUFFERED=1 \
     COMFY_URL=http://127.0.0.1:8188 \
     WORKER_HTTP_PORT=8000 \
     WORKER_WORKFLOW_PATH=/workspace/Generate/model_profiles/workflows/ltx25.json \
-    WORKER_BINDINGS_PATH=/workspace/Generate/model_profiles/workflows/ltx25_bindings.json
+    WORKER_BINDINGS_PATH=/workspace/Generate/model_profiles/workflows/ltx25_bindings.json \
+    COMFY_LOG_PATH=/workspace/comfyui.log
 
 # Номер коммита сборки: первая строка вывода воркера и GET /logs («Сборка воркера: <значение>»).
 # ARG стоит прямо перед копированием файлов, чтобы смена коммита не сбрасывала кэш установки пакетов.
@@ -31,7 +32,8 @@ ARG WORKER_BUILD=unknown
 ENV WORKER_BUILD=$WORKER_BUILD
 
 # Файлы воркера и профили моделей
-COPY Generate/worker/server.py Generate/worker/comfy_client.py Generate/worker/setup.sh /workspace/Generate/worker/
+COPY Generate/worker/server.py Generate/worker/comfy_client.py Generate/worker/comfy_output.py \
+     Generate/worker/telemetry.py Generate/worker/setup.sh /workspace/Generate/worker/
 COPY Generate/model_profiles/ /workspace/Generate/model_profiles/
 
 RUN sed -i 's/\r$//' /workspace/Generate/worker/setup.sh \

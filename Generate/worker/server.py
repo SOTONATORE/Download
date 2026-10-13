@@ -28,8 +28,13 @@ from urllib.parse import parse_qs
 try:
     from Generate.worker.comfy_client import (
         ComfyClient, ComfyError, inject_workflow)
+    from Generate.worker.comfy_output import (
+        COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader)
+    from Generate.worker.telemetry import SystemSampler, TelemetrySampler
 except ImportError:  # запуск прямо на карте, без пакета Generate
     from worker.comfy_client import ComfyClient, ComfyError, inject_workflow
+    from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader
+    from worker.telemetry import SystemSampler, TelemetrySampler
 
 log = logging.getLogger("Generate.worker.server")
 
@@ -48,6 +53,8 @@ LOG_BUFFER_MAX_LINES = 5000
 LOGS_PATH = "/logs"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 STDOUT_HANDLER_NAME = "worker-stdout"
+# Файл вывода ComfyUI, который пишет setup.sh через tee (пусто = чтение не запускается)
+COMFY_LOG_ENV = "COMFY_LOG_PATH"
 # Сборка образа (WORKER_BUILD из Dockerfile, аргумент docker_build.yml): первая строка вывода и GET /logs
 BUILD_ENV = "WORKER_BUILD"
 BUILD_UNKNOWN = "unknown"
@@ -349,7 +356,8 @@ class TaskManager:
     def __init__(self, comfy: Any, workflow: Optional[dict] = None,
                  bindings: Optional[dict] = None, output_dir: Any = DEFAULT_OUTPUT_DIR,
                  extra_inputs: Optional[dict] = None, max_unacked: int = DEFAULT_MAX_UNACKED,
-                 task_timeout: float = 600.0) -> None:
+                 task_timeout: float = 600.0,
+                 on_event: Optional[Callable[[str], None]] = None) -> None:
         self.comfy = comfy
         self.workflow = workflow if workflow is not None else {}
         self.bindings = bindings if bindings is not None else {}
@@ -357,6 +365,7 @@ class TaskManager:
         self.extra_inputs = extra_inputs or {}
         self.max_unacked = max_unacked
         self.task_timeout = task_timeout
+        self._on_event = on_event  # снимок телеметрии при старте и конце клипа; не должен мешать задаче
         self._tasks: Dict[str, _Task] = {}
         self._lock = threading.Lock()
         self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
@@ -469,7 +478,23 @@ class TaskManager:
             raise ComfyError("Файл результата не найден на диске.")
         return full
 
+    def _notify(self, text: str) -> None:
+        """Событие для телеметрии: только постановка в очередь снимка, ошибка здесь клип не задевает."""
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(text)
+        except Exception:
+            pass
+
     def _run(self, task: _Task) -> None:
+        self._notify(f"начало клипа {task.num}")
+        try:
+            self._run_body(task)
+        finally:
+            self._notify(f"конец клипа {task.num}")
+
+    def _run_body(self, task: _Task) -> None:
         started: Optional[float] = None
         try:
             self._set(task, "running", "подстановка параметров в workflow")
@@ -766,7 +791,10 @@ class WorkerApp:
                  max_unacked: int = DEFAULT_MAX_UNACKED,
                  task_timeout: float = 600.0,
                  log_level: str = "INFO",
-                 build_id: str = BUILD_UNKNOWN) -> None:
+                 build_id: str = BUILD_UNKNOWN,
+                 comfy_log_path: Optional[str] = None,
+                 telemetry_gpu_stats: Optional[Callable[[], dict]] = None,
+                 telemetry_interval_check: float = 1.0) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -781,14 +809,27 @@ class WorkerApp:
         self._log_handler = BufferHandler(self.logbuf)
         self._log_attached = False
         self.comfy = comfy
+        # Телеметрия: видеопамять берётся из /system_stats ComfyUI (check_health), см. telemetry.py
+        self.sysampler = SystemSampler(gpu_stats=telemetry_gpu_stats or comfy.check_health,
+                                       disk_path=output_dir)
+        self.telemetry = TelemetrySampler(self.sysampler.snapshot, log_level,
+                                          check_interval=telemetry_interval_check)
         self.manager = TaskManager(comfy, workflow, bindings, output_dir, extra_inputs,
-                                   max_unacked, task_timeout)
+                                   max_unacked, task_timeout, on_event=self.telemetry.notify)
         self.deadman = DeadManSwitch(idle_timeout_seconds,
                                      on_idle_timeout or self._default_shutdown,
                                      check_interval)
+        # Вывод ComfyUI: файл из setup.sh; без пути строки ComfyUI в буфер не попадают
+        self.comfy_reader: Optional[ComfyOutputReader] = None
+        if comfy_log_path:
+            self.comfy_reader = ComfyOutputReader(comfy_log_path, self._comfy_line, mask_secrets)
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
         self._serve_thread: Optional[threading.Thread] = None
+
+    def _comfy_line(self, line: str) -> None:
+        """Строка ComfyUI: в буфер логов, с русской пометкой; в контейнерный лог уже попала через tee."""
+        logging.getLogger(COMFY_LOG_LOGGER).info("%s%s", COMFY_MARK, line)
 
     @property
     def port(self) -> int:
@@ -799,16 +840,23 @@ class WorkerApp:
         threading.Thread(target=self.httpd.shutdown, name="idle-shutdown", daemon=True).start()
 
     def _attach_logs(self) -> None:
-        """Буфер получает записи логгера «Generate.worker» (и его потомков); уровень из GEN_LOG_LEVEL."""
+        """Буфер получает записи логгера «Generate.worker» (и его потомков); уровень из GEN_LOG_LEVEL.
+        Строки ComfyUI идут в буфер напрямую (propagate=False): их уже выводит tee в контейнерный лог."""
         worker_log = logging.getLogger("Generate.worker")
         worker_log.setLevel(getattr(logging, self.log_level))
         if not self._log_attached:
             worker_log.addHandler(self._log_handler)
+            comfy_log = logging.getLogger(COMFY_LOG_LOGGER)
+            comfy_log.addHandler(self._log_handler)
+            comfy_log.propagate = False
             self._log_attached = True
 
     def _detach_logs(self) -> None:
         if self._log_attached:
             logging.getLogger("Generate.worker").removeHandler(self._log_handler)
+            comfy_log = logging.getLogger(COMFY_LOG_LOGGER)
+            comfy_log.removeHandler(self._log_handler)
+            comfy_log.propagate = True
             self._log_attached = False
 
     def _start_workers(self) -> None:
@@ -817,6 +865,9 @@ class WorkerApp:
                  self.log_level, LOG_BUFFER_MAX_LINES)
         self.manager.start()
         self.deadman.start()
+        self.telemetry.start()  # первый снимок «запуск воркера» ставится в очередь здесь
+        if self.comfy_reader is not None:
+            self.comfy_reader.start()
 
     def serve_forever(self) -> None:
         self._start_workers()
@@ -837,6 +888,9 @@ class WorkerApp:
         log.info("Воркер останавливается.")
         self.deadman.stop()
         self.manager.stop()
+        self.telemetry.stop()
+        if self.comfy_reader is not None:
+            self.comfy_reader.stop()
         if self._serve_thread is not None:
             self.httpd.shutdown()
             self._serve_thread.join(timeout=5)
@@ -884,7 +938,8 @@ def main() -> int:
     app = WorkerApp(token, comfy, port=port, idle_timeout_seconds=idle_min * 60.0,
                     workflow=workflow, bindings=bindings,
                     output_dir=os.environ.get("COMFY_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
-                    log_level=level, build_id=build)
+                    log_level=level, build_id=build,
+                    comfy_log_path=os.environ.get(COMFY_LOG_ENV, "") or None)
     try:
         app.serve_forever()
     except KeyboardInterrupt:
