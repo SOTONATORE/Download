@@ -3,7 +3,10 @@
 Ничего не арендует, не создаёт, не меняет и не удаляет. Из ответа аккаунта берутся только баланс
 (balance) и кредит (credit); печатаются и пишутся в probe_result.json только эти два значения.
 Вызовы:
-  • POST /api/v0/bundles/                    — поиск предложений, сырой ответ (тот же запрос, что в production);
+  • POST /api/v0/bundles/                    — поиск предложений без фильтра verified (filter.verified = False),
+    сырой ответ (тот же запрос, что в production);
+  • POST /api/v0/bundles/                    — тот же поиск с verified=True (копия фильтра, запрос строится тем же
+    VastClient._build_query); нужен только для сверки числа предложений, production не меняется;
   • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
   • GET  /api/v0/users/current/              — баланс и кредит аккаунта (через _request, только чтение);
   • GET  /api/v0/instances/999999999/        — проверка пути одного экземпляра (id заведомо не существует);
@@ -22,7 +25,9 @@ _build_query (та же сборка запроса), _base_url и _timeout (т�
 и скрыл бы код ответа. Перенаправления для путей Vast не выполняются (поведение httpx по умолчанию).
 
 Коды выхода: 0 — поиск выполнен; 2 — нет ключа или неверные входы (сеть не трогается);
-3 — сбой вызова Vast; 1 — прочая ошибка (например, запись probe_result.json).
+3 — сбой вызова Vast (в том числе сбой поиска с verified=True: он печатается, а результат первого
+поиска и блок search_verified_check всё равно записываются в probe_result.json); 1 — прочая ошибка
+(например, запись probe_result.json).
 Результаты проверок счёта, путей и файлов модели на код выхода не влияют: неуспешная проверка
 печатается и попадает в поле account или checks файла probe_result.json.
 
@@ -35,6 +40,7 @@ PROBE_MIN_RELIABILITY, PROBE_SHOW_COUNT, PROBE_MIN_BALANCE (минимум дл�
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import math
@@ -118,6 +124,16 @@ HF_CALL_RE = re.compile(r'^\s*download_model\s+"([^"]+)"\s+"([^"]+)"\s*$')
 HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определение функции «download_model() {» не совпадает
 
 SNIPPET_LIMIT = 200
+
+# Сверка с фильтром verified=True (только число предложений и вывод полей).
+# Ключ verified в запросе взят из production-кода (VastClient._build_query); живой ответ Vast
+# на этот ключ в репозитории не проверен: UNVERIFIED.
+# UNVERIFIED: поле подтверждения хоста в предложении Vast в репозитории не подтверждено, имя и
+# значения не проверены живым ответом. Имя не угадывается: печатаются ключи предложения, в которых
+# есть подстрока VERIFY_KEY_MARKER, и их значения у первых предложений. Если таких ключей нет,
+# печатается VERIFY_FIELD_MISSING.
+VERIFY_KEY_MARKER = "verif"
+VERIFY_FIELD_MISSING = "поля verified в предложениях нет"
 
 # Значения секретов (ключ Vast, HF_TOKEN): заменяются на «***» во всём выводе.
 # Задаются в main() до первого вывода; самое длинное значение первым.
@@ -483,6 +499,80 @@ def _check_hf_files(token: str) -> dict[str, Any]:
     return state
 
 
+def _offers_of(raw: Any) -> list:
+    """Список предложений из сырого ответа поиска; при неожиданной форме пустой список."""
+    if isinstance(raw, dict) and isinstance(raw.get("offers"), list):
+        return raw["offers"]
+    return []
+
+
+def _verify_field_names(offers: list) -> list[str]:
+    """UNVERIFIED (см. VERIFY_KEY_MARKER): имена полей предложений, в которых есть подстрока
+    VERIFY_KEY_MARKER. Имена с признаками секретов не берутся (_is_sensitive)."""
+    names: set[str] = set()
+    for offer in offers:
+        if not isinstance(offer, dict):
+            continue
+        for key in offer:
+            if VERIFY_KEY_MARKER in str(key).lower() and not _is_sensitive(key):
+                names.add(str(key))
+    return sorted(names)
+
+
+def _check_verified(
+    client: VastClient, offer_filter: OfferFilter, count_plain: int, show_count: int
+) -> tuple[dict[str, Any], bool]:
+    """Второй сырой поиск с verified=True, только чтение. Возвращает блок search_verified_check
+    для probe_result.json и признак сбоя поиска (код выхода 3). Результат без фильтра не меняется."""
+    check: dict[str, Any] = {
+        "count_without_verified": count_plain,
+        "count_with_verified": None,
+        "field_names": [],
+        "error": None,
+    }
+    say("=== Поиск с фильтром verified=True (сверка числа предложений) ===")
+    # Копия фильтра с verified=True; запрос строится тем же _build_query, что и production-запрос.
+    verified_filter = dataclasses.replace(offer_filter, verified=True)
+    try:
+        raw = client._request(
+            "POST", PATH_BUNDLES, json=VastClient._build_query(verified_filter)
+        )
+    except VastError as exc:
+        check["error"] = str(exc)
+        err(f"Сбой поиска предложений Vast с фильтром verified: {exc}")
+        say(
+            f"Предложений без фильтра verified: {count_plain}; "
+            "с фильтром verified: не получено (ошибка поиска)"
+        )
+        return check, True
+
+    offers = _offers_of(raw)
+    check["count_with_verified"] = len(offers)
+    say(f"Предложений без фильтра verified: {count_plain}; с фильтром verified: {len(offers)}")
+    if not offers:
+        say("Предложений нет: поле подтверждения хоста не проверено.")
+        return check, False
+
+    names = _verify_field_names(offers)
+    check["field_names"] = names
+    if not names:
+        say(VERIFY_FIELD_MISSING)
+        return check, False
+
+    # UNVERIFIED: значения полей подтверждения хоста у первых предложений (имена из ответа Vast).
+    say("Поля предложения с подстрокой «verif» (UNVERIFIED): " + ", ".join(names))
+    for index, offer in enumerate(offers[:show_count], start=1):
+        if not isinstance(offer, dict):
+            say(f"  #{index}: не объект")
+            continue
+        parts = []
+        for name in names:
+            shown = _snippet(_value(offer, name)) if name in offer else "нет поля"
+            parts.append(f"{name}={shown}")
+        say(f"  #{index}: " + "; ".join(parts))
+    return check, False
+
+
 def main() -> int:
     global _secrets
 
@@ -510,6 +600,7 @@ def main() -> int:
 
     failed = False
     checks: dict[str, Any] = {}
+    verified_check: dict[str, Any] = {}
     say("=== Проверка Vast.ai (только чтение) ===")
     say(f"Фильтр: {_filter_text(offer_filter)}")
 
@@ -564,6 +655,11 @@ def main() -> int:
             parts += [f"{f}={_value(offer, f)}" for f in SHOW_OPTIONAL_FIELDS if f in offer]
             say(f"  #{index}: " + "; ".join(parts))
 
+        # 1б. Сверка: тот же поиск с verified=True. Результат без фильтра выше не меняется;
+        # сбой печатается и даёт код 3 в конце (см. docstring). production-фильтр не меняется.
+        verified_check, verified_failed = _check_verified(client, offer_filter, total, show_count)
+        failed = failed or verified_failed
+
         # 2. Текущие production-правила: второй запрос тем же клиентом и тем же фильтром.
         try:
             passed = client.search_offers(offer_filter)
@@ -596,6 +692,7 @@ def main() -> int:
         payload["offers"] = payload["offers"][:RESULT_OFFERS_LIMIT]
     payload["checks"] = checks
     payload["account"] = account
+    payload["search_verified_check"] = verified_check
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")
