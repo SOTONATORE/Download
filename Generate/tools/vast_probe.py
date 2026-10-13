@@ -1,9 +1,11 @@
 """Диагностика Vast.ai и Hugging Face: только чтение (SPEC 0.1, 0.5, 8.3).
 
-Ничего не арендует, не создаёт, не меняет и не удаляет. Баланс аккаунта не запрашивается и не выводится.
+Ничего не арендует, не создаёт, не меняет и не удаляет. Из ответа аккаунта берутся только баланс
+(balance) и кредит (credit); печатаются и пишутся в probe_result.json только эти два значения.
 Вызовы:
   • POST /api/v0/bundles/                    — поиск предложений, сырой ответ (тот же запрос, что в production);
   • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
+  • GET  /api/v0/users/current/              — баланс и кредит аккаунта (через _request, только чтение);
   • GET  /api/v0/instances/999999999/        — проверка пути одного экземпляра (id заведомо не существует);
   • GET  /api/v1/instances/999999999/        — то же для пути v1;
   • HEAD <базовый адрес>/<подкаталог>/<имя>  — по одному на каждую строку download_model в
@@ -21,13 +23,14 @@ _build_query (та же сборка запроса), _base_url и _timeout (т�
 
 Коды выхода: 0 — поиск выполнен; 2 — нет ключа или неверные входы (сеть не трогается);
 3 — сбой вызова Vast; 1 — прочая ошибка (например, запись probe_result.json).
-Результаты проверок путей и файлов модели на код выхода не влияют: неуспешная проверка
-печатается и попадает в поле checks файла probe_result.json.
+Результаты проверок счёта, путей и файлов модели на код выхода не влияют: неуспешная проверка
+печатается и попадает в поле account или checks файла probe_result.json.
 
 Входы — переменные окружения, все необязательные (значения по умолчанию совпадают с
 Generate/config.default.yaml, кроме max_price и min_inet_mbps, которые заданы по запросу):
 PROBE_GPU_NAME, PROBE_MIN_PRICE, PROBE_MAX_PRICE, PROBE_MIN_INET_MBPS,
-PROBE_MIN_RELIABILITY, PROBE_SHOW_COUNT. HF_TOKEN необязателен: без него проверка файлов модели
+PROBE_MIN_RELIABILITY, PROBE_SHOW_COUNT, PROBE_MIN_BALANCE (минимум для сравнения с балансом и
+кредитом, USD; по умолчанию 2.0). HF_TOKEN необязателен: без него проверка файлов модели
 пропускается.
 """
 from __future__ import annotations
@@ -53,6 +56,7 @@ if str(REPO_ROOT) not in sys.path:
 from Generate.core.vast_client import (  # noqa: E402
     ENV_KEY_NAME,
     PATH_BUNDLES,
+    PATH_USER,
     OfferFilter,
     VastClient,
     VastError,
@@ -68,6 +72,10 @@ DEFAULT_MAX_PRICE = 0.55
 DEFAULT_MIN_INET_MBPS = 800.0
 DEFAULT_MIN_RELIABILITY = 0.95
 DEFAULT_SHOW_COUNT = 5
+DEFAULT_MIN_BALANCE = 2.0
+
+# Поля ответа аккаунта, которые печатаются и попадают в probe_result.json. Других полей нет.
+ACCOUNT_FIELDS = ("balance", "credit")
 
 # Поля, по которым печатается статистика. Значения сырые, без пересчёта единиц.
 PRICE_FIELDS = (
@@ -209,6 +217,14 @@ def _read_inputs() -> tuple[OfferFilter, int]:
     return offer_filter, show_count
 
 
+def _read_min_balance() -> float:
+    """Минимум для сравнения с балансом и кредитом, USD: конечное число, не отрицательное."""
+    min_balance = _env_float("PROBE_MIN_BALANCE", DEFAULT_MIN_BALANCE)
+    if min_balance < 0:
+        raise ProbeInputError("PROBE_MIN_BALANCE не может быть отрицательным")
+    return min_balance
+
+
 def _filter_text(f: OfferFilter) -> str:
     return (
         f"GPU «{f.gpu_name or 'любая'}», цена {f.min_price}–{f.max_price} USD/ч, "
@@ -256,6 +272,38 @@ def _sanitize(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize(v) for v in value]
     return value
+
+
+def _check_account(client: VastClient, min_balance: float) -> dict[str, Any]:
+    """Баланс и кредит аккаунта: один GET на PATH_USER через _request, только чтение.
+    VastClient.get_balance_usd не подходит: он требует баланс и не читает кредит.
+    Возвращает блок для probe_result.json: balance и credit (число или null) и использованный минимум."""
+    account: dict[str, Any] = {"balance": None, "credit": None, "min_balance_usd": min_balance}
+    say("=== Проверка счёта Vast ===")
+    try:
+        data = client._request("GET", PATH_USER)
+    except VastError as exc:
+        err(f"Сбой запроса счёта Vast: {exc}")
+        say("Баланс и кредит не получены; остальные проверки выполняются.")
+        return account
+    if not isinstance(data, dict):
+        say(f"Ответ счёта не является объектом JSON: тип {type(data).__name__}")
+        say("Баланс и кредит не получены; остальные проверки выполняются.")
+        return account
+    for field in ACCOUNT_FIELDS:
+        if field not in data:
+            say(f"{field}: поля нет в ответе")
+            continue
+        value = data[field]
+        if not _is_number(value):
+            say(f"{field}: значение не является конечным числом")
+            continue
+        number = float(value)
+        account[field] = number
+        say(f"{field}: {number} USD")
+        verdict = "да" if number >= min_balance else "нет"
+        say(f"{field}: достаточно для минимума {min_balance} USD: {verdict}")
+    return account
 
 
 def _vast_path_note(code: int) -> str | None:
@@ -450,6 +498,7 @@ def main() -> int:
 
     try:
         offer_filter, show_count = _read_inputs()
+        min_balance = _read_min_balance()
     except ProbeInputError as exc:
         err(f"Ошибка входных параметров: {exc}. Проверка не запущена.")
         return 2
@@ -527,21 +576,26 @@ def main() -> int:
         )
         say(f"Строка итога поиска: {summary or 'не получена'}")
 
-        # 3. Проверка путей Vast (GET на несуществующий экземпляр). Код выхода не меняет.
+        # 3. Баланс и кредит аккаунта (GET на PATH_USER). Код выхода не меняет.
+        say()
+        account = _check_account(client, min_balance)
+
+        # 4. Проверка путей Vast (GET на несуществующий экземпляр). Код выхода не меняет.
         say()
         checks["vast_instance_endpoints"] = _check_vast_paths(
             client._base_url, client._timeout, key
         )
 
-    # 4. Проверка файлов модели Hugging Face (HEAD). Код выхода не меняет.
+    # 5. Проверка файлов модели Hugging Face (HEAD). Код выхода не меняет.
     say()
     checks["hf_model_files"] = _check_hf_files(hf_token)
 
-    # Файл: сырой ответ, первые 200 предложений, проверки; без полей с ключами, токенами и секретами.
+    # Файл: сырой ответ, первые 200 предложений, проверки, два поля счёта; без полей с ключами, токенами и секретами.
     payload: Any = dict(raw) if isinstance(raw, dict) else {"response": raw}
     if isinstance(payload.get("offers"), list):
         payload["offers"] = payload["offers"][:RESULT_OFFERS_LIMIT]
     payload["checks"] = checks
+    payload["account"] = account
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")
