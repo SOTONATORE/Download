@@ -761,7 +761,7 @@ def test_status_message_is_redacted_before_log(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     hf_fake = "hf-fake-SECRET-554433"
     monkeypatch.setenv("HF_TOKEN", hf_fake)
-    # секреты в начале текста: при обрезке до 200 символов они должны остаться в строке лога
+    # секреты в начале текста: в строке лога они должны быть уже замаскированы
     msg = f"token={TOKEN} hf={hf_fake} {CDI_MSG}"
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
     rig.vast.script[1] = [("loading", msg)]
@@ -773,18 +773,29 @@ def test_status_message_is_redacted_before_log(tmp_path, monkeypatch, caplog):
     assert summary.completed == 1
 
 
-def test_status_message_is_cut_to_200_chars_in_one_line(tmp_path, monkeypatch, caplog):
+def test_status_message_over_200_chars_is_logged_in_full_and_redacted(tmp_path, monkeypatch, caplog):
+    """Длинный текст ошибки попадает в строку лога целиком; секрет в его хвосте маскируется."""
     caplog.set_level(logging.INFO)
-    long_msg = "CDI " + "длинный текст " * 40 + "\nвторая строка"
+    fake_hf = "hf-fake-TAIL-554466"
+    monkeypatch.setenv("HF_TOKEN", fake_hf)
+    long_msg = ("CDI " + "длинный текст " * 40 + "\nвторая строка; "
+                + f"hf={fake_hf}" + " конец ошибки")
+    assert len(long_msg) > 200
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
     rig.vast.script[1] = [("loading", long_msg)]
-    rig.run()
+    summary = rig.run()
 
     line = next(r.getMessage() for r in caplog.records if "старт не удался" in r.getMessage())
     assert "\n" not in line
     m = re.search(r"; текст: (.*)\)\. Карта снимается", line)
     assert m is not None
-    assert len(m.group(1)) == orch.START_MSG_LIMIT and m.group(1).endswith("…")
+    text = m.group(1)
+    assert len(text) > 200                                   # без обрезки
+    assert text.startswith("CDI длинный текст")
+    assert text.endswith("вторая строка; hf=*** конец ошибки")  # хвост на месте, секрет замаскирован
+    assert fake_hf not in caplog.text
+    _no_secrets(caplog.text)
+    assert summary.completed == 1
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -799,11 +810,23 @@ def test_start_markers_match_case_insensitively(text, expected):
     assert orch._has_start_marker(text) is expected
 
 
-def test_clip_msg_is_one_line_and_bounded():
-    assert orch._clip_msg("a  b\n c") == "a b c"
-    assert orch._clip_msg("x" * 200) == "x" * 200
-    cut = orch._clip_msg("x" * 201)
-    assert len(cut) == orch.START_MSG_LIMIT and cut.endswith("…")
+def test_one_line_collapses_whitespace_and_never_cuts():
+    assert orch._one_line("a  b\n c") == "a b c"
+    long_text = "x" * 1000
+    assert orch._one_line(long_text) == long_text
+
+
+def test_empty_verified_pool_rents_nothing(tmp_path, monkeypatch, caplog):
+    """Пустой пул (поиск с verified не нашёл предложений): карта не арендуется, запуск
+    завершается по существующей логике (срок job_deadline_min), непроверенный хост не берётся."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), job_deadline_min=5)
+    rig.vast.offers = []
+    summary = rig.run()
+
+    assert rig.vast.created == []
+    assert "Подходящих предложений Vast нет, повтор позже." in caplog.text
+    assert summary.completed == 0
 
 
 def test_failed_start_machine_and_offer_are_not_rented_again(tmp_path, monkeypatch):

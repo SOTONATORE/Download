@@ -63,6 +63,33 @@ def test_missing_key_is_error():
     _assert_rejected(raw, "отсутствует обязательный ключ «fps»")
 
 
+# ---------------------------------------------------------------- verified (производственный фильтр Vast)
+
+def test_verified_default_file_is_true():
+    assert cl.load_config().verified is True
+
+
+def test_verified_false_from_file_is_passed_through():
+    raw = _base()
+    raw["verified"] = False
+    assert cl.parse_config(raw).verified is False
+
+
+def test_verified_missing_key_defaults_to_true():
+    """Fail closed: без ключа фильтр проверенных хостов остаётся включённым."""
+    raw = _base()
+    del raw["verified"]
+    assert cl.parse_config(raw).verified is True
+
+
+def test_verified_missing_key_does_not_hide_other_missing_keys():
+    raw = _base()
+    del raw["verified"]
+    del raw["fps"]
+    err = _assert_rejected(raw, "отсутствует обязательный ключ «fps»")
+    assert "«verified»" not in str(err)
+
+
 def test_secret_like_key_is_refused_with_hint():
     raw = _base()
     raw["vast_api_key"] = "x"
@@ -88,6 +115,8 @@ def test_empty_file_reports_missing_keys():
     ("clip_min_sec", "2.5", "число"),
     ("clip_min_sec", False, "число"),
     ("interruptible", "true", "true или false"),
+    ("verified", "true", "true или false"),       # строка «true» не считается логическим значением
+    ("verified", None, "не может быть пустым"),   # null не превращается молча в умолчание
     ("filename_template", 12, "строка"),
     ("gemini_models", "gemini-3.5-flash-lite", "список строк"),
     ("gemini_models", [1, 2], "список строк"),

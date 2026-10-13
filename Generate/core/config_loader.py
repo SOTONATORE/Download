@@ -20,7 +20,7 @@ from __future__ import annotations
 import difflib
 import re
 import typing
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Optional, get_args, get_origin, get_type_hints
 
@@ -85,6 +85,9 @@ class Config:
     # --- аренда карт Vast.ai ---
     gpu_name: str = _rule()
     interruptible: bool = _rule()
+    # Единственный ключ с умолчанием: отсутствие в файле читается как True (fail closed, SPEC 0.5).
+    # kw_only снимает правило «поля с умолчанием идут после полей без умолчания»; порядок как в файле.
+    verified: bool = field(default=True, kw_only=True)
     min_price_per_hour: float = _rule(ge=0)
     max_price_per_hour: float = _rule(gt=0)
     min_reliability: float = _rule(ge=0, le=1)
@@ -219,6 +222,9 @@ def parse_config(raw: Any, *, source: str = DEFAULT_CONFIG_PATH.name) -> Config:
     values: dict[str, Any] = {}
     for name, f in known.items():
         if name not in raw:
+            if f.default is not MISSING:  # ключ с умолчанием: отсутствие равно значению по умолчанию
+                values[name] = f.default
+                continue
             problems.append(f"отсутствует обязательный ключ «{name}»")
             continue
         try:

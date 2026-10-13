@@ -367,6 +367,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         min_inet_mbps=cfg.min_inet_mbps,
         max_inet_price_per_tb=cfg.max_inet_price_per_tb,
         interruptible=cfg.interruptible,
+        verified=cfg.verified,
     )
 
     try:

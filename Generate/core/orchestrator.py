@@ -78,7 +78,6 @@ _FAILED_STATUSES = frozenset({"failed", "error"})
 # Сравнение без учёта регистра и по подстроке. Другие ошибки старта этим списком не покрыты:
 # они по-прежнему снимаются таймаутом молчащего хоста.
 START_FAILURE_MARKERS = ("failed to create", "OCI runtime", "CDI", "shim")
-START_MSG_LIMIT = 200  # предел длины текста статуса в строке лога, символов (с «…»)
 START_FAILURE_REASON = "старт карты не удался"
 
 # Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
@@ -172,12 +171,9 @@ def _has_start_marker(text: str) -> bool:
     return any(marker.lower() in low for marker in START_FAILURE_MARKERS)
 
 
-def _clip_msg(text: str, limit: int = START_MSG_LIMIT) -> str:
-    """Текст в одну строку не длиннее limit символов; если обрезан, последний символ «…»."""
-    flat = " ".join(text.split())
-    if len(flat) <= limit:
-        return flat
-    return flat[:limit - 1] + "…"
+def _one_line(text: str) -> str:
+    """Текст в одну строку: пробельные символы сворачиваются, длина не ограничивается."""
+    return " ".join(text.split())
 
 
 class Orchestrator:
@@ -649,8 +645,8 @@ class Orchestrator:
         by_message = bool(raw_msg) and _has_start_marker(raw_msg)
         if not (by_transition or by_message):
             return False
-        # маскирование до обрезки: токен, обрезанный посередине, перестал бы распознаваться
-        text = _clip_msg(self._mask_remote(raw_msg))
+        # маскирование всего текста до сворачивания пробелов (SPEC 0.1); текст не обрезается
+        text = _one_line(self._mask_remote(raw_msg))
         detail = f"статус «{prev_status or 'неизвестно'}» → «{new_status or 'неизвестно'}»"
         if text:
             detail += f"; текст: {text}"

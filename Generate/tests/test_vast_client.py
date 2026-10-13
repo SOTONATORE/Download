@@ -67,6 +67,15 @@ def test_offer_filter_defaults():
     assert f.max_inet_price_per_tb == 4.1
 
 
+def test_build_query_verified_key_only_when_flag_is_true():
+    on = vc.VastClient._build_query(OfferFilter(verified=True))
+    off = vc.VastClient._build_query(OfferFilter(verified=False))
+    assert on["verified"] == {"eq": True}
+    assert "verified" not in off
+    # флаг меняет только это условие: остальной запрос тот же
+    assert {k: v for k, v in on.items() if k != "verified"} == off
+
+
 def test_missing_key_raises(monkeypatch):
     monkeypatch.delenv(ENV_KEY_NAME, raising=False)
     with pytest.raises(VastInputError) as e:

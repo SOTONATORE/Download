@@ -295,6 +295,24 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
     assert f.max_inet_price_per_tb == 3.0
 
 
+def test_run_default_offer_filter_is_verified(capsys, run_env, missing_file):
+    """Производственный поиск берёт verified из config.default.yaml: по умолчанию true."""
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["offer_filter"].verified is True
+
+
+def test_run_verified_false_from_config_reaches_offer_filter(capsys, run_env, missing_file, tmp_path):
+    """Значение verified из файла конфигурации доходит до OfferFilter без изменений."""
+    text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "\nverified: true\n" in text
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
+    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg))) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["offer_filter"].verified is False
+
+
 def test_run_default_card_params(capsys, run_env, missing_file):
     """Без флагов docker_image/disk_gb/silent_host_timeout_min получают значения по умолчанию."""
     assert cli.main(_run_args(DATA, missing_file)) == 0
