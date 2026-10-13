@@ -288,6 +288,28 @@ def test_get_instance_running_and_loading(key):
     assert info2.actual_status == "loading" and info2.direct_port is None
 
 
+def test_status_msg_is_read_when_text(key):
+    d = inst(7, "created")
+    d["status_msg"] = "Error response from daemon: failed to create shim task"
+    c = make(lambda r: httpx.Response(200, json={"instances": d}))
+    info = c.get_instance(7)
+    assert info.status_msg == "Error response from daemon: failed to create shim task"
+    assert info.actual_status == "created"
+
+
+def test_status_msg_missing_or_not_text_is_empty(key):
+    """Поля нет или значение не строка: текста нет, остальные поля читаются как раньше."""
+    missing = make(lambda r: httpx.Response(200, json={"instances": inst(8, "loading")}))
+    info = missing.get_instance(8)
+    assert info.status_msg == "" and info.actual_status == "loading"
+    for value in (None, 123, {"text": "CDI"}, ["CDI"]):
+        d = inst(9, "loading")
+        d["status_msg"] = value
+        c = make(lambda r, d=d: httpx.Response(200, json={"instances": d}))
+        info = c.get_instance(9)
+        assert info.status_msg == "" and info.actual_status == "loading"
+
+
 def test_destroy_and_destroy_by_label(key):
     deleted = []
 

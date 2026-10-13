@@ -62,6 +62,11 @@ PATH_USER = "/api/v0/users/current/"         # GET: кредит аккаунт�
 # «цена трафика не разобрана» (fail-closed).
 INET_UP_COST_FIELD = "inet_up_cost"        # UNVERIFIED в ответе API; USD за ГБ по vast-cli
 INET_DOWN_COST_FIELD = "inet_down_cost"    # UNVERIFIED в ответе API; USD за ГБ по vast-cli
+# Текст статуса экземпляра (ошибка рантайма при неудачном старте, SPEC 8.2).
+# UNVERIFIED: имя поля не найдено ни в репозитории, ни в производственном логе; официальный
+# vast.py недоступен (403 политики egress, 13.10.2026). Поля нет или значение не строка:
+# status_msg = "" и правило по тексту статуса не срабатывает (fail-closed).
+STATUS_MSG_FIELD = "status_msg"
 # Пересчёт USD за ГБ в USD за ТБ: коэффициент 1024, как у vast-cli при выводе цены за ТБ.
 # UNVERIFIED: при десятичном ТБ (1000 ГБ) цена была бы примерно на 2.3% ниже.
 GB_PER_TB = 1024.0
@@ -124,6 +129,7 @@ class InstanceInfo:
     ssh_host: Optional[str] = None
     ssh_port: Optional[int] = None
     dph: float = 0.0
+    status_msg: str = ""      # текст статуса (см. STATUS_MSG_FIELD); "" если поля нет
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -438,6 +444,7 @@ class VastClient:
             if isinstance(mapped, list) and mapped and isinstance(mapped[0], dict):
                 direct_port = _to_int(mapped[0].get("HostPort"))
         label = d.get("label")
+        raw_msg = d.get(STATUS_MSG_FIELD)
         return InstanceInfo(
             instance_id=_to_int(d.get("id")) or 0,
             actual_status=str(d.get("actual_status") or ""),
@@ -448,6 +455,8 @@ class VastClient:
             ssh_host=d.get("ssh_host") or None,
             ssh_port=_to_int(d.get("ssh_port")),
             dph=_to_float(d.get("dph_total")),
+            # не строка (или поля нет) значит текста нет: иначе в проверку попал бы repr объекта
+            status_msg=raw_msg if isinstance(raw_msg, str) else "",
             raw=d,
         )
 

@@ -71,6 +71,16 @@ LOG_LEVELS = ("INFO", "DEBUG")
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
 
+# Маркеры ошибки контейнерного рантайма в тексте статуса Vast (SPEC 8.2, неудачный старт).
+# Список основан на одной наблюдаемой ошибке (карта 55771098, хост 362355, 13.10.2026):
+# «Error response from daemon: failed to create task for container: failed to create shim task:
+# OCI runtime create failed: … failed to inject CDI devices: unresolvable CDI devices … gpu=2: unknown».
+# Сравнение без учёта регистра и по подстроке. Другие ошибки старта этим списком не покрыты:
+# они по-прежнему снимаются таймаутом молчащего хоста.
+START_FAILURE_MARKERS = ("failed to create", "OCI runtime", "CDI", "shim")
+START_MSG_LIMIT = 200  # предел длины текста статуса в строке лога, символов (с «…»)
+START_FAILURE_REASON = "старт карты не удался"
+
 # Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
 # Тот же набор шаблонов, что в worker/server.py (воркер собирается отдельно, модуль не импортируется).
 _SECRET_PATTERNS = (
@@ -142,6 +152,8 @@ class _CardSlot:
     task: Optional[_Task] = None
     log_next: Optional[int] = None    # курсор логов: номер последней строки, полученной с карты
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
+    offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
+    saw_loading: bool = False         # Vast хотя бы раз показал «loading»: старт начался (SPEC 8.2)
 
 
 def _prompt_ready(entry) -> bool:
@@ -152,6 +164,20 @@ def _prompt_ready(entry) -> bool:
             and bool(str(entry.get("prompt", "")).strip())
             and isinstance(num_frames, int) and not isinstance(num_frames, bool)
             and num_frames > 0)
+
+
+def _has_start_marker(text: str) -> bool:
+    """Есть ли в тексте статуса маркер ошибки рантайма (без учёта регистра, по подстроке)."""
+    low = text.lower()
+    return any(marker.lower() in low for marker in START_FAILURE_MARKERS)
+
+
+def _clip_msg(text: str, limit: int = START_MSG_LIMIT) -> str:
+    """Текст в одну строку не длиннее limit символов; если обрезан, последний символ «…»."""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit - 1] + "…"
 
 
 class Orchestrator:
@@ -560,7 +586,7 @@ class Orchestrator:
         gen = self._gens.get(index, 0) + 1
         self._gens[index] = gen
         self._slots[index] = _CardSlot(index, gen, inst_id, offer.machine_id,
-                                       offer.price_per_hr, now)
+                                       offer.price_per_hr, now, offer_id=offer.offer_id)
         self._cards_rented += 1
         log.info("Арендована карта %d по предложению %d (слот %d, поколение %d): %.4f USD/ч.",
                  inst_id, offer.offer_id, index, gen, offer.price_per_hr)
@@ -608,6 +634,37 @@ class Orchestrator:
         except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
             log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
+    def _check_start_failure(self, slot: _CardSlot, prev_status: str, info: InstanceInfo) -> bool:
+        """Неудачный старт карты (SPEC 8.2). Возвращает True, если карта снята.
+
+        Судится только после первого «loading» (вызывающий код проверяет saw_loading).
+        Признаки, любой из двух: статус ушёл из «loading» (или «running») в другое непустое
+        состояние, например «created»; текст статуса содержит маркер START_FAILURE_MARKERS.
+        Пустой статус и отсутствующий текст ни одного признака не дают: карта ждёт по старому
+        правилу (таймаут молчащего хоста). Снятие идёт через _retire(bad=True), без второго пути.
+        """
+        new_status = info.actual_status
+        raw_msg = (info.status_msg or "").strip()
+        by_transition = bool(new_status) and new_status not in ("loading", "running")
+        by_message = bool(raw_msg) and _has_start_marker(raw_msg)
+        if not (by_transition or by_message):
+            return False
+        # маскирование до обрезки: токен, обрезанный посередине, перестал бы распознаваться
+        text = _clip_msg(self._mask_remote(raw_msg))
+        detail = f"статус «{prev_status or 'неизвестно'}» → «{new_status or 'неизвестно'}»"
+        if text:
+            detail += f"; текст: {text}"
+        if slot.machine_id:
+            host = f"хост {slot.machine_id} исключён из этого запуска"
+        else:
+            host = "номер хоста неизвестен, исключено только предложение"
+        log.error("Карта %d: старт не удался (%s). Карта снимается, %s.",
+                  slot.instance_id, detail, host)
+        if slot.offer_id:
+            self._bad_offers.add(slot.offer_id)
+        self._retire(slot, START_FAILURE_REASON, bad=True)
+        return True
+
     # --- шаг по карте ---------------------------------------------------------
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
@@ -618,6 +675,7 @@ class Orchestrator:
             except VastError as exc:
                 log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
             if info is not None:
+                prev_status = slot.vast_status
                 # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
                 if info.actual_status != slot.vast_status:
                     slot.vast_status = info.actual_status
@@ -625,6 +683,11 @@ class Orchestrator:
                              info.actual_status or "неизвестно")
                 if info.actual_status == "exited" or info.intended_status == "stopped":
                     self._retire(slot, "карта остановлена хостом", bad=True)
+                    return
+                if info.actual_status == "loading":
+                    slot.saw_loading = True
+                # до первого «loading» карта не судится по признакам неудачного старта
+                if slot.saw_loading and self._check_start_failure(slot, prev_status, info):
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"

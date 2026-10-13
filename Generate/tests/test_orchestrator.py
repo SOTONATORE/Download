@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import deque
 import sys
 import types
@@ -106,6 +107,9 @@ class FakeVast:
         self.create_exc = None
         self.fail_offers: set = set()   # предложения, создание которых завершается ошибкой
         self.label_exc = None
+        # предложение -> сценарий опросов [(actual_status, status_msg), ...]; последний шаг повторяется
+        self.script: dict = {}
+        self._polls: dict = {}
         self._offer_of: dict = {}
         self._next = 100
 
@@ -127,7 +131,19 @@ class FakeVast:
         return self._next
 
     def get_instance(self, instance_id):
-        stuck = self._offer_of.get(instance_id) in self.stuck_offers
+        offer = self._offer_of.get(instance_id)
+        if offer in self.script:
+            steps = self.script[offer]
+            i = self._polls.get(instance_id, 0)
+            self._polls[instance_id] = i + 1
+            status, msg = steps[min(i, len(steps) - 1)]
+            up = status == "running"
+            extra = {} if msg is None else {"status_msg": msg}   # None: поля статуса нет совсем
+            return vc.InstanceInfo(
+                instance_id=instance_id, actual_status=status, intended_status="running",
+                public_ip="10.0.0.1" if up else None, direct_port=18000 if up else None,
+                **extra)
+        stuck = offer in self.stuck_offers
         return vc.InstanceInfo(
             instance_id=instance_id,
             actual_status="loading" if stuck else "running",
@@ -642,3 +658,190 @@ def test_new_parameters_reach_vast_and_silent_timeout(tmp_path, monkeypatch, cap
     assert "хост не вышел на связь за 2 мин" in caplog.text
     assert summary.completed == 1 and summary.exit_code == 0
     _no_secrets(caplog.text)
+
+
+# ---------------------------------------------------------------------------
+# Неудачный старт карты (SPEC 8.2): снятие сразу, хост не арендуется снова в этом запуске
+# ---------------------------------------------------------------------------
+
+START_REASON = orch.START_FAILURE_REASON
+CDI_MSG = ("Error response from daemon: failed to create task for container: failed to create "
+           "shim task: OCI runtime create failed: failed to inject CDI devices: unresolvable CDI "
+           "devices nvidia.com/gpu=2: unknown")
+TWO_OFFERS = [make_offer(1, 11, price=0.2), make_offer(2, 22, price=0.3)]
+
+
+def _spy_retire(orc):
+    """Записывает каждое снятие карты: причину, bad, хост, время создания и время снятия."""
+    calls: list = []
+    original = orc._retire
+
+    def spy(slot, reason, *, bad=False):
+        calls.append({"instance": slot.instance_id, "machine": slot.machine_id,
+                      "reason": reason, "bad": bad, "created": slot.created, "at": orc.clock()})
+        return original(slot, reason, bad=bad)
+
+    orc._retire = spy
+    return calls
+
+
+def test_loading_then_created_retires_card_at_once(tmp_path, monkeypatch, caplog):
+    """Статус поля нет совсем (None): работает только правило перехода loading -> created."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("created", None), ("loading", None), ("created", None)]
+    calls = _spy_retire(rig.orc)
+    summary = rig.run()
+
+    first = calls[0]
+    assert first["reason"] == START_REASON and first["bad"] is True
+    assert first["instance"] == rig.vast.created[0]["id"]
+    assert first["at"] - first["created"] <= 60          # сразу, а не через 20 минут молчания
+    assert rig.vast.created[0]["id"] in rig.vast.destroyed
+    assert 11 in rig.orc._bad_machines                   # хост 11 исключён из этого запуска
+    assert [c["offer_id"] for c in rig.vast.created] == [1, 2]
+    assert summary.completed == 1 and summary.exit_code == 0
+    assert "старт не удался (статус «loading» → «created»)" in caplog.text
+    assert "хост 11 исключён из этого запуска" in caplog.text
+
+
+def test_created_only_is_not_judged_as_failed_start(tmp_path, monkeypatch, caplog):
+    """Карта ни разу не была в loading: новое правило её не трогает, даже с текстом CDI."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS), silent_host_timeout_min=1)
+    rig.vast.script[1] = [("created", CDI_MSG)]
+    calls = _spy_retire(rig.orc)
+    summary = rig.run()
+
+    assert calls[0]["reason"] == "хост не вышел на связь за 1 мин"   # старое правило, не новое
+    assert calls[0]["bad"] is True
+    assert START_REASON not in caplog.text and "старт не удался" not in caplog.text
+    assert summary.completed == 1
+
+
+def test_normal_start_loading_running_is_unchanged(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.vast.script[1] = [("created", None), ("loading", None), ("running", None)]
+    calls = _spy_retire(rig.orc)
+    summary = rig.run()
+
+    assert summary.completed == 1 and summary.exit_code == 0
+    assert len(rig.vast.created) == 1
+    assert all(not c["bad"] for c in calls)              # ни одного аварийного снятия
+    assert rig.orc._bad_machines == set() and rig.orc._bad_offers == set()
+    assert "старт не удался" not in caplog.text
+    assert "healthcheck OK" in caplog.text
+
+
+def test_cdi_message_while_loading_retires_at_once(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("created", None), ("loading", CDI_MSG)]
+    calls = _spy_retire(rig.orc)
+    summary = rig.run()
+
+    assert calls[0]["reason"] == START_REASON and calls[0]["bad"] is True
+    assert calls[0]["at"] - calls[0]["created"] <= 30    # первый же опрос после loading
+    assert 11 in rig.orc._bad_machines
+    assert summary.completed == 1
+    assert "старт не удался (статус «created» → «loading»; текст: Error response from daemon" in caplog.text
+
+
+def test_unknown_previous_status_is_named_in_log(tmp_path, monkeypatch, caplog):
+    """Первый же опрос уже «loading» (предыдущего статуса нет): в строке «неизвестно», не пусто."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("loading", CDI_MSG)]
+    rig.run()
+    assert "старт не удался (статус «неизвестно» → «loading»; текст:" in caplog.text
+
+
+def test_status_message_is_redacted_before_log(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    hf_fake = "hf-fake-SECRET-554433"
+    monkeypatch.setenv("HF_TOKEN", hf_fake)
+    # секреты в начале текста: при обрезке до 200 символов они должны остаться в строке лога
+    msg = f"token={TOKEN} hf={hf_fake} {CDI_MSG}"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("loading", msg)]
+    summary = rig.run()
+
+    _no_secrets(caplog.text)
+    assert hf_fake not in caplog.text
+    assert "token=***" in caplog.text and "hf=***" in caplog.text
+    assert summary.completed == 1
+
+
+def test_status_message_is_cut_to_200_chars_in_one_line(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    long_msg = "CDI " + "длинный текст " * 40 + "\nвторая строка"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("loading", long_msg)]
+    rig.run()
+
+    line = next(r.getMessage() for r in caplog.records if "старт не удался" in r.getMessage())
+    assert "\n" not in line
+    m = re.search(r"; текст: (.*)\)\. Карта снимается", line)
+    assert m is not None
+    assert len(m.group(1)) == orch.START_MSG_LIMIT and m.group(1).endswith("…")
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Error: failed to create shim task", True),
+    ("OCI runtime create failed", True),
+    ("unresolvable cdi devices", True),
+    ("Shim crashed", True),
+    ("Container is running", False),
+    ("", False),
+])
+def test_start_markers_match_case_insensitively(text, expected):
+    assert orch._has_start_marker(text) is expected
+
+
+def test_clip_msg_is_one_line_and_bounded():
+    assert orch._clip_msg("a  b\n c") == "a b c"
+    assert orch._clip_msg("x" * 200) == "x" * 200
+    cut = orch._clip_msg("x" * 201)
+    assert len(cut) == orch.START_MSG_LIMIT and cut.endswith("…")
+
+
+def test_failed_start_machine_and_offer_are_not_rented_again(tmp_path, monkeypatch):
+    offers = [make_offer(1, 11, price=0.2),    # плохая карта: хост 11, предложение 1
+              make_offer(3, 11, price=0.25),   # другое предложение того же хоста 11
+              make_offer(2, 22, price=0.3)]    # другой хост
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    rig.vast.script[1] = [("loading", None), ("created", None)]
+    summary = rig.run()
+
+    assert [c["offer_id"] for c in rig.vast.created] == [1, 2]   # предложение 3 не арендовано
+    assert 1 in rig.orc._bad_offers and 11 in rig.orc._bad_machines
+    assert summary.completed == 1 and summary.exit_code == 0
+
+
+def test_rent_one_filters_bad_machine_and_bad_offer(tmp_path, monkeypatch):
+    offers = [make_offer(1, 11, price=0.2), make_offer(3, 11, price=0.25),
+              make_offer(2, 22, price=0.3)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    rig.orc._bad_machines.add(11)
+    rig.orc._bad_offers.add(2)
+    assert rig.orc._rent_one(rig.clock.now) == "retry"   # хост 11 и предложение 2 отброшены
+    assert rig.vast.created == []
+
+    rig.orc._bad_offers.clear()
+    assert rig.orc._rent_one(rig.clock.now) == "ok"      # снова доступно только предложение 2
+    assert [c["offer_id"] for c in rig.vast.created] == [2]
+
+
+def test_failed_card_cost_is_stopped_like_any_retirement(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("loading", None), ("created", None)]
+    calls = _spy_retire(rig.orc)
+    rig.run()
+
+    failed_id = rig.vast.created[0]["id"]
+    rec = next(r for r in rig.orc.budget._records if r.instance_id == failed_id)
+    assert not rec.is_active
+    assert rec.stop_time == calls[0]["at"]               # учёт остановлен в момент снятия
+    assert rec.accrued_cost(rec.stop_time + 3600) == rec.accrued_cost(rec.stop_time)
+    assert rec.accrued_cost(rec.stop_time) <= 0.2 * 60 / 3600 + 1e-9
