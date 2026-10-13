@@ -109,7 +109,7 @@ def test_optional_gpu_max_accepts_null_and_number():
 
 def test_int_field_accepts_int_float_field_accepts_int():
     raw = _base()
-    raw["budget_limit_usd"] = 2          # число без дроби допустимо для float (баланс по умолчанию 2.0)
+    raw["budget_limit_usd"] = 2          # число без дроби допустимо для float (кредит по умолчанию 2.0)
     raw["max_cards"] = 2
     cfg = cl.parse_config(raw)
     assert cfg.budget_limit_usd == 2.0 and isinstance(cfg.budget_limit_usd, float)

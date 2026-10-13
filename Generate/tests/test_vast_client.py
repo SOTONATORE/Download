@@ -343,9 +343,9 @@ def test_network_errors(key):
         assert e.value.exit_code == 3
 
 
-# --- баланс аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
+# --- кредит аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
 
-def test_balance_normal_value(key):
+def test_credit_normal_value(key):
     seen = {}
 
     def handler(req):
@@ -353,7 +353,7 @@ def test_balance_normal_value(key):
         seen["path"] = req.url.path
         seen["auth"] = req.headers["Authorization"]
         seen["query"] = str(req.url.query)
-        return httpx.Response(200, json={"id": 1, "email": "x@example.com", "balance": 12.5})
+        return httpx.Response(200, json={"id": 1, "email": "x@example.com", "credit": 12.5})
 
     c = make(handler)
     assert c.get_balance_usd() == 12.5
@@ -362,38 +362,47 @@ def test_balance_normal_value(key):
     assert SECRET not in seen["query"]
 
 
-def test_balance_integer_and_negative_values(key):
-    # целое число допустимо и возвращается как float; отрицательный баланс (задолженность) не ошибка разбора
-    v = make(lambda r: httpx.Response(200, json={"balance": 5})).get_balance_usd()
+def test_credit_is_read_not_balance(key):
+    # balance = 0 при кредите 20 (как в живом пробе): возвращается credit, поле balance не используется
+    v = make(lambda r: httpx.Response(200, json={"id": 1, "balance": 0.0, "credit": 20})).get_balance_usd()
+    assert v == 20.0 and isinstance(v, float)
+
+
+def test_credit_integer_and_negative_values(key):
+    # целое число допустимо и возвращается как float; отрицательный кредит (задолженность) не ошибка разбора
+    v = make(lambda r: httpx.Response(200, json={"credit": 5})).get_balance_usd()
     assert v == 5.0 and isinstance(v, float)
-    assert make(lambda r: httpx.Response(200, json={"balance": -2.5})).get_balance_usd() == -2.5
+    assert make(lambda r: httpx.Response(200, json={"credit": -2.5})).get_balance_usd() == -2.5
 
 
 @pytest.mark.parametrize("payload", [
     {"id": 1},                              # поля нет
-    {"id": 1, "balance": None},
-    {"id": 1, "balance": "12.5"},           # строка: схема Vast описывает число
-    {"id": 1, "balance": "много"},
-    {"id": 1, "balance": True},             # bool не считается числом
+    {"id": 1, "balance": 20.0},             # есть только balance: подменять им credit нельзя
+    {"id": 1, "credit": None},
+    {"id": 1, "credit": "12.5"},            # строка: схема Vast описывает число
+    {"id": 1, "credit": "много"},
+    {"id": 1, "credit": True},              # bool не считается числом
 ])
-def test_balance_non_numeric_or_missing_raises(key, payload):
+def test_credit_non_numeric_or_missing_raises(key, payload):
     c = make(lambda r: httpx.Response(200, json=payload))
     with pytest.raises(VastRuntimeError) as e:
         c.get_balance_usd()
-    # ошибка, а не тихий ноль: неизвестный баланс не должен пропускать запуск
+    # ошибка, а не тихий ноль: неизвестный кредит не должен пропускать запуск
     assert e.value.exit_code == 3
-    assert "баланс" in str(e.value).lower()
+    assert "кредит" in str(e.value).lower()
 
 
-def test_balance_nan_is_rejected(key):
-    # Python разбирает NaN из JSON, но баланс NaN не принимаем: сравнение с порогом было бы ложным
-    c = make(lambda r: httpx.Response(200, content=b'{"id": 1, "balance": NaN}'))
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_credit_non_finite_is_rejected(key, literal):
+    # Python разбирает NaN и Infinity из JSON, но такой кредит не принимаем: сравнение с порогом было бы ложным
+    body = ('{"id": 1, "credit": %s}' % literal).encode()
+    c = make(lambda r: httpx.Response(200, content=body))
     with pytest.raises(VastRuntimeError) as e:
         c.get_balance_usd()
     assert e.value.exit_code == 3
 
 
-def test_balance_unexpected_shape_raises(key):
+def test_credit_unexpected_shape_raises(key):
     c = make(lambda r: httpx.Response(200, json=[12.5]))
     with pytest.raises(VastRuntimeError) as e:
         c.get_balance_usd()
@@ -401,14 +410,14 @@ def test_balance_unexpected_shape_raises(key):
 
 
 @pytest.mark.parametrize("status", [401, 500])
-def test_balance_http_error_raises(key, status):
+def test_credit_http_error_raises(key, status):
     c = make(lambda r: httpx.Response(status, text="error"))
     with pytest.raises(VastRuntimeError) as e:
         c.get_balance_usd()
     assert e.value.exit_code == 3 and str(status) in str(e.value)
 
 
-def test_balance_error_does_not_leak_key(key):
+def test_credit_error_does_not_leak_key(key):
     c = make(lambda r: httpx.Response(401, text=f"bad {r.headers['Authorization']}"))
     with pytest.raises(VastRuntimeError) as e:
         c.get_balance_usd()
@@ -457,7 +466,7 @@ def test_source_has_no_secret_names():
 
 
 # --- пути API и перенаправления ---
-# Регрессия: прод упал на 301 (баланс) и 410 (список экземпляров). Старые тесты проверяли
+# Регрессия: прод упал на 301 (кредит) и 410 (список экземпляров). Старые тесты проверяли
 # только тело ответа, а не точный путь, поэтому сбой не был виден. Здесь путь проверяется точно.
 
 SRT = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
@@ -476,7 +485,7 @@ def test_endpoint_paths_are_exact(key):
         if p == "/api/v0/bundles/":
             return httpx.Response(200, json={"offers": []})
         if p == "/api/v0/users/current/":
-            return httpx.Response(200, json={"balance": 1.0})
+            return httpx.Response(200, json={"credit": 1.0})
         if p == "/api/v1/instances/":
             return httpx.Response(200, json={"instances": []})
         if p == "/api/v0/asks/42/":
@@ -694,12 +703,12 @@ def test_preflight_list_410_stops_before_search_and_rental(key, monkeypatch, tmp
     assert code == 3
     assert "Предстартовая проверка Vast API не пройдена" in cap.err
     assert "GET /api/v1/instances/" in cap.err and "карты не арендованы" in cap.err
-    assert seen == [("GET", "/api/v1/instances/")]       # ни баланса, ни поиска, ни аренды
+    assert seen == [("GET", "/api/v1/instances/")]       # ни кредита, ни поиска, ни аренды
     assert orchestrator_calls == []
     assert SECRET not in cap.err + cap.out
 
 
-def test_preflight_balance_301_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
+def test_preflight_credit_301_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
     cli, orchestrator_calls = cli_run
     seen = []
 
@@ -716,12 +725,12 @@ def test_preflight_balance_301_stops_before_search(key, monkeypatch, tmp_path, c
     cap = capsys.readouterr()
     assert code == 3
     assert "GET /api/v0/users/current/" in cap.err
-    # порядок: список, баланс, и больше ничего (ни /bundles/, ни /asks/)
+    # порядок: список, кредит, и больше ничего (ни /bundles/, ни /asks/)
     assert seen == [("GET", "/api/v1/instances/"), ("GET", "/api/v0/users/current/")]
     assert orchestrator_calls == []
 
 
-def test_preflight_low_balance_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
+def test_preflight_low_credit_stops_before_search(key, monkeypatch, tmp_path, capsys, cli_run):
     cli, orchestrator_calls = cli_run
     seen = []
 
@@ -729,7 +738,8 @@ def test_preflight_low_balance_stops_before_search(key, monkeypatch, tmp_path, c
         seen.append((req.method, req.url.path))
         if req.url.path == "/api/v1/instances/":
             return httpx.Response(200, json={"instances": []})
-        return httpx.Response(200, json={"balance": 1.0})
+        # кредит ниже минимума; balance = 0 не должен ни на что влиять
+        return httpx.Response(200, json={"balance": 0.0, "credit": 1.0})
 
     assert _cli_run(cli, monkeypatch, tmp_path, handler) == 2
     assert [p for _, p in seen] == ["/api/v1/instances/", "/api/v0/users/current/"]
@@ -742,7 +752,7 @@ def test_preflight_all_ok_continues_to_orchestrator(key, monkeypatch, tmp_path, 
     def handler(req):
         if req.url.path == "/api/v1/instances/":
             return httpx.Response(200, json={"instances": []})
-        return httpx.Response(200, json={"balance": 12.5})
+        return httpx.Response(200, json={"balance": 0.0, "credit": 12.5})
 
     assert _cli_run(cli, monkeypatch, tmp_path, handler) == 0
     assert orchestrator_calls == [1]

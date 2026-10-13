@@ -178,7 +178,7 @@ def _cross_checks(v: Mapping[str, Any]) -> list[str]:
     if v["job_deadline_min"] >= ACTIONS_JOB_LIMIT_MIN:
         problems.append(f"«job_deadline_min» должен быть меньше лимита задания "
                         f"GitHub ({ACTIONS_JOB_LIMIT_MIN} мин)")
-    # на запуск должно хватать всего бюджета: баланс не меньше потолка расходов
+    # на запуск должно хватать всего бюджета: кредит (min_balance_usd) не меньше потолка расходов
     if v["min_balance_usd"] < v["budget_limit_usd"]:
         problems.append("«min_balance_usd» не может быть меньше «budget_limit_usd»")
     return problems

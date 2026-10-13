@@ -88,29 +88,30 @@ def _err(text: str) -> None:
 
 
 def _usd_floor(value: float) -> str:
-    """Баланс в USD до цента с округлением вниз: 4.996 не покажется как «5.00» при минимуме 5."""
+    """Кредит в USD до цента с округлением вниз: 4.996 не покажется как «5.00» при минимуме 5."""
     return f"{math.floor(value * 100) / 100:.2f}"
 
 
 def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
-    """Предстартовая проверка баланса Vast.ai (SPEC 8.3, е).
+    """Предстартовая проверка расходуемого кредита Vast.ai (SPEC 8.3, е).
 
+    Кредит берётся через vast.get_balance_usd(), которое читает поле credit (не balance).
     Вызывается до поиска предложений и до любого вызова Gemini. Возвращает None, если
     запуск можно продолжать, иначе код завершения (сообщение уже напечатано):
-    2 — баланса не хватает, 3 — баланс не удалось проверить. В обоих случаях ничего не потрачено.
+    2 — кредита не хватает, 3 — кредит не удалось проверить. В обоих случаях ничего не потрачено.
     """
     try:
-        balance = vast.get_balance_usd()
+        credit = vast.get_balance_usd()
     except VastRuntimeError as e:
         # текст ошибки клиента безопасен: ключ в нём уже замаскирован (SPEC 0.1)
-        _err(f"Не удалось проверить баланс Vast.ai: {e}. "
+        _err(f"Не удалось проверить кредит Vast.ai: {e}. "
              f"Запуск не начат, карты не арендованы.")
         return EXIT_RUNTIME
-    if balance < min_balance_usd:
-        _err(f"Недостаточно средств на Vast.ai: баланс {_usd_floor(balance)} USD, "
+    if credit < min_balance_usd:
+        _err(f"Недостаточно средств на Vast.ai: кредит {_usd_floor(credit)} USD, "
              f"нужно не менее {min_balance_usd:.2f} USD. Пополните баланс и запустите снова.")
         return EXIT_INPUT
-    log.info("Баланс Vast.ai: %s USD, минимум %.2f USD.", _usd_floor(balance), min_balance_usd)
+    log.info("Кредит Vast.ai: %s USD, минимум %.2f USD.", _usd_floor(credit), min_balance_usd)
     return None
 
 
@@ -118,7 +119,7 @@ def _vast_preflight(vast, min_balance_usd: float) -> Optional[int]:
     """Предстартовая проверка Vast API (SPEC 8.3, е): только чтение, до любого поиска и аренды.
 
     Сначала эндпоинт списка экземпляров: без него уборка (kill-cards) не сможет найти карты,
-    и ошибка выплыла бы уже после аренды. Затем баланс. Возвращает None (можно продолжать)
+    и ошибка выплыла бы уже после аренды. Затем кредит. Возвращает None (можно продолжать)
     или код завершения; сообщение уже напечатано. В обоих случаях ничего не арендовано.
     """
     try:
@@ -369,7 +370,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     try:
-        # предстартовая проверка Vast API и баланса: до поиска предложений и любого вызова Gemini
+        # предстартовая проверка Vast API и кредита: до поиска предложений и любого вызова Gemini
         code = _vast_preflight(vast, cfg.min_balance_usd)
         if code is not None:
             return code
@@ -533,7 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--budget-limit", type=float, default=None,
                        help="жёсткий потолок расходов на запуск, USD; по умолчанию из конфига")
     run_p.add_argument("--min-balance-usd", type=float, default=None,
-                       help="минимальный баланс Vast.ai для старта, USD; по умолчанию из конфига")
+                       help="минимальный кредит Vast.ai для старта, USD; по умолчанию из конфига")
     run_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
     run_p.add_argument("--style-brief", default=None,

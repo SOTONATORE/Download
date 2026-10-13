@@ -136,17 +136,17 @@ def test_unexpected_exception_gives_3(capsys, monkeypatch):
 class FakeVast:
     """Подмена VastClient: ключ не читается, сети нет."""
     instances = []
-    balance = 10.0        # что вернёт предстартовая проверка баланса
-    balance_error = None  # если задано, проверка баланса падает с этой ошибкой
+    credit = 10.0        # что вернёт предстартовая проверка кредита (клиент читает поле credit)
+    credit_error = None  # если задано, проверка кредита падает с этой ошибкой
 
     def __init__(self, *a, **k):
         self.closed = False
         FakeVast.instances.append(self)
 
     def get_balance_usd(self):
-        if FakeVast.balance_error is not None:
-            raise FakeVast.balance_error
-        return FakeVast.balance
+        if FakeVast.credit_error is not None:
+            raise FakeVast.credit_error
+        return FakeVast.credit
 
     def check_instances_endpoint(self):
         """Предстартовая проверка эндпоинта списка (по умолчанию успешна)."""
@@ -161,8 +161,8 @@ def run_env(monkeypatch):
     """Подменяет всё внешнее для команды run; возвращает список вызовов оркестратора."""
     calls = []
     FakeVast.instances = []
-    FakeVast.balance = 10.0
-    FakeVast.balance_error = None
+    FakeVast.credit = 10.0
+    FakeVast.credit_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
                         lambda profile, brief, batch_size: ("CFG", profile, brief))
@@ -348,68 +348,68 @@ def test_run_vast_key_missing_gives_2(capsys, run_env, missing_file, monkeypatch
     assert run_env.calls == []
 
 
-# ---------------------------------------------------------------- предстартовая проверка баланса
+# ---------------------------------------------------------------- предстартовая проверка кредита
 
 TESTKEY = "TESTKEY-12345"
 
 
-def test_balance_below_minimum_gives_2(capsys, run_env, missing_file):
-    FakeVast.balance = 1.5
+def test_credit_below_minimum_gives_2(capsys, run_env, missing_file):
+    FakeVast.credit = 1.5
     code = cli.main(_run_args(DATA, missing_file))
     err = capsys.readouterr().err
     assert code == 2
-    assert "Недостаточно средств на Vast.ai: баланс 1.50 USD, нужно не менее 2.00 USD" in err
+    assert "Недостаточно средств на Vast.ai: кредит 1.50 USD, нужно не менее 2.00 USD" in err
     assert "Пополните баланс и запустите снова" in err
     # до Gemini и до аренды карт дело не доходит: оркестратор не вызывается
     assert run_env.calls == []
     assert FakeVast.instances[0].closed
 
 
-def test_balance_query_fails_gives_3(capsys, run_env, missing_file):
-    FakeVast.balance_error = cli.VastRuntimeError("Vast API вернул HTTP 503: GET /users/current")
+def test_credit_query_fails_gives_3(capsys, run_env, missing_file):
+    FakeVast.credit_error = cli.VastRuntimeError("Vast API вернул HTTP 503: GET /users/current")
     code = cli.main(_run_args(DATA, missing_file))
     cap = capsys.readouterr()
     assert code == 3
-    assert "Не удалось проверить баланс Vast.ai" in cap.err
+    assert "Не удалось проверить кредит Vast.ai" in cap.err
     assert "карты не арендованы" in cap.err
     assert "Traceback" not in cap.err
     assert run_env.calls == []
     assert FakeVast.instances[0].closed
 
 
-def test_balance_sufficient_continues_and_logs(capsys, run_env, missing_file, caplog):
+def test_credit_sufficient_continues_and_logs(capsys, run_env, missing_file, caplog):
     caplog.set_level(logging.INFO, logger="Generate.cli")
-    FakeVast.balance = 12.5
+    FakeVast.credit = 12.5
     code = cli.main(_run_args(DATA, missing_file))
     assert code == 0
     assert len(run_env.calls) == 1
-    assert "Баланс Vast.ai: 12.50 USD, минимум 2.00 USD." in caplog.text
+    assert "Кредит Vast.ai: 12.50 USD, минимум 2.00 USD." in caplog.text
 
 
-def test_balance_equal_to_minimum_continues(capsys, run_env, missing_file):
-    FakeVast.balance = 2.0
+def test_credit_equal_to_minimum_continues(capsys, run_env, missing_file):
+    FakeVast.credit = 2.0
     assert cli.main(_run_args(DATA, missing_file)) == 0
     assert len(run_env.calls) == 1
 
 
 def test_min_balance_flag_reaches_preflight(capsys, run_env, missing_file):
     """Вход --min-balance-usd переопределяет конфиг и действует на проверку."""
-    FakeVast.balance = 8.0
+    FakeVast.credit = 8.0
     code = cli.main(_run_args(DATA, missing_file, "--min-balance-usd", "9.0"))
     assert code == 2
     assert "нужно не менее 9.00 USD" in capsys.readouterr().err
     assert run_env.calls == []
 
 
-def test_balance_refusal_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
+def test_credit_refusal_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
     monkeypatch.setenv(VAST_KEY_ENV, TESTKEY)
-    FakeVast.balance = 1.0
+    FakeVast.credit = 1.0
     assert cli.main(_run_args(DATA, missing_file)) == 2
     cap = capsys.readouterr()
     assert TESTKEY not in cap.out + cap.err
 
 
-def test_balance_http_error_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
+def test_credit_http_error_does_not_leak_key(capsys, run_env, missing_file, monkeypatch):
     """Настоящий клиент: ответ 401, который эхом возвращает заголовок, не выводит ключ (SPEC 0.1)."""
     monkeypatch.setenv(VAST_KEY_ENV, TESTKEY)
 

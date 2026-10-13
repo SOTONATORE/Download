@@ -52,7 +52,7 @@ PATH_BUNDLES = "/api/v0/bundles/"            # POST: поиск предложе
 PATH_ASKS = "/api/v0/asks/{id}/"             # PUT: аренда предложения
 PATH_INSTANCES = "/api/v1/instances/"        # GET: список экземпляров, постраничный (v1)
 PATH_INSTANCE = "/api/v0/instances/{id}/"    # GET, DELETE: один экземпляр
-PATH_USER = "/api/v0/users/current/"         # GET: баланс аккаунта
+PATH_USER = "/api/v0/users/current/"         # GET: кредит аккаунта (поле credit)
 
 # Поля цены сетевого трафика предложения Vast.
 # UNVERIFIED: имена и единица взяты из официального vast-cli (github.com/vast-ai/vast-cli, vast.py):
@@ -254,23 +254,25 @@ class VastClient:
                 f"Vast API вернул не JSON: {method} {path}"
             ) from None
 
-    # --- баланс аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
+    # --- кредит аккаунта (предстартовая проверка, SPEC 8.3 (е)) ---
     def get_balance_usd(self) -> float:
-        """Баланс аккаунта Vast, USD: поле balance ответа GET /api/v0/users/current/.
+        """Расходуемый кредит аккаунта Vast, USD: поле credit ответа GET /api/v0/users/current/.
 
+        Возвращает именно кредит (как «Credit» в консоли), а не поле balance: balance может
+        быть 0 при положительном кредите, и подменять одно поле другим нельзя.
         Поле проверяется строго: отсутствие или нечисловое значение дают VastRuntimeError,
-        а не 0. Неизвестный баланс не должен пропускать запуск с пустым счётом.
-        Отрицательный баланс допустим (означает задолженность) и сравнивается дальше.
+        а не 0. Неизвестный кредит не должен пропускать запуск с пустым счётом.
+        Отрицательный кредит допустим (означает задолженность) и сравнивается дальше.
         """
         data = self._request("GET", PATH_USER)
         if not isinstance(data, dict):
-            raise VastRuntimeError("Vast API вернул неожиданный ответ при проверке баланса")
-        if "balance" not in data:
-            raise VastRuntimeError("В ответе Vast API нет поля баланса (balance)")
-        value = data["balance"]
-        # bool — подкласс int, но «true» баланс не является; строки не принимаем (схема: число)
+            raise VastRuntimeError("Vast API вернул неожиданный ответ при проверке кредита")
+        if "credit" not in data:
+            raise VastRuntimeError("В ответе Vast API нет поля кредита (credit)")
+        value = data["credit"]
+        # bool — подкласс int, но «true» кредитом не является; строки не принимаем (схема: число)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise VastRuntimeError("Поле баланса в ответе Vast API не является числом")
+            raise VastRuntimeError("Поле кредита в ответе Vast API не является числом")
         return float(value)
 
     # --- поиск предложений ---
