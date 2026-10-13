@@ -4,7 +4,10 @@
 (balance) и кредит (credit); печатаются и пишутся в probe_result.json только эти два значения.
 Вызовы:
   • POST /api/v0/bundles/                    — поиск предложений без фильтра verified (filter.verified = False),
-    сырой ответ (тот же запрос, что в production);
+    сырой ответ (тот же запрос, что в production); у каждого предложения этого ответа печатаются значения
+    полей verification и is_vm_deverified (до show_count), а в probe_result.json пишутся в блок
+    verification_fields_unfiltered. Имена полей подтверждены живым ответом; смысл значений UNVERIFIED
+    (проба не сопоставляет их с «verified» или «unverified»);
   • POST /api/v0/bundles/                    — тот же поиск с verified=True (копия фильтра, запрос строится тем же
     VastClient._build_query); нужен только для сверки числа предложений, production не меняется;
   • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
@@ -128,12 +131,20 @@ SNIPPET_LIMIT = 200
 # Сверка с фильтром verified=True (только число предложений и вывод полей).
 # Ключ verified в запросе взят из production-кода (VastClient._build_query); живой ответ Vast
 # на этот ключ в репозитории не проверен: UNVERIFIED.
-# UNVERIFIED: поле подтверждения хоста в предложении Vast в репозитории не подтверждено, имя и
-# значения не проверены живым ответом. Имя не угадывается: печатаются ключи предложения, в которых
-# есть подстрока VERIFY_KEY_MARKER, и их значения у первых предложений. Если таких ключей нет,
-# печатается VERIFY_FIELD_MISSING.
+# Имена полей подтверждения хоста в предложении подтверждены живым ответом без фильтра (ключи
+# verification и is_vm_deverified, прогон 13.10.2026). Смысл их значений НЕ подтверждён: UNVERIFIED.
+# Поиск с verified=True печатает ключи предложения, в которых есть подстрока VERIFY_KEY_MARKER,
+# и их значения у первых предложений. Если таких ключей нет, печатается VERIFY_FIELD_MISSING.
 VERIFY_KEY_MARKER = "verif"
 VERIFY_FIELD_MISSING = "поля verified в предложениях нет"
+
+# Поля подтверждения хоста в предложении из ответа БЕЗ фильтра verified (шаг 1а main()).
+# Имена подтверждены живым ответом. Смысл значений UNVERIFIED: проба выводит значения как есть и
+# не сопоставляет их с «verified» или «unverified» ни в коде, ни в выводе.
+VERIFICATION_FIELDS = ("verification", "is_vm_deverified")
+VERIFICATION_STATUS = "UNVERIFIED"
+VERIFICATION_BLOCK_KEY = "verification_fields_unfiltered"
+FIELD_MISSING_TEXT = "поля нет"
 
 # Значения секретов (ключ Vast, HF_TOKEN): заменяются на «***» во всём выводе.
 # Задаются в main() до первого вывода; самое длинное значение первым.
@@ -519,6 +530,61 @@ def _verify_field_names(offers: list) -> list[str]:
     return sorted(names)
 
 
+def _raw_text(value: Any) -> str:
+    """Сырое значение для печати: JSON null печатается как «null», остальное через str."""
+    return "null" if value is None else str(value)
+
+
+def _verification_fields_unfiltered(offers: list, show_count: int) -> dict[str, Any]:
+    """UNVERIFIED: значения полей verification и is_vm_deverified у предложений ответа без фильтра verified.
+    Печатает первые show_count предложений. Блок для probe_result.json содержит сырые значения у всех
+    предложений, которые пишутся в файл (до RESULT_OFFERS_LIMIT), и признак наличия поля. Значения не
+    сопоставляются с «verified» или «unverified»: их смысл не подтверждён. Не зависит от результата
+    поиска с verified=True и код выхода не меняет."""
+    file_offers = offers[:RESULT_OFFERS_LIMIT]
+    block: dict[str, Any] = {
+        "status": VERIFICATION_STATUS,
+        "fields": list(VERIFICATION_FIELDS),
+        "offers_checked": len(file_offers),
+        "offers": [],
+    }
+    say(f"=== Поля подтверждения хоста в предложениях без фильтра verified ({VERIFICATION_STATUS}) ===")
+    say("Смысл значений не подтверждён (UNVERIFIED): значения выводятся как есть.")
+    if not file_offers:
+        say("Предложений нет: поля подтверждения не проверены.")
+        return block
+
+    dict_count = 0
+    present_counts = {name: 0 for name in VERIFICATION_FIELDS}
+    for index, offer in enumerate(file_offers, start=1):
+        entry: dict[str, Any] = {"index": index}
+        if not isinstance(offer, dict):
+            entry["error"] = "не объект"
+            block["offers"].append(entry)
+            if index <= show_count:
+                say(f"  #{index}: не объект")
+            continue
+        dict_count += 1
+        entry["id"] = offer.get("id")
+        parts = []
+        for name in VERIFICATION_FIELDS:
+            if name in offer:
+                present_counts[name] += 1
+                entry[name] = {"present": True, "value": offer[name]}
+                shown = _snippet(_raw_text(offer[name]))
+            else:
+                entry[name] = {"present": False, "value": None}
+                shown = FIELD_MISSING_TEXT
+            parts.append(f"{name}={shown}")
+        block["offers"].append(entry)
+        if index <= show_count:
+            say(f"  #{index}: id={_value(offer, 'id')}; " + "; ".join(parts))
+
+    for name in VERIFICATION_FIELDS:
+        say(f"{name}: поле есть у {present_counts[name]} из {dict_count}")
+    return block
+
+
 def _check_verified(
     client: VastClient, offer_filter: OfferFilter, count_plain: int, show_count: int
 ) -> tuple[dict[str, Any], bool]:
@@ -601,6 +667,7 @@ def main() -> int:
     failed = False
     checks: dict[str, Any] = {}
     verified_check: dict[str, Any] = {}
+    verification_block: dict[str, Any] = {}
     say("=== Проверка Vast.ai (только чтение) ===")
     say(f"Фильтр: {_filter_text(offer_filter)}")
 
@@ -655,6 +722,10 @@ def main() -> int:
             parts += [f"{f}={_value(offer, f)}" for f in SHOW_OPTIONAL_FIELDS if f in offer]
             say(f"  #{index}: " + "; ".join(parts))
 
+        # 1а. Поля подтверждения хоста (UNVERIFIED) из того же сырого ответа без фильтра: не зависят от
+        # поиска с verified=True. Код выхода не меняет.
+        verification_block = _verification_fields_unfiltered(offers_raw, show_count)
+
         # 1б. Сверка: тот же поиск с verified=True. Результат без фильтра выше не меняется;
         # сбой печатается и даёт код 3 в конце (см. docstring). production-фильтр не меняется.
         verified_check, verified_failed = _check_verified(client, offer_filter, total, show_count)
@@ -686,13 +757,15 @@ def main() -> int:
     say()
     checks["hf_model_files"] = _check_hf_files(hf_token)
 
-    # Файл: сырой ответ, первые 200 предложений, проверки, два поля счёта; без полей с ключами, токенами и секретами.
+    # Файл: сырой ответ, первые 200 предложений, проверки, два поля счёта, блок полей подтверждения
+    # без фильтра (UNVERIFIED); без полей с ключами, токенами и секретами.
     payload: Any = dict(raw) if isinstance(raw, dict) else {"response": raw}
     if isinstance(payload.get("offers"), list):
         payload["offers"] = payload["offers"][:RESULT_OFFERS_LIMIT]
     payload["checks"] = checks
     payload["account"] = account
     payload["search_verified_check"] = verified_check
+    payload[VERIFICATION_BLOCK_KEY] = verification_block
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")
