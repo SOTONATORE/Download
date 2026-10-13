@@ -224,6 +224,183 @@ def test_rpd_exhausted_everywhere_before_first_call(tmp_path):
     assert t.calls == []
 
 
+# ------------------------------------------------ временные ошибки (500/503/504, сеть)
+
+def unavail(status=503, code="UNAVAILABLE"):
+    return GeminiRuntimeError("тестовая временная ошибка сервера", status=status, code=code)
+
+
+def net_fail():
+    return GeminiRuntimeError("Сбой сети при обращении к Gemini (ConnectError).")
+
+
+SWITCH_TEXT = "переход на модель"
+
+
+def _switch_lines(caplog):
+    return [r.getMessage() for r in caplog.records if SWITCH_TEXT in r.getMessage()]
+
+
+@pytest.mark.parametrize("err, expected", [
+    (unavail(500), True),
+    (unavail(503), True),
+    (unavail(504), True),
+    (net_fail(), True),
+    (unavail(502), False),
+    (unavail(503, ""), True),
+    (GeminiRuntimeError("x", status=503, daily_quota=True), False),
+    (GeminiRuntimeError("x", status=429, code="RESOURCE_EXHAUSTED"), False),
+    (GeminiRuntimeError("x", status=400), False),
+    (GeminiRuntimeError("x", status=401), False),
+    (GeminiRuntimeError("x", status=403), False),
+    (GeminiRuntimeError("x", status=404), False),
+])
+def test_is_transient_classification(err, expected):
+    assert go.is_transient(err) is expected
+
+
+def test_503_then_success_same_model_one_warning(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    clock = FakeClock()
+    t = FakeTransport([unavail(), ok([1, 2])])
+    state = run(tmp_path, t, [1, 2], clock=clock)
+    assert t.calls == [M1, M1]
+    assert clock.sleeps == [3.0]
+    assert state["model"] == M1 and read(tmp_path / "prompts.json")["model"] == M1
+    warnings = [r for r in caplog.records
+                if r.name == "Generate.gemini_orchestrator" and r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert _switch_lines(caplog) == []
+
+
+def test_five_503_then_switch_for_rest_of_run(tmp_path, caplog):
+    caplog.set_level(logging.DEBUG)
+    clock = FakeClock()
+    t = FakeTransport([unavail() for _ in range(5)] + [ok([1, 2]), ok([3, 4])])
+    state = run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
+    assert t.calls == [M1] * 5 + [M2, M2]
+    assert clock.sleeps == [3.0, 6.0, 12.0, 24.0]     # без паузы при смене модели
+    assert state["model"] == M2
+    lines = _switch_lines(caplog)
+    assert len(lines) == 1 and M1 in lines[0] and M2 in lines[0]
+
+
+def test_after_switch_transient_on_second_model_does_not_go_back(tmp_path):
+    clock = FakeClock()
+    t = FakeTransport([unavail() for _ in range(5)] + [ok([1, 2]), unavail(), ok([3, 4])])
+    run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
+    assert t.calls[:5] == [M1] * 5
+    assert t.calls[5:] == [M2, M2, M2]
+    assert read(tmp_path / "prompts.json")["model"] == M2
+
+
+def test_fresh_request_gets_five_attempts_on_current_model(tmp_path):
+    clock = FakeClock()
+    replies = [unavail() for _ in range(5)] + [ok([1, 2])] + [unavail() for _ in range(4)] + [ok([3, 4])]
+    t = FakeTransport(replies)
+    run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
+    assert t.calls == [M1] * 5 + [M2] * 6
+    assert clock.sleeps == [3.0, 6.0, 12.0, 24.0] * 2
+
+
+def test_503_on_every_model_raises_after_five_per_model(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv(ENV_NAME, TESTKEY)
+    caplog.set_level(logging.DEBUG)
+    clock = FakeClock()
+    t = FakeTransport([unavail() for _ in range(10)])
+    with pytest.raises(GeminiRuntimeError) as ei:
+        run(tmp_path, t, [1], clock=clock)
+    e = ei.value
+    assert t.calls == [M1] * 5 + [M2] * 5
+    assert e.exit_code == 3 and e.status == 503 and e.code == "UNAVAILABLE" and not e.daily_quota
+    assert "временно недоступен на всех моделях" in str(e)
+    assert clock.sleeps == [3.0, 6.0, 12.0, 24.0] * 2
+    assert TESTKEY not in str(e) and TESTKEY not in caplog.text
+    assert not (tmp_path / "prompts.json").exists()   # ни одного батча не готово: файл не создан
+
+
+def test_last_status_kept_on_final_failure_for_network(tmp_path):
+    t = FakeTransport([net_fail() for _ in range(10)])
+    with pytest.raises(GeminiRuntimeError) as ei:
+        run(tmp_path, t, [1])
+    assert ei.value.status is None and "сбой сети" in str(ei.value)
+
+
+def test_pauses_follow_schedule(tmp_path):
+    clock = FakeClock()
+    t = FakeTransport([unavail() for _ in range(4)] + [ok([1])])
+    run(tmp_path, t, [1], clock=clock)
+    assert clock.sleeps == [3.0, 6.0, 12.0, 24.0]
+
+
+@pytest.mark.parametrize("retry_after, expected", [(2.5, [2.5]), (500.0, [go.MAX_WAIT_SEC])])
+def test_transient_pause_honours_retry_after_capped(tmp_path, retry_after, expected):
+    clock = FakeClock()
+    t = FakeTransport([GeminiRuntimeError("тест", status=503, retry_after=retry_after), ok([1])])
+    run(tmp_path, t, [1], clock=clock)
+    assert clock.sleeps == expected
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_client_errors_raise_at_once_without_switch(tmp_path, status, caplog):
+    caplog.set_level(logging.DEBUG)
+    clock = FakeClock()
+    t = FakeTransport([GeminiRuntimeError("тест", status=status), ok([1])])
+    with pytest.raises(GeminiRuntimeError) as ei:
+        run(tmp_path, t, [1], clock=clock)
+    assert ei.value.status == status
+    assert t.calls == [M1] and clock.sleeps == []
+    assert _switch_lines(caplog) == []
+
+
+def test_network_error_is_transient_fake_transport(tmp_path):
+    clock = FakeClock()
+    t = FakeTransport([net_fail(), ok([1])])
+    run(tmp_path, t, [1], clock=clock)
+    assert t.calls == [M1, M1] and clock.sleeps == [3.0]
+
+
+def test_network_error_from_real_transport_is_retried(tmp_path, monkeypatch):
+    import httpx
+    monkeypatch.setenv(ENV_NAME, TESTKEY)
+    good = json.dumps(ok([1]))
+    seen = []
+
+    def handler(request):
+        seen.append(1)
+        if len(seen) == 1:
+            raise httpx.ConnectError("обрыв соединения", request=request)
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": good}]}}]})
+
+    real = gp.RealTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    clock = FakeClock()
+    run(tmp_path, real, [1], clock=clock)
+    assert len(seen) == 2 and clock.sleeps == [3.0]
+    assert TESTKEY not in (tmp_path / "prompts.json").read_text(encoding="utf-8")
+
+
+def test_limiter_runs_before_every_transient_attempt(tmp_path, monkeypatch):
+    calls = []
+    real_acquire = go.RateLimiter.acquire
+
+    def spy(self, tokens):
+        calls.append(tokens)
+        return real_acquire(self, tokens)
+    monkeypatch.setattr(go.RateLimiter, "acquire", spy)
+    t = FakeTransport([unavail(), unavail(), unavail(), ok([1])])
+    run(tmp_path, t, [1])
+    assert len(calls) == 4 and len(set(calls)) == 1
+
+
+def test_transient_errors_leave_no_key_or_prompt_text_in_logs(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv(ENV_NAME, TESTKEY)
+    caplog.set_level(logging.DEBUG)
+    t = FakeTransport([unavail() for _ in range(5)] + [ok([1]), unavail(504), ok([2])])
+    run(tmp_path, t, [1, 2], cfg=cfg(tmp_path, batch_size=1))
+    assert TESTKEY not in caplog.text and "A wide shot" not in caplog.text
+    assert "HTTP 503, код UNAVAILABLE" in caplog.text
+
+
 # ------------------------------------------------------------------- лимитер
 
 def test_15_rpm_throttling():

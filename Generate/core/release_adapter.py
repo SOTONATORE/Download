@@ -327,16 +327,22 @@ class ReleaseUploader:
         return self.upload_clip(os.path.join(directory, name))
 
     def upload_service_file(self, path: str) -> None:
-        """prompts.json / generated_links.txt: только в основной релиз."""
+        """prompts.json / generated_links.txt: только в основной релиз.
+
+        generated_links.txt нулевой длины (клипов нет) не выкладывается: GitHub отвергает
+        пустой ассет (HTTP 400, Bad Content-Length). prompts.json проверка не касается."""
         self._ensure_prepared()
         name = os.path.basename(path)
         if name not in SERVICE_FILES:
             raise GeminiInputError(f"Не служебный файл: {name}")
+        if name == LINKS_FILENAME and os.path.isfile(path) and os.path.getsize(path) == 0:
+            self._log("Нет готовых клипов: generated_links.txt не выкладывается.")
+            return
         self.store.upload_asset(self.tag, path)
         self._counts[self.tag] = self._counts.get(self.tag, 0) + 1
 
     def links_text(self, repo: str) -> str:
-        """Содержимое generated_links.txt по всем загруженным клипам."""
+        """Содержимое generated_links.txt по всем загруженным клипам; пустая строка, если клипов нет."""
         names = sorted(self.asset_tags,
                        key=lambda n: (parse_clip_num(n, self.template) or 0, n))
         return create_generated_links(repo, self.tag, names, self.asset_tags)

@@ -158,6 +158,46 @@ def test_links_text_sorted_with_parts():
     assert lines[0].endswith(f"{TAG}-part2/2.mp4") and lines[1].endswith(f"{TAG}/10.mp4")
 
 
+def test_no_clips_empty_links_file_not_uploaded(tmp_path):
+    s = FakeStore()
+    logs = []
+    u = ra.ReleaseUploader(s, SEGS, "ltx25", release_asset_limit=900, now=lambda: NOW,
+                           log=logs.append)
+    u.prepare()
+    logs.clear()                                              # строка «Создан релиз» не относится к делу
+    links = tmp_path / "generated_links.txt"
+    links.write_text(u.links_text("o/r"), encoding="utf-8")   # клипов нет: текст пустой
+    assert links.stat().st_size == 0
+    u.upload_service_file(str(links))
+    assert s.uploads == []
+    assert logs == ["Нет готовых клипов: generated_links.txt не выкладывается."]
+
+
+def test_links_file_with_clips_is_uploaded(tmp_path):
+    s = FakeStore()
+    s.add(TAG, body(), ["1.mp4"])
+    u = make(s)
+    u.prepare()
+    links = tmp_path / "generated_links.txt"
+    links.write_text(u.links_text("o/r"), encoding="utf-8")
+    assert links.stat().st_size > 0
+    u.upload_service_file(str(links))
+    assert s.uploads == [(TAG, str(links))]
+
+
+def test_empty_prompts_file_upload_unchanged(tmp_path):
+    s = FakeStore()
+    logs = []
+    u = ra.ReleaseUploader(s, SEGS, "ltx25", release_asset_limit=900, now=lambda: NOW,
+                           log=logs.append)
+    u.prepare()
+    logs.clear()
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text("", encoding="utf-8")
+    u.upload_service_file(str(prompts))
+    assert s.uploads == [(TAG, str(prompts))] and logs == []
+
+
 # --- gh и безопасность токена -------------------------------------------------
 
 class FakeProc:

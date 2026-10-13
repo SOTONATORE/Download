@@ -342,6 +342,23 @@ def test_all_clips_already_in_release(tmp_path, monkeypatch):
     assert rig.store.clip_uploads() == []
 
 
+def test_no_clips_means_no_links_upload(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2))
+
+    def gemini_unavailable(*args, **kwargs):
+        raise orch.gp.GeminiRuntimeError("Сервис Gemini временно недоступен", status=503)
+    monkeypatch.setattr(orch.go, "generate_and_store", gemini_unavailable)
+
+    summary = rig.run()
+    assert summary.completed == 0 and rig.vast.created == []
+    assert rig.store.clip_uploads() == []
+    assert rig.store.uploads == []                          # ни prompts.json, ни generated_links.txt
+    assert (TAG, "generated_links.txt") not in rig.store.blobs
+    assert caplog.text.count("Нет готовых клипов: generated_links.txt не выкладывается.") == 1
+    _no_secrets(caplog.text)
+
+
 def test_resume_renders_only_missing(tmp_path, monkeypatch):
     rig = Rig(tmp_path, monkeypatch, missing=(1, 2), preload=["1.mp4"])
     summary = rig.run()

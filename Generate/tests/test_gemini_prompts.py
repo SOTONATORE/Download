@@ -445,6 +445,18 @@ def test_non_json_error_body(monkeypatch):
     assert "Bad Gateway" not in str(e)
 
 
+def test_503_unavailable_maps_to_status_without_daily_flag(monkeypatch):
+    """HTTP 503 (UNAVAILABLE): статус 503, код из тела, без признака суточной квоты, текст тела не в исключении."""
+    monkeypatch.setenv(ENV_NAME, TESTKEY)
+    body = {"error": {"code": 503, "status": "UNAVAILABLE", "message": "ECHO " + TESTKEY}}
+    t = _transport(lambda r: httpx.Response(503, json=body))
+    with pytest.raises(GeminiRuntimeError) as ei:
+        t.generate_json("m", "s", "u", {})
+    e = ei.value
+    assert e.status == 503 and e.code == "UNAVAILABLE" and not e.daily_quota and e.retry_after is None
+    assert TESTKEY not in str(e) and "ECHO" not in str(e)
+
+
 def test_close_owned_client(monkeypatch):
     monkeypatch.setenv(ENV_NAME, TESTKEY)
     t = RealTransport()

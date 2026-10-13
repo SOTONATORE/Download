@@ -30,7 +30,31 @@ log = logging.getLogger("Generate.gemini_orchestrator")
 DEFAULT_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 WINDOW_SEC = 60.0
 CHARS_PER_TOKEN = 3          # консервативная оценка входа
-MAX_WAIT_SEC = 120.0         # потолок одной паузы после 429
+MAX_WAIT_SEC = 120.0         # потолок одной паузы (после 429 и при временной ошибке)
+TRANSIENT_STATUSES = frozenset({500, 503, 504})  # сеть: HTTP-статуса нет (status None)
+TRANSIENT_ATTEMPTS = 5       # попыток на один запрос на одной модели, потом смена модели
+TRANSIENT_PAUSES_SEC = (3.0, 6.0, 12.0, 24.0)    # паузы перед 2-й..5-й попыткой
+
+
+def is_transient(err: gp.GeminiRuntimeError) -> bool:
+    """Временный сбой: HTTP 500/503/504 или сетевой сбой (RealTransport отдаёт его без статуса).
+    Суточная квота, 429 и остальные коды (400, 401, 403, 404, 502 и т.д.) сюда не входят."""
+    if err.daily_quota or err.status == 429:
+        return False
+    return err.status is None or err.status in TRANSIENT_STATUSES
+
+
+def _describe(status: Optional[int], code: str) -> str:
+    """Безопасное описание ошибки для логов и сообщений: статус и код из ответа, без тела."""
+    if status is None:
+        return "сбой сети"
+    return f"HTTP {status}" + (f", код {code}" if code else "")
+
+
+def _transient_wait(err: gp.GeminiRuntimeError, attempt: int) -> float:
+    """Пауза после неудачной попытки номер attempt (1..4): retry_after из ответа или график, не больше MAX_WAIT_SEC."""
+    base = err.retry_after if err.retry_after is not None else TRANSIENT_PAUSES_SEC[attempt - 1]
+    return min(max(float(base), 0.0), MAX_WAIT_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +100,8 @@ class RateLimiter:
 # ---------------------------------------------------------------------------
 
 class ManagedTransport:
-    """Обёртка над transport.generate_json: лимитер, счётчик RPD, смена модели, повтор при RPM.
+    """Обёртка над transport.generate_json: лимитер, счётчик RPD, смена модели, повтор при RPM,
+    повтор временных ошибок (500/503/504, сеть) с last-resort сменой модели.
 
     Аргумент model, который передаёт generate_prompts, игнорируется: модель выбирает цепочка.
     """
@@ -100,24 +125,41 @@ class ManagedTransport:
         self._limiters = {m: RateLimiter(rpm_limit, tpm_limit, clock, sleep) for m in self._models}
         self._used = {m: int((rpd_used or {}).get(m, 0)) for m in self._models}
         self._exhausted: set = set()
+        self._transient_failed: set = set()        # модели, снятые на остаток прогона после 5 временных ошибок
+        self._last_transient: tuple = (None, "")   # (status, code) последней временной ошибки
         self.active_model: str = self._models[0]
 
     @property
     def requests_used(self) -> dict:
         return dict(self._used)
 
+    def _usable(self, m: str) -> bool:
+        if m in self._exhausted or m in self._transient_failed:
+            return False
+        if self._used[m] >= self._rpd_limit:
+            self._exhausted.add(m)
+            log.warning("Модель %s: достигнут суточный лимит запросов (%d).", m, self._rpd_limit)
+            return False
+        return True
+
+    def _transient_exhausted(self) -> gp.GeminiRuntimeError:
+        status, code = self._last_transient
+        return gp.GeminiRuntimeError(
+            f"Сервис Gemini временно недоступен на всех моделях цепочки: по {TRANSIENT_ATTEMPTS} "
+            f"попыток на каждой, последняя ошибка: {_describe(status, code)}. "
+            "Прогресс сохранён; повторите запуск позже",
+            status=status, code=code)
+
     def _pick_model(self) -> str:
         for m in self._models:
-            if m in self._exhausted:
-                continue
-            if self._used[m] >= self._rpd_limit:
-                self._exhausted.add(m)
-                log.warning("Модель %s: достигнут суточный лимит запросов (%d).", m, self._rpd_limit)
+            if not self._usable(m):
                 continue
             if m != self.active_model:
                 log.warning("Переключение на запасную модель: %s.", m)
             self.active_model = m
             return m
+        if self._transient_failed:
+            raise self._transient_exhausted()
         raise gp.GeminiRuntimeError(
             "Суточная квота исчерпана у всех моделей цепочки; прогресс сохранён, "
             "повторите запуск после сброса квоты.",
@@ -126,8 +168,12 @@ class ManagedTransport:
     def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
         tokens = (len(system) + len(user)) // CHARS_PER_TOKEN + 1 + self._reserve
         rate_retries = 0
+        tries = 0                  # неудачные попытки подряд на текущей модели, только для этого запроса
+        tries_model = None
         while True:
             m = self._pick_model()
+            if m != tries_model:   # на каждой модели свои 5 попыток, в том числе после смены по квоте
+                tries, tries_model = 0, m
             self._limiters[m].acquire(tokens)
             self._used[m] += 1
             try:
@@ -150,7 +196,26 @@ class ManagedTransport:
                                 m, wait, rate_retries, self._max_retries)
                     self._sleep(wait)
                     continue
-                raise
+                if not is_transient(e):
+                    raise
+                tries += 1
+                self._last_transient = (e.status, e.code)
+                if tries < TRANSIENT_ATTEMPTS:
+                    wait = _transient_wait(e, tries)
+                    log.warning("Модель %s: временная ошибка (%s), пауза %.1f с (попытка %d из %d).",
+                                m, _describe(e.status, e.code), wait, tries + 1, TRANSIENT_ATTEMPTS)
+                    self._sleep(wait)
+                    continue
+                # 5 неудач подряд: модель снимается на остаток прогона, переход на следующую
+                self._transient_failed.add(m)
+                nxt = next((x for x in self._models if self._usable(x)), None)
+                if nxt is None:
+                    raise self._transient_exhausted() from None
+                log.warning("Модель %s: %d попыток подряд с временной ошибкой (%s), переход на модель %s "
+                            "на остаток прогона.", m, TRANSIENT_ATTEMPTS, _describe(e.status, e.code), nxt)
+                # active_model ставим здесь, чтобы _pick_model не дублировал строку «Переключение»
+                self.active_model = nxt
+                continue
 
 
 # ---------------------------------------------------------------------------
