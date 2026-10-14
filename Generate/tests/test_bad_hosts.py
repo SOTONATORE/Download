@@ -191,8 +191,8 @@ def test_drop_is_logged_once_per_run_not_per_offer(tmp_path, caplog):
     orc._rent_one(NOW)
     orc._rent_one(NOW + 60)
     lines = [r for r in caplog.records if "bad_hosts.txt" in r.getMessage()]
-    assert len(lines) == 1
-    assert vast.rented_offers == [3]
+    assert len(lines) == 1                  # лог один на запуск, а не на предложение
+    assert vast.rented_offers == [3, 3]     # оба вызова арендуют предложение 3, 58482 не арендован
 
 
 def test_in_run_bad_machines_still_excluded_with_permanent_list(tmp_path):
