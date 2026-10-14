@@ -9,13 +9,19 @@
 
 Перенаправления (301/302/303/307/308) клиент НЕ выполняет: заголовок с ключом не уходит
 по адресу, который сервер назвал сам, а сбой виден сразу как ошибка с кодом 3.
+
+При debug_logs=True каждый запрос и ответ пишутся в лог сырыми, с маскированием секретов
+(SPEC 0.1, 10). При debug_logs=False журнала нет: ни строк, ни вычислений маскирования.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import math
 import os
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -70,6 +76,90 @@ STATUS_MSG_FIELD = "status_msg"
 # Пересчёт USD за ГБ в USD за ТБ: коэффициент 1024, как у vast-cli при выводе цены за ТБ.
 # UNVERIFIED: при десятичном ТБ (1000 ГБ) цена была бы примерно на 2.3% ниже.
 GB_PER_TB = 1024.0
+
+
+# --- отладочный журнал сырого обмена (только при debug_logs=True; SPEC 0.1, 10) ---
+# Имя ключа, параметра или заголовка с одной из этих подстрок маскируется целиком. Подстрока
+# «auth» задевает и «author»: лишнее маскирование допустимо, пропущенный секрет недопустим.
+_SENSITIVE_NAME_PARTS = ("token", "key", "secret", "password", "authorization", "auth")
+_REDACTED = "***"
+# «Bearer <значение>» в свободном тексте (тело не JSON).
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
+# Пара «имя: значение» или «имя=значение» с секретным именем в свободном тексте (тело не JSON).
+_PAIR_RE = re.compile(
+    r"""(?i)(["']?[\w.\-]*(?:token|key|secret|password|authorization|auth)[\w.\-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&}\]]+)"""
+)
+
+
+def is_sensitive_name(name: str) -> bool:
+    """Имя ключа, параметра или заголовка похоже на секрет (без учёта регистра)."""
+    lowered = str(name).lower()
+    return any(part in lowered for part in _SENSITIVE_NAME_PARTS)
+
+
+def _pair_repl(m: "re.Match[str]") -> str:
+    value = m.group(2)
+    return m.group(1) + (f'"{_REDACTED}"' if value[:1] in ('"', "'") else _REDACTED)
+
+
+def redact_text(text: str, secret: str = "") -> str:
+    """Маскирует свободный текст: литерал ключа, «Bearer …» и пары «имя: значение» с секретным
+    именем. Покрытие шаблонами не полное (UNVERIFIED), поэтому литерал ключа проверяется отдельно."""
+    if secret:
+        text = text.replace(secret, _REDACTED)
+    text = _BEARER_RE.sub(f"Bearer {_REDACTED}", text)
+    return _PAIR_RE.sub(_pair_repl, text)
+
+
+def redact_value(obj: Any, secret: str = "") -> Any:
+    """Рекурсивно маскирует JSON-объект: значение ключа с секретным именем заменяется на «***»,
+    ключ сохраняется. Строки проходят через redact_text. Исходный объект не меняется."""
+    if isinstance(obj, dict):
+        return {k: (_REDACTED if is_sensitive_name(k) else redact_value(v, secret))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact_value(x, secret) for x in obj]
+    if isinstance(obj, str):
+        return redact_text(obj, secret)
+    return obj
+
+
+def redact_query(params: Optional[dict], secret: str = "") -> dict:
+    """Маскирует параметры запроса. Значение-JSON (как select_filters, order_by) разбирается
+    и маскируется как тело. Параметр с секретным именем (например after_token) целиком «***»."""
+    out: dict = {}
+    for name, value in (params or {}).items():
+        if is_sensitive_name(name):
+            out[name] = _REDACTED
+        elif isinstance(value, str) and value[:1] in ("{", "["):
+            try:
+                out[name] = json.dumps(redact_value(json.loads(value), secret), ensure_ascii=False)
+            except ValueError:
+                out[name] = redact_text(value, secret)
+        else:
+            out[name] = redact_value(value, secret)
+    return out
+
+
+def redact_headers(headers: dict, secret: str = "") -> dict:
+    """Маскирует заголовки: Authorization, X-Api-Key и похожие имена становятся «***»."""
+    return {n: (_REDACTED if is_sensitive_name(n) else redact_text(str(v), secret))
+            for n, v in headers.items()}
+
+
+def debug_body_for_log(raw: str, secret: str = "") -> str:
+    """Сырое тело ответа для лога целиком. JSON маскируется по ключам, прочий текст шаблонами.
+    Тело, которое не разобралось как JSON, остаётся текстом и не теряется."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return redact_text(raw, secret)
+    return json.dumps(redact_value(parsed, secret), ensure_ascii=False)
+
+
+def _request_body_for_log(body: Any, secret: str) -> str:
+    """Тело запроса для лога целиком (маскирование то же, что у ответа)."""
+    return json.dumps(redact_value(body, secret), ensure_ascii=False, default=str)
 
 
 class VastError(Exception):
@@ -176,6 +266,7 @@ class VastClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = 60.0,
         client: Optional[httpx.Client] = None,
+        debug_logs: bool = False,
     ) -> None:
         key = os.environ.get(api_key_env, "").strip()
         if not key:
@@ -187,6 +278,10 @@ class VastClient:
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=timeout)
         self._timeout = timeout
+        # отладочный журнал сырого обмена; при False строки лога и маскирование не выполняются
+        self._debug = bool(debug_logs)
+        # номер запроса в журнале: связывает строку «Запрос» со строкой «Ответ»
+        self._req_seq = itertools.count(1)
 
     # --- служебное ---
     def __repr__(self) -> str:
@@ -207,6 +302,30 @@ class VastClient:
     def _redact(self, text: str) -> str:
         return text.replace(self._api_key, "***")
 
+    def _debug_request(self, req_no: int, method: str, path: str, params: Optional[dict],
+                       body: Any, headers: dict) -> None:
+        """Строка запроса в отладочном журнале: путь, параметры, тело. Секреты маскируются."""
+        params_text = ("нет" if params is None else
+                       json.dumps(redact_query(params, self._api_key), ensure_ascii=False))
+        body_text = ("нет" if body is None else
+                     _request_body_for_log(body, self._api_key))
+        log.info(
+            "Запрос Vast #%d: %s %s | параметры: %s | заголовки: %s | тело: %s",
+            req_no, method, path, params_text,
+            json.dumps(redact_headers(headers, self._api_key), ensure_ascii=False),
+            body_text,
+        )
+
+    def _debug_response(self, req_no: int, elapsed: float, *, status: Optional[int] = None,
+                        text: str = "", failure: Optional[str] = None) -> None:
+        """Строка ответа: код HTTP, время в секундах и тело целиком (без обрезки).
+        При сбое (таймаут, сеть) вместо кода выводится причина; текст исключения не выводится."""
+        if failure is not None:
+            log.info("Ответ Vast #%d: %s, за %.3f с, тела нет", req_no, failure, elapsed)
+            return
+        log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело: %s",
+                 req_no, status, elapsed, debug_body_for_log(text, self._api_key))
+
     def _request(
         self,
         method: str,
@@ -217,19 +336,32 @@ class VastClient:
     ) -> Any:
         url = f"{self._base_url}{path}"
         headers = {"Authorization": f"Bearer {self._api_key}", "Accept": "application/json"}
+        req_no = next(self._req_seq)
+        if self._debug:
+            self._debug_request(req_no, method, path, params, json, headers)
+        started = time.monotonic()
         try:
             resp = self._client.request(
                 method, url, json=json, params=params, headers=headers, timeout=self._timeout
             )
         except httpx.TimeoutException:
+            if self._debug:
+                self._debug_response(req_no, time.monotonic() - started, failure="таймаут")
             log.warning("Таймаут запроса к Vast: %s %s", method, path)
             raise VastRuntimeError(f"Таймаут запроса к Vast API: {method} {path}") from None
         except httpx.HTTPError as exc:
+            if self._debug:
+                self._debug_response(req_no, time.monotonic() - started,
+                                     failure=f"сетевая ошибка ({type(exc).__name__})")
             # Текст исходного исключения может содержать заголовки: берём только имя типа.
             log.warning("Сетевая ошибка Vast: %s %s (%s)", method, path, type(exc).__name__)
             raise VastRuntimeError(
                 f"Сетевая ошибка при обращении к Vast API: {method} {path} ({type(exc).__name__})"
             ) from None
+
+        if self._debug:
+            self._debug_response(req_no, time.monotonic() - started,
+                                 status=resp.status_code, text=resp.text)
 
         if resp.status_code != 200:
             code = resp.status_code
