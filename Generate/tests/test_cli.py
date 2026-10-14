@@ -875,3 +875,21 @@ def test_check_empty_image_without_sha_is_input_error(capsys, missing_file, monk
     calls = _fake_docker(monkeypatch, 0)
     assert cli.main(_check_args(missing_file, "--docker-image", "")) == 2
     assert calls == []
+
+
+def test_run_passes_loaded_bad_hosts_to_orchestrator(capsys, run_env, missing_file, monkeypatch):
+    """Список плохих машин загружается один раз и передаётся оркестратору (SPEC 3, 8.2)."""
+    monkeypatch.setattr(cli, "load_bad_hosts", lambda *a, **k: frozenset({58482}))
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    _, kwargs = run_env.calls[0]
+    assert kwargs["excluded_machines"] == frozenset({58482})
+
+
+def test_run_bad_hosts_error_stops_before_any_spend(capsys, run_env, missing_file, monkeypatch):
+    """Ошибка формата bad_hosts.txt: код 2, оркестратор не вызывается, в stderr назван номер строки."""
+    def boom(*a, **k):
+        raise cli.BadHostsError("неверный формат файла bad_hosts.txt: строка 2: test")
+    monkeypatch.setattr(cli, "load_bad_hosts", boom)
+    assert cli.main(_run_args(DATA, missing_file)) == 2
+    assert run_env.calls == []
+    assert "строка 2" in capsys.readouterr().err
