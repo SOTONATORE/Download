@@ -165,6 +165,8 @@ jobs:
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          # debug_logs выключен: уровень INFO; включен: DEBUG. Сырой журнал Vast включается
+          # отдельно аргументом --debug-logs (блок debug_args ниже), от уровня он не зависит.
           GEN_LOG_LEVEL: ${{ inputs.debug_logs && 'DEBUG' || 'INFO' }}
         run: |
           # --docker-image пусто = образ этого коммита (тег = WORKER_BUILD, SPEC 8.4)
@@ -195,6 +197,13 @@ jobs:
             args+=(--release-tag "$RELEASE_TAG")
           fi
 
+          # Сырой журнал обмена с Vast (вход debug_logs). Пустую строку в аргументах не передаём:
+          # argparse принял бы её за лишний аргумент, поэтому массив пуст, когда вход выключен.
+          debug_args=()
+          if [ "${{ inputs.debug_logs }}" = "true" ]; then
+            debug_args=(--debug-logs)
+          fi
+
           # Фильтр маскирует значения секретов до записи в сводку и в файл лога (SPEC 0.1):
           # GitHub прячет секреты только в журнале шага, а файл артефакта публичен.
           # Короткие значения (< 8 символов) не трогаем, чтобы не испортить обычный текст.
@@ -223,7 +232,7 @@ jobs:
           # pipefail: код завершения берётся от python, а не от фильтра и tee;
           # rc сохраняем, чтобы закрыть блок кода и затем завершить шаг тем же кодом
           rc=0
-          python -m Generate.cli run "${args[@]}" 2>&1 \
+          python -m Generate.cli run "${args[@]}" "${debug_args[@]}" 2>&1 \
             | python3 -I -u "$mask_filter" \
             | tee -a "$GITHUB_STEP_SUMMARY" "$RUN_LOG" || rc=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
