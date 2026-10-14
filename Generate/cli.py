@@ -41,6 +41,7 @@ from typing import Optional
 from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 
 try:  # пакетный и «плоский» импорт
+    from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from Generate.core.gemini_prompts import GeminiInputError
@@ -50,6 +51,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.vast_client import (
         OfferFilter, VastClient, VastError, VastRuntimeError)
 except ImportError:  # pragma: no cover
+    from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from gemini_prompts import GeminiInputError  # type: ignore
@@ -358,6 +360,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.missing):
         _err(f"Ошибка входных данных: файл missing не найден: {args.missing}")
         return EXIT_INPUT
+    # постоянный список плохих машин (SPEC 3, 8.2): читается один раз, до любых трат
+    try:
+        excluded_machines = load_bad_hosts()
+    except BadHostsError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
 
     try:
         timing = _build_timing(cfg, cfg.model_profile)
@@ -410,6 +418,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             profile=cfg.model_profile,
             release_tag=args.release_tag,
             offer_filter=offer_filter,
+            excluded_machines=excluded_machines,
             docker_image=cfg.docker_image,
             disk_gb=cfg.disk_gb,
             silent_host_timeout_min=cfg.silent_host_timeout_min,
