@@ -64,6 +64,10 @@ on:
         description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
         type: string
         default: "4.1"
+      verified:
+        description: "Только проверенные хосты Vast (true/false). По умолчанию true"
+        type: string
+        default: "true"
       docker_image:
         description: "пусто = образ этого коммита"
         type: string
@@ -154,6 +158,7 @@ jobs:
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
           MIN_INET: ${{ inputs.min_inet_mbps }}
           MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
+          VERIFIED: ${{ inputs.verified }}
           DOCKER_IMAGE: ${{ inputs.docker_image }}
           WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
@@ -178,6 +183,7 @@ jobs:
             --min-reliability "$MIN_RELIABILITY"
             --min-inet-mbps "$MIN_INET"
             --max-inet-price-per-tb "$MAX_INET_PRICE"
+            --verified "$VERIFIED"
             --disk-gb "$DISK_GB"
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
             --repo "$REPO"
