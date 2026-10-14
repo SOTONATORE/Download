@@ -313,6 +313,79 @@ def test_run_verified_false_from_config_reaches_offer_filter(capsys, run_env, mi
     assert kwargs["offer_filter"].verified is False
 
 
+# ---------------------------------------------------------------- --verified (вход workflow)
+
+@pytest.fixture
+def loaded_cfgs(monkeypatch):
+    """Запоминает конфиг, который cmd_run получил от _load_cfg (уже с наложенными входами)."""
+    seen = []
+    real_load = cli._load_cfg
+
+    def spy(path, overrides=None):
+        cfg, code = real_load(path, overrides)
+        seen.append(cfg)
+        return cfg, code
+
+    monkeypatch.setattr(cli, "_load_cfg", spy)
+    return seen
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("true", True),
+    ("false", False),
+    ("TRUE", True),
+    ("False", False),
+    ("", None),
+])
+def test_verified_flag_parsing(raw, expected):
+    assert cli.build_parser().parse_args(["run", "--verified", raw]).verified is expected
+
+
+def test_verified_missing_argument_is_none():
+    assert cli.build_parser().parse_args(["run"]).verified is None
+
+
+@pytest.mark.parametrize("bad", ["maybe", "1", "yes", "tru"])
+def test_verified_invalid_value_is_input_error(capsys, run_env, missing_file, bad):
+    code = cli.main(_run_args(DATA, missing_file, "--verified", bad))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "допустимы только значения true или false" in err
+    assert "Traceback" not in err
+    assert run_env.calls == []
+
+
+def test_verified_false_flag_reaches_loaded_config(capsys, run_env, loaded_cfgs, missing_file):
+    assert cli.main(_run_args(DATA, missing_file, "--verified", "false")) == 0
+    assert loaded_cfgs[0].verified is False
+    _, kwargs = run_env.calls[0]
+    assert kwargs["offer_filter"].verified is False
+
+
+def test_verified_absent_keeps_config_true(capsys, run_env, loaded_cfgs, missing_file):
+    assert cli.main(_run_args(DATA, missing_file)) == 0
+    assert loaded_cfgs[0].verified is True
+
+
+def test_verified_empty_keeps_config_value(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
+    """Пустой вход не переопределяет конфиг: verified: false из файла остаётся false."""
+    text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "\nverified: true\n" in text
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
+    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "")) == 0
+    assert loaded_cfgs[0].verified is False
+
+
+def test_verified_true_flag_overrides_config_false(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
+    text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+    assert "\nverified: true\n" in text
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
+    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "TRUE")) == 0
+    assert loaded_cfgs[0].verified is True
+
+
 def test_run_default_card_params(capsys, run_env, missing_file):
     """Без флагов docker_image/disk_gb/silent_host_timeout_min получают значения по умолчанию."""
     assert cli.main(_run_args(DATA, missing_file)) == 0

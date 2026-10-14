@@ -92,6 +92,23 @@ def _usd_floor(value: float) -> str:
     return f"{math.floor(value * 100) / 100:.2f}"
 
 
+def _parse_verified(value: str) -> Optional[bool]:
+    """Вход --verified: true или false без учёта регистра; пустая строка = None (взять из конфига).
+
+    Любое другое значение — ошибка аргументов (код 2). Введённое значение в сообщении не печатаем.
+    """
+    if value == "":
+        return None
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise argparse.ArgumentTypeError(
+        "допустимы только значения true или false (без учёта регистра); "
+        "пустое значение означает «взять из конфига»")
+
+
 def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
     """Предстартовая проверка расходуемого кредита Vast.ai (SPEC 8.3, е).
 
@@ -329,6 +346,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "docker_image": docker_image,
         "disk_gb": args.disk_gb,
         "silent_host_timeout_min": args.silent_host_timeout_min,
+        "verified": args.verified,
     }
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
@@ -567,6 +585,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
                        help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
+    run_p.add_argument("--verified", type=_parse_verified, default=None,
+                       help="только проверенные хосты Vast: true или false (без учёта регистра); "
+                            "пусто = из конфига; по умолчанию из конфига")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
