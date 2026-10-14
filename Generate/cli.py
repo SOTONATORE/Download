@@ -372,7 +372,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.style_brief, cfg.gemini_batch_size)
         transport = _make_transport()
         store = _make_release_store(args.repo)
-        vast = VastClient()
+        vast = VastClient(debug_logs=bool(getattr(args, "debug_logs", False)))
     except VastError as e:
         _err(f"Ошибка запуска: {e}")
         return EXIT_INPUT if e.exit_code == EXIT_INPUT else EXIT_RUNTIME
@@ -449,6 +449,7 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
 
     client = None
     try:
+        # отладочный журнал Vast здесь не включается (по умолчанию выключен; флага у kill-cards нет)
         client = VastClient()
         destroyed = client.destroy_by_label(label)
     except VastError as e:
@@ -597,6 +598,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--verified", type=_parse_verified, default=None,
                        help="только проверенные хосты Vast: true или false (без учёта регистра); "
                             "пусто = из конфига; по умолчанию из конфига")
+    run_p.add_argument("--debug-logs", action="store_true", default=False,
+                       help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
