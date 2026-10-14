@@ -224,6 +224,46 @@ jobs:
               sys.stdout.flush()
           PY
 
+          # Фильтр сводки (SPEC 0.1, 10): сырые строки обмена с Vast («Запрос Vast #», «Ответ Vast #»)
+          # в $GITHUB_STEP_SUMMARY не попадают. В $RUN_LOG и в журнал шага они идут полностью.
+          # Строки записи лога начинаются с «ДАТА ВРЕМЯ [УРОВЕНЬ]», поэтому префикс ищется после них.
+          summary_filter="$RUNNER_TEMP/summary_filter.py"
+          cat > "$summary_filter" <<'PY'
+          import re
+          import sys
+
+          # Начало записи лога: «ГГГГ-ММ-ДД ЧЧ:ММ:СС,ммм [УРОВЕНЬ] текст» (формат из cli.py).
+          # Строки, не начинающие запись, относятся к предыдущей записи (многострочное тело ответа).
+          RECORD_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?\[[A-Z]+\] ")
+          RAW_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?(?:\[[A-Z]+\] )?(?:Запрос Vast #|Ответ Vast #)")
+
+          summary = None
+          try:
+              summary = open(sys.argv[1], "a", encoding="utf-8")
+          except OSError:
+              sys.stderr.write("Сводка: файл итогов не открыт, в «Итоги генерации» ничего не попадёт\n")
+
+          raw = False
+          for line in sys.stdin:
+              if RECORD_RE.match(line):
+                  raw = RAW_RE.match(line) is not None
+              sys.stdout.write(line)
+              sys.stdout.flush()
+              if summary is not None and not raw:
+                  try:
+                      summary.write(line)
+                      summary.flush()
+                  except OSError:
+                      sys.stderr.write("Сводка: запись в файл итогов прервана, дальше в сводку ничего не пишется\n")
+                      summary = None
+
+          if summary is not None:
+              try:
+                  summary.close()
+              except OSError:
+                  pass
+          PY
+
           {
             echo '## Итоги генерации'
             echo '```'
@@ -234,7 +274,8 @@ jobs:
           rc=0
           python -m Generate.cli run "${args[@]}" "${debug_args[@]}" 2>&1 \
             | python3 -I -u "$mask_filter" \
-            | tee -a "$GITHUB_STEP_SUMMARY" "$RUN_LOG" || rc=$?
+            | python3 -I -u "$summary_filter" "$GITHUB_STEP_SUMMARY" \
+            | tee -a "$RUN_LOG" || rc=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
