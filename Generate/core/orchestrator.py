@@ -197,6 +197,7 @@ class Orchestrator:
         silent_host_timeout_min: int = 20,
         worker_idle_timeout_min: int = 5,
         offer_filter: Optional[OfferFilter] = None,
+        excluded_machines: Optional[frozenset] = None,
         docker_image: str = "",
         disk_gb: int = 100,
         limit_clips: int = 0,
@@ -291,6 +292,10 @@ class Orchestrator:
         self._durations: list = []
         self._bad_machines: set = set()
         self._bad_offers: set = set()
+        # постоянный список плохих машин (bad_hosts.txt, SPEC 8.2): живёт между запусками,
+        # в отличие от _bad_machines; в лог пишется одна строка на запуск
+        self._excluded_machines: frozenset = frozenset(int(m) for m in (excluded_machines or ()))
+        self._excluded_logged = False
         self._next_rent = 0.0
         self._budget_blocked = False
         self._cards_rented = 0
@@ -540,12 +545,27 @@ class Orchestrator:
                 self._budget_blocked = True
                 return
 
+    def _note_excluded(self, listed: list) -> None:
+        """Одна строка в лог на запуск о предложениях, отброшенных по постоянному списку."""
+        if self._excluded_logged:
+            return
+        self._excluded_logged = True
+        ids = sorted({o.machine_id for o in listed})
+        log.warning("Предложения отброшены по постоянному списку плохих машин (bad_hosts.txt): "
+                    "машины %s, предложений в этом поиске %d.",
+                    ", ".join(str(i) for i in ids), len(listed))
+
     def _rent_one(self, now: float) -> str:
         try:
             offers = self.vast.search_offers(self.offer_filter)
         except VastError as exc:
             log.warning("Поиск предложений Vast не удался: %s", exc)
             return "retry"
+        # постоянный список плохих машин (SPEC 8.2): отсеивается до аренды, по ID машины
+        listed = [o for o in offers if o.machine_id in self._excluded_machines]
+        if listed:
+            self._note_excluded(listed)
+            offers = [o for o in offers if o.machine_id not in self._excluded_machines]
         offers = [o for o in offers if o.offer_id not in self._bad_offers
                   and not (o.machine_id and o.machine_id in self._bad_machines)]
         if not offers:
