@@ -12,7 +12,7 @@ on:
         type: string
         default: ""
       pilot_start_cmd:
-        description: "Команда старта ComfyUI в контейнере (UNVERIFIED для образа). Пусто = по умолчанию из кода"
+        description: "Команда старта ComfyUI в контейнере (UNVERIFIED). Пусто = не передавать, образ стартует сам"
         type: string
         default: ""
       budget_limit_usd:
@@ -66,7 +66,7 @@ on:
         type: number
         default: 100
       silent_host_timeout_min:
-        description: "Таймаут до ответа ComfyUI на порту 8188, минут"
+        description: "Таймаут до ответа ComfyUI на порту 18188, минут"
         type: number
         default: 20
       debug_logs:
