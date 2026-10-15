@@ -849,6 +849,12 @@ def test_status_message_over_200_chars_is_truncated_and_redacted(tmp_path, monke
     _no_secrets(caplog.text)
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("cdi", True),
+    ("Failed To Create", True),
+    ("Preparing GPUs...", False),
+    ("", False),
+])
 def test_start_markers_match_case_insensitively(text, expected):
     assert orch._has_start_marker(text) is expected
 
@@ -877,7 +883,7 @@ def test_failed_start_machine_and_offer_are_not_rented_again(tmp_path, monkeypat
               make_offer(3, 11, price=0.25),   # другое предложение того же хоста 11
               make_offer(2, 22, price=0.3)]    # другой хост
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
-    rig.vast.script[1] = [("loading", None), ("created", None)]
+    rig.vast.script[1] = [("loading", None), ("created", "failed to create shim task")]
     summary = rig.run()
 
     assert [c["offer_id"] for c in rig.vast.created] == [1, 2]   # предложение 3 не арендовано
@@ -901,7 +907,7 @@ def test_rent_one_filters_bad_machine_and_bad_offer(tmp_path, monkeypatch):
 
 def test_failed_card_cost_is_stopped_like_any_retirement(tmp_path, monkeypatch):
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
-    rig.vast.script[1] = [("loading", None), ("created", None)]
+    rig.vast.script[1] = [("loading", None), ("created", "failed to create shim task")]
     calls = _spy_retire(rig.orc)
     rig.run()
 
