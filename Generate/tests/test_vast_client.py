@@ -271,6 +271,23 @@ def test_create_instance_payload(key):
     assert b["label"] == "gen-run1" and b["onstart"] == "echo hi"
 
 
+def test_create_instance_without_onstart_has_no_onstart_key(key):
+    """Пустой onstart (пилот без --pilot-start-cmd) не попадает в payload вовсе, ни как None, ни как пустая строка."""
+    bodies = []
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"success": True, "new_contract": 779})
+
+    c = make(handler)
+    c.create_instance(42, "img:latest", 50, env_vars={"GEN_LOG_LEVEL": "INFO"}, label="pilot-run1")
+    c.create_instance(42, "img:latest", 50, env_vars={}, label="pilot-run1", onstart=None)
+    c.create_instance(42, "img:latest", 50, env_vars={}, label="pilot-run1", onstart="")
+    assert len(bodies) == 3
+    for body in bodies:
+        assert "onstart" not in body
+
+
 def test_create_instance_bad_response(key):
     c = make(lambda r: httpx.Response(200, json={"success": False}))
     with pytest.raises(VastRuntimeError):

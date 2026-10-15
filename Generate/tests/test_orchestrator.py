@@ -1277,3 +1277,161 @@ def test_cleanup_all_destroys_fail_closes_no_record(tmp_path, monkeypatch):
 
     assert _record_of(rig, 501).is_active and _record_of(rig, 502).is_active
     assert rig.orc._destroyed == 0 and rig.orc.cleanup_ok is False
+
+
+# ---------------------------------------------------------------------------
+# Пилот ComfyUI (образ vastai/comfy, внутренний порт 18188). Офлайн: Vast и HTTP — заглушки.
+# ---------------------------------------------------------------------------
+
+class PilotVast(FakeVast):
+    """Vast для пилота: статусы идут по сценарию, поле ports задаёт тест (None = поля нет)."""
+
+    def __init__(self, offers, events, ports=None, steps=("loading", "running")) -> None:
+        super().__init__(offers, events)
+        self.ports = ports
+        self.steps = list(steps)
+
+    def get_instance(self, instance_id):
+        i = self._polls.get(instance_id, 0)
+        self._polls[instance_id] = i + 1
+        status = self.steps[min(i, len(self.steps) - 1)]
+        up = status == "running"
+        raw = {} if self.ports is None else {"ports": self.ports}
+        return vc.InstanceInfo(instance_id=instance_id, actual_status=status, intended_status="running",
+                               public_ip="10.0.0.1" if up else None, dph=0.0, is_bid=True, raw=raw)
+
+
+def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilot_start_cmd="", **kw):
+    """Оркестратор в пилотном режиме; /system_stats отвечает кодом status, адреса проб пишутся в probe_urls."""
+    urls = probe_urls if probe_urls is not None else []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        if request.url.path == "/system_stats":
+            return httpx.Response(status, json={"ok": True} if status == 200 else {"error": "нужен токен"})
+        return httpx.Response(404)
+
+    clock = FakeClock()
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    segs = [types.SimpleNamespace(num=n) for n in range(1, 6)]
+    orc_kw = dict(repo="owner/repo", run_id="pilot-test", profile="ltx25", docker_image="comfy:img",
+                  poll_interval_sec=10.0, silent_host_timeout_min=1, pilot=True,
+                  pilot_start_cmd=pilot_start_cmd, work_dir=tmp_path / "work")
+    orc_kw.update(kw)
+    return orch.Orchestrator(
+        segs, tmp_path / "missing.txt", None, None, FakeStore([]), vast, object(),
+        tmp_path / "prompts.json", http_client=http, clock=clock, sleep=clock.sleep, **orc_kw)
+
+
+PILOT_PORTS_OK = {"18188/tcp": [{"HostIp": "0.0.0.0", "HostPort": "31888"}]}
+
+
+def test_pilot_probe_goes_to_external_port_of_18188(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    urls: list = []
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls).run()
+    assert urls, "проба не выполнялась"
+    assert all(u.endswith(":31888/system_stats") for u in urls)
+    assert not any(":8188/" in u for u in urls)
+    assert summary.exit_code == orch.EXIT_OK
+    assert "PILOT-ИТОГ: результат=ok" in caplog.text
+    assert "PILOT-МАРКЕР порт 18188: HTTP 200" in caplog.text
+    assert "PILOT-МАРКЕР running: карта" in caplog.text
+    assert "аренда→ответ=" in caplog.text
+    assert "карт арендовано 1, уничтожено 1" in caplog.text
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_auth_codes_give_auth_required_neither_failure_nor_success(tmp_path, monkeypatch, caplog, code):
+    caplog.set_level(logging.INFO)
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, status=code).run()
+    assert "PILOT-ИТОГ: результат=auth_required" in caplog.text
+    assert f"PILOT-МАРКЕР порт 18188: HTTP {code}" in caplog.text
+    assert summary.completed == 0 and summary.failed == 0
+    assert summary.exit_code == orch.EXIT_OK
+
+
+def test_other_code_until_timeout_gives_not_ready(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, status=500).run()
+    assert "PILOT-ИТОГ: результат=not_ready; причина=timeout" in caplog.text
+    assert "HTTP 500" in caplog.text
+    assert summary.failed == 1
+    assert summary.exit_code == orch.EXIT_PARTIAL
+
+
+def test_missing_18188_key_logs_key_names_without_values(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    urls: list = []
+    vast = PilotVast([make_offer(1, 11)], [], ports={"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40001"}]})
+    _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls).run()
+    assert urls == []  # без ключа 18188/tcp пробы нет
+    assert "в поле ports нет ключа 18188/tcp" in caplog.text
+    assert "8000/tcp" in caplog.text
+    assert "40001" not in caplog.text
+    assert "PILOT-ИТОГ: результат=not_ready" in caplog.text
+
+
+@pytest.mark.parametrize(("code", "verdict"), [
+    (200, "ok"), (401, "auth_required"), (403, "auth_required"),
+    (404, None), (500, None), (302, None), (None, None),
+])
+def test_pilot_verdict_mapping(code, verdict):
+    assert orch._pilot_verdict(code) == verdict
+
+
+def test_port_keys_text_has_names_only():
+    info = vc.InstanceInfo(instance_id=1, actual_status="running", intended_status="running",
+                           raw={"ports": {"22/tcp": [{"HostPort": "50022"}], "18188/tcp": [{"HostPort": "31888"}]}})
+    text = orch._port_keys_text(info)
+    assert text == "18188/tcp, 22/tcp"
+    assert "50022" not in text and "31888" not in text
+
+
+@pytest.mark.parametrize("start_cmd", ["", "   "])
+def test_pilot_empty_start_cmd_sends_no_onstart(tmp_path, monkeypatch, start_cmd):
+    received: list = []
+
+    class Spy(PilotVast):
+        def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None,
+                            bid_price=None):
+            received.append(onstart)
+            return super().create_instance(offer_id, image, disk_gb, env_vars=env_vars, label=label,
+                                           onstart=onstart, bid_price=bid_price)
+
+    vast = Spy([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast, pilot_start_cmd=start_cmd).run()
+    assert received == [None]
+
+
+def test_pilot_nonempty_start_cmd_is_passed_as_onstart(tmp_path, monkeypatch):
+    received: list = []
+
+    class Spy(PilotVast):
+        def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None,
+                            bid_price=None):
+            received.append(onstart)
+            return super().create_instance(offer_id, image, disk_gb, env_vars=env_vars, label=label,
+                                           onstart=onstart, bid_price=bid_price)
+
+    vast = Spy([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast, pilot_start_cmd="echo start").run()
+    assert received == ["echo start"]
+
+
+def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-PILOT-secret-4242")
+    monkeypatch.setenv("GH_TOKEN", "gh-PILOT-secret-4242")
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast).run()
+    env = vast.created[0]["env"]
+    forbidden = {"WORKER_TOKEN", "HF_TOKEN", "GEN_GEMINI_API_KEY", "GH_TOKEN"}
+    assert not (forbidden & set(env))
+    assert not any(k.startswith(("COMFYUI_", "PORTAL_CONFIG", "OPEN_BUTTON_")) for k in env)
+    assert not any("8000" in k for k in env)          # -p 8000:8000 не добавляется
+    assert "-p 18188:18188" in env                    # внутренний порт пилота
+    assert set(env) <= {"GEN_LOG_LEVEL", "-p 18188:18188"}
+    _no_secrets(json.dumps(env))

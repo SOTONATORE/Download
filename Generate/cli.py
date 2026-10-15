@@ -489,7 +489,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             log_level=getattr(args, "log_level", "INFO"),
             stop_event=stop,
             pilot=_pilot_mode(args),
-            pilot_start_cmd=getattr(args, "pilot_start_cmd", "") or "",
+            # пустая команда не передаётся дальше (None): onstart в payload не попадает
+            pilot_start_cmd=(getattr(args, "pilot_start_cmd", "") or "").strip() or None,
         )
     finally:
         _restore_handlers(previous_handlers)
@@ -664,7 +665,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--pilot", action="store_true", default=False,
                        help="пилот ComfyUI: одна карта, без воркера, весов и Release; метка pilot-<run-id>")
     run_p.add_argument("--pilot-start-cmd", default="",
-                       help="команда старта ComfyUI в пилоте (UNVERIFIED для образа; пусто = по умолчанию)")
+                       help="команда старта ComfyUI в пилоте (UNVERIFIED); пусто = не передавать, образ стартует сам")
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))

@@ -65,10 +65,10 @@ log = logging.getLogger("Generate.orchestrator")
 
 MAX_ATTEMPTS = 3          # попыток рендера одного клипа
 # Пилот ComfyUI (pilot-comfyui.yml): проверка инфраструктуры Vast без воркера (Generate/PILOT_REPORT.md).
-PILOT_HTTP_PORT = 8188    # порт ComfyUI в контейнере
-# команда старта ComfyUI: UNVERIFIED — путь к main.py зависит от образа; переопределяется --pilot-start-cmd
-PILOT_START_CMD = "python /workspace/ComfyUI/main.py --listen 0.0.0.0 --port 8188"
-PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI, по которому setup.sh проверяет готовность
+PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри образа vastai/comfy (supervisor); внешний порт выдаёт Vast
+# команды старта по умолчанию нет: образ сам запускает ComfyUI. onstart уходит только при непустом --pilot-start-cmd
+PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI для проверки готовности
+PILOT_AUTH_CODES = frozenset({401, 403})  # ComfyUI отвечает, но просит токен: отдельный результат auth_required
 PILOT_PROBE_TIMEOUT_SEC = 5.0
 MAX_NET_FAILS = 6         # подряд сбоев связи с воркером до снятия карты
 EXIT_OK = 0
@@ -224,6 +224,29 @@ def _mapped_port(info: InstanceInfo, port: int) -> Optional[int]:
     return None
 
 
+def _pilot_verdict(code: Optional[int]) -> Optional[str]:
+    """Вердикт пробы GET /system_stats: ok (200), auth_required (401/403), None — ждём дальше."""
+    if code == 200:
+        return "ok"
+    if code in PILOT_AUTH_CODES:
+        return "auth_required"
+    return None
+
+
+def _port_keys_text(info: InstanceInfo) -> str:
+    """Имена ключей поля ports для лога. Значения (HostPort и пр.) не выводятся."""
+    ports = info.raw.get("ports")
+    if isinstance(ports, str):
+        try:
+            ports = json.loads(ports)
+        except ValueError:
+            return "поле ports не разобрано"
+    if not isinstance(ports, dict):
+        return "поля ports нет"
+    keys = sorted(str(k) for k in ports)
+    return ", ".join(keys) if keys else "пусто"
+
+
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
@@ -304,7 +327,8 @@ class Orchestrator:
         self.limit_clips = limit_clips
         self.repo = repo
         self.pilot = bool(pilot)
-        self.pilot_start_cmd = pilot_start_cmd or PILOT_START_CMD
+        # пустая команда не передаётся дальше: onstart в payload не попадает
+        self.pilot_start_cmd = (pilot_start_cmd or "").strip() or None
         self.label = f"{'pilot' if self.pilot else 'gen'}-{run_id or uuid.uuid4().hex[:8]}"
         self.profile = profile
         self.template = filename_template
@@ -501,8 +525,9 @@ class Orchestrator:
 
     # --- пилот ComfyUI (pilot-comfyui.yml) -----------------------------------
     def _run_pilot(self) -> RunSummary:
-        """Пилот: одна карта, ожидание статуса running и HTTP 200 на порту ComfyUI, замер времени, уборка.
+        """Пилот: одна карта, ожидание статуса running и ответа ComfyUI на порту 18188, замер времени, уборка.
 
+        Итог: ok (HTTP 200), auth_required (HTTP 401/403: ComfyUI отвечает, нужен токен), not_ready (иначе).
         Без missing.txt, Gemini, Release и воркера; весов не загружает. Уборка (destroy_by_label)
         и учёт бюджета — те же методы, что в основном пути. Все строки начинаются с «PILOT».
         """
@@ -513,6 +538,8 @@ class Orchestrator:
         running_at: Optional[float] = None
         port_at: Optional[float] = None
         slot: Optional[_CardSlot] = None
+        last_code: Optional[int] = None
+        keys_logged = False
         try:
             # аренда: повторы как в основном пути, пока не истёк срок молчания
             while slot is None:
@@ -544,6 +571,8 @@ class Orchestrator:
                     result = "timeout"
                     log.error("PILOT: порт %d не ответил за %d мин после аренды.",
                               PILOT_HTTP_PORT, int(self._silent_sec // 60))
+                    log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.", PILOT_HTTP_PORT,
+                             "нет ответа" if last_code is None else last_code, now - rent_at)
                     break
                 try:
                     info = self.vast.get_instance(slot.instance_id)
@@ -563,16 +592,25 @@ class Orchestrator:
                         running_at = self.clock()
                         log.info("PILOT-МАРКЕР running: карта %d через %.0f с после аренды.",
                                  slot.instance_id, running_at - rent_at)
-                    port = _mapped_port(info, PILOT_HTTP_PORT) if running_at is not None else None
-                    if running_at is not None and info.public_ip and port:
-                        code = self._probe_pilot(f"http://{info.public_ip}:{port}")
-                        if code == 200:
-                            port_at = self.clock()
-                            result = "ok"
-                            log.info("PILOT-МАРКЕР порт %d: HTTP 200 через %.0f с после аренды.",
-                                     PILOT_HTTP_PORT, port_at - rent_at)
-                            break
-                        log.debug("PILOT: порт %d пока не отвечает (код %s).", PILOT_HTTP_PORT, code)
+                    if running_at is not None and info.public_ip:
+                        port = _mapped_port(info, PILOT_HTTP_PORT)
+                        if port is None:
+                            # ключа нет: в лог идут только имена ключей ports, значения не печатаем
+                            if not keys_logged:
+                                keys_logged = True
+                                log.error("PILOT: в поле ports нет ключа %d/tcp. Пришедшие ключи: %s.",
+                                          PILOT_HTTP_PORT, _port_keys_text(info))
+                        else:
+                            code = self._probe_pilot(f"http://{info.public_ip}:{port}")
+                            last_code = code
+                            verdict = _pilot_verdict(code)
+                            if verdict is not None:
+                                port_at = self.clock()
+                                result = verdict
+                                log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.",
+                                         PILOT_HTTP_PORT, code, port_at - rent_at)
+                                break
+                            log.debug("PILOT: порт %d пока не отвечает (код %s).", PILOT_HTTP_PORT, code)
                 self._sleep(self.poll_interval)
         finally:
             # уборка по метке pilot-<run_id>: та же функция, что у основного пути; карты гасятся всегда
@@ -581,20 +619,24 @@ class Orchestrator:
         # замер: интервалы от аренды; None, если этап не наступил
         to_running = (running_at - rent_at) if (running_at is not None and rent_at is not None) else None
         to_port = (port_at - rent_at) if (port_at is not None and rent_at is not None) else None
-        ok = result == "ok"
-        log.info("PILOT-ИТОГ: результат=%s; аренда→running=%s с; аренда→ответ %d=%s с; карт арендовано %d, "
-                 "уничтожено %d; уборка %s.", result,
-                 "нет" if to_running is None else f"{to_running:.0f}", PILOT_HTTP_PORT,
-                 "нет" if to_port is None else f"{to_port:.0f}", self._cards_rented, self._destroyed,
+        answered = result in ("ok", "auth_required")
+        verdict = result if answered else "not_ready"
+        reason = "" if answered else f"; причина={result}"
+        log.info("PILOT-ИТОГ: результат=%s%s; аренда→running=%s с; аренда→ответ=%s с; "
+                 "карт арендовано %d, уничтожено %d; уборка %s.", verdict, reason,
+                 "нет" if to_running is None else f"{to_running:.0f}",
+                 "нет" if to_port is None else f"{to_port:.0f}",
+                 self._cards_rented, self._destroyed,
                  "выполнена" if self.cleanup_ok else "НЕ ПОДТВЕРЖДЕНА")
-        summary.completed = 1 if ok else 0
-        summary.failed = 0 if ok else 1
+        # ok — успех; auth_required — не провал и не успех (ComfyUI отвечает, нужен токен), код 0
+        summary.completed = 1 if result == "ok" else 0
+        summary.failed = 0 if answered else 1
         summary.cards_rented = self._cards_rented
         summary.destroyed_cards = self._destroyed
         summary.cleanup_ok = self.cleanup_ok
         summary.spent_usd = self.budget.current_spent(self.clock())
         summary.budget_exceeded = self.budget_exceeded
-        summary.exit_code = EXIT_OK if (ok and self.cleanup_ok) else EXIT_PARTIAL
+        summary.exit_code = EXIT_OK if (answered and self.cleanup_ok) else EXIT_PARTIAL
         self._log_budget()
         return summary
 
