@@ -65,9 +65,12 @@ on:
         type: string
         default: "4.1"
       verified:
-        description: "Только проверенные хосты Vast (true/false). По умолчанию true"
-        type: string
-        default: "true"
+        description: "Только проверенные хосты Vast: 1 = да, 0 = нет. По умолчанию 0"
+        type: choice
+        options:
+          - "1"
+          - "0"
+        default: "0"
       docker_image:
         description: "пусто = образ этого коммита"
         type: string
