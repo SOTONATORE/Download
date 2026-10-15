@@ -71,6 +71,13 @@ on:
           - "1"
           - "0"
         default: "0"
+      rental_type:
+        description: "Режим аренды карт Vast: interruptible (прерываемая, ставка bid) или on-demand (обычная)"
+        type: choice
+        options:
+          - "interruptible"
+          - "on-demand"
+        default: "interruptible"
       docker_image:
         description: "пусто = образ этого коммита"
         type: string
@@ -162,6 +169,7 @@ jobs:
           MIN_INET: ${{ inputs.min_inet_mbps }}
           MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
           VERIFIED: ${{ inputs.verified }}
+          RENTAL_TYPE: ${{ inputs.rental_type }}
           DOCKER_IMAGE: ${{ inputs.docker_image }}
           WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
@@ -189,6 +197,7 @@ jobs:
             --min-inet-mbps "$MIN_INET"
             --max-inet-price-per-tb "$MAX_INET_PRICE"
             --verified "$VERIFIED"
+            --rental-type "$RENTAL_TYPE"
             --disk-gb "$DISK_GB"
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
             --repo "$REPO"
@@ -284,6 +293,8 @@ jobs:
 
       # SPEC 8.3 (в): выполняется всегда — при ошибке, таймауте и отмене.
       # Шаг 1: сначала немедленно гасим карты, чтобы остановить списание денег.
+      # Вывод шагов уборки пишется и в $RUN_LOG (артефакт generate-run-log): через ту же маскировку,
+      # что и в шаге run, потому что файл артефакта публичен (SPEC 0.1). Код выхода — от python (pipefail).
       - name: Kill rented cards
         if: always()
         timeout-minutes: 5
@@ -291,7 +302,19 @@ jobs:
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          python -m Generate.cli kill-cards --run-id "$RUN_ID"
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          python -m Generate.cli kill-cards --run-id "$RUN_ID" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG"
 
       # Шаг 2: выдаём уже готовые клипы (prompts.json и generated_links.txt).
       - name: Finalize release on completion or cancel
@@ -312,7 +335,19 @@ jobs:
           if [ -n "$RELEASE_TAG" ]; then
             args+=(--release-tag "$RELEASE_TAG")
           fi
-          python -m Generate.cli finalize-release "${args[@]}"
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          python -m Generate.cli finalize-release "${args[@]}" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG"
 
       # Полный лог шага run (с маскированием) сохраняется даже при отмене и ошибке.
       - name: Upload run log
