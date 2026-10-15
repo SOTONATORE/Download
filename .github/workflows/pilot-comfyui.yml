@@ -146,7 +146,7 @@ jobs:
             --max-price-per-hour "$MAX_PRICE"
             --min-reliability "$MIN_RELIABILITY"
             --min-inet-mbps "$MIN_INET"
-            --max-inet-price-per-tb "$MAX_INET"
+            --max-inet-price-per-tb "$MAX_INET_PRICE"
             --verified "$VERIFIED"
             --rental-type "$RENTAL_TYPE"
             --disk-gb "$DISK_GB"
