@@ -364,11 +364,19 @@ def _print_summary(s) -> None:
         print("  ВНИМАНИЕ: карты могли остаться арендованными, проверьте Vast.ai")
 
 
+def _pilot_mode(args: argparse.Namespace) -> bool:
+    """Флаг пилота ComfyUI; у старых вызовов без атрибута (тесты, прежние аргументы) — выключен."""
+    return bool(getattr(args, "pilot", False))
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Основной запуск генерации (этапы 4-9)."""
     # пустой docker_image = образ этого коммита (SPEC 8.4); None = не задано, берётся из конфига
     docker_image = args.docker_image
-    if docker_image is not None:
+    if _pilot_mode(args) and not (docker_image or "").strip():
+        _err("Ошибка входных данных: пилот ComfyUI требует явного образа (--docker-image).")
+        return EXIT_INPUT
+    if docker_image is not None and not _pilot_mode(args):
         try:
             docker_image = _resolve_docker_image(docker_image, args.worker_build)
         except ValueError as e:
@@ -416,8 +424,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         timing = _build_timing(cfg, cfg.model_profile)
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.style_brief, cfg.gemini_batch_size)
-        transport = _make_transport()
-        store = _make_release_store(args.repo)
+        # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
+        transport = None if _pilot_mode(args) else _make_transport()
+        store = None if _pilot_mode(args) else _make_release_store(args.repo)
         vast = VastClient(debug_logs=bool(getattr(args, "debug_logs", False)))
     except VastError as e:
         _err(f"Ошибка запуска: {e}")
@@ -479,6 +488,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             gemini_options=_gemini_options(cfg),
             log_level=getattr(args, "log_level", "INFO"),
             stop_event=stop,
+            pilot=_pilot_mode(args),
+            pilot_start_cmd=getattr(args, "pilot_start_cmd", "") or "",
         )
     finally:
         _restore_handlers(previous_handlers)
@@ -650,6 +661,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--verified", type=_parse_verified, default=None,
                        help="только проверенные хосты Vast: 1 = да, 0 = нет; "
                             "другие значения недопустимы; без флага берётся из конфига")
+    run_p.add_argument("--pilot", action="store_true", default=False,
+                       help="пилот ComfyUI: одна карта, без воркера, весов и Release; метка pilot-<run-id>")
+    run_p.add_argument("--pilot-start-cmd", default="",
+                       help="команда старта ComfyUI в пилоте (UNVERIFIED для образа; пусто = по умолчанию)")
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))

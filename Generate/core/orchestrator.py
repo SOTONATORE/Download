@@ -64,6 +64,12 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger("Generate.orchestrator")
 
 MAX_ATTEMPTS = 3          # попыток рендера одного клипа
+# Пилот ComfyUI (pilot-comfyui.yml): проверка инфраструктуры Vast без воркера (Generate/PILOT_REPORT.md).
+PILOT_HTTP_PORT = 8188    # порт ComfyUI в контейнере
+# команда старта ComfyUI: UNVERIFIED — путь к main.py зависит от образа; переопределяется --pilot-start-cmd
+PILOT_START_CMD = "python /workspace/ComfyUI/main.py --listen 0.0.0.0 --port 8188"
+PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI, по которому setup.sh проверяет готовность
+PILOT_PROBE_TIMEOUT_SEC = 5.0
 MAX_NET_FAILS = 6         # подряд сбоев связи с воркером до снятия карты
 EXIT_OK = 0
 EXIT_PARTIAL = 3
@@ -199,6 +205,25 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _mapped_port(info: InstanceInfo, port: int) -> Optional[int]:
+    """Внешний порт Vast, проброшенный на внутренний port (поле ports экземпляра); None, если проброса нет."""
+    ports = info.raw.get("ports")
+    if isinstance(ports, str):
+        try:
+            ports = json.loads(ports)
+        except ValueError:
+            return None
+    if not isinstance(ports, dict):
+        return None
+    mapped = ports.get(f"{port}/tcp")
+    if isinstance(mapped, list) and mapped and isinstance(mapped[0], dict):
+        try:
+            return int(mapped[0].get("HostPort"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
@@ -247,6 +272,8 @@ class Orchestrator:
         clock: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], None]] = None,
         stop_event: Optional[threading.Event] = None,
+        pilot: bool = False,
+        pilot_start_cmd: str = "",
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -276,7 +303,9 @@ class Orchestrator:
         self.disk_gb = disk_gb
         self.limit_clips = limit_clips
         self.repo = repo
-        self.label = f"gen-{run_id or uuid.uuid4().hex[:8]}"
+        self.pilot = bool(pilot)
+        self.pilot_start_cmd = pilot_start_cmd or PILOT_START_CMD
+        self.label = f"{'pilot' if self.pilot else 'gen'}-{run_id or uuid.uuid4().hex[:8]}"
         self.profile = profile
         self.template = filename_template
         self.width = clip_name_width
@@ -409,6 +438,8 @@ class Orchestrator:
     def run(self) -> RunSummary:
         self._t0 = self.clock()
         try:
+            if self.pilot:
+                return self._run_pilot()
             missing = parse_missing(self.missing_path, self.segments)
             if not missing:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
@@ -467,6 +498,113 @@ class Orchestrator:
                  summary.spent_usd, summary.exit_code)
         self._log_budget()
         return summary
+
+    # --- пилот ComfyUI (pilot-comfyui.yml) -----------------------------------
+    def _run_pilot(self) -> RunSummary:
+        """Пилот: одна карта, ожидание статуса running и HTTP 200 на порту ComfyUI, замер времени, уборка.
+
+        Без missing.txt, Gemini, Release и воркера; весов не загружает. Уборка (destroy_by_label)
+        и учёт бюджета — те же методы, что в основном пути. Все строки начинаются с «PILOT».
+        """
+        summary = RunSummary(total_needed=1)
+        t_start = self.clock()
+        result = "timeout"
+        rent_at: Optional[float] = None
+        running_at: Optional[float] = None
+        port_at: Optional[float] = None
+        slot: Optional[_CardSlot] = None
+        try:
+            # аренда: повторы как в основном пути, пока не истёк срок молчания
+            while slot is None:
+                if self._stop.is_set():
+                    result = "stop"
+                    break
+                state = self._rent_one(self.clock())
+                if state == "ok":
+                    slot = next(iter(self._slots.values()))
+                    rent_at = slot.created
+                elif state in ("budget", "stop"):
+                    result = state
+                    break
+                elif self.clock() - t_start >= self._silent_sec:
+                    log.error("PILOT: карту не удалось арендовать за %d мин.", int(self._silent_sec // 60))
+                    break
+                else:
+                    self._sleep(self.rent_retry)
+
+            while slot is not None and rent_at is not None:
+                now = self.clock()
+                if self._stop.is_set():
+                    result = "stop"
+                    break
+                if now - rent_at >= self._lifetime_sec:
+                    result = "lifetime"
+                    break
+                if now - rent_at >= self._silent_sec and port_at is None:
+                    result = "timeout"
+                    log.error("PILOT: порт %d не ответил за %d мин после аренды.",
+                              PILOT_HTTP_PORT, int(self._silent_sec // 60))
+                    break
+                try:
+                    info = self.vast.get_instance(slot.instance_id)
+                except VastError as exc:  # VastInstanceNotFound тоже сюда: опрос повторяется
+                    log.warning("PILOT: не удалось получить статус карты %d: %s",
+                                slot.instance_id, type(exc).__name__)
+                    info = None
+                if info is not None:
+                    if info.actual_status != slot.vast_status:
+                        slot.vast_status = info.actual_status
+                        log.info("Карта %d: состояние Vast «%s».", slot.instance_id,
+                                 info.actual_status or "неизвестно")
+                    if info.actual_status in STOPPED_AFTER_START_STATUSES or info.intended_status == "stopped":
+                        result = "card_stopped"
+                        break
+                    if running_at is None and info.actual_status == "running":
+                        running_at = self.clock()
+                        log.info("PILOT-МАРКЕР running: карта %d через %.0f с после аренды.",
+                                 slot.instance_id, running_at - rent_at)
+                    port = _mapped_port(info, PILOT_HTTP_PORT) if running_at is not None else None
+                    if running_at is not None and info.public_ip and port:
+                        code = self._probe_pilot(f"http://{info.public_ip}:{port}")
+                        if code == 200:
+                            port_at = self.clock()
+                            result = "ok"
+                            log.info("PILOT-МАРКЕР порт %d: HTTP 200 через %.0f с после аренды.",
+                                     PILOT_HTTP_PORT, port_at - rent_at)
+                            break
+                        log.debug("PILOT: порт %d пока не отвечает (код %s).", PILOT_HTTP_PORT, code)
+                self._sleep(self.poll_interval)
+        finally:
+            # уборка по метке pilot-<run_id>: та же функция, что у основного пути; карты гасятся всегда
+            self._cleanup()
+
+        # замер: интервалы от аренды; None, если этап не наступил
+        to_running = (running_at - rent_at) if (running_at is not None and rent_at is not None) else None
+        to_port = (port_at - rent_at) if (port_at is not None and rent_at is not None) else None
+        ok = result == "ok"
+        log.info("PILOT-ИТОГ: результат=%s; аренда→running=%s с; аренда→ответ %d=%s с; карт арендовано %d, "
+                 "уничтожено %d; уборка %s.", result,
+                 "нет" if to_running is None else f"{to_running:.0f}", PILOT_HTTP_PORT,
+                 "нет" if to_port is None else f"{to_port:.0f}", self._cards_rented, self._destroyed,
+                 "выполнена" if self.cleanup_ok else "НЕ ПОДТВЕРЖДЕНА")
+        summary.completed = 1 if ok else 0
+        summary.failed = 0 if ok else 1
+        summary.cards_rented = self._cards_rented
+        summary.destroyed_cards = self._destroyed
+        summary.cleanup_ok = self.cleanup_ok
+        summary.spent_usd = self.budget.current_spent(self.clock())
+        summary.budget_exceeded = self.budget_exceeded
+        summary.exit_code = EXIT_OK if (ok and self.cleanup_ok) else EXIT_PARTIAL
+        self._log_budget()
+        return summary
+
+    def _probe_pilot(self, base: str) -> Optional[int]:
+        """GET PILOT_PROBE_PATH на порту ComfyUI. Возвращает код HTTP или None, если ответа нет."""
+        try:
+            resp = self._http.get(base + PILOT_PROBE_PATH, timeout=PILOT_PROBE_TIMEOUT_SEC)
+        except httpx.HTTPError:
+            return None
+        return resp.status_code
 
     # --- промпты -------------------------------------------------------------
     def _read_state(self) -> dict:
@@ -618,25 +756,32 @@ class Orchestrator:
         offer = affordable[0]
         if self._stop.is_set():  # сигнал пришёл во время поиска: новая аренда не начинается
             return "stop"
-        env = {
-            "WORKER_TOKEN": self._token,
-            "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
-            "WORKER_MAX_LIFETIME_MIN": str(self.card_max_lifetime_min),
-            "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
-            f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
-        }
-        # HF_TOKEN пробрасывается в контейнер для скачивания закрытых моделей LTX-2.5
-        # (значение токена не логируется и не печатается).
-        hf_token = os.environ.get("HF_TOKEN", "").strip()
-        if hf_token:
-            env["HF_TOKEN"] = hf_token
+        if self.pilot:
+            # пилот: ни токена воркера, ни HF_TOKEN (загрузка весов отключена); открыт только порт ComfyUI
+            env = {
+                "GEN_LOG_LEVEL": self.log_level,
+                f"-p {PILOT_HTTP_PORT}:{PILOT_HTTP_PORT}": "1",
+            }
+        else:
+            env = {
+                "WORKER_TOKEN": self._token,
+                "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
+                "WORKER_MAX_LIFETIME_MIN": str(self.card_max_lifetime_min),
+                "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
+                f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
+            }
+            # HF_TOKEN пробрасывается в контейнер для скачивания закрытых моделей LTX-2.5
+            # (значение токена не логируется и не печатается).
+            hf_token = os.environ.get("HF_TOKEN", "").strip()
+            if hf_token:
+                env["HF_TOKEN"] = hf_token
         # цена бюджета по режиму аренды (SPEC 8.2): прерываемая — ставка bid (поле «price»), обычная —
         # dph_total предложения; поле «price» для обычной аренды не отправляется
         bid_price = offer.price_per_hr if offer.is_interruptible else None
         try:
             inst_id = self.vast.create_instance(
                 offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label,
-                bid_price=bid_price)
+                bid_price=bid_price, onstart=self.pilot_start_cmd if self.pilot else None)
         except VastError as exc:
             self._bad_offers.add(offer.offer_id)
             log.warning("Не удалось создать карту по предложению %d: %s", offer.offer_id, exc)
