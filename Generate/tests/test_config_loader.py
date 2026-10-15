@@ -87,11 +87,33 @@ def test_verified_accepts_only_integers_zero_and_one(value):
     assert "«verified»: нужно 0 или 1" in str(ei.value)
 
 
-def test_verified_missing_key_defaults_to_true():
-    """Fail closed: без ключа фильтр проверенных хостов остаётся включённым."""
+def test_verified_missing_key_defaults_to_false():
+    """Отсутствие ключа читается как 0 (без фильтра по проверке), как в config.default.yaml."""
     raw = _base()
     del raw["verified"]
-    assert cl.parse_config(raw).verified is True
+    assert cl.parse_config(raw).verified is False
+
+
+# ---------------------------------------------------------------- rental_type (режим аренды)
+
+def test_rental_type_default_file_is_interruptible_and_derives_flag():
+    cfg = cl.load_config()
+    assert cfg.rental_type == "interruptible" and cfg.interruptible is True
+
+
+def test_rental_type_on_demand_derives_interruptible_false():
+    raw = _base()
+    raw["rental_type"] = "on-demand"
+    cfg = cl.parse_config(raw)
+    assert cfg.rental_type == "on-demand" and cfg.interruptible is False
+
+
+def test_old_interruptible_key_is_rejected_as_unknown():
+    raw = _base()
+    raw["interruptible"] = True
+    with pytest.raises(GeminiInputError) as ei:
+        cl.parse_config(raw)
+    assert "неизвестный ключ «interruptible»" in str(ei.value)
 
 
 def test_verified_missing_key_does_not_hide_other_missing_keys():
@@ -126,7 +148,8 @@ def test_empty_file_reports_missing_keys():
     ("fps", True, "целое число"),                 # bool не считается целым
     ("clip_min_sec", "2.5", "число"),
     ("clip_min_sec", False, "число"),
-    ("interruptible", "true", "true или false"),
+    ("rental_type", "spot", "допустимы значения: interruptible, on-demand"),
+    ("rental_type", True, "строка"),
     ("verified", "true", "0 или 1"),              # строка «true» не считается значением verified
     ("verified", True, "0 или 1"),                # bool не принимается даже в виде True/False
     ("verified", None, "не может быть пустым"),   # null не превращается молча в умолчание

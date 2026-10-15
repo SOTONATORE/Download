@@ -24,6 +24,7 @@ import re
 import secrets
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -73,14 +74,18 @@ LOG_LEVELS = ("INFO", "DEBUG")
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
 
-# Маркеры ошибки контейнерного рантайма в тексте статуса Vast (SPEC 8.2, неудачный старт).
-# Список основан на одной наблюдаемой ошибке (карта 55771098, хост 362355, 13.10.2026):
-# «Error response from daemon: failed to create task for container: failed to create shim task:
-# OCI runtime create failed: … failed to inject CDI devices: unresolvable CDI devices … gpu=2: unknown».
-# Сравнение без учёта регистра и по подстроке. Другие ошибки старта этим списком не покрыты:
-# они по-прежнему снимаются таймаутом молчащего хоста.
-START_FAILURE_MARKERS = ("failed to create", "OCI runtime", "CDI", "shim")
+# Маркеры ошибки в тексте статуса Vast (SPEC 8.2, неудачный старт), одна константа.
+# «failed to create», «OCI runtime», «CDI», «shim» основаны на наблюдаемой ошибке (карта 55771098,
+# хост 362355, 13.10.2026): «failed to create task … failed to create shim task: OCI runtime create
+# failed: … failed to inject CDI devices: unresolvable CDI devices … gpu=2: unknown».
+# «failed to», «unresolvable», «error» — общие слова ошибки. Сравнение без учёта регистра и по подстроке.
+# Текст «Preparing GPUs...» и подобный прогресс маркеров не содержит и карту не снимает.
+START_FAILURE_MARKERS = ("failed to", "unresolvable", "error", "failed to create", "OCI runtime", "CDI", "shim")
+# Статусы Vast, которые после начала старта (loading или created) означают неудачный старт (SPEC 8.2)
+STOPPED_AFTER_START_STATUSES = ("offline", "exited")
 START_FAILURE_REASON = "старт карты не удался"
+# длина текста статуса в строке лога о неудачном старте (SPEC 8.2), символов
+START_MSG_LOG_LEN = 200
 
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
@@ -160,8 +165,17 @@ class _CardSlot:
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
     offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
     saw_loading: bool = False         # Vast хотя бы раз показал «loading»: старт начался (SPEC 8.2)
+    saw_created: bool = False         # Vast показал «created»: старт начался (SPEC 8.2)
+    bid_requested: bool = False       # карта арендована как прерываемая (ставка bid, SPEC 8.2)
+    dph_search: float = 0.0           # dph_total из поиска: запасная цена, если bid не подтверждён
+    mode_mismatch: bool = False       # Vast не подтвердил bid (is_bid не True): бюджет по dph_total
     not_found: int = 0                # подряд идущих ответов «экземпляр не найден» (NOT_FOUND_LIMIT, SPEC 8.3)
     cost_checked: bool = False        # цена по ответу Vast уже учтена или признана недоступной (SPEC 8.2)
+
+    @property
+    def started(self) -> bool:
+        """Старт карты начался: Vast показал «loading» или «created» (SPEC 8.2)."""
+        return self.saw_loading or self.saw_created
 
 
 def _prompt_ready(entry) -> bool:
@@ -231,7 +245,8 @@ class Orchestrator:
         http_timeout_sec: float = 60.0,
         log_level: str = "INFO",
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Optional[Callable[[float], None]] = None,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -278,7 +293,10 @@ class Orchestrator:
         self.rent_estimate = rent_estimate_sec
         self.http_timeout = http_timeout_sec
         self.clock = clock
-        self._sleep = sleep
+        # сигнал остановки (SPEC 8.3 (в)): cli выставляет флаг; ожидания между шагами прерываются им
+        self._stop = stop_event if stop_event is not None else threading.Event()
+        # пауза по умолчанию прерываемая: Event.wait возвращается сразу при установленном флаге
+        self._sleep = sleep if sleep is not None else self._stop.wait
 
         self._token = worker_token or secrets.token_urlsafe(24)
         self._headers = {"X-Worker-Token": self._token}
@@ -447,6 +465,7 @@ class Orchestrator:
                  summary.completed, len(needed), summary.failed, summary.pending,
                  summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
                  summary.spent_usd, summary.exit_code)
+        self._log_budget()
         return summary
 
     # --- промпты -------------------------------------------------------------
@@ -498,6 +517,12 @@ class Orchestrator:
         self._queue = deque(ready)
         drain_since: Optional[float] = None
         while True:
+            if self._stop.is_set():
+                # сигнал остановки: новых поисков и аренд нет, дозаливки нет; карты уничтожает _cleanup
+                # по метке запуска (как kill-cards) и закрывает их записи бюджета
+                log.error("Получен сигнал остановки: новые поиски и аренды не запускаются, "
+                          "арендованные карты уничтожаются.")
+                break
             now = self.clock()
             deadline_hit = (now - self._t0) >= self._deadline_sec
             if deadline_hit and drain_since is None:
@@ -547,6 +572,8 @@ class Orchestrator:
             return
         while len(self._slots) < self._desired(now):
             res = self._rent_one(now)
+            if res == "stop":
+                return
             if res == "retry":
                 self._next_rent = now + self.rent_retry
                 return
@@ -565,6 +592,8 @@ class Orchestrator:
                     ", ".join(str(i) for i in ids), len(listed))
 
     def _rent_one(self, now: float) -> str:
+        if self._stop.is_set():
+            return "stop"
         try:
             offers = self.vast.search_offers(self.offer_filter)
         except VastError as exc:
@@ -587,6 +616,8 @@ class Orchestrator:
                         self.budget.remaining_budget(now))
             return "budget"
         offer = affordable[0]
+        if self._stop.is_set():  # сигнал пришёл во время поиска: новая аренда не начинается
+            return "stop"
         env = {
             "WORKER_TOKEN": self._token,
             "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
@@ -599,9 +630,13 @@ class Orchestrator:
         hf_token = os.environ.get("HF_TOKEN", "").strip()
         if hf_token:
             env["HF_TOKEN"] = hf_token
+        # цена бюджета по режиму аренды (SPEC 8.2): прерываемая — ставка bid (поле «price»), обычная —
+        # dph_total предложения; поле «price» для обычной аренды не отправляется
+        bid_price = offer.price_per_hr if offer.is_interruptible else None
         try:
             inst_id = self.vast.create_instance(
-                offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label)
+                offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label,
+                bid_price=bid_price)
         except VastError as exc:
             self._bad_offers.add(offer.offer_id)
             log.warning("Не удалось создать карту по предложению %d: %s", offer.offer_id, exc)
@@ -611,10 +646,13 @@ class Orchestrator:
         gen = self._gens.get(index, 0) + 1
         self._gens[index] = gen
         self._slots[index] = _CardSlot(index, gen, inst_id, offer.machine_id,
-                                       offer.price_per_hr, now, offer_id=offer.offer_id)
+                                       offer.price_per_hr, now, offer_id=offer.offer_id,
+                                       bid_requested=offer.is_interruptible,
+                                       dph_search=offer.dph_total)
         self._cards_rented += 1
-        log.info("Арендована карта %d по предложению %d (слот %d, поколение %d): %.4f USD/ч.",
-                 inst_id, offer.offer_id, index, gen, offer.price_per_hr)
+        mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
+        log.info("Арендована карта %d по предложению %d (слот %d, поколение %d, %s): %.4f USD/ч.",
+                 inst_id, offer.offer_id, index, gen, mode, offer.price_per_hr)
         log.info("Карта %d создана, ждём загрузку образа.", inst_id)
         return "ok"
 
@@ -665,20 +703,26 @@ class Orchestrator:
     def _check_start_failure(self, slot: _CardSlot, prev_status: str, info: InstanceInfo) -> bool:
         """Неудачный старт карты (SPEC 8.2). Возвращает True, если карта снята.
 
-        Судится только после первого «loading» (вызывающий код проверяет saw_loading).
-        Признаки, любой из двух: статус ушёл из «loading» (или «running») в другое непустое
-        состояние, например «created»; текст статуса содержит маркер START_FAILURE_MARKERS.
-        Пустой статус и отсутствующий текст ни одного признака не дают: карта ждёт по старому
-        правилу (таймаут молчащего хоста). Снятие идёт через _retire(bad=True), без второго пути.
+        Судится только после начала старта (вызывающий код проверяет slot.started: «loading» или «created»).
+        Признаки, любой из двух:
+          - текст статуса (status_msg, строка) содержит маркер START_FAILURE_MARKERS (без учёта регистра,
+            по подстроке);
+          - статус Vast стал «offline» или «exited».
+        Статус «created» сам по себе признаком не является: прогресс («Preparing GPUs...») карту не снимает,
+        она ждёт до silent_host_timeout_min. Пустой статус, отсутствующий или нестроковый текст
+        признака не дают (fail-closed).
+        Снятие идёт через _retire(bad=True): хост и предложение исключаются на весь запуск, отдельного пути нет.
         """
         new_status = info.actual_status
-        raw_msg = (info.status_msg or "").strip()
-        by_transition = bool(new_status) and new_status not in ("loading", "running")
+        raw_msg = info.status_msg.strip() if isinstance(info.status_msg, str) else ""
         by_message = bool(raw_msg) and _has_start_marker(raw_msg)
-        if not (by_transition or by_message):
+        by_status = new_status in STOPPED_AFTER_START_STATUSES
+        if not (by_message or by_status):
             return False
-        # маскирование всего текста до сворачивания пробелов (SPEC 0.1); текст не обрезается
-        text = _one_line(self._mask_remote(raw_msg))
+        # маскирование всего текста до обрезки и сворачивания пробелов (SPEC 0.1)
+        text = _one_line(self._mask_remote(raw_msg)) if raw_msg else ""
+        if len(text) > START_MSG_LOG_LEN:
+            text = text[:START_MSG_LOG_LEN] + "…"
         detail = f"статус «{prev_status or 'неизвестно'}» → «{new_status or 'неизвестно'}»"
         if text:
             detail += f"; текст: {text}"
@@ -706,24 +750,41 @@ class Orchestrator:
             self._bad_offers.add(slot.offer_id)
         self._retire(slot, NOT_FOUND_REASON, bad=True)
 
+    def _check_rental_mode(self, slot: _CardSlot, info: InstanceInfo) -> None:
+        """Проверка режима после аренды (SPEC 8.2): карта арендована как bid, но Vast не подтвердил is_bid.
+
+        Это ошибка нашего кода или ответа API. Запуск не прерывается; бюджет считается по dph_total,
+        min_bid не используется (см. _adopt_vast_price).
+        """
+        if not slot.bid_requested or info.is_bid is True:
+            return
+        slot.mode_mismatch = True
+        log.error("карта %d: запрошен bid, Vast вернул is_bid=%s; бюджет считается по dph_total.",
+                  slot.instance_id, info.is_bid)
+
     def _adopt_vast_price(self, slot: _CardSlot, info: InstanceInfo) -> None:
         """Цена карты по ответу Vast (dph_total) вместо цены поиска (SPEC 8.2, бюджет).
 
         Вызывается один раз на карту, на первом успешном ответе get_instance. Если dph нулевой или
-        отсутствует, остаётся цена поиска и пишется одно предупреждение. Иначе ставка открытой записи
+        отсутствует, остаётся цена поиска и пишется одно предупреждение. При несовпадении режима
+        (mode_mismatch) запасная цена — dph_total из поиска, но не min_bid. Иначе ставка открытой записи
         бюджета меняется через set_dph: запись одна, стоимость до этого момента сохраняется.
         Лимит бюджета и расчёт резерва не меняются.
         """
         slot.cost_checked = True
-        if not info.dph > 0:
-            log.warning("Карта %d: Vast не вернул цену (dph_total), учитывается цена поиска %.4f USD/ч.",
-                        slot.instance_id, slot.price)
+        price = info.dph
+        if not price > 0 and slot.mode_mismatch and slot.dph_search > 0:
+            price = slot.dph_search
+        if not price > 0:
+            log.warning("карта %d: Vast не вернул цену (dph_total) ни в ответе, ни в поиске; "
+                        "бюджет считается по ставке bid из поиска, проверьте Billing.",
+                        slot.instance_id)
             return
-        if not self.budget.set_dph(slot.instance_id, info.dph, self.clock()):
+        if not self.budget.set_dph(slot.instance_id, price, self.clock()):
             log.warning("Карта %d: нет записи учёта бюджета, учитывается цена поиска %.4f USD/ч.",
                         slot.instance_id, slot.price)
             return
-        slot.price = info.dph
+        slot.price = price
 
     # --- шаг по карте ---------------------------------------------------------
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
@@ -744,6 +805,7 @@ class Orchestrator:
             if info is not None:
                 slot.not_found = 0
                 if not slot.cost_checked:
+                    self._check_rental_mode(slot, info)
                     self._adopt_vast_price(slot, info)
                 prev_status = slot.vast_status
                 # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
@@ -751,13 +813,15 @@ class Orchestrator:
                     slot.vast_status = info.actual_status
                     log.info("Карта %d: состояние Vast «%s».", slot.instance_id,
                              info.actual_status or "неизвестно")
-                if info.actual_status == "exited" or info.intended_status == "stopped":
-                    self._retire(slot, "карта остановлена хостом", bad=True)
-                    return
                 if info.actual_status == "loading":
                     slot.saw_loading = True
-                # до первого «loading» карта не судится по признакам неудачного старта
-                if slot.saw_loading and self._check_start_failure(slot, prev_status, info):
+                if info.actual_status == "created":
+                    slot.saw_created = True
+                # признаки неудачного старта судятся только после начала старта (loading или created)
+                if slot.started and self._check_start_failure(slot, prev_status, info):
+                    return
+                if info.actual_status == "exited" or info.intended_status == "stopped":
+                    self._retire(slot, "карта остановлена хостом", bad=True)
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"
@@ -969,6 +1033,16 @@ class Orchestrator:
                     self.budget.track_instance_stop(rec["instance_id"], now)
                 except BudgetError:
                     pass
+
+    def _log_budget(self) -> None:
+        """Одна строка в конце запуска: режим аренды, расход по картам и итог (SPEC 10)."""
+        now = self.clock()
+        rows = self.budget.summary(now)["breakdown"]
+        per_card = ", ".join(f"карта {r['instance_id']}: {r['cost_usd']:.4f} USD" for r in rows)
+        mode = "прерываемая (bid)" if self.offer_filter.interruptible else "обычная (on-demand)"
+        log.info("Бюджет запуска: режим аренды %s; по картам: %s; всего %.4f USD из лимита %.2f USD.",
+                 mode, per_card or "карт не арендовано", self.budget.current_spent(now),
+                 self.budget.budget_limit_usd)
 
     def _close_budget_records(self, instance_ids: list[int], now: float) -> None:
         """Закрывает открытые записи бюджета только у перечисленных карт (те же вызовы, что в уборке)."""

@@ -3,3 +3,5 @@
 58482  # CDI gpu=2 error, 2026-10-14, instance 55937386
 38389  # CDI gpu=2, 2026-10-14, instance 55975351
 36773  # CDI gpu=2
+52992  # run 38738836798: false loading->created retire / offline
+150168  # run 38738836798: false loading->created retire / offline

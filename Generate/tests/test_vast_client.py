@@ -277,6 +277,27 @@ def test_create_instance_bad_response(key):
         c.create_instance(1, "img", 10)
 
 
+def test_create_instance_sends_price_only_for_bid(key):
+    bodies = []
+
+    def handler(req):
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"success": True, "new_contract": 5})
+
+    c = make(handler)
+    c.create_instance(1, "img", 10)                    # обычная аренда: поля price нет
+    c.create_instance(2, "img", 10, bid_price=0.31)    # прерываемая: ставка bid
+    assert "price" not in bodies[0]
+    assert bodies[1]["price"] == 0.31
+
+
+def test_parse_instance_reads_is_bid_or_none():
+    assert VastClient._parse_instance({"id": 1, "is_bid": True}).is_bid is True
+    assert VastClient._parse_instance({"id": 1, "is_bid": False}).is_bid is False
+    assert VastClient._parse_instance({"id": 1}).is_bid is None
+    assert VastClient._parse_instance({"id": 1, "is_bid": "true"}).is_bid is None
+
+
 def inst(i, status="running", label="gen-a", ports=True):
     d = {"id": i, "actual_status": status, "intended_status": "running", "label": label,
          "public_ipaddr": "1.2.3.4", "ssh_host": "ssh.vast", "ssh_port": 2222, "dph_total": 0.4}

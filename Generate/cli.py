@@ -32,9 +32,11 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -107,6 +109,49 @@ def _parse_verified(value: str) -> bool:
         return False
     raise argparse.ArgumentTypeError(
         "допустимы только значения 1 и 0: 1 = только проверенные хосты, 0 = без фильтра")
+
+
+def _parse_rental_type(value: str) -> Optional[str]:
+    """Вход --rental-type: interruptible или on-demand. Пустая строка = не задано (конфиг не переопределяется).
+
+    Любое другое значение — ошибка аргументов (код 2), до первого вызова Vast. Значение в сообщении не печатаем.
+    """
+    if value == "":
+        return None
+    if value in ("interruptible", "on-demand"):
+        return value
+    raise argparse.ArgumentTypeError("допустимы значения: interruptible, on-demand")
+
+
+# Сигналы остановки (SPEC 8.3 (в)): отмена запуска или SIGTERM переводят конвейер в режим уборки.
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def _install_stop_handlers(stop: threading.Event) -> dict:
+    """Ставит обработчики SIGINT и SIGTERM: они только выставляют флаг. Возвращает прежние обработчики.
+
+    Логирование внутри обработчика не делается: оркестратор пишет строку, увидев флаг в цикле.
+    Вне главного потока signal не ставится; тогда возвращается пустой словарь.
+    """
+    previous: dict = {}
+
+    def _on_signal(signum, frame):  # noqa: ARG001 - сигнатура обязательна для signal
+        stop.set()
+
+    for sig in STOP_SIGNALS:
+        try:
+            previous[sig] = signal.signal(sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+    return previous
+
+
+def _restore_handlers(previous: dict) -> None:
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
 
 
 def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
@@ -348,6 +393,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "silent_host_timeout_min": args.silent_host_timeout_min,
         # схема конфига принимает только целые 0 и 1 (не bool): флаг переводится в 1 или 0
         "verified": None if args.verified is None else int(args.verified),
+        # режим аренды: None (не задан) не переопределяет config.default.yaml
+        "rental_type": args.rental_type,
     }
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
@@ -395,6 +442,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         verified=cfg.verified,
     )
 
+    stop = threading.Event()
+    previous_handlers = _install_stop_handlers(stop)
     try:
         # предстартовая проверка Vast API и кредита: до поиска предложений и любого вызова Gemini
         code = _vast_preflight(vast, cfg.min_balance_usd)
@@ -429,8 +478,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             release_asset_limit=cfg.release_asset_limit,
             gemini_options=_gemini_options(cfg),
             log_level=getattr(args, "log_level", "INFO"),
+            stop_event=stop,
         )
     finally:
+        _restore_handlers(previous_handlers)
         close = getattr(vast, "close", None)
         if callable(close):
             close()
@@ -594,6 +645,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
                        help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
+    run_p.add_argument("--rental-type", type=_parse_rental_type, default=None,
+                       help="режим аренды карт: interruptible или on-demand (пусто = из конфига)")
     run_p.add_argument("--verified", type=_parse_verified, default=None,
                        help="только проверенные хосты Vast: 1 = да, 0 = нет; "
                             "другие значения недопустимы; без флага берётся из конфига")

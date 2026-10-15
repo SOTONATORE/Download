@@ -52,7 +52,8 @@ class FakeVast:
         self.search_calls += 1
         return list(self.offers)
 
-    def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None):
+    def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None,
+                        bid_price=None):
         self.rented_offers.append(offer_id)
         return 900 + len(self.rented_offers)
 

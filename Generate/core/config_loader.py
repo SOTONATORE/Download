@@ -46,6 +46,8 @@ ACTIONS_JOB_LIMIT_MIN = 360
 # Подстроки имён ключей: если неизвестный ключ похож на секрет, сообщаем об этом отдельно.
 _SECRET_NAME_HINTS = ("api_key", "apikey", "token", "secret", "password")
 _PROFILE_NAME_PATTERN = r"[A-Za-z0-9_\-]+"
+# Режимы аренды карт Vast (rental_type): прерываемая (bid) и обычная (on-demand).
+RENTAL_TYPES = ("interruptible", "on-demand")
 
 _TYPE_WORDS = {bool: "логическое значение (true или false)", int: "целое число",
                float: "число", str: "строка"}
@@ -84,11 +86,11 @@ class Config:
 
     # --- аренда карт Vast.ai ---
     gpu_name: str = _rule()
-    interruptible: bool = _rule()
-    # Единственный ключ с умолчанием: отсутствие в файле читается как True (fail closed, SPEC 0.5).
+    rental_type: str = _rule(choices=RENTAL_TYPES)
+    # Единственный ключ с умолчанием: отсутствие в файле читается как False (без фильтра по проверке).
     # В файле и во входах значение только 0 или 1 (целые); true и false не принимаются.
     # kw_only снимает правило «поля с умолчанием идут после полей без умолчания»; порядок как в файле.
-    verified: bool = field(default=True, kw_only=True, metadata={"zero_one": True})
+    verified: bool = field(default=False, kw_only=True, metadata={"zero_one": True})
     min_price_per_hour: float = _rule(ge=0)
     max_price_per_hour: float = _rule(gt=0)
     min_reliability: float = _rule(ge=0, le=1)
@@ -107,6 +109,11 @@ class Config:
     release_asset_limit: int = _rule(ge=1)
     limit_clips: int = _rule(ge=0)
     job_deadline_min: int = _rule(ge=1)
+
+    @property
+    def interruptible(self) -> bool:
+        """Производное от rental_type: единственный источник режима аренды (ключа interruptible в файле нет)."""
+        return self.rental_type == "interruptible"
 
 
 class _Bad(Exception):
@@ -163,6 +170,9 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
             raise _Bad(f"«{name}»: не соответствует формату ({meta.get('hint', meta['pattern'])})")
         if "contains" in meta and meta["contains"] not in value:
             raise _Bad(f"«{name}»: должно содержать {meta['contains']}")
+        if "choices" in meta and value not in meta["choices"]:
+            # значение из файла в текст не выводим (SPEC 0.1): только список допустимых
+            raise _Bad(f"«{name}»: допустимы значения: {', '.join(meta['choices'])}")
         return value
 
     raise TypeError(f"неподдерживаемый тип схемы для {name}: {hint!r}")  # ошибка разработчика

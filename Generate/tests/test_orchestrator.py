@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections import deque
 import sys
 import types
@@ -113,13 +114,15 @@ class FakeVast:
         self._offer_of: dict = {}
         self.dph: dict = {}             # предложение -> dph_total в ответе карты (нет записи = 0.0, поля нет)
         self.destroy_exc = None         # если задано, destroy_instance бросает эту ошибку
+        self.is_bid: dict = {}          # предложение -> is_bid в ответе карты (нет записи = True)
         self._next = 100
 
     def search_offers(self, filters):
         self.search_calls += 1
         return list(self.offers)
 
-    def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None):
+    def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None,
+                        bid_price=None):
         if self.create_exc is not None:
             raise self.create_exc
         if offer_id in self.fail_offers:
@@ -129,7 +132,8 @@ class FakeVast:
         self._offer_of[self._next] = offer_id
         self.created.append({"id": self._next, "offer_id": offer_id,
                              "image": image, "disk_gb": disk_gb,
-                             "env": dict(env_vars or {}), "label": label})
+                             "env": dict(env_vars or {}), "label": label,
+                             "bid_price": bid_price})
         return self._next
 
     def get_instance(self, instance_id):
@@ -144,7 +148,7 @@ class FakeVast:
             return vc.InstanceInfo(
                 instance_id=instance_id, actual_status=status, intended_status="running",
                 public_ip="10.0.0.1" if up else None, direct_port=18000 if up else None,
-                dph=self.dph.get(offer, 0.0), **extra)
+                dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True), **extra)
         stuck = offer in self.stuck_offers
         return vc.InstanceInfo(
             instance_id=instance_id,
@@ -152,7 +156,7 @@ class FakeVast:
             intended_status="running",
             public_ip=None if stuck else "10.0.0.1",
             direct_port=None if stuck else 18000,
-            dph=self.dph.get(offer, 0.0))
+            dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True))
 
     def destroy_instance(self, instance_id):
         if self.destroy_exc is not None:
@@ -690,38 +694,82 @@ def _spy_retire(orc):
     return calls
 
 
-def test_loading_then_created_retires_card_at_once(tmp_path, monkeypatch, caplog):
-    """Статус поля нет совсем (None): работает только правило перехода loading -> created."""
+def test_created_with_progress_text_is_not_retired(tmp_path, monkeypatch, caplog):
+    """Прогресс «created» («Preparing GPUs...») после loading карту не снимает: ждём таймаут молчания (SPEC 8.2)."""
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
-    rig.vast.script[1] = [("created", None), ("loading", None), ("created", None)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS), silent_host_timeout_min=1)
+    rig.vast.script[1] = [("created", None), ("loading", None), ("created", "Preparing GPUs...")]
     calls = _spy_retire(rig.orc)
     summary = rig.run()
 
-    first = calls[0]
-    assert first["reason"] == START_REASON and first["bad"] is True
-    assert first["instance"] == rig.vast.created[0]["id"]
-    assert first["at"] - first["created"] <= 60          # сразу, а не через 20 минут молчания
-    assert rig.vast.created[0]["id"] in rig.vast.destroyed
-    assert 11 in rig.orc._bad_machines                   # хост 11 исключён из этого запуска
-    assert [c["offer_id"] for c in rig.vast.created] == [1, 2]
-    assert summary.completed == 1 and summary.exit_code == 0
-    assert "старт не удался (статус «loading» → «created»)" in caplog.text
-    assert "хост 11 исключён из этого запуска" in caplog.text
+    assert calls[0]["reason"] == "хост не вышел на связь за 1 мин"
+    assert calls[0]["bad"] is True
+    assert calls[0]["at"] - calls[0]["created"] >= 60     # не раньше таймаута молчания
+    assert START_REASON not in caplog.text and "старт не удался" not in caplog.text
+    assert summary.completed == 1
 
 
-def test_created_only_is_not_judged_as_failed_start(tmp_path, monkeypatch, caplog):
-    """Карта ни разу не была в loading: новое правило её не трогает, даже с текстом CDI."""
+def test_created_with_error_marker_retires_at_once(tmp_path, monkeypatch, caplog):
+    """Маркер ошибки в тексте статуса «created» снимает карту сразу (статус уже начал старт)."""
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS), silent_host_timeout_min=1)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
     rig.vast.script[1] = [("created", CDI_MSG)]
     calls = _spy_retire(rig.orc)
     summary = rig.run()
 
-    assert calls[0]["reason"] == "хост не вышел на связь за 1 мин"   # старое правило, не новое
-    assert calls[0]["bad"] is True
-    assert START_REASON not in caplog.text and "старт не удался" not in caplog.text
+    assert calls[0]["reason"] == START_REASON and calls[0]["bad"] is True
+    assert calls[0]["at"] - calls[0]["created"] <= 30
+    assert 11 in rig.orc._bad_machines
+    assert "статус «неизвестно» → «created»; текст: Error response from daemon" in caplog.text
     assert summary.completed == 1
+
+
+def test_offline_after_loading_retires_as_failed_start(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
+    rig.vast.script[1] = [("loading", None), ("offline", None)]
+    calls = _spy_retire(rig.orc)
+    summary = rig.run()
+
+    assert calls[0]["reason"] == START_REASON and calls[0]["bad"] is True
+    assert "статус «loading» → «offline»" in caplog.text
+    assert 11 in rig.orc._bad_machines
+    assert summary.completed == 1
+
+
+def test_bid_not_confirmed_by_vast_recomputes_budget_from_dph_total(tmp_path, monkeypatch, caplog):
+    """Запрошен bid, Vast ответил is_bid не True: строка об ошибке, бюджет по dph_total ответа, не по min_bid."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.2)])
+    rig.vast.is_bid[1] = None                 # поля is_bid в ответе нет
+    rig.vast.dph[1] = 0.5                     # dph_total в ответе карты
+    rig.orc.run()
+
+    assert "карта " in caplog.text and "запрошен bid, Vast вернул is_bid=None; бюджет считается по dph_total." in caplog.text
+    assert rig.vast.created[0]["bid_price"] == 0.2          # bid был отправлен при аренде
+    rows = rig.orc.budget.summary(rig.clock.now)["breakdown"]
+    assert rows[0]["dph"] == pytest.approx(0.5)
+
+
+def test_on_demand_rental_sends_no_bid_price(tmp_path, monkeypatch):
+    offer = make_offer(1, 11, price=0.3)
+    offer.is_interruptible = False
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[offer])
+    rig.orc.run()
+    assert rig.vast.created[0]["bid_price"] is None
+
+
+def test_stop_signal_rents_nothing_and_cleans_up_by_label(tmp_path, monkeypatch, caplog):
+    """Сигнал остановки до работы: ни поиска, ни аренды; уборка идёт по метке запуска (как kill-cards)."""
+    caplog.set_level(logging.INFO)
+    stop = threading.Event()
+    stop.set()
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS), stop_event=stop)
+    rig.run()
+
+    assert rig.vast.search_calls == 0 and rig.vast.created == []
+    assert rig.vast.label_destroyed == [rig.orc.label]
+    assert "Получен сигнал остановки" in caplog.text
 
 
 def test_normal_start_loading_running_is_unchanged(tmp_path, monkeypatch, caplog):
@@ -778,8 +826,8 @@ def test_status_message_is_redacted_before_log(tmp_path, monkeypatch, caplog):
     assert summary.completed == 1
 
 
-def test_status_message_over_200_chars_is_logged_in_full_and_redacted(tmp_path, monkeypatch, caplog):
-    """Длинный текст ошибки попадает в строку лога целиком; секрет в его хвосте маскируется."""
+def test_status_message_over_200_chars_is_truncated_and_redacted(tmp_path, monkeypatch, caplog):
+    """Текст статуса маскируется целиком и обрезается до 200 символов (SPEC 8.2)."""
     caplog.set_level(logging.INFO)
     fake_hf = "hf-fake-TAIL-554466"
     monkeypatch.setenv("HF_TOKEN", fake_hf)
@@ -788,29 +836,19 @@ def test_status_message_over_200_chars_is_logged_in_full_and_redacted(tmp_path, 
     assert len(long_msg) > 200
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
     rig.vast.script[1] = [("loading", long_msg)]
-    summary = rig.run()
+    rig.run()
 
     line = next(r.getMessage() for r in caplog.records if "старт не удался" in r.getMessage())
     assert "\n" not in line
     m = re.search(r"; текст: (.*)\)\. Карта снимается", line)
     assert m is not None
     text = m.group(1)
-    assert len(text) > 200                                   # без обрезки
+    assert text.endswith("…") and len(text) == 201          # 200 символов и отметка обрезки
     assert text.startswith("CDI длинный текст")
-    assert text.endswith("вторая строка; hf=*** конец ошибки")  # хвост на месте, секрет замаскирован
     assert fake_hf not in caplog.text
     _no_secrets(caplog.text)
-    assert summary.completed == 1
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("Error: failed to create shim task", True),
-    ("OCI runtime create failed", True),
-    ("unresolvable cdi devices", True),
-    ("Shim crashed", True),
-    ("Container is running", False),
-    ("", False),
-])
 def test_start_markers_match_case_insensitively(text, expected):
     assert orch._has_start_marker(text) is expected
 

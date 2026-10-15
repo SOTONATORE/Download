@@ -237,6 +237,8 @@ class GpuOffer:
     is_interruptible: bool
     inet_up_price_per_tb: Optional[float] = None
     inet_down_price_per_tb: Optional[float] = None
+    # dph_total из поиска (цена обычной аренды): запасной расчёт бюджета, если Vast не ответил ставкой bid.
+    dph_total: float = 0.0
 
 
 @dataclass
@@ -251,6 +253,8 @@ class InstanceInfo:
     ssh_port: Optional[int] = None
     dph: float = 0.0
     status_msg: str = ""      # текст статуса (см. STATUS_MSG_FIELD); "" если поля нет
+    # is_bid из ответа экземпляра: True для прерываемой аренды; None, если поля нет (UNVERIFIED в API)
+    is_bid: Optional[bool] = None
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -490,6 +494,7 @@ class VastClient:
             is_interruptible=interruptible,
             inet_up_price_per_tb=_per_tb_or_none(b.get(INET_UP_COST_FIELD)),
             inet_down_price_per_tb=_per_tb_or_none(b.get(INET_DOWN_COST_FIELD)),
+            dph_total=_to_float(b.get("dph_total")),
         )
 
     def search_offers(self, filters: OfferFilter) -> list[GpuOffer]:
@@ -570,7 +575,10 @@ class VastClient:
         env_vars: Optional[dict] = None,
         label: Optional[str] = None,
         onstart: Optional[str] = None,
+        bid_price: Optional[float] = None,
     ) -> int:
+        """Аренда предложения. bid_price задаётся только для прерываемой аренды (поле «price» тела запроса);
+        для обычной аренды поле не отправляется, цена определяется предложением (SPEC 8.2)."""
         if not image:
             raise VastInputError("Не задан образ контейнера для аренды карты")
         if disk_gb <= 0:
@@ -581,6 +589,10 @@ class VastClient:
             "disk": disk_gb,
             "env": dict(env_vars or {}),
         }
+        if bid_price is not None:
+            if isinstance(bid_price, bool) or not math.isfinite(float(bid_price)) or float(bid_price) <= 0:
+                raise VastInputError("Ставка прерываемой аренды должна быть положительным числом")
+            payload["price"] = float(bid_price)
         if label:
             payload["label"] = label
         if onstart:
@@ -620,6 +632,7 @@ class VastClient:
             dph=_to_float(d.get("dph_total")),
             # не строка (или поля нет) значит текста нет: иначе в проверку попал бы repr объекта
             status_msg=raw_msg if isinstance(raw_msg, str) else "",
+            is_bid=d.get("is_bid") if isinstance(d.get("is_bid"), bool) else None,
             raw=d,
         )
 
