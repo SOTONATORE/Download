@@ -237,3 +237,55 @@ def test_stop_before_start_message(tracker):
     with pytest.raises(BudgetError) as ei:
         tracker.track_instance_stop(1, stop_time=50.0)
     assert "раньше" in str(ei.value)
+
+
+# --- set_dph: смена ставки открытой записи без второй записи ---
+def test_set_dph_keeps_cost_so_far_and_applies_new_rate_after():
+    tr = BudgetTracker(5.0)
+    tr.track_instance_start(1, 1.0, start_time=0.0)
+    assert tr.set_dph(1, 2.0, now=H) is True
+    s = tr.summary(now=2 * H)
+    assert s["total_cards"] == 1 and len(s["breakdown"]) == 1
+    assert s["breakdown"][0]["dph"] == 2.0 and s["breakdown"][0]["active"] is True
+    assert s["total_spent"] == pytest.approx(1.0 + 2.0)      # 1 ч по 1.0, затем 1 ч по 2.0
+
+
+def test_set_dph_second_call_changes_rate_again_without_second_record():
+    tr = BudgetTracker(5.0)
+    tr.track_instance_start(1, 1.0, start_time=0.0)
+    assert tr.set_dph(1, 2.0, now=H) is True
+    assert tr.set_dph(1, 3.0, now=2 * H) is True
+    s = tr.summary(now=3 * H)
+    assert s["total_cards"] == 1
+    assert s["total_spent"] == pytest.approx(1.0 + 2.0 + 3.0)
+
+
+def test_set_dph_unknown_instance_returns_false_and_creates_nothing(caplog):
+    tr = BudgetTracker(5.0)
+    caplog.set_level("INFO")
+    assert tr.set_dph(9, 1.0, now=0.0) is False
+    assert tr.summary(now=H)["total_cards"] == 0
+    assert "ставка изменена" not in caplog.text
+
+
+def test_set_dph_after_stop_returns_false_and_keeps_closed_cost():
+    tr = BudgetTracker(5.0)
+    tr.track_instance_start(1, 1.0, start_time=0.0)
+    tr.track_instance_stop(1, stop_time=H)
+    assert tr.set_dph(1, 5.0, now=2 * H) is False
+    assert tr.summary(now=3 * H)["total_spent"] == pytest.approx(1.0)
+
+
+def test_set_dph_logs_old_and_new_rate(caplog):
+    tr = BudgetTracker(5.0)
+    tr.track_instance_start(1, 0.3, start_time=0.0)
+    caplog.set_level("INFO")
+    tr.set_dph(1, 0.4398, now=10.0)
+    assert "Карта 1: ставка изменена с 0.3000 до 0.4398 USD/ч." in caplog.text
+
+
+def test_set_dph_negative_raises():
+    tr = BudgetTracker(5.0)
+    tr.track_instance_start(1, 1.0, start_time=0.0)
+    with pytest.raises(BudgetError):
+        tr.set_dph(1, -0.1, now=H)

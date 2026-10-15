@@ -232,3 +232,56 @@ def test_secret_echoed_in_error_response_is_masked(caplog):
     text = "\n".join(debug_lines(caplog))
     assert "HTTP 401" in text
     assert SECRET not in text and SECRET not in str(ei.value)
+
+
+# ---------------------------------------------------------------- пары [имя, значение], extra_env, crisp_hmac
+
+EXTRA_TOKEN = "EXTRA-TOKEN-VALUE-321"
+CRISP_VALUE = "CRISP-HMAC-VALUE-456"
+
+
+def test_pure_redaction_of_pairs_extra_env_and_crisp_hmac():
+    body = {"extra_env": [["WORKER_TOKEN", EXTRA_TOKEN], ["GEN_LOG_LEVEL", "DEBUG"]],
+            "crisp_hmac": CRISP_VALUE, "label": "gen-1"}
+    out = vc.redact_value(body)
+    assert out == {"extra_env": "***", "crisp_hmac": "***", "label": "gen-1"}
+    assert body["extra_env"][0][1] == EXTRA_TOKEN          # исходный объект не изменён
+    # пара с секретным именем: маскируется значение, имя остаётся; соседние пары не трогаются
+    assert vc.redact_value([["WORKER_TOKEN", EXTRA_TOKEN], ["GEN_LOG_LEVEL", "DEBUG"]]) == \
+        [["WORKER_TOKEN", "***"], ["GEN_LOG_LEVEL", "DEBUG"]]
+    assert vc.redact_value({"env_pairs": [["HF_TOKEN", EXTRA_TOKEN]]}) == {"env_pairs": [["HF_TOKEN", "***"]]}
+    assert vc.is_sensitive_name("extra_env") and vc.is_sensitive_name("crisp_hmac")
+    assert vc.is_sensitive_name("x_hmac") and vc.is_sensitive_name("crisp")
+    assert not vc.is_sensitive_name("gpu_name") and not vc.is_sensitive_name("label")
+
+
+def test_crisp_hmac_in_free_text_is_masked():
+    text = vc.redact_text(f"crisp_hmac={CRISP_VALUE} gpu=RTX")
+    assert CRISP_VALUE not in text and "gpu=RTX" in text
+
+
+def test_extra_env_pairs_in_response_are_not_logged(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"instances": [{
+            "id": 7, "actual_status": "running", "intended_status": "running", "label": "gen-1",
+            "extra_env": [["WORKER_TOKEN", EXTRA_TOKEN], ["GEN_LOG_LEVEL", "DEBUG"]],
+            "crisp_hmac": CRISP_VALUE}]})
+
+    info = make(handler).get_instance(7)
+    assert info.instance_id == 7
+    lines = debug_lines(caplog)
+    text = "\n".join(lines)
+    assert any(m.startswith("Ответ Vast #1") for m in lines)
+    assert EXTRA_TOKEN not in all_text(caplog)             # ни в одной строке журнала
+    assert CRISP_VALUE not in all_text(caplog)
+    assert '"extra_env": "***"' in text and '"crisp_hmac": "***"' in text
+    assert '"actual_status": "running"' in text and '"label": "gen-1"' in text   # имена остальных ключей видны
+
+
+def test_crisp_hmac_value_is_not_logged_outside_debug_too(caplog):
+    """Журнал выключен: строк нет и значение не появляется ни в каком сообщении."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"instances": [{"id": 8, "crisp_hmac": CRISP_VALUE}]})
+
+    make(handler, debug=False).get_instance(8)
+    assert CRISP_VALUE not in all_text(caplog)

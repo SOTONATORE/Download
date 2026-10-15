@@ -65,14 +65,26 @@ def test_missing_key_is_error():
 
 # ---------------------------------------------------------------- verified (производственный фильтр Vast)
 
-def test_verified_default_file_is_true():
-    assert cl.load_config().verified is True
+def test_verified_default_file_is_false():
+    """Значение в config.default.yaml: 0 (как вход workflow по умолчанию)."""
+    assert cl.load_config().verified is False
 
 
-def test_verified_false_from_file_is_passed_through():
+def test_verified_zero_from_file_is_passed_through_as_false():
     raw = _base()
-    raw["verified"] = False
+    raw["verified"] = 0
     assert cl.parse_config(raw).verified is False
+    raw["verified"] = 1
+    assert cl.parse_config(raw).verified is True
+
+
+@pytest.mark.parametrize("value", [True, False, "true", "false", "0", "1", 2, -1])
+def test_verified_accepts_only_integers_zero_and_one(value):
+    raw = _base()
+    raw["verified"] = value
+    with pytest.raises(GeminiInputError) as ei:
+        cl.parse_config(raw)
+    assert "«verified»: нужно 0 или 1" in str(ei.value)
 
 
 def test_verified_missing_key_defaults_to_true():
@@ -115,7 +127,8 @@ def test_empty_file_reports_missing_keys():
     ("clip_min_sec", "2.5", "число"),
     ("clip_min_sec", False, "число"),
     ("interruptible", "true", "true или false"),
-    ("verified", "true", "true или false"),       # строка «true» не считается логическим значением
+    ("verified", "true", "0 или 1"),              # строка «true» не считается значением verified
+    ("verified", True, "0 или 1"),                # bool не принимается даже в виде True/False
     ("verified", None, "не может быть пустым"),   # null не превращается молча в умолчание
     ("filename_template", 12, "строка"),
     ("gemini_models", "gemini-3.5-flash-lite", "список строк"),

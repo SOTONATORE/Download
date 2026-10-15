@@ -111,6 +111,8 @@ class FakeVast:
         self.script: dict = {}
         self._polls: dict = {}
         self._offer_of: dict = {}
+        self.dph: dict = {}             # предложение -> dph_total в ответе карты (нет записи = 0.0, поля нет)
+        self.destroy_exc = None         # если задано, destroy_instance бросает эту ошибку
         self._next = 100
 
     def search_offers(self, filters):
@@ -142,16 +144,19 @@ class FakeVast:
             return vc.InstanceInfo(
                 instance_id=instance_id, actual_status=status, intended_status="running",
                 public_ip="10.0.0.1" if up else None, direct_port=18000 if up else None,
-                **extra)
+                dph=self.dph.get(offer, 0.0), **extra)
         stuck = offer in self.stuck_offers
         return vc.InstanceInfo(
             instance_id=instance_id,
             actual_status="loading" if stuck else "running",
             intended_status="running",
             public_ip=None if stuck else "10.0.0.1",
-            direct_port=None if stuck else 18000)
+            direct_port=None if stuck else 18000,
+            dph=self.dph.get(offer, 0.0))
 
     def destroy_instance(self, instance_id):
+        if self.destroy_exc is not None:
+            raise self.destroy_exc
         self.destroyed.append(instance_id)
         return True
 
@@ -868,3 +873,207 @@ def test_failed_card_cost_is_stopped_like_any_retirement(tmp_path, monkeypatch):
     assert rec.stop_time == calls[0]["at"]               # учёт остановлен в момент снятия
     assert rec.accrued_cost(rec.stop_time + 3600) == rec.accrued_cost(rec.stop_time)
     assert rec.accrued_cost(rec.stop_time) <= 0.2 * 60 / 3600 + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Счётчик «экземпляр не найден» (SPEC 8.2, 8.3)
+# ---------------------------------------------------------------------------
+
+NF_MSG = "Экземпляр Vast {} не найден в ответе API"
+
+
+class _Responses:
+    """Сценарий ответов get_instance для одной карты.
+
+    'nf' — VastInstanceNotFound; 'timeout' — VastRuntimeError по таймауту;
+    любое другое значение — обычный ответ «loading» (карта ещё стартует). Шаги кончились — «nf».
+    """
+
+    def __init__(self, steps) -> None:
+        self.steps = list(steps)
+        self.calls = 0
+
+    def __call__(self, instance_id):
+        self.calls += 1
+        step = self.steps.pop(0) if self.steps else "nf"
+        if step == "nf":
+            raise vc.VastInstanceNotFound(NF_MSG.format(instance_id))
+        if step == "timeout":
+            raise vc.VastRuntimeError(f"Таймаут запроса к Vast API: GET /api/v0/instances/{instance_id}/")
+        return vc.InstanceInfo(instance_id=instance_id, actual_status="loading",
+                               intended_status="running", dph=0.0)
+
+
+def _booting_slot(rig, *, instance_id=500, machine_id=11, offer_id=1, price=0.3):
+    """Карта в состоянии booting, учтённая в бюджете, как после аренды."""
+    slot = orch._CardSlot(0, 1, instance_id, machine_id, price, rig.clock.now, offer_id=offer_id)
+    rig.orc._slots[0] = slot
+    rig.orc.budget.track_instance_start(instance_id, price, rig.clock.now)
+    return slot
+
+
+def _poll(rig, slot, times) -> None:
+    """Опросы карты с шагом 10 с, как в основном цикле; стоп, если карта снята."""
+    for _ in range(times):
+        if rig.orc._slots.get(slot.index) is not slot:
+            break
+        rig.orc._step_slot(slot, rig.clock.now, False)
+        rig.clock.sleep(10.0)
+
+
+def test_nine_not_found_responses_do_not_retire(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _booting_slot(rig)
+    rig.vast.get_instance = _Responses(["nf"] * 9)
+    calls = _spy_retire(rig.orc)
+    _poll(rig, slot, 9)
+
+    assert calls == []
+    assert rig.orc._slots.get(0) is slot and slot.not_found == 9
+    assert rig.orc._bad_machines == set() and rig.orc._bad_offers == set()
+    assert orch.NOT_FOUND_REASON not in caplog.text
+
+
+def test_ten_not_found_responses_retire_and_exclude_machine_for_run(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    offers = [make_offer(1, 11, price=0.2),    # карта на хосте 11
+              make_offer(3, 11, price=0.25),   # другое предложение того же хоста 11
+              make_offer(2, 22, price=0.3)]    # другой хост
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    slot = _booting_slot(rig, machine_id=11, offer_id=1, price=0.2)
+    rig.vast.get_instance = _Responses(["nf"] * 10)
+    calls = _spy_retire(rig.orc)
+    _poll(rig, slot, 10)
+
+    assert len(calls) == 1
+    assert calls[0]["reason"] == orch.NOT_FOUND_REASON and calls[0]["bad"] is True
+    assert rig.orc._slots.get(0) is None
+    assert 11 in rig.orc._bad_machines and 1 in rig.orc._bad_offers
+    assert 500 in rig.vast.destroyed           # снятие идёт через обычный _retire
+
+    warnings = [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "в 10 ответах подряд" in r.getMessage()]
+    assert len(warnings) == 1                  # одно предупреждение на снятие
+    assert "Слот 0" in warnings[0] and "500" in warnings[0] and "11" in warnings[0]
+    assert "bad_hosts.txt" not in warnings[0]  # постоянный список не трогается
+
+    # следующая аренда не берёт хост 11, включая другое предложение того же хоста (offer 3)
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert [c["offer_id"] for c in rig.vast.created] == [2]
+
+
+def test_normal_response_between_not_found_resets_count(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _booting_slot(rig)
+    rig.vast.get_instance = _Responses(["nf"] * 9 + ["loading"] + ["nf"] * 9)
+    calls = _spy_retire(rig.orc)
+    _poll(rig, slot, 19)
+
+    assert calls == []                          # 9 + 1 обычный + 9: серия прервана
+    assert slot.not_found == 9
+    assert rig.orc._slots.get(0) is slot
+
+
+def test_timeout_does_not_increment_not_found_counter(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _booting_slot(rig)
+    rig.vast.get_instance = _Responses(["nf"] * 9 + ["timeout"] * 5)
+    calls = _spy_retire(rig.orc)
+    _poll(rig, slot, 14)
+
+    assert calls == []
+    assert slot.not_found == 9                  # таймауты счётчик не увеличили
+
+    rig.vast.get_instance = _Responses(["nf"])  # следующий «не найдена» — десятый подряд
+    _poll(rig, slot, 1)
+    assert calls[0]["reason"] == orch.NOT_FOUND_REASON
+
+
+# ---------------------------------------------------------------------------
+# Цена карты по ответу Vast (SPEC 8.2, бюджет)
+# ---------------------------------------------------------------------------
+
+def test_budget_uses_vast_dph_after_first_poll(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.3)])
+    rig.vast.dph[1] = 0.4398                    # Vast берёт больше, чем показал поиск
+    summary = rig.run()
+
+    inst = rig.vast.created[0]["id"]
+    recs = [r for r in rig.orc.budget._records if r.instance_id == inst]
+    assert len(recs) == 1                                      # одна запись, без переоткрытия
+    assert round(recs[0].dph, 4) == 0.4398                     # ставка из ответа карты
+    assert summary.completed == 1 and summary.exit_code == 0
+
+
+def test_zero_dph_keeps_search_price_and_warns_once(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.3)])
+    rig.vast.dph[1] = 0.0                       # поле есть, но цена нулевая
+    summary = rig.run()
+
+    inst = rig.vast.created[0]["id"]
+    recs = [r for r in rig.orc.budget._records if r.instance_id == inst]
+    assert [r.dph for r in recs] == [0.3]      # цена поиска сохранена
+    assert caplog.text.count("Vast не вернул цену") == 1
+    assert summary.completed == 1
+
+
+# ---------------------------------------------------------------------------
+# Снятие карты: стоимость фиксируется в момент снятия (SPEC 8.2, 8.3)
+# ---------------------------------------------------------------------------
+
+def _card_records(rig, instance_id=500):
+    return [r for r in rig.orc.budget._records if r.instance_id == instance_id]
+
+
+def test_failed_destroy_at_retirement_fixes_cost_at_that_moment(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.vast.destroy_exc = vc.VastRuntimeError("тестовый сбой уничтожения")
+    slot = _booting_slot(rig, price=0.3)
+    rig.clock.sleep(600.0)
+    rig.orc._retire(slot, "тест")
+    now = rig.clock.now
+
+    recs = _card_records(rig)
+    assert len(recs) == 1 and not recs[0].is_active and recs[0].stop_time == now
+    first = rig.orc.budget.summary(now)["breakdown"][0]
+    later = rig.orc.budget.summary(now + 7200)["breakdown"][0]
+    assert later["active"] is False
+    assert later["cost_usd"] == first["cost_usd"]              # после снятия стоимость не растёт
+    assert rig.orc._slots.get(0) is None                       # прогон продолжается, слот освобождён
+    assert "Стоимость зафиксирована на этот момент" in caplog.text
+    assert "повторено при финальной уборке" in caplog.text
+
+
+def test_cleanup_after_failed_destroy_does_not_add_cost_again(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.vast.destroy_exc = vc.VastRuntimeError("тестовый сбой уничтожения")
+    slot = _booting_slot(rig, price=0.3)
+    rig.clock.sleep(600.0)
+    rig.orc._retire(slot, "тест")
+    before = rig.orc.budget.summary(rig.clock.now)["total_spent"]
+
+    rig.clock.sleep(3600.0)
+    rig.orc._cleanup()                                         # не бросает
+    after = rig.orc.budget.summary(rig.clock.now)["total_spent"]
+    assert after == pytest.approx(before)
+    assert len(_card_records(rig)) == 1                        # вторая запись не появилась
+
+
+def test_successful_destroy_at_retirement_closes_record_once(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _booting_slot(rig, price=0.3)
+    rig.clock.sleep(600.0)
+    rig.orc._retire(slot, "тест")
+    now = rig.clock.now
+
+    recs = _card_records(rig)
+    assert len(recs) == 1 and recs[0].stop_time == now and not recs[0].is_active
+    assert rig.vast.destroyed == [500] and rig.orc._destroyed == 1
+    total = rig.orc.budget.summary(now)["total_spent"]
+    rig.clock.sleep(3600.0)
+    rig.orc._cleanup()
+    assert rig.orc.budget.summary(rig.clock.now)["total_spent"] == pytest.approx(total)
+    assert len(_card_records(rig)) == 1

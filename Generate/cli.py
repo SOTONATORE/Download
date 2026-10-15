@@ -94,21 +94,19 @@ def _usd_floor(value: float) -> str:
     return f"{math.floor(value * 100) / 100:.2f}"
 
 
-def _parse_verified(value: str) -> Optional[bool]:
-    """Вход --verified: true или false без учёта регистра; пустая строка = None (взять из конфига).
+def _parse_verified(value: str) -> bool:
+    """Вход --verified: только «1» (только проверенные хосты) или «0» (без фильтра по проверке).
 
-    Любое другое значение — ошибка аргументов (код 2). Введённое значение в сообщении не печатаем.
+    Любое другое значение, включая true, false и пустую строку, — ошибка аргументов (код 2),
+    это происходит до первого вызова Vast. Введённое значение в сообщении не печатаем.
+    Отсутствие флага (None) означает «взять из конфига» и сюда не попадает.
     """
-    if value == "":
-        return None
-    lowered = value.lower()
-    if lowered == "true":
+    if value == "1":
         return True
-    if lowered == "false":
+    if value == "0":
         return False
     raise argparse.ArgumentTypeError(
-        "допустимы только значения true или false (без учёта регистра); "
-        "пустое значение означает «взять из конфига»")
+        "допустимы только значения 1 и 0: 1 = только проверенные хосты, 0 = без фильтра")
 
 
 def _balance_preflight(vast, min_balance_usd: float) -> Optional[int]:
@@ -348,7 +346,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "docker_image": docker_image,
         "disk_gb": args.disk_gb,
         "silent_host_timeout_min": args.silent_host_timeout_min,
-        "verified": args.verified,
+        # схема конфига принимает только целые 0 и 1 (не bool): флаг переводится в 1 или 0
+        "verified": None if args.verified is None else int(args.verified),
     }
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
@@ -596,8 +595,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
                        help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
     run_p.add_argument("--verified", type=_parse_verified, default=None,
-                       help="только проверенные хосты Vast: true или false (без учёта регистра); "
-                            "пусто = из конфига; по умолчанию из конфига")
+                       help="только проверенные хосты Vast: 1 = да, 0 = нет; "
+                            "другие значения недопустимы; без флага берётся из конфига")
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))

@@ -81,7 +81,10 @@ GB_PER_TB = 1024.0
 # --- отладочный журнал сырого обмена (только при debug_logs=True; SPEC 0.1, 10) ---
 # Имя ключа, параметра или заголовка с одной из этих подстрок маскируется целиком. Подстрока
 # «auth» задевает и «author»: лишнее маскирование допустимо, пропущенный секрет недопустим.
-_SENSITIVE_NAME_PARTS = ("token", "key", "secret", "password", "authorization", "auth")
+_SENSITIVE_NAME_PARTS = ("token", "key", "secret", "password", "authorization", "auth", "hmac", "crisp")
+# Имена, чьё значение маскируется целиком, каким бы ни был его тип (список пар, объект, строка).
+# extra_env в ответе Vast: список пар [имя, значение] с переменными окружения карты (SPEC 0.1, 10).
+_FULL_MASK_NAMES = frozenset({"extra_env"})
 _REDACTED = "***"
 # «Bearer <значение>» в свободном тексте (тело не JSON).
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
@@ -89,14 +92,14 @@ _BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
 # Совпадение начинается с кавычки или с границы слова (перед ним нет [\w.-]). Без этого якоря
 # поиск пробует каждую позицию внутри длинного слова и работает квадратично (test_body_is_logged_in_full).
 _PAIR_RE = re.compile(
-    r"""(?i)(?:(?=[\"'])|(?<![\w.\-]))([\"']?[\w.\-]*(?:token|key|secret|password|authorization|auth)[\w.\-]*[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&}\]]+)"""
+    r"""(?i)(?:(?=[\"'])|(?<![\w.\-]))([\"']?[\w.\-]*(?:token|key|secret|password|authorization|auth|hmac|crisp)[\w.\-]*[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&}\]]+)"""
 )
 
 
 def is_sensitive_name(name: str) -> bool:
-    """Имя ключа, параметра или заголовка похоже на секрет (без учёта регистра)."""
+    """Имя ключа, параметра или заголовка похоже на секрет (без учёта регистра) или целиком в _FULL_MASK_NAMES."""
     lowered = str(name).lower()
-    return any(part in lowered for part in _SENSITIVE_NAME_PARTS)
+    return lowered in _FULL_MASK_NAMES or any(part in lowered for part in _SENSITIVE_NAME_PARTS)
 
 
 def _pair_repl(m: "re.Match[str]") -> str:
@@ -113,14 +116,23 @@ def redact_text(text: str, secret: str = "") -> str:
     return _PAIR_RE.sub(_pair_repl, text)
 
 
+def _redact_pair(item: Any, secret: str = "") -> Any:
+    """Пара [имя, значение] с секретным именем (например ["WORKER_TOKEN", "..."]): маскируется значение.
+    Имя остаётся, чтобы в журнале было видно, какая переменная передана. Исходный объект не меняется."""
+    if isinstance(item, (list, tuple)) and len(item) == 2 and is_sensitive_name(item[0]):
+        return [item[0], _REDACTED]
+    return redact_value(item, secret)
+
+
 def redact_value(obj: Any, secret: str = "") -> Any:
     """Рекурсивно маскирует JSON-объект: значение ключа с секретным именем заменяется на «***»,
-    ключ сохраняется. Строки проходят через redact_text. Исходный объект не меняется."""
+    ключ сохраняется. Список пар [имя, значение] с секретным именем маскируется по значению.
+    Строки проходят через redact_text. Исходный объект не меняется."""
     if isinstance(obj, dict):
         return {k: (_REDACTED if is_sensitive_name(k) else redact_value(v, secret))
                 for k, v in obj.items()}
     if isinstance(obj, list):
-        return [redact_value(x, secret) for x in obj]
+        return [_redact_pair(x, secret) for x in obj]
     if isinstance(obj, str):
         return redact_text(obj, secret)
     return obj
@@ -177,6 +189,10 @@ class VastInputError(VastError):
 class VastRuntimeError(VastError):
     """Сбой сети или ответ Vast API с кодом, отличным от 200."""
     exit_code = 3
+
+
+class VastInstanceNotFound(VastRuntimeError):
+    """Ответ API не содержит экземпляр с запрошенным ID (SPEC 8.2, 8.3). Код выхода наследуется: 3."""
 
 
 @dataclass
@@ -600,7 +616,7 @@ class VastClient:
         if isinstance(inst, list):
             inst = inst[0] if inst else None
         if not isinstance(inst, dict):
-            raise VastRuntimeError(f"Экземпляр Vast {instance_id} не найден в ответе API")
+            raise VastInstanceNotFound(f"Экземпляр Vast {instance_id} не найден в ответе API")
         return self._parse_instance(inst)
 
     def destroy_instance(self, instance_id: int) -> bool:

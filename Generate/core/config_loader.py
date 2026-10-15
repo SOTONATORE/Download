@@ -86,8 +86,9 @@ class Config:
     gpu_name: str = _rule()
     interruptible: bool = _rule()
     # Единственный ключ с умолчанием: отсутствие в файле читается как True (fail closed, SPEC 0.5).
+    # В файле и во входах значение только 0 или 1 (целые); true и false не принимаются.
     # kw_only снимает правило «поля с умолчанием идут после полей без умолчания»; порядок как в файле.
-    verified: bool = field(default=True, kw_only=True)
+    verified: bool = field(default=True, kw_only=True, metadata={"zero_one": True})
     min_price_per_hour: float = _rule(ge=0)
     max_price_per_hour: float = _rule(gt=0)
     min_reliability: float = _rule(ge=0, le=1)
@@ -122,6 +123,12 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
         if optional:
             return None
         raise _Bad(f"«{name}»: значение не может быть пустым (null)")
+
+    if meta.get("zero_one"):
+        # только целые 0 и 1: bool (True и False) и строки «0», «1», «true» не принимаются
+        if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1):
+            raise _Bad(f"«{name}»: нужно 0 или 1")
+        return bool(value)
 
     if base is bool:
         if not isinstance(value, bool):

@@ -295,19 +295,19 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
     assert f.max_inet_price_per_tb == 3.0
 
 
-def test_run_default_offer_filter_is_verified(capsys, run_env, missing_file):
-    """Производственный поиск берёт verified из config.default.yaml: по умолчанию true."""
+def test_run_default_offer_filter_verified_is_false(capsys, run_env, missing_file):
+    """Производственный поиск берёт verified из config.default.yaml: по умолчанию 0 (False)."""
     assert cli.main(_run_args(DATA, missing_file)) == 0
     _, kwargs = run_env.calls[0]
-    assert kwargs["offer_filter"].verified is True
+    assert kwargs["offer_filter"].verified is False
 
 
-def test_run_verified_false_from_config_reaches_offer_filter(capsys, run_env, missing_file, tmp_path):
-    """Значение verified из файла конфигурации доходит до OfferFilter без изменений."""
+def test_run_verified_zero_from_config_reaches_offer_filter(capsys, run_env, missing_file, tmp_path):
+    """Значение verified: 0 из файла конфигурации доходит до OfferFilter как False."""
     text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    assert "\nverified: true\n" in text
+    assert "\nverified: 0\n" in text
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
+    cfg.write_text(text, encoding="utf-8")
     assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg))) == 0
     _, kwargs = run_env.calls[0]
     assert kwargs["offer_filter"].verified is False
@@ -331,11 +331,8 @@ def loaded_cfgs(monkeypatch):
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("true", True),
-    ("false", False),
-    ("TRUE", True),
-    ("False", False),
-    ("", None),
+    ("1", True),
+    ("0", False),
 ])
 def test_verified_flag_parsing(raw, expected):
     assert cli.build_parser().parse_args(["run", "--verified", raw]).verified is expected
@@ -345,45 +342,38 @@ def test_verified_missing_argument_is_none():
     assert cli.build_parser().parse_args(["run"]).verified is None
 
 
-@pytest.mark.parametrize("bad", ["maybe", "1", "yes", "tru"])
+@pytest.mark.parametrize("bad", ["true", "false", "TRUE", "False", "", "2", "maybe", "yes"])
 def test_verified_invalid_value_is_input_error(capsys, run_env, missing_file, bad):
+    """Допустимы только «1» и «0». true, false, пустая строка и любое другое значение: код 2, до Vast."""
     code = cli.main(_run_args(DATA, missing_file, "--verified", bad))
     err = capsys.readouterr().err
     assert code == 2
-    assert "допустимы только значения true или false" in err
+    assert "допустимы только значения 1 и 0" in err
     assert "Traceback" not in err
     assert run_env.calls == []
 
 
-def test_verified_false_flag_reaches_loaded_config(capsys, run_env, loaded_cfgs, missing_file):
-    assert cli.main(_run_args(DATA, missing_file, "--verified", "false")) == 0
+def test_verified_zero_flag_reaches_loaded_config(capsys, run_env, loaded_cfgs, missing_file):
+    assert cli.main(_run_args(DATA, missing_file, "--verified", "0")) == 0
     assert loaded_cfgs[0].verified is False
     _, kwargs = run_env.calls[0]
     assert kwargs["offer_filter"].verified is False
 
 
-def test_verified_absent_keeps_config_true(capsys, run_env, loaded_cfgs, missing_file):
+def test_verified_absent_keeps_config_value(capsys, run_env, loaded_cfgs, missing_file):
     assert cli.main(_run_args(DATA, missing_file)) == 0
-    assert loaded_cfgs[0].verified is True
+    assert loaded_cfgs[0].verified is False      # значение из config.default.yaml: 0
 
 
-def test_verified_empty_keeps_config_value(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
-    """Пустой вход не переопределяет конфиг: verified: false из файла остаётся false."""
+def test_verified_one_flag_overrides_config_zero(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
     text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    assert "\nverified: true\n" in text
+    assert "\nverified: 0\n" in text
     cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
-    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "")) == 0
-    assert loaded_cfgs[0].verified is False
-
-
-def test_verified_true_flag_overrides_config_false(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
-    text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    assert "\nverified: true\n" in text
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(text.replace("\nverified: true\n", "\nverified: false\n"), encoding="utf-8")
-    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "TRUE")) == 0
+    cfg.write_text(text, encoding="utf-8")
+    assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "1")) == 0
     assert loaded_cfgs[0].verified is True
+    _, kwargs = run_env.calls[0]
+    assert kwargs["offer_filter"].verified is True
 
 
 def test_run_default_card_params(capsys, run_env, missing_file):

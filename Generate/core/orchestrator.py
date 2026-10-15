@@ -44,6 +44,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     )
     from .vast_client import (  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastError,
+        VastInstanceNotFound,
     )
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
@@ -56,6 +57,7 @@ except ImportError:  # pragma: no cover
     )
     from vast_client import (  # type: ignore  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastError,
+        VastInstanceNotFound,
     )
 
 log = logging.getLogger("Generate.orchestrator")
@@ -79,6 +81,11 @@ _FAILED_STATUSES = frozenset({"failed", "error"})
 # они по-прежнему снимаются таймаутом молчащего хоста.
 START_FAILURE_MARKERS = ("failed to create", "OCI runtime", "CDI", "shim")
 START_FAILURE_REASON = "старт карты не удался"
+
+# Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
+# карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
+NOT_FOUND_LIMIT = 10
+NOT_FOUND_REASON = "экземпляр не найден в Vast"
 
 # Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
 # Тот же набор шаблонов, что в worker/server.py (воркер собирается отдельно, модуль не импортируется).
@@ -153,6 +160,8 @@ class _CardSlot:
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
     offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
     saw_loading: bool = False         # Vast хотя бы раз показал «loading»: старт начался (SPEC 8.2)
+    not_found: int = 0                # подряд идущих ответов «экземпляр не найден» (NOT_FOUND_LIMIT, SPEC 8.3)
+    cost_checked: bool = False        # цена по ответу Vast уже учтена или признана недоступной (SPEC 8.2)
 
 
 def _prompt_ready(entry) -> bool:
@@ -624,17 +633,19 @@ class Orchestrator:
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
         self._dump_before_destroy(slot)
+        # стоимость карты фиксируется в момент снятия, независимо от исхода уничтожения (SPEC 8.3).
+        # Повторное закрытие невозможно: финальная уборка закрывает только открытые записи.
+        try:
+            self.budget.track_instance_stop(slot.instance_id, self.clock())
+        except BudgetError:
+            pass
         try:
             self.vast.destroy_instance(slot.instance_id)
         except VastError as exc:
-            log.error("Не удалось уничтожить карту %d: %s. Будет повтор при финальной уборке.",
-                      slot.instance_id, exc)
+            log.error("Не удалось уничтожить карту %d: %s. Стоимость зафиксирована на этот момент; "
+                      "уничтожение будет повторено при финальной уборке.", slot.instance_id, exc)
         else:
             self._destroyed += 1
-            try:
-                self.budget.track_instance_stop(slot.instance_id, self.clock())
-            except BudgetError:
-                pass
         self._slots.pop(slot.index, None)
 
     def _dump_before_destroy(self, slot: _CardSlot) -> None:
@@ -681,6 +692,38 @@ class Orchestrator:
         self._retire(slot, START_FAILURE_REASON, bad=True)
         return True
 
+    def _retire_not_found(self, slot: _CardSlot) -> None:
+        """Vast не находит карту NOT_FOUND_LIMIT раз подряд (SPEC 8.2, 8.3): снятие как при неудачном старте.
+
+        Хост исключается только на этот запуск (_bad_machines, _bad_offers). bad_hosts.txt не меняется:
+        он постоянный и правится вручную.
+        """
+        log.warning("Слот %d: карта %d (хост %s) не найдена в Vast в %d ответах подряд; "
+                    "карта снимается, хост исключён из этого запуска.",
+                    slot.index, slot.instance_id, slot.machine_id, slot.not_found)
+        if slot.offer_id:
+            self._bad_offers.add(slot.offer_id)
+        self._retire(slot, NOT_FOUND_REASON, bad=True)
+
+    def _adopt_vast_price(self, slot: _CardSlot, info: InstanceInfo) -> None:
+        """Цена карты по ответу Vast (dph_total) вместо цены поиска (SPEC 8.2, бюджет).
+
+        Вызывается один раз на карту, на первом успешном ответе get_instance. Если dph нулевой или
+        отсутствует, остаётся цена поиска и пишется одно предупреждение. Иначе ставка открытой записи
+        бюджета меняется через set_dph: запись одна, стоимость до этого момента сохраняется.
+        Лимит бюджета и расчёт резерва не меняются.
+        """
+        slot.cost_checked = True
+        if not info.dph > 0:
+            log.warning("Карта %d: Vast не вернул цену (dph_total), учитывается цена поиска %.4f USD/ч.",
+                        slot.instance_id, slot.price)
+            return
+        if not self.budget.set_dph(slot.instance_id, info.dph, self.clock()):
+            log.warning("Карта %d: нет записи учёта бюджета, учитывается цена поиска %.4f USD/ч.",
+                        slot.instance_id, slot.price)
+            return
+        slot.price = info.dph
+
     # --- шаг по карте ---------------------------------------------------------
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
@@ -688,9 +731,19 @@ class Orchestrator:
             info = None
             try:
                 info = self.vast.get_instance(slot.instance_id)
+            except VastInstanceNotFound as exc:
+                # подряд идущие «не найдена» считаются отдельно (SPEC 8.3); остальные ошибки ниже, как раньше
+                slot.not_found += 1
+                log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
+                if slot.not_found >= NOT_FOUND_LIMIT:
+                    self._retire_not_found(slot)
+                    return
             except VastError as exc:
                 log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
             if info is not None:
+                slot.not_found = 0
+                if not slot.cost_checked:
+                    self._adopt_vast_price(slot, info)
                 prev_status = slot.vast_status
                 # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
                 if info.actual_status != slot.vast_status:

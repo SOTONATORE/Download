@@ -32,12 +32,16 @@ class InstanceCost:
     dph: float
     start_time: float
     stop_time: Optional[float] = None
+    # стоимость до последней смены ставки (set_dph) и момент этой смены; до смены ставка действует с start_time
+    base_cost: float = 0.0
+    rate_since: Optional[float] = None
 
     def accrued_cost(self, now: float) -> float:
-        """Начисленная стоимость: (конец - начало) / 3600 * dph; конец = stop_time или now."""
+        """Начисленная стоимость: base_cost + (конец - начало ставки) / 3600 * dph; конец = stop_time или now."""
         end = self.stop_time if self.stop_time is not None else now
-        elapsed = max(0.0, end - self.start_time)
-        return elapsed / _SEC_PER_HOUR * self.dph
+        since = self.start_time if self.rate_since is None else self.rate_since
+        elapsed = max(0.0, end - since)
+        return self.base_cost + elapsed / _SEC_PER_HOUR * self.dph
 
     @property
     def is_active(self) -> bool:
@@ -102,6 +106,32 @@ class BudgetTracker:
         cost = rec.accrued_cost(stop)
         log.info("Учёт карты %d завершён: итого %.4f USD", instance_id, cost)
         return cost
+
+    def set_dph(self, instance_id: int, dph: float, now: Optional[float] = None) -> bool:
+        """Меняет ставку открытой записи карты (например, цену из ответа Vast).
+
+        Начисленная стоимость до момента смены сохраняется, с этого момента действует новая ставка.
+        Запись не дублируется и не закрывается. Если открытой записи нет, возвращает False и ничего не пишет.
+        """
+        rec = self._find_active(instance_id)
+        if rec is None:
+            return False
+        if dph < 0:
+            raise BudgetError(
+                f"Цена карты {instance_id} не может быть отрицательной: {dph} USD/ч"
+            )
+        t = self._now(now)
+        since = rec.start_time if rec.rate_since is None else rec.rate_since
+        if t < since:
+            raise BudgetError(
+                f"Время смены ставки карты {instance_id} раньше времени, с которого она действует"
+            )
+        old = rec.dph
+        rec.base_cost = rec.accrued_cost(t)
+        rec.rate_since = t
+        rec.dph = float(dph)
+        log.info("Карта %d: ставка изменена с %.4f до %.4f USD/ч.", instance_id, old, rec.dph)
+        return True
 
     # --- расчёты ---
     def current_spent(self, now: Optional[float] = None) -> float:
