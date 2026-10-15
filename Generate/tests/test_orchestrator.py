@@ -1044,7 +1044,7 @@ def test_failed_destroy_at_retirement_fixes_cost_at_that_moment(tmp_path, monkey
     assert later["cost_usd"] == first["cost_usd"]              # после снятия стоимость не растёт
     assert rig.orc._slots.get(0) is None                       # прогон продолжается, слот освобождён
     assert "Стоимость зафиксирована на этот момент" in caplog.text
-    assert "повторено при финальной уборке" in caplog.text
+    assert "карта будет проверена при финальной уборке" in caplog.text
 
 
 def test_cleanup_after_failed_destroy_does_not_add_cost_again(tmp_path, monkeypatch):
@@ -1077,3 +1077,159 @@ def test_successful_destroy_at_retirement_closes_record_once(tmp_path, monkeypat
     rig.orc._cleanup()
     assert rig.orc.budget.summary(rig.clock.now)["total_spent"] == pytest.approx(total)
     assert len(_card_records(rig)) == 1
+
+
+class _LiveVast(FakeVast):
+    """Vast, который по метке отдаёт живые карты (live_ids), как list_instances(label=...) + destroy."""
+
+    def __init__(self, offers, events, live_ids) -> None:
+        super().__init__(offers, events)
+        self.live = list(live_ids)
+        self.attempts: list = []
+
+    def destroy_instance(self, instance_id):
+        self.attempts.append(instance_id)
+        return super().destroy_instance(instance_id)
+
+    def destroy_by_label(self, label):
+        self.events.append("destroy_by_label")
+        self.label_destroyed.append(label)
+        if self.label_exc is not None:
+            raise self.label_exc
+        destroyed, failed = [], []
+        for iid in self.live:
+            try:
+                self.destroy_instance(iid)
+                destroyed.append(iid)
+            except vc.VastRuntimeError:
+                failed.append(iid)
+        if failed:
+            raise vc.VastRuntimeError(f"Не удалось уничтожить экземпляры Vast: {failed}")
+        return destroyed
+
+
+def test_cleanup_destroys_card_whose_retirement_destroy_failed(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.vast.destroy_exc = vc.VastRuntimeError("тестовый сбой уничтожения")
+    slot = _booting_slot(rig, instance_id=500, machine_id=11, price=0.3)
+    rig.clock.sleep(600.0)
+    rig.orc._retire(slot, "тест")                              # уничтожение при снятии не прошло
+    assert rig.vast.destroyed == []
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and "машина 11" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "500" in warnings[0].getMessage()
+    assert "уничтожение не подтверждено, карта будет проверена при финальной уборке" \
+        in warnings[0].getMessage()
+
+    live = _LiveVast(rig.vast.offers, rig.events, live_ids=[500])   # Vast по-прежнему видит карту
+    rig.orc.vast = live
+    before = rig.orc.budget.summary(rig.clock.now)["total_spent"]
+    rig.clock.sleep(3600.0)
+    rig.orc._cleanup()
+    assert live.attempts == [500] and live.destroyed == [500]      # уборка уничтожила карту
+    assert live.label_destroyed == [rig.orc.label]
+    assert rig.orc._destroyed == 1 and rig.orc.cleanup_ok is True
+    assert rig.orc.budget.summary(rig.clock.now)["total_spent"] == pytest.approx(before)
+    assert len(_card_records(rig)) == 1                            # стоимость не добавлена, запись не открыта
+
+
+def test_cleanup_destroys_live_card_without_budget_record(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    live = _LiveVast(rig.vast.offers, rig.events, live_ids=[777])  # в бюджете записи о 777 нет
+    rig.orc.vast = live
+    assert rig.orc.budget._records == []
+    rig.orc._cleanup()
+    assert live.destroyed == [777] and rig.orc._destroyed == 1
+    assert rig.orc.cleanup_ok is True
+    assert rig.orc.budget._records == []                           # уборка не создаёт записей бюджета
+
+
+class _PartialDestroyVast(FakeVast):
+    """Как реальный destroy_by_label: пробует все живые карты, при сбоях бросает VastDestroyError."""
+
+    def __init__(self, offers, events, live_ids, fail_ids) -> None:
+        super().__init__(offers, events)
+        self.live = list(live_ids)
+        self.fail_ids = set(fail_ids)
+
+    def destroy_instance(self, instance_id):
+        if instance_id in self.fail_ids:
+            raise vc.VastRuntimeError("тестовый сбой уничтожения")
+        self.destroyed.append(instance_id)
+        return True
+
+    def destroy_by_label(self, label):
+        self.events.append("destroy_by_label")
+        self.label_destroyed.append(label)
+        destroyed, failed = [], []
+        for iid in self.live:
+            try:
+                self.destroy_instance(iid)
+                destroyed.append(iid)
+            except vc.VastRuntimeError:
+                failed.append(iid)
+        if failed:
+            raise vc.VastDestroyError(
+                f"Не удалось уничтожить экземпляры Vast: {failed}; уничтожены: {destroyed}",
+                destroyed_ids=destroyed, failed_ids=failed)
+        return destroyed
+
+
+def _record_of(rig, instance_id):
+    return next(r for r in rig.orc.budget._records if r.instance_id == instance_id)
+
+
+def test_cleanup_closes_destroyed_card_and_keeps_failed_card_open(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc.budget.track_instance_start(501, 0.3, rig.clock.now)   # карта A: уничтожится
+    rig.orc.budget.track_instance_start(502, 0.3, rig.clock.now)   # карта B: не уничтожится
+    rig.clock.sleep(600.0)
+    vast = _PartialDestroyVast(rig.vast.offers, rig.events, live_ids=[501, 502], fail_ids=[502])
+    rig.orc.vast = vast
+    rig.orc._cleanup()                                             # исключение не выходит
+
+    now = rig.clock.now
+    rec_a, rec_b = _record_of(rig, 501), _record_of(rig, 502)
+    assert not rec_a.is_active and rec_a.stop_time == now          # учёт A закрыт в момент уборки
+    assert rec_b.is_active and rec_b.stop_time is None             # B жива: запись не закрыта
+    assert vast.destroyed == [501]
+    assert rig.orc.cleanup_ok is False and rig.orc._destroyed == 1
+    assert "502" in caplog.text                                    # упавший id есть в логе, как раньше
+    assert vast.label_destroyed == [rig.orc.label]
+
+
+def test_cleanup_partial_failure_does_not_stop_closed_card_again(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc.budget.track_instance_start(501, 0.3, rig.clock.now)
+    rig.orc.budget.track_instance_start(502, 0.3, rig.clock.now)
+    rig.clock.sleep(600.0)
+    rig.orc.budget.track_instance_stop(501, rig.clock.now)         # A уже закрыта при снятии
+    stop_a = _record_of(rig, 501).stop_time
+    cost_a = _record_of(rig, 501).accrued_cost(stop_a)
+
+    rig.clock.sleep(3600.0)
+    rig.orc.vast = _PartialDestroyVast(rig.vast.offers, rig.events, live_ids=[501, 502], fail_ids=[502])
+    rig.orc._cleanup()                                             # без исключения и повторной остановки
+
+    rec_a = _record_of(rig, 501)
+    assert rec_a.stop_time == stop_a                               # время остановки не переписано
+    assert rec_a.accrued_cost(rig.clock.now) == pytest.approx(cost_a)
+    assert len(_card_records(rig, 501)) == 1
+    assert _record_of(rig, 502).is_active                          # B по-прежнему открыта
+    assert rig.orc.cleanup_ok is False
+
+
+def test_cleanup_all_destroys_fail_closes_no_record(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc.budget.track_instance_start(501, 0.3, rig.clock.now)
+    rig.orc.budget.track_instance_start(502, 0.3, rig.clock.now)
+    rig.clock.sleep(600.0)
+    rig.orc.vast = _PartialDestroyVast(rig.vast.offers, rig.events, live_ids=[501, 502],
+                                       fail_ids=[501, 502])
+    rig.orc._cleanup()                                             # исключение не выходит
+
+    assert _record_of(rig, 501).is_active and _record_of(rig, 502).is_active
+    assert rig.orc._destroyed == 0 and rig.orc.cleanup_ok is False

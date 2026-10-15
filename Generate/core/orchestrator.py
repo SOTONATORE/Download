@@ -43,8 +43,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
     from .vast_client import (  # noqa: F401
-        WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastError,
-        VastInstanceNotFound,
+        WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
+        VastError, VastInstanceNotFound,
     )
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
@@ -56,8 +56,8 @@ except ImportError:  # pragma: no cover
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
     from vast_client import (  # type: ignore  # noqa: F401
-        WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastError,
-        VastInstanceNotFound,
+        WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
+        VastError, VastInstanceNotFound,
     )
 
 log = logging.getLogger("Generate.orchestrator")
@@ -642,8 +642,9 @@ class Orchestrator:
         try:
             self.vast.destroy_instance(slot.instance_id)
         except VastError as exc:
-            log.error("Не удалось уничтожить карту %d: %s. Стоимость зафиксирована на этот момент; "
-                      "уничтожение будет повторено при финальной уборке.", slot.instance_id, exc)
+            log.warning("Не удалось уничтожить карту %d (машина %s): %s. Стоимость зафиксирована "
+                        "на этот момент; уничтожение не подтверждено, карта будет проверена при "
+                        "финальной уборке.", slot.instance_id, slot.machine_id, exc)
         else:
             self._destroyed += 1
         self._slots.pop(slot.index, None)
@@ -956,10 +957,23 @@ class Orchestrator:
             self.cleanup_ok = False
             log.error("Не удалось уничтожить карты по метке %s: %s", self.label,
                       exc if isinstance(exc, VastError) else type(exc).__name__)
+            if isinstance(exc, VastDestroyError):
+                # уничтоженные карты не живут: их учёт закрываем так же, как при обычной уборке
+                self._destroyed += len(exc.destroyed_ids)
+                self._close_budget_records(exc.destroyed_ids, self.clock())
             return
         now = self.clock()
         for rec in self.budget.summary(now)["breakdown"]:
             if rec["active"]:
+                try:
+                    self.budget.track_instance_stop(rec["instance_id"], now)
+                except BudgetError:
+                    pass
+
+    def _close_budget_records(self, instance_ids: list[int], now: float) -> None:
+        """Закрывает открытые записи бюджета только у перечисленных карт (те же вызовы, что в уборке)."""
+        for rec in self.budget.summary(now)["breakdown"]:
+            if rec["active"] and rec["instance_id"] in instance_ids:
                 try:
                     self.budget.track_instance_stop(rec["instance_id"], now)
                 except BudgetError:

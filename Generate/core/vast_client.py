@@ -195,6 +195,19 @@ class VastInstanceNotFound(VastRuntimeError):
     """Ответ API не содержит экземпляр с запрошенным ID (SPEC 8.2, 8.3). Код выхода наследуется: 3."""
 
 
+class VastDestroyError(VastRuntimeError):
+    """Массовое уничтожение по метке: часть экземпляров не уничтожена (SPEC 8.3 (в)).
+
+    destroyed_ids и failed_ids нужны уборке, чтобы закрыть учёт бюджета у уничтоженных карт.
+    Код выхода наследуется: 3.
+    """
+
+    def __init__(self, message: str, *, destroyed_ids: list[int], failed_ids: list[int]) -> None:
+        super().__init__(message)
+        self.destroyed_ids: list[int] = list(destroyed_ids)
+        self.failed_ids: list[int] = list(failed_ids)
+
+
 @dataclass
 class OfferFilter:
     gpu_name: Optional[str] = "RTX 5090"
@@ -703,7 +716,8 @@ class VastClient:
             except VastRuntimeError:
                 failed.append(inst.instance_id)
         if failed:
-            raise VastRuntimeError(
-                f"Не удалось уничтожить экземпляры Vast: {failed}; уничтожены: {destroyed}"
+            raise VastDestroyError(
+                f"Не удалось уничтожить экземпляры Vast: {failed}; уничтожены: {destroyed}",
+                destroyed_ids=destroyed, failed_ids=failed,
             )
         return destroyed
