@@ -116,7 +116,8 @@ jobs:
       run:
         shell: bash   # bash -e -o pipefail
     env:
-      # полный вывод шага run (после маскирования секретов), артефакт шага «Upload run log»
+      # вывод окна шагов (INFO, после маскирования секретов), артефакт шага «Upload run log».
+      # Подробный журнал (DEBUG и сырой обмен с Vast) пишется отдельно: run/debug.log в артефакте запуска.
       RUN_LOG: /tmp/generate-run.log
 
     steps:
@@ -395,8 +396,8 @@ jobs:
             | python3 -I -u -c "$mask_code" \
             | tee -a "$RUN_LOG"
 
-      # Журнал окна шага run (INFO, с маскированием) сохраняется даже при отмене и ошибке.
-      # Подробный журнал (DEBUG и сырой обмен с Vast) лежит в артефакте generate-artifact-<run_id>.
+      # Журнал окон шагов run, уборки и релиза (INFO, с маскированием) сохраняется даже при отмене и ошибке.
+      # Подробный журнал (DEBUG и сырой обмен с Vast) — run/debug.log в артефакте generate-artifact-<run_id>.
       - name: Upload run log
         if: always()
         uses: actions/upload-artifact@v4

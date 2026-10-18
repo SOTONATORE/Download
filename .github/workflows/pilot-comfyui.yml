@@ -138,6 +138,8 @@ jobs:
             echo "Ошибка: не задан образ ComfyUI (вход docker_image или переменная PILOT_IMAGE)." >&2
             exit 2
           fi
+          # каталог артефакта пилота (SPEC 10.4): run/debug.log; загружается шагом «Upload pilot artifact»
+          PILOT_ART_DIR="$RUNNER_TEMP/pilot-artifact"
           args=(
             --budget-limit "$BUDGET_LIMIT"
             --min-balance-usd "$MIN_BALANCE"
@@ -156,6 +158,7 @@ jobs:
             --docker-image "$DOCKER_IMAGE"
             --pilot
             --pilot-start-cmd "$PILOT_START_CMD"
+            --artifact-dir "$PILOT_ART_DIR"
           )
           debug_args=()
           if [ "${{ inputs.debug_logs }}" = "true" ]; then
@@ -213,5 +216,15 @@ jobs:
         with:
           name: pilot-run-log-${{ github.run_id }}
           path: ${{ env.RUN_LOG }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Артефакт пилота (SPEC 10.4): каталог --artifact-dir шага «Run pilot». Загружается при любом исходе.
+      - name: Upload pilot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-artifact-${{ github.run_id }}
+          path: ${{ runner.temp }}/pilot-artifact
           retention-days: 30
           if-no-files-found: warn
