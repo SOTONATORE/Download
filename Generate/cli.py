@@ -49,6 +49,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from Generate.core.gemini_prompts import GeminiInputError
+    from Generate.core.log_setup import setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
@@ -60,6 +61,7 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from gemini_prompts import GeminiInputError  # type: ignore
+    from log_setup import setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
@@ -781,9 +783,11 @@ def _read_log_level() -> Optional[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Возвращает код завершения. Трейсбеки пользователю не показываются."""
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] %(message)s")
+    """Возвращает код завершения. Трейсбеки пользователю не показываются.
+
+    Обработчики журнала (SPEC 10): консоль на INFO всегда; файл отладочного журнала в каталоге
+    артефакта (--artifact-dir) на уровне GEN_LOG_LEVEL. Настройка и снятие: core/log_setup.py.
+    """
     try:
         parser = build_parser()
         try:
@@ -795,17 +799,22 @@ def main(argv: list[str] | None = None) -> int:
         if level is None:
             _err(f"Ошибка входных данных: {LOG_LEVEL_ENV} допускает только значения INFO и DEBUG.")
             return EXIT_INPUT
-        logging.getLogger().setLevel(level)
         # HTTP-библиотека на DEBUG выводит детали соединений: оставляем её на WARNING
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         args.log_level = level
+        handlers, note = setup_logging(level, getattr(args, "artifact_dir", "") or None)
         try:
-            return int(args.func(args))
+            if note:
+                _err(note)
+            try:
+                return int(args.func(args))
+            finally:
+                # метка конца запуска для наблюдателя heartbeat (SPEC 8.3 а): при любом исходе run
+                heartbeat = getattr(args, "heartbeat_path", None)
+                if args.command == "run" and heartbeat:
+                    _mark_run_finished(heartbeat)
         finally:
-            # метка конца запуска для наблюдателя heartbeat (SPEC 8.3 а): при любом исходе run
-            heartbeat = getattr(args, "heartbeat_path", None)
-            if args.command == "run" and heartbeat:
-                _mark_run_finished(heartbeat)
+            teardown_logging(handlers)
     except Exception as e:  # noqa: BLE001 - намеренно ловим всё непредвиденное
         # Печатаем только тип исключения: текст может содержать секреты (SPEC 0.1).
         _err(f"Непредвиденная ошибка выполнения ({type(e).__name__}).")
