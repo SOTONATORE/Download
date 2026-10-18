@@ -472,6 +472,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             limit_clips=cfg.limit_clips,
             repo=args.repo,
             run_id=args.run_id,
+            # номер сборки воркера (SPEC 8.4): проверяется оркестратором до трат; пилот его не использует
+            worker_build=args.worker_build,
             profile=cfg.model_profile,
             release_tag=args.release_tag,
             offer_filter=offer_filter,
@@ -491,6 +493,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             # пустая команда не передаётся дальше (None): onstart в payload не попадает
             pilot_start_cmd=(getattr(args, "pilot_start_cmd", "") or "").strip() or None,
         )
+    except GeminiInputError as e:
+        # ошибка входа из оркестратора (run_id, номер сборки): код 2, текст на русском, карт не арендовано
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
     finally:
         _restore_handlers(previous_handlers)
         close = getattr(vast, "close", None)

@@ -115,7 +115,8 @@ def test_orchestrator_init_and_refusal_are_clean(tmp_path, caplog, capsys):
 
     orc = Orchestrator(SEGMENTS, missing, None, None, object(), vast, object(),
                        tmp_path / "prompts.json", repo="owner/repo", run_id="secrets-test",
-                       profile="ltx25", docker_image="img:latest")
+                       profile="ltx25", docker_image="img:latest",
+                       worker_build="a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0")
     assert orc is not None
 
     with pytest.raises(Exception) as ei:          # отказ на неверном входе

@@ -885,3 +885,25 @@ def test_run_bad_hosts_error_stops_before_any_spend(capsys, run_env, missing_fil
     assert cli.main(_run_args(DATA, missing_file)) == 2
     assert run_env.calls == []
     assert "строка 2" in capsys.readouterr().err
+
+
+def test_run_passes_worker_build_and_run_id_to_orchestrator(capsys, run_env, missing_file):
+    """Этап 6а: номер сборки и номер запуска доходят до оркестратора (SPEC 8.4, 9.1)."""
+    code = cli.main(_run_args(DATA, missing_file, "--run-id", "555", "--worker-build", SHA))
+    assert code == 0
+    (_, kwargs), = run_env.calls
+    assert kwargs["worker_build"] == SHA
+    assert kwargs["run_id"] == "555"
+    assert "card_max_lifetime_min" not in kwargs
+
+
+def test_orchestrator_input_error_is_exit_2_in_russian(capsys, run_env, missing_file, monkeypatch):
+    """Ошибка входа из оркестратора (нет run_id) — код 2 и текст на русском, без трейсбека."""
+    def refuse(*args, **kwargs):
+        raise cli.GeminiInputError("Не задан номер запуска (run_id): без него карты нельзя пометить меткой.")
+    monkeypatch.setattr(cli, "run_generation", refuse)
+    code = cli.main(_run_args(DATA, missing_file, "--worker-build", SHA))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Ошибка входных данных" in err and "run_id" in err
+    assert "Traceback" not in err

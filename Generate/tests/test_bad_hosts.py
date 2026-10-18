@@ -63,7 +63,8 @@ def make_orchestrator(tmp_path, vast, excluded=None, **kw):
     return orch.Orchestrator(
         [], tmp_path / "missing.txt", None, None, object(), vast, object(),
         tmp_path / "prompts.json", excluded_machines=excluded, work_dir=tmp_path,
-        worker_token="test-token", http_client=httpx.Client(), **kw)
+        worker_token="test-token", http_client=httpx.Client(), run_id="test",
+        worker_build="a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", **kw)
 
 
 # ---------------------------------------------------------------------------

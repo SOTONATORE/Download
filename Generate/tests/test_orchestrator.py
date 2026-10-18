@@ -39,6 +39,7 @@ VAST_KEY = "vast-key-SECRET-777"
 GEMINI_KEY = "gemini-key-SECRET-888"
 LABEL = "gen-test"
 SECRETS = (TOKEN, VAST_KEY, GEMINI_KEY)
+VALID_BUILD = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"   # номер коммита сборки воркера (SPEC 8.4)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +267,8 @@ class Rig:
 
         self.http = httpx.Client(transport=httpx.MockTransport(self.worker))
         kw = dict(repo="owner/repo", run_id="test", profile="ltx25", docker_image="img:latest",
-                  worker_token=token, poll_interval_sec=10.0, work_dir=self.work_dir)
+                  worker_token=token, poll_interval_sec=10.0, work_dir=self.work_dir,
+                  worker_build=VALID_BUILD)
         kw.update(orch_kw)
         segs = [types.SimpleNamespace(num=n) for n in range(1, 6)]
         self.orc = orch.Orchestrator(
@@ -409,7 +411,7 @@ def test_budget_blocks_renting_when_unaffordable(tmp_path, monkeypatch):
 def test_budget_exceeded_mid_run_stops_everything(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.9)],
-              budget_limit_usd=0.5, task_timeout_sec=1e9, card_max_lifetime_min=300,
+              budget_limit_usd=0.5, task_timeout_sec=1e9,
               worker_kw={"render_sec": 1e9})
     rig.worker.plan[1] = ["hang"] * 5
     summary = rig.run()
@@ -590,7 +592,7 @@ def test_missing_or_invalid_num_frames_fails_immediately(tmp_path, monkeypatch, 
     orc._state = {"prompts": prompts}
     orc._prompts = prompts
     orc._queue = deque([1])
-    slot = orch._CardSlot(index=0, generation=1, instance_id=101, machine_id=11,
+    slot = orch._CardSlot(index=1, generation=1, instance_id=101, machine_id=11,
                           price=0.3, created=rig.clock())
 
     orc._dispatch(slot, rig.clock())
@@ -826,14 +828,15 @@ def test_status_message_is_redacted_before_log(tmp_path, monkeypatch, caplog):
     assert summary.completed == 1
 
 
-def test_status_message_over_200_chars_is_truncated_and_redacted(tmp_path, monkeypatch, caplog):
-    """Текст статуса маскируется целиком и обрезается до 200 символов (SPEC 8.2)."""
+def test_status_message_500_chars_is_logged_in_full_and_redacted(tmp_path, monkeypatch, caplog):
+    """Текст статуса маскируется целиком и в строке лога не обрезается (SPEC 8.2, owner decision)."""
     caplog.set_level(logging.INFO)
     fake_hf = "hf-fake-TAIL-554466"
     monkeypatch.setenv("HF_TOKEN", fake_hf)
-    long_msg = ("CDI " + "длинный текст " * 40 + "\nвторая строка; "
-                + f"hf={fake_hf}" + " конец ошибки")
-    assert len(long_msg) > 200
+    head = "CDI " + "длинный текст " * 30
+    tail = " конец ошибки ХВОСТ-OK"
+    long_msg = head + "\nвторая строка; " + f"hf={fake_hf}" + tail
+    assert len(long_msg) > 450
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=list(TWO_OFFERS))
     rig.vast.script[1] = [("loading", long_msg)]
     rig.run()
@@ -843,9 +846,10 @@ def test_status_message_over_200_chars_is_truncated_and_redacted(tmp_path, monke
     m = re.search(r"; текст: (.*)\)\. Карта снимается", line)
     assert m is not None
     text = m.group(1)
-    assert text.endswith("…") and len(text) == 201          # 200 символов и отметка обрезки
+    assert "…" not in text                                   # обрезки нет
+    assert text.endswith("конец ошибки ХВОСТ-OK")            # хвост на месте
     assert text.startswith("CDI длинный текст")
-    assert fake_hf not in caplog.text
+    assert "hf=***" in text and fake_hf not in caplog.text
     _no_secrets(caplog.text)
 
 
@@ -950,8 +954,8 @@ class _Responses:
 
 def _booting_slot(rig, *, instance_id=500, machine_id=11, offer_id=1, price=0.3):
     """Карта в состоянии booting, учтённая в бюджете, как после аренды."""
-    slot = orch._CardSlot(0, 1, instance_id, machine_id, price, rig.clock.now, offer_id=offer_id)
-    rig.orc._slots[0] = slot
+    slot = orch._CardSlot(1, 1, instance_id, machine_id, price, rig.clock.now, offer_id=offer_id)
+    rig.orc._slots[1] = slot
     rig.orc.budget.track_instance_start(instance_id, price, rig.clock.now)
     return slot
 
@@ -974,7 +978,7 @@ def test_nine_not_found_responses_do_not_retire(tmp_path, monkeypatch, caplog):
     _poll(rig, slot, 9)
 
     assert calls == []
-    assert rig.orc._slots.get(0) is slot and slot.not_found == 9
+    assert rig.orc._slots.get(1) is slot and slot.not_found == 9
     assert rig.orc._bad_machines == set() and rig.orc._bad_offers == set()
     assert orch.NOT_FOUND_REASON not in caplog.text
 
@@ -992,14 +996,14 @@ def test_ten_not_found_responses_retire_and_exclude_machine_for_run(tmp_path, mo
 
     assert len(calls) == 1
     assert calls[0]["reason"] == orch.NOT_FOUND_REASON and calls[0]["bad"] is True
-    assert rig.orc._slots.get(0) is None
+    assert rig.orc._slots.get(1) is None
     assert 11 in rig.orc._bad_machines and 1 in rig.orc._bad_offers
     assert 500 in rig.vast.destroyed           # снятие идёт через обычный _retire
 
     warnings = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.WARNING and "в 10 ответах подряд" in r.getMessage()]
     assert len(warnings) == 1                  # одно предупреждение на снятие
-    assert "Слот 0" in warnings[0] and "500" in warnings[0] and "11" in warnings[0]
+    assert "Карта 1 поколение 1 (экземпляр 500)" in warnings[0] and "хосте 11" in warnings[0]
     assert "bad_hosts.txt" not in warnings[0]  # постоянный список не трогается
 
     # следующая аренда не берёт хост 11, включая другое предложение того же хоста (offer 3)
@@ -1016,7 +1020,7 @@ def test_normal_response_between_not_found_resets_count(tmp_path, monkeypatch):
 
     assert calls == []                          # 9 + 1 обычный + 9: серия прервана
     assert slot.not_found == 9
-    assert rig.orc._slots.get(0) is slot
+    assert rig.orc._slots.get(1) is slot
 
 
 def test_timeout_does_not_increment_not_found_counter(tmp_path, monkeypatch):
@@ -1086,7 +1090,7 @@ def test_failed_destroy_at_retirement_fixes_cost_at_that_moment(tmp_path, monkey
     later = rig.orc.budget.summary(now + 7200)["breakdown"][0]
     assert later["active"] is False
     assert later["cost_usd"] == first["cost_usd"]              # после снятия стоимость не растёт
-    assert rig.orc._slots.get(0) is None                       # прогон продолжается, слот освобождён
+    assert rig.orc._slots.get(1) is None                       # прогон продолжается, слот освобождён
     assert "Стоимость зафиксирована на этот момент" in caplog.text
     assert "карта будет проверена при финальной уборке" in caplog.text
 
@@ -1435,3 +1439,221 @@ def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatc
     assert "-p 18188:18188" in env                    # внутренний порт пилота
     assert set(env) <= {"GEN_LOG_LEVEL", "-p 18188:18188"}
     _no_secrets(json.dumps(env))
+
+
+# ---------------------------------------------------------------------------
+# Этап 6а: слоты, назначение клипов, поколения, сборка воркера, run_id, onstart (SPEC 8.2, 8.3, 8.4)
+# ---------------------------------------------------------------------------
+
+def _ready_slot(rig, index, *, instance_id, machine_id=11, offer_id=1, price=0.3, generation=1):
+    """Карта в состоянии ready с адресом воркера, как после healthcheck (для тестов отправки)."""
+    slot = orch._CardSlot(index, generation, instance_id, machine_id, price, rig.clock.now, offer_id=offer_id)
+    slot.state = "ready"
+    slot.contacted = True
+    slot.url = "http://10.0.0.1:18000"
+    rig.orc._slots[index] = slot
+    rig.orc.budget.track_instance_start(instance_id, price, rig.clock.now)
+    return slot
+
+
+def _prompt(rig, num=1):
+    rig.orc._prompts = {str(num): {"status": "ready", "prompt": f"промпт {num}", "num_frames": 49}}
+
+
+def test_one_clip_is_never_assigned_to_two_slots(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), max_cards=2)
+    _prompt(rig)
+    s1 = _ready_slot(rig, 1, instance_id=501)
+    s2 = _ready_slot(rig, 2, instance_id=502, offer_id=2, machine_id=22)
+    rig.orc._queue = deque([1])
+
+    rig.orc._dispatch(s1, rig.clock.now)
+    assert s1.task is not None and s1.task.num == 1
+
+    # клип снова оказался в очереди, пока назначен первому слоту: второй слот его не берёт
+    rig.orc._queue.append(1)
+    rig.orc._dispatch(s2, rig.clock.now)
+    assert s2.task is None
+    assert rig.worker.posted == [1]                       # одна отправка на воркер, дубля нет
+    holders = [s for s in (s1, s2) if s.task is not None and s.task.num == 1]
+    assert holders == [s1]
+    assert rig.orc._assigned_slot(1) is s1
+
+
+def test_retired_slot_returns_its_clip_to_free(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), max_cards=2)
+    _prompt(rig)
+    s1 = _ready_slot(rig, 1, instance_id=501)
+    rig.orc._queue = deque([1])
+    rig.orc._dispatch(s1, rig.clock.now)
+
+    rig.orc._retire(s1, "тест")
+    assert list(rig.orc._queue) == [1]                    # клип free и снова в очереди
+    assert rig.orc._assigned_slot(1) is None
+    assert 501 in rig.vast.destroyed
+
+    s2 = _ready_slot(rig, 2, instance_id=502, offer_id=2, machine_id=22)
+    rig.orc._dispatch(s2, rig.clock.now)
+    assert s2.task is not None and s2.task.num == 1
+    assert rig.worker.posted == [1, 1]                    # вторая отправка после возврата, не дубль в слот
+    assert rig.orc._attempts[1] == 1                      # возврат из-за снятия не тратит попытку
+
+
+def test_done_clip_is_never_sent_again(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    _prompt(rig)
+    s1 = _ready_slot(rig, 1, instance_id=501)
+    rig.orc._done.add(1)
+    rig.orc._queue = deque([1])
+    rig.orc._dispatch(s1, rig.clock.now)
+    assert rig.worker.posted == [] and s1.task is None
+
+
+def test_failed_or_done_clip_is_not_requeued_by_fail_clip(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc._done.add(1)
+    rig.orc._fail_clip(1, "тест")
+    assert list(rig.orc._queue) == []
+
+
+@pytest.mark.parametrize("max_cards", [1, 3, 101])
+def test_slots_start_at_one_and_generation_counts_replacements(tmp_path, monkeypatch, max_cards):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), max_cards=max_cards, budget_limit_usd=100000.0)
+    for _ in range(max_cards):
+        assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert sorted(rig.orc._slots) == list(range(1, max_cards + 1))
+    assert all(s.generation == 1 for s in rig.orc._slots.values())
+    # пересоздание слота 1 даёт следующее поколение того же слота
+    old = rig.orc._slots[1]
+    rig.orc._retire(old, "тест")
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    new = rig.orc._slots[1]
+    assert new.generation == 2 and new.instance_id != old.instance_id
+    assert sorted(rig.orc._slots) == list(range(1, max_cards + 1))
+
+
+def test_card_name_in_logs_is_slot_and_generation(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert "Арендована карта 1 поколение 1 (экземпляр 101)" in caplog.text
+    rig.orc._retire(rig.orc._slots[1], "тест")
+    assert "Карта 1 поколение 1 (экземпляр 101) снимается: тест." in caplog.text
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert "Арендована карта 1 поколение 2" in caplog.text
+
+
+def test_card_older_than_90_minutes_is_not_retired_by_age(tmp_path, monkeypatch, caplog):
+    """Срока жизни 90 минут больше нет: карта живёт, пока её клип не готов (SPEC 8.3 б)."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), budget_limit_usd=10.0, task_timeout_sec=1e9,
+              worker_kw={"render_sec": 6000.0})
+    summary = rig.run()
+    assert summary.completed == 1 and summary.exit_code == 0
+    assert "истёк" not in caplog.text and "предельный срок" not in caplog.text
+
+
+def test_lifetime_parameter_and_worker_env_limit_are_removed(tmp_path, monkeypatch):
+    with pytest.raises(TypeError):
+        Rig(tmp_path, monkeypatch, missing=(1,), card_max_lifetime_min=90)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    assert not hasattr(rig.orc, "_lifetime_sec")
+    assert not hasattr(rig.orc, "card_max_lifetime_min")
+    rig.run()
+    env = rig.vast.created[0]["env"]
+    assert "WORKER_MAX_LIFETIME_MIN" not in env
+    assert env["WORKER_BUILD"] == VALID_BUILD
+
+
+@pytest.mark.parametrize("bad", [
+    None, "", "ZZZ", "A1B2C3D4", "abc123", "x" * 40, "a" * 65,
+])
+def test_invalid_worker_build_is_refused_in_russian(tmp_path, monkeypatch, bad):
+    with pytest.raises(orch.gp.GeminiInputError) as ei:
+        Rig(tmp_path, monkeypatch, missing=(1,), worker_build=bad)
+    assert "--worker-build" in str(ei.value)
+
+
+@pytest.mark.parametrize("run_id", [None, ""])
+def test_run_id_is_required_and_label_is_gen_run_id(tmp_path, monkeypatch, run_id):
+    with pytest.raises(orch.gp.GeminiInputError) as ei:
+        Rig(tmp_path, monkeypatch, missing=(1,), run_id=run_id)
+    assert "run_id" in str(ei.value)
+    assert Rig(tmp_path, monkeypatch, missing=(1,)).orc.label == "gen-test"
+
+
+def test_worker_onstart_has_sha_and_no_secret(tmp_path, monkeypatch):
+    canary = "TESTKEY-12345"
+    received: list = []
+
+    class Spy(FakeVast):
+        def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None,
+                            bid_price=None):
+            received.append(onstart)
+            return super().create_instance(offer_id, image, disk_gb, env_vars=env_vars, label=label,
+                                           onstart=onstart, bid_price=bid_price)
+
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), token=canary)
+    spy = Spy([make_offer(1, 11)], rig.events)
+    rig.orc.vast = spy
+    rig.orc.run()
+
+    onstart = received[0]
+    assert VALID_BUILD in onstart
+    assert f"https://codeload.github.com/SOTONATORE/Download/tar.gz/{VALID_BUILD}" in onstart
+    assert "/workspace/src" in onstart and "worker/bootstrap.sh" in onstart
+    assert "/workspace/bootstrap.log" in onstart and "2>&1 &" in onstart   # в фоне, вывод в файл
+    assert canary not in onstart
+    assert "set -x" not in onstart and "printenv" not in onstart
+    assert re.search(r"\benv\b", onstart) is None
+    assert canary in json.dumps(spy.created[0]["env"])      # токен идёт только через окружение карты
+
+
+def test_worker_onstart_refuses_non_hex_build():
+    with pytest.raises(orch.gp.GeminiInputError):
+        orch._worker_onstart("x; rm -rf /")
+
+
+@pytest.mark.parametrize(("interruptible", "expected", "forbidden"), [
+    (True, "ставке bid", "обычной аренды"),
+    (False, "обычной аренды", "ставке bid"),
+])
+def test_zero_dph_warning_text_follows_rental_mode(tmp_path, monkeypatch, caplog,
+                                                   interruptible, expected, forbidden):
+    caplog.set_level(logging.INFO)
+    offer = make_offer(1, 11, price=0.3)
+    offer.is_interruptible = interruptible
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[offer])
+    rig.vast.dph[1] = 0.0
+    rig.run()
+    warn = [r.getMessage() for r in caplog.records if "не вернул цену" in r.getMessage()]
+    assert len(warn) == 1
+    assert expected in warn[0] and forbidden not in warn[0]
+    assert ("bid" in warn[0]) is interruptible
+    assert rig.vast.created[0]["bid_price"] == (0.3 if interruptible else None)
+
+
+@pytest.mark.parametrize(("interruptible", "price", "bid_sent"), [(True, 0.2, 0.2), (False, 0.45, None)])
+def test_budget_price_follows_rental_mode(tmp_path, monkeypatch, interruptible, price, bid_sent):
+    offer = make_offer(1, 11, price=price)
+    offer.is_interruptible = interruptible
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[offer])
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    rec = rig.orc.budget._records[0]
+    assert rec.dph == pytest.approx(price)                # учёт по цене режима (bid или dph_total)
+    assert rig.vast.created[0]["bid_price"] == bid_sent   # поле price уходит только при bid
+
+
+def test_bad_host_is_excluded_for_this_run_only_and_no_file_is_written(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11)])
+    slot = _ready_slot(rig, 1, instance_id=501, machine_id=11, offer_id=1)
+    rig.orc._retire(slot, "тест", bad=True)
+    assert 11 in rig.orc._bad_machines                     # хост исключён на этот запуск
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []     # постоянный список не пишется
+
+    (tmp_path / "second").mkdir()
+    rig2 = Rig(tmp_path / "second", monkeypatch, missing=(1,), offers=[make_offer(1, 11)])
+    assert rig2.orc._bad_machines == set() and rig2.orc._bad_offers == set()
+    assert rig2.orc._rent_one(rig2.clock.now) == "ok"      # в новом запуске хост снова доступен
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []

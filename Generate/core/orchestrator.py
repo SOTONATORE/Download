@@ -26,7 +26,6 @@ import shutil
 import tempfile
 import threading
 import time
-import uuid
 from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -90,8 +89,13 @@ START_FAILURE_MARKERS = ("failed to", "unresolvable", "error", "failed to create
 # Статусы Vast, которые после начала старта (loading или created) означают неудачный старт (SPEC 8.2)
 STOPPED_AFTER_START_STATUSES = ("offline", "exited")
 START_FAILURE_REASON = "старт карты не удался"
-# длина текста статуса в строке лога о неудачном старте (SPEC 8.2), символов
-START_MSG_LOG_LEN = 200
+# Срок жизни карты только для пилота (SPEC 8.3 б): основной путь срока жизни не имеет
+PILOT_MAX_LIFETIME_SEC = 90 * 60.0
+# Сборка воркера (SPEC 8.4): номер коммита, 7-64 символа 0-9 и a-f
+WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
+WORKER_ARCHIVE_URL = "https://codeload.github.com/SOTONATORE/Download/tar.gz/{sha}"
+WORKER_SRC_DIR = "/workspace/src"
+WORKER_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
 
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
@@ -233,6 +237,28 @@ def _pilot_verdict(code: Optional[int]) -> Optional[str]:
     return None
 
 
+def _valid_worker_build(value) -> bool:
+    return isinstance(value, str) and WORKER_BUILD_RE.fullmatch(value) is not None
+
+
+def _worker_onstart(worker_build: str) -> str:
+    """Команда onstart карты воркера (SPEC 8.1, вариант A).
+
+    Номер коммита проверяется до сборки текста. Архив коммита скачивается с codeload.github.com и
+    распаковывается в WORKER_SRC_DIR без верхней папки (Generate окажется в WORKER_SRC_DIR/Generate).
+    bootstrap.sh запускается в фоне, вывод уходит в WORKER_BOOTSTRAP_LOG. REPO_DIR передаётся явно,
+    чтобы bootstrap не скачивал тот же архив второй раз. В тексте команды нет токенов и секретов:
+    они приходят в окружении карты (WORKER_TOKEN, HF_TOKEN).
+    """
+    if not _valid_worker_build(worker_build):
+        raise gp.GeminiInputError("Номер сборки воркера (--worker-build) должен быть из 7-64 символов 0-9 и a-f.")
+    url = WORKER_ARCHIVE_URL.format(sha=worker_build)
+    src = WORKER_SRC_DIR
+    return (f"mkdir -p {src} && curl -fsSL --retry 3 {url} | tar -xz --strip-components=1 -C {src} && "
+            f"(REPO_DIR={src}/Generate nohup bash {src}/Generate/worker/bootstrap.sh "
+            f"> {WORKER_BOOTSTRAP_LOG} 2>&1 &)")
+
+
 def _port_keys_text(info: InstanceInfo) -> str:
     """Имена ключей поля ports для лога. Значения (HostPort и пр.) не выводятся."""
     ports = info.raw.get("ports")
@@ -245,6 +271,12 @@ def _port_keys_text(info: InstanceInfo) -> str:
         return "поля ports нет"
     keys = sorted(str(k) for k in ports)
     return ", ".join(keys) if keys else "пусто"
+
+
+def _card_name(slot, *, cap: bool = False) -> str:
+    """Имя карты в логах (SPEC 8.2): «карта <слот> поколение <поколение>», номер экземпляра Vast в скобках."""
+    name = f"карта {slot.index} поколение {slot.generation} (экземпляр {slot.instance_id})"
+    return name[:1].upper() + name[1:] if cap else name
 
 
 class Orchestrator:
@@ -264,7 +296,6 @@ class Orchestrator:
         max_cards: int = 4,
         budget_limit_usd: float = 2.0,
         job_deadline_min: int = 330,
-        card_max_lifetime_min: int = 90,
         silent_host_timeout_min: int = 20,
         worker_idle_timeout_min: int = 5,
         offer_filter: Optional[OfferFilter] = None,
@@ -297,11 +328,18 @@ class Orchestrator:
         stop_event: Optional[threading.Event] = None,
         pilot: bool = False,
         pilot_start_cmd: str = "",
+        worker_build: Optional[str] = None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
-        if job_deadline_min <= 0 or card_max_lifetime_min <= 0 or silent_host_timeout_min <= 0:
-            raise gp.GeminiInputError("Сроки (дедлайн, жизнь карты, молчание хоста) должны быть положительными.")
+        if job_deadline_min <= 0 or silent_host_timeout_min <= 0:
+            raise gp.GeminiInputError("Сроки (дедлайн, молчание хоста) должны быть положительными.")
+        # run_id обязателен (SPEC 9.1, 8.3 г): по нему карты помечаются меткой для уборки (kill-cards, cleanup_vast)
+        if run_id is None or not str(run_id).strip():
+            raise gp.GeminiInputError("Не задан номер запуска (run_id): без него карты нельзя пометить меткой для уборки.")
+        # номер сборки воркера (SPEC 8.4): проверяется до любых трат; пилот его не использует
+        if not pilot and not _valid_worker_build(worker_build):
+            raise gp.GeminiInputError("Номер сборки воркера (--worker-build) должен быть из 7-64 символов 0-9 и a-f.")
         if log_level not in LOG_LEVELS:
             raise gp.GeminiInputError("Уровень логов должен быть INFO или DEBUG.")
         self.log_level = log_level
@@ -318,9 +356,7 @@ class Orchestrator:
         self.job_deadline_min = job_deadline_min
         self.worker_idle_timeout_min = worker_idle_timeout_min
         self._deadline_sec = job_deadline_min * 60.0
-        self._lifetime_sec = card_max_lifetime_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
-        self.card_max_lifetime_min = card_max_lifetime_min
         self.offer_filter = offer_filter or OfferFilter()
         self.docker_image = docker_image
         self.disk_gb = disk_gb
@@ -329,7 +365,9 @@ class Orchestrator:
         self.pilot = bool(pilot)
         # пустая команда не передаётся дальше: onstart в payload не попадает
         self.pilot_start_cmd = (pilot_start_cmd or "").strip() or None
-        self.label = f"{'pilot' if self.pilot else 'gen'}-{run_id or uuid.uuid4().hex[:8]}"
+        self.label = f"{'pilot' if self.pilot else 'gen'}-{run_id}"
+        self.worker_build = "" if self.pilot else worker_build
+        self._onstart = None if self.pilot else _worker_onstart(worker_build)
         self.profile = profile
         self.template = filename_template
         self.width = clip_name_width
@@ -564,7 +602,7 @@ class Orchestrator:
                 if self._stop.is_set():
                     result = "stop"
                     break
-                if now - rent_at >= self._lifetime_sec:
+                if now - rent_at >= PILOT_MAX_LIFETIME_SEC:
                     result = "lifetime"
                     break
                 if now - rent_at >= self._silent_sec and port_at is None:
@@ -789,7 +827,7 @@ class Orchestrator:
         if not offers:
             log.warning("Подходящих предложений Vast нет, повтор позже.")
             return "retry"
-        est = min(self.rent_estimate, self._lifetime_sec)
+        est = self.rent_estimate
         affordable = [o for o in offers if self.budget.can_afford(o.price_per_hr, est, now)]
         if not affordable:
             log.warning("Бюджета не хватает ни на одно предложение (остаток %.4f USD).",
@@ -807,8 +845,8 @@ class Orchestrator:
         else:
             env = {
                 "WORKER_TOKEN": self._token,
+                "WORKER_BUILD": self.worker_build,  # номер коммита: первая строка логов воркера (SPEC 8.4)
                 "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
-                "WORKER_MAX_LIFETIME_MIN": str(self.card_max_lifetime_min),
                 "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
                 f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
             }
@@ -823,38 +861,40 @@ class Orchestrator:
         try:
             inst_id = self.vast.create_instance(
                 offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label,
-                bid_price=bid_price, onstart=self.pilot_start_cmd if self.pilot else None)
+                bid_price=bid_price, onstart=self.pilot_start_cmd if self.pilot else self._onstart)
         except VastError as exc:
             self._bad_offers.add(offer.offer_id)
             log.warning("Не удалось создать карту по предложению %d: %s", offer.offer_id, exc)
             return "retry"
         self.budget.track_instance_start(inst_id, offer.price_per_hr, now)
-        index = next(i for i in range(self.max_cards) if i not in self._slots)
+        # слоты нумеруются с 1 (карта 1, карта 2, …) до max_cards; поколение слота растёт с 1
+        index = next(i for i in range(1, self.max_cards + 1) if i not in self._slots)
         gen = self._gens.get(index, 0) + 1
         self._gens[index] = gen
-        self._slots[index] = _CardSlot(index, gen, inst_id, offer.machine_id,
-                                       offer.price_per_hr, now, offer_id=offer.offer_id,
-                                       bid_requested=offer.is_interruptible,
-                                       dph_search=offer.dph_total)
+        slot = _CardSlot(index, gen, inst_id, offer.machine_id,
+                         offer.price_per_hr, now, offer_id=offer.offer_id,
+                         bid_requested=offer.is_interruptible,
+                         dph_search=offer.dph_total)
+        self._slots[index] = slot
         self._cards_rented += 1
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
-        log.info("Арендована карта %d по предложению %d (слот %d, поколение %d, %s): %.4f USD/ч.",
-                 inst_id, offer.offer_id, index, gen, mode, offer.price_per_hr)
-        log.info("Карта %d создана, ждём загрузку образа.", inst_id)
+        log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
+                 _card_name(slot), offer.offer_id, mode, offer.price_per_hr)
+        log.info("%s создана, ждём загрузку образа.", _card_name(slot, cap=True))
         return "ok"
 
     def _retire(self, slot: _CardSlot, reason: str, *, bad: bool = False) -> None:
-        log.warning("Карта %d (слот %d, поколение %d) снимается: %s.",
-                    slot.instance_id, slot.index, slot.generation, reason)
+        log.warning("%s снимается: %s.", _card_name(slot, cap=True), reason)
         self._budget_blocked = False
-        if slot.task is not None:
+        task = slot.task
+        slot.task = None  # клип больше не назначен этой карте до возврата в очередь (SPEC 8.2)
+        if task is not None:
             if bad:
                 # аварийно завершившаяся карта засчитывается как попытка (MAX_ATTEMPTS),
                 # иначе «отравленный» клип может зацикливать аренду карт
-                self._fail_clip(slot.task.num, f"карта аварийно завершилась: {reason}")
+                self._fail_clip(task.num, f"карта аварийно завершилась: {reason}")
             else:
-                self._requeue_free(slot.task.num)
-            slot.task = None
+                self._requeue_free(task.num)
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
         self._dump_before_destroy(slot)
@@ -867,9 +907,9 @@ class Orchestrator:
         try:
             self.vast.destroy_instance(slot.instance_id)
         except VastError as exc:
-            log.warning("Не удалось уничтожить карту %d (машина %s): %s. Стоимость зафиксирована "
+            log.warning("Не удалось уничтожить %s (машина %s): %s. Стоимость зафиксирована "
                         "на этот момент; уничтожение не подтверждено, карта будет проверена при "
-                        "финальной уборке.", slot.instance_id, slot.machine_id, exc)
+                        "финальной уборке.", _card_name(slot), slot.machine_id, exc)
         else:
             self._destroyed += 1
         self._slots.pop(slot.index, None)
@@ -883,7 +923,7 @@ class Orchestrator:
             if slot.url:
                 self._pull_card_logs(slot, final=True)
             else:
-                log.info("Карта %d: адрес воркера неизвестен, логи не запрошены.", slot.instance_id)
+                log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
         except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
             log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
@@ -908,8 +948,6 @@ class Orchestrator:
             return False
         # маскирование всего текста до обрезки и сворачивания пробелов (SPEC 0.1)
         text = _one_line(self._mask_remote(raw_msg)) if raw_msg else ""
-        if len(text) > START_MSG_LOG_LEN:
-            text = text[:START_MSG_LOG_LEN] + "…"
         detail = f"статус «{prev_status or 'неизвестно'}» → «{new_status or 'неизвестно'}»"
         if text:
             detail += f"; текст: {text}"
@@ -917,8 +955,8 @@ class Orchestrator:
             host = f"хост {slot.machine_id} исключён из этого запуска"
         else:
             host = "номер хоста неизвестен, исключено только предложение"
-        log.error("Карта %d: старт не удался (%s). Карта снимается, %s.",
-                  slot.instance_id, detail, host)
+        log.error("%s: старт не удался (%s). Карта снимается, %s.",
+                  _card_name(slot, cap=True), detail, host)
         if slot.offer_id:
             self._bad_offers.add(slot.offer_id)
         self._retire(slot, START_FAILURE_REASON, bad=True)
@@ -930,9 +968,9 @@ class Orchestrator:
         Хост исключается только на этот запуск (_bad_machines, _bad_offers). bad_hosts.txt не меняется:
         он постоянный и правится вручную.
         """
-        log.warning("Слот %d: карта %d (хост %s) не найдена в Vast в %d ответах подряд; "
+        log.warning("%s на хосте %s: не найдена в Vast в %d ответах подряд; "
                     "карта снимается, хост исключён из этого запуска.",
-                    slot.index, slot.instance_id, slot.machine_id, slot.not_found)
+                    _card_name(slot, cap=True), slot.machine_id, slot.not_found)
         if slot.offer_id:
             self._bad_offers.add(slot.offer_id)
         self._retire(slot, NOT_FOUND_REASON, bad=True)
@@ -946,8 +984,8 @@ class Orchestrator:
         if not slot.bid_requested or info.is_bid is True:
             return
         slot.mode_mismatch = True
-        log.error("карта %d: запрошен bid, Vast вернул is_bid=%s; бюджет считается по dph_total.",
-                  slot.instance_id, info.is_bid)
+        log.error("%s: запрошен bid, Vast вернул is_bid=%s; бюджет считается по dph_total.",
+                  _card_name(slot), info.is_bid)
 
     def _adopt_vast_price(self, slot: _CardSlot, info: InstanceInfo) -> None:
         """Цена карты по ответу Vast (dph_total) вместо цены поиска (SPEC 8.2, бюджет).
@@ -963,13 +1001,19 @@ class Orchestrator:
         if not price > 0 and slot.mode_mismatch and slot.dph_search > 0:
             price = slot.dph_search
         if not price > 0:
-            log.warning("карта %d: Vast не вернул цену (dph_total) ни в ответе, ни в поиске; "
-                        "бюджет считается по ставке bid из поиска, проверьте Billing.",
-                        slot.instance_id)
+            # текст зависит от режима: предупреждение про bid пишется только для прерываемой аренды
+            if slot.bid_requested:
+                log.warning("%s: Vast не вернул цену (dph_total) ни в ответе, ни в поиске; "
+                            "бюджет считается по ставке bid из поиска, проверьте Billing.",
+                            _card_name(slot, cap=True))
+            else:
+                log.warning("%s: Vast не вернул цену (dph_total) ни в ответе, ни в поиске; "
+                            "бюджет обычной аренды считается по dph_total из поиска, проверьте Billing.",
+                            _card_name(slot, cap=True))
             return
         if not self.budget.set_dph(slot.instance_id, price, self.clock()):
-            log.warning("Карта %d: нет записи учёта бюджета, учитывается цена поиска %.4f USD/ч.",
-                        slot.instance_id, slot.price)
+            log.warning("%s: нет записи учёта бюджета, учитывается цена поиска %.4f USD/ч.",
+                        _card_name(slot, cap=True), slot.price)
             return
         slot.price = price
 
@@ -983,12 +1027,12 @@ class Orchestrator:
             except VastInstanceNotFound as exc:
                 # подряд идущие «не найдена» считаются отдельно (SPEC 8.3); остальные ошибки ниже, как раньше
                 slot.not_found += 1
-                log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
+                log.warning("Не удалось получить статус %s: %s", _card_name(slot), exc)
                 if slot.not_found >= NOT_FOUND_LIMIT:
                     self._retire_not_found(slot)
                     return
             except VastError as exc:
-                log.warning("Не удалось получить статус карты %d: %s", slot.instance_id, exc)
+                log.warning("Не удалось получить статус %s: %s", _card_name(slot), exc)
             if info is not None:
                 slot.not_found = 0
                 if not slot.cost_checked:
@@ -998,7 +1042,7 @@ class Orchestrator:
                 # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
                 if info.actual_status != slot.vast_status:
                     slot.vast_status = info.actual_status
-                    log.info("Карта %d: состояние Vast «%s».", slot.instance_id,
+                    log.info("%s: состояние Vast «%s».", _card_name(slot, cap=True),
                              info.actual_status or "неизвестно")
                 if info.actual_status == "loading":
                     slot.saw_loading = True
@@ -1017,15 +1061,12 @@ class Orchestrator:
                         slot.state = "ready"
                         slot.contacted = True
                         slot.net_fail = 0
-                        log.info("Карта %d: healthcheck OK через %.0f с после создания, "
-                                 "готова к приёму задач.", slot.instance_id, age)
+                        log.info("%s: healthcheck OK через %.0f с после создания, "
+                                 "готова к приёму задач.", _card_name(slot, cap=True), age)
         if not slot.contacted and age >= self._silent_sec:
-            log.error("Карта %d: healthcheck не прошёл за %d мин (таймаут).",
-                      slot.instance_id, int(self._silent_sec // 60))
+            log.error("%s: healthcheck не прошёл за %d мин (таймаут).",
+                      _card_name(slot, cap=True), int(self._silent_sec // 60))
             self._retire(slot, f"хост не вышел на связь за {int(self._silent_sec // 60)} мин", bad=True)
-            return
-        if age >= self._lifetime_sec:
-            self._retire(slot, "истёк предельный срок жизни карты")
             return
         if slot.net_fail >= MAX_NET_FAILS:
             self._retire(slot, "воркер недоступен", bad=True)
@@ -1071,12 +1112,24 @@ class Orchestrator:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _assigned_slot(self, num: int) -> Optional[_CardSlot]:
+        """Слот, на котором сейчас назначен клип (состояние assigned, SPEC 8.2); None, если клип free."""
+        for slot in self._slots.values():
+            if slot.task is not None and slot.task.num == num:
+                return slot
+        return None
+
     def _requeue_free(self, num: int) -> None:
+        """Клип возвращается в состояние free: в очередь, если он не done, не назначен и уже не в очереди."""
+        if num in self._done or num in self._failed or num in self._queue or self._assigned_slot(num):
+            return
         if self._attempts.get(num, 0) > 0:
             self._attempts[num] -= 1
         self._queue.appendleft(num)
 
     def _fail_clip(self, num: int, reason: str) -> None:
+        if num in self._done or self._assigned_slot(num) is not None:
+            return  # готовый или назначенный клип не возвращается в очередь
         used = self._attempts.get(num, 0)
         if used >= MAX_ATTEMPTS:
             log.error("Клип %d: попытки исчерпаны (%d), помечен как неудачный. Причина: %s",
@@ -1086,10 +1139,17 @@ class Orchestrator:
         else:
             log.warning("Клип %d: неудачная попытка %d из %d (%s), возвращён в очередь.",
                         num, used, MAX_ATTEMPTS, reason)
-            self._queue.append(num)
+            if num not in self._queue:
+                self._queue.append(num)
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
         num = self._queue.popleft()
+        owner = self._assigned_slot(num)
+        if owner is not None or num in self._done:
+            # повторный POST /task для назначенного клипа создал бы дубль на воркере (SPEC 8.2, 13.1 п. 3)
+            log.warning("Клип %d уже назначен или готов (%s): повторной отправки нет.", num,
+                        _card_name(owner) if owner is not None else "готов")
+            return
         entry = self._prompts.get(str(num))
         entry = entry if isinstance(entry, dict) else {}
         num_frames = entry.get("num_frames")
@@ -1105,8 +1165,8 @@ class Orchestrator:
         except _WorkerNetError as exc:
             slot.net_fail += 1
             self._queue.appendleft(num)
-            log.warning("Воркер карты %d не принял клип %d (сбой связи: %s).",
-                        slot.instance_id, num, exc)
+            log.warning("Воркер %s не принял клип %d (сбой связи: %s).",
+                        _card_name(slot), num, exc)
             return
         except _WorkerHttpError as exc:
             slot.net_fail += 1
@@ -1122,8 +1182,8 @@ class Orchestrator:
         # текст промпта не логируем: только длина и короткий SHA-256 (SPEC 0.1)
         prompt = str(payload["prompt"])
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
-        log.info("Клип %d отправлен на карту %d (попытка %d, промпт %d симв., sha256 %s).",
-                 num, slot.instance_id, self._attempts[num], len(prompt), digest)
+        log.info("Клип %d отправлен: %s (попытка %d, промпт %d симв., sha256 %s).",
+                 num, _card_name(slot), self._attempts[num], len(prompt), digest)
 
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
@@ -1188,8 +1248,8 @@ class Orchestrator:
         duration = max(0.0, now - task.started)
         self._durations.append(duration)
         self._mark(task.num, "done")
-        log.info("Клип %d выдан в Release (рендер на карте %d: %.1f с).",
-                 task.num, slot.instance_id, duration)
+        log.info("Клип %d выдан в Release (рендер: %s, %.1f с).",
+                 task.num, _card_name(slot), duration)
         try:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):

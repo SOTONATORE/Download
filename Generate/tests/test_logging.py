@@ -325,7 +325,7 @@ def test_clip_duration_logged_per_clip_and_summary_fields(logs_rig, caplog):
     caplog.set_level(logging.INFO)
     rig = logs_rig(missing=(1, 2))
     summary = rig.run()
-    assert len(re.findall(r"Клип \d выдан в Release \(рендер на карте \d+: \d+\.\d с\)",
+    assert len(re.findall(r"Клип \d выдан в Release \(рендер: карта \d+ поколение \d+ \(экземпляр \d+\), \d+\.\d с\)",
                           caplog.text)) == 2
     assert summary.destroyed_cards >= 1
     assert summary.avg_render_sec > 0
