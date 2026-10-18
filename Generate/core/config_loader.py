@@ -87,10 +87,10 @@ class Config:
     # --- аренда карт Vast.ai ---
     gpu_name: str = _rule()
     rental_type: str = _rule(choices=RENTAL_TYPES)
-    # Единственный ключ с умолчанием: отсутствие в файле читается как False (без фильтра по проверке).
+    # Единственный ключ с умолчанием: отсутствие в файле читается как True, то есть 1 (SPEC 3).
     # В файле и во входах значение только 0 или 1 (целые); true и false не принимаются.
     # kw_only снимает правило «поля с умолчанием идут после полей без умолчания»; порядок как в файле.
-    verified: bool = field(default=False, kw_only=True, metadata={"zero_one": True})
+    verified: bool = field(default=True, kw_only=True, metadata={"zero_one": True})
     min_price_per_hour: float = _rule(ge=0)
     max_price_per_hour: float = _rule(gt=0)
     min_reliability: float = _rule(ge=0, le=1)
@@ -103,12 +103,26 @@ class Config:
     docker_image: str = _rule(pattern=r"\S+", hint="непустая строка без пробелов")
     disk_gb: int = _rule(ge=1)
     worker_idle_timeout_min: int = _rule(ge=1)
-    card_max_lifetime_min: int = _rule(ge=1)
 
     # --- выдача и запуск ---
     release_asset_limit: int = _rule(ge=1)
     limit_clips: int = _rule(ge=0)
     job_deadline_min: int = _rule(ge=1)
+
+    # --- сбор цен, загрузка весов, мониторинг (v0.6) ---
+    scan_sec: int = _rule(ge=1)
+    scan_step_sec: int = _rule(ge=1)
+    stable_max_spread: float = _rule(ge=0)
+    bid_margin: float = _rule(ge=0)
+    speed_check_at_pct: int = _rule(ge=1, le=100)
+    speed_min_mbps: float = _rule(gt=0)
+    progress_step_pct: int = _rule(ge=1, le=50)
+    stall_timeout_min: int = _rule(ge=1)
+    stage_max_min: int = _rule(ge=1)
+    worker_ready_timeout_min: int = _rule(ge=1)
+    task_accept_timeout_min: int = _rule(ge=1)
+    heartbeat_interval_sec: int = _rule(ge=1)
+    monitor_interval_sec: int = _rule(ge=1)
 
     @property
     def interruptible(self) -> bool:
@@ -179,13 +193,13 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
 
 
 def _check_bounds(name: str, number: float, meta: Mapping[str, Any]) -> float:
-    # Числа не секретны, поэтому значение показываем: так проще найти опечатку.
+    # Значение из файла в текст ошибки не выводим (SPEC 0.1, задание этапа 1): только имя ключа и правило.
     if "gt" in meta and not number > meta["gt"]:
-        raise _Bad(f"«{name}»: должно быть больше {meta['gt']} (получено {number:g})")
+        raise _Bad(f"«{name}»: должно быть больше {meta['gt']}")
     if "ge" in meta and not number >= meta["ge"]:
-        raise _Bad(f"«{name}»: должно быть не меньше {meta['ge']} (получено {number:g})")
+        raise _Bad(f"«{name}»: должно быть не меньше {meta['ge']}")
     if "le" in meta and not number <= meta["le"]:
-        raise _Bad(f"«{name}»: должно быть не больше {meta['le']} (получено {number:g})")
+        raise _Bad(f"«{name}»: должно быть не больше {meta['le']}")
     return number
 
 
@@ -201,6 +215,12 @@ def _cross_checks(v: Mapping[str, Any]) -> list[str]:
     # на запуск должно хватать всего бюджета: кредит (min_balance_usd) не меньше потолка расходов
     if v["min_balance_usd"] < v["budget_limit_usd"]:
         problems.append("«min_balance_usd» не может быть меньше «budget_limit_usd»")
+    # скорость на срезе не выше потолка сети, по которому отбираются предложения
+    if v["speed_min_mbps"] > v["min_inet_mbps"]:
+        problems.append("«speed_min_mbps» не может быть больше «min_inet_mbps»")
+    # общий срок этапа не короче срока зависания
+    if v["stage_max_min"] < v["stall_timeout_min"]:
+        problems.append("«stage_max_min» не может быть меньше «stall_timeout_min»")
     return problems
 
 

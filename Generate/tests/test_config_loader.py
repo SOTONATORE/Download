@@ -36,8 +36,9 @@ def test_default_file_loads_and_matches_spec_values():
     assert cfg.gemini_batch_size == 100
     assert cfg.disk_gb == 100
     assert cfg.silent_host_timeout_min == 20
-    assert cfg.card_max_lifetime_min == 90
-    assert cfg.worker_idle_timeout_min == 5
+    assert cfg.worker_idle_timeout_min == 2
+    assert cfg.max_cards == 1
+    assert cfg.limit_clips == 0
     assert cfg.job_deadline_min == 330
     assert cfg.gpu_max_sec is None          # берётся из профиля модели
     assert cl.load_profile_number(cfg.model_profile, "gpu_max_sec") == 10.0
@@ -65,9 +66,9 @@ def test_missing_key_is_error():
 
 # ---------------------------------------------------------------- verified (производственный фильтр Vast)
 
-def test_verified_default_file_is_false():
-    """Значение в config.default.yaml: 0 (как вход workflow по умолчанию)."""
-    assert cl.load_config().verified is False
+def test_verified_default_file_is_true():
+    """Значение в config.default.yaml: 1, как в vast_stable_run.sh (verified eq true)."""
+    assert cl.load_config().verified is True
 
 
 def test_verified_zero_from_file_is_passed_through_as_false():
@@ -87,11 +88,13 @@ def test_verified_accepts_only_integers_zero_and_one(value):
     assert "«verified»: нужно 0 или 1" in str(ei.value)
 
 
-def test_verified_missing_key_defaults_to_false():
-    """Отсутствие ключа читается как 0 (без фильтра по проверке), как в config.default.yaml."""
+def test_verified_missing_key_defaults_to_true():
+    """Отсутствие ключа читается как 1 (SPEC 3), а не как 0: умолчание датакласса тоже True."""
     raw = _base()
     del raw["verified"]
-    assert cl.parse_config(raw).verified is False
+    assert cl.parse_config(raw).verified is True
+    default = {f.name: f for f in dataclasses.fields(cl.Config)}["verified"].default
+    assert default is True
 
 
 # ---------------------------------------------------------------- rental_type (режим аренды)
@@ -297,6 +300,14 @@ def test_error_message_does_not_echo_string_values():
     assert "TOP-SECRET-VALUE" not in str(err)
 
 
+def test_error_message_does_not_echo_numeric_values_from_file():
+    """Выход за границы: в тексте ошибки только имя ключа и правило, без значения из файла (задание 2h)."""
+    raw = _base()
+    raw["scan_sec"] = -4242
+    err = _assert_rejected(raw, "«scan_sec»: должно быть не меньше 1")
+    assert "4242" not in str(err)
+
+
 # ---------------------------------------------------------------- файл и YAML
 
 def test_missing_file_is_input_error(tmp_path):
@@ -387,3 +398,136 @@ def test_max_inet_price_per_tb_bounds_and_type(value, fragment):
     raw = _base()
     raw["max_inet_price_per_tb"] = value
     _assert_rejected(raw, fragment)
+
+
+# ---------------------------------------------------------------- v0.6: удалённый и новые ключи
+
+NEW_KEYS_DEFAULTS = {
+    "scan_sec": 300, "scan_step_sec": 20, "stable_max_spread": 0.05, "bid_margin": 0.03,
+    "speed_check_at_pct": 10, "speed_min_mbps": 400.0, "progress_step_pct": 10,
+    "stall_timeout_min": 3, "stage_max_min": 20, "worker_ready_timeout_min": 10,
+    "task_accept_timeout_min": 3, "heartbeat_interval_sec": 10, "monitor_interval_sec": 10,
+}
+
+
+def test_card_max_lifetime_is_removed_and_its_presence_is_unknown_key():
+    raw = _base()
+    raw["card_max_lifetime_min"] = 90
+    _assert_rejected(raw, "неизвестный ключ «card_max_lifetime_min»")
+    assert "card_max_lifetime_min" not in cl.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+
+
+def test_new_keys_defaults_and_types_from_file():
+    cfg = cl.load_config()
+    for key, value in NEW_KEYS_DEFAULTS.items():
+        assert getattr(cfg, key) == value, key
+    assert isinstance(cfg.stable_max_spread, float)
+    assert isinstance(cfg.bid_margin, float)
+    assert isinstance(cfg.speed_min_mbps, float)
+    assert isinstance(cfg.scan_sec, int)
+    assert isinstance(cfg.speed_check_at_pct, int)
+
+
+@pytest.mark.parametrize("key, value, fragment", [
+    ("scan_sec", 0, "«scan_sec»: должно быть не меньше 1"),
+    ("scan_step_sec", 0, "«scan_step_sec»: должно быть не меньше 1"),
+    ("stable_max_spread", -0.01, "«stable_max_spread»: должно быть не меньше 0"),
+    ("bid_margin", -0.01, "«bid_margin»: должно быть не меньше 0"),
+    ("speed_check_at_pct", 0, "«speed_check_at_pct»: должно быть не меньше 1"),
+    ("speed_check_at_pct", 101, "«speed_check_at_pct»: должно быть не больше 100"),
+    ("speed_min_mbps", 0, "«speed_min_mbps»: должно быть больше 0"),
+    ("progress_step_pct", 0, "«progress_step_pct»: должно быть не меньше 1"),
+    ("progress_step_pct", 51, "«progress_step_pct»: должно быть не больше 50"),
+    ("stall_timeout_min", 0, "«stall_timeout_min»: должно быть не меньше 1"),
+    ("stage_max_min", 0, "«stage_max_min»: должно быть не меньше 1"),
+    ("worker_ready_timeout_min", 0, "«worker_ready_timeout_min»: должно быть не меньше 1"),
+    ("task_accept_timeout_min", 0, "«task_accept_timeout_min»: должно быть не меньше 1"),
+    ("heartbeat_interval_sec", 0, "«heartbeat_interval_sec»: должно быть не меньше 1"),
+    ("monitor_interval_sec", 0, "«monitor_interval_sec»: должно быть не меньше 1"),
+    ("worker_idle_timeout_min", 0, "«worker_idle_timeout_min»: должно быть не меньше 1"),
+])
+def test_new_keys_out_of_bounds_are_rejected(key, value, fragment):
+    raw = _base()
+    raw[key] = value
+    _assert_rejected(raw, fragment)
+
+
+@pytest.mark.parametrize("key, value", [
+    ("speed_check_at_pct", 1), ("speed_check_at_pct", 100),
+    ("progress_step_pct", 1), ("progress_step_pct", 50),
+    ("stable_max_spread", 0), ("bid_margin", 0), ("speed_min_mbps", 0.5),
+])
+def test_new_keys_accept_bound_edges(key, value):
+    raw = _base()
+    raw[key] = value
+    assert getattr(cl.parse_config(raw), key) == pytest.approx(value)
+
+
+@pytest.mark.parametrize("key, value, fragment", [
+    ("scan_sec", 300.5, "целое число"),
+    ("speed_check_at_pct", True, "целое число"),
+    ("progress_step_pct", "10", "целое число"),
+    ("stable_max_spread", True, "число"),
+    ("bid_margin", "0.03", "число"),
+    ("speed_min_mbps", "400", "число"),
+    ("heartbeat_interval_sec", None, "не может быть пустым"),
+])
+def test_new_keys_type_errors(key, value, fragment):
+    raw = _base()
+    raw[key] = value
+    _assert_rejected(raw, f"«{key}»", fragment)
+
+
+def test_speed_min_must_not_exceed_min_inet():
+    raw = _base()
+    raw["speed_min_mbps"] = 900
+    _assert_rejected(raw, "«speed_min_mbps» не может быть больше «min_inet_mbps»")
+
+
+def test_speed_min_equal_to_min_inet_is_allowed():
+    raw = _base()
+    raw["speed_min_mbps"] = raw["min_inet_mbps"]
+    assert cl.parse_config(raw).speed_min_mbps == 800.0
+
+
+def test_stage_max_must_not_be_less_than_stall_timeout():
+    raw = _base()
+    raw["stage_max_min"], raw["stall_timeout_min"] = 2, 3
+    _assert_rejected(raw, "«stage_max_min» не может быть меньше «stall_timeout_min»")
+
+
+def test_stage_max_equal_to_stall_timeout_is_allowed():
+    raw = _base()
+    raw["stage_max_min"] = raw["stall_timeout_min"] = 3
+    assert cl.parse_config(raw).stage_max_min == 3
+
+
+def test_both_new_relations_are_reported_together():
+    raw = _base()
+    raw["speed_min_mbps"] = 900
+    raw["stage_max_min"], raw["stall_timeout_min"] = 2, 3
+    err = _assert_rejected(raw, "«speed_min_mbps»", "«stage_max_min»")
+    assert "проблем: 2" in str(err)
+
+
+def test_override_wins_over_file_and_empty_override_keeps_file_value(tmp_path):
+    p = tmp_path / "cfg.yaml"
+    p.write_text(cl.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+                 .replace("stall_timeout_min: 3", "stall_timeout_min: 4"), encoding="utf-8")
+    assert cl.load_config(p).stall_timeout_min == 4                                  # из файла
+    assert cl.load_config(p, overrides={"stall_timeout_min": None}).stall_timeout_min == 4  # пусто: файл
+    assert cl.load_config(p, overrides={}).stall_timeout_min == 4                    # пустой словарь: файл
+    assert cl.load_config(p, overrides={"stall_timeout_min": 5}).stall_timeout_min == 5    # вход побеждает
+
+
+def test_verified_override_wins_over_file_default_and_none_keeps_it():
+    assert cl.load_config(overrides={"verified": 0}).verified is False
+    assert cl.load_config(overrides={"verified": 1}).verified is True
+    assert cl.load_config(overrides={"verified": None}).verified is True
+    assert cl.load_config().verified is True
+
+
+def test_verified_override_bool_is_rejected():
+    with pytest.raises(GeminiInputError) as ei:
+        cl.load_config(overrides={"verified": True})
+    assert "«verified»: нужно 0 или 1" in str(ei.value)

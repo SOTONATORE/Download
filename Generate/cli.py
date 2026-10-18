@@ -480,7 +480,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             disk_gb=cfg.disk_gb,
             silent_host_timeout_min=cfg.silent_host_timeout_min,
             job_deadline_min=cfg.job_deadline_min,
-            card_max_lifetime_min=cfg.card_max_lifetime_min,
             worker_idle_timeout_min=cfg.worker_idle_timeout_min,
             filename_template=cfg.filename_template,
             clip_name_width=cfg.clip_name_width,

@@ -257,7 +257,7 @@ def test_run_defaults_without_repo_and_run_id(capsys, run_env, missing_file, mon
     assert kwargs["repo"] == ""
     assert kwargs["run_id"] == ""
     assert kwargs["limit_clips"] == 0
-    assert kwargs["max_cards"] == 4
+    assert kwargs["max_cards"] == 1
 
 
 def test_run_default_offer_filter(capsys, run_env, missing_file):
@@ -295,17 +295,18 @@ def test_run_custom_offer_filter(capsys, run_env, missing_file):
     assert f.max_inet_price_per_tb == 3.0
 
 
-def test_run_default_offer_filter_verified_is_false(capsys, run_env, missing_file):
-    """Производственный поиск берёт verified из config.default.yaml: по умолчанию 0 (False)."""
+def test_run_default_offer_filter_verified_is_true(capsys, run_env, missing_file):
+    """Производственный поиск берёт verified из config.default.yaml: по умолчанию 1 (True)."""
     assert cli.main(_run_args(DATA, missing_file)) == 0
     _, kwargs = run_env.calls[0]
-    assert kwargs["offer_filter"].verified is False
+    assert kwargs["offer_filter"].verified is True
 
 
 def test_run_verified_zero_from_config_reaches_offer_filter(capsys, run_env, missing_file, tmp_path):
     """Значение verified: 0 из файла конфигурации доходит до OfferFilter как False."""
     text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    assert "\nverified: 0\n" in text
+    assert "\nverified: 1\n" in text
+    text = text.replace("\nverified: 1\n", "\nverified: 0\n")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(text, encoding="utf-8")
     assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg))) == 0
@@ -362,12 +363,13 @@ def test_verified_zero_flag_reaches_loaded_config(capsys, run_env, loaded_cfgs, 
 
 def test_verified_absent_keeps_config_value(capsys, run_env, loaded_cfgs, missing_file):
     assert cli.main(_run_args(DATA, missing_file)) == 0
-    assert loaded_cfgs[0].verified is False      # значение из config.default.yaml: 0
+    assert loaded_cfgs[0].verified is True       # значение из config.default.yaml: 1
 
 
 def test_verified_one_flag_overrides_config_zero(capsys, run_env, loaded_cfgs, missing_file, tmp_path):
     text = cli.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
-    assert "\nverified: 0\n" in text
+    assert "\nverified: 1\n" in text
+    text = text.replace("\nverified: 1\n", "\nverified: 0\n")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(text, encoding="utf-8")
     assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg), "--verified", "1")) == 0
