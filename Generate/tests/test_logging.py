@@ -693,3 +693,36 @@ def test_remote_text_and_log_share_one_masking_function(monkeypatch):
     assert out == ls.mask_remote_text(sample) == ls.mask_text(sample)
     assert "hf_abcdefghijklmnopqrstu" not in out and CANARY not in out
     assert "status=running" in out and "ip=46.224.213.21" in out and "max_tokens=512" in out
+
+
+# ---------------------------------------------------------------------------
+# Чёрный список имён (этап 7д): маскируется всегда, в обоих режимах, раньше белого списка
+# ---------------------------------------------------------------------------
+
+def test_blocked_names_are_frozen():
+    assert isinstance(ls.BLOCKED_NAMES, frozenset)
+    assert tuple(sorted(ls.BLOCKED_NAMES)) == ("crisp_hmac", "hmac")
+    assert len(ls.BLOCKED_NAMES) == 2
+
+
+def test_blocked_and_allowed_names_do_not_intersect():
+    blocked = {n.lower() for n in ls.BLOCKED_NAMES}
+    allowed = {n.lower() for n in ls.ALLOWED_NAMES}
+    assert not (blocked & allowed)
+
+
+@pytest.mark.parametrize("mode", MASK_MODES)
+@pytest.mark.parametrize("line, expected", [
+    (f"crisp_hmac={CANARY}", "crisp_hmac=***"),
+    (f'"crisp_hmac": "{CANARY}"', '"crisp_hmac": "***"'),
+    (f"hmac={CANARY}", "hmac=***"),
+])
+def test_blocked_pairs_are_masked_in_both_modes(mode, line, expected):
+    out = ls.mask_text_with_mode(line, mode)
+    assert out == expected
+    assert CANARY not in out
+
+
+def test_blocked_name_is_masked_by_remote_path():
+    out = ls.mask_remote_text(f"crisp_hmac={CANARY}")
+    assert out == "crisp_hmac=***" and CANARY not in out

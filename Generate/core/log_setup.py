@@ -55,6 +55,13 @@ ALLOWED_NAMES = frozenset({
 # Сравнение без учёта регистра: имя connIndex в списке написано с заглавной буквой, сверяем в нижнем регистре.
 _ALLOWED_LOWER = frozenset(n.lower() for n in ALLOWED_NAMES)
 
+# имена, которые маскируются всегда, в любом режиме; список меняется только явным решением владельца
+BLOCKED_NAMES = frozenset({"crisp_hmac", "hmac"})
+_BLOCKED_LOWER = frozenset(n.lower() for n in BLOCKED_NAMES)
+_OVERLAP = sorted(_BLOCKED_LOWER & _ALLOWED_LOWER)
+if _OVERLAP:
+    raise ValueError("Имена из чёрного списка не могут быть в белом списке: " + ", ".join(_OVERLAP))
+
 # Имя с секретной частью (режим A) и любое имя (режим B). Значение: в кавычках до закрывающей кавычки,
 # иначе до первого пробела, кавычки, запятой или конца строки.
 _SECRET_WORDS = r"(?:KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|SESSION)"
@@ -66,6 +73,10 @@ _ASSIGN_B = re.compile(r"(?i)(?<![\w.\-])(?P<name>" + _NAME_B + r")=(?P<value>" 
 _JSON_A = re.compile(r"(?i)\"(?P<name>" + _NAME_A + r")\"(?P<sep>\s*:\s*)\"[^\"\r\n]*\"?")
 _JSON_B = re.compile(r"(?i)\"(?P<name>" + _NAME_B + r")\"(?P<sep>\s*:\s*)\"[^\"\r\n]*\"?")
 _PAIR_PATTERNS = {"A": (_JSON_A, _ASSIGN_A), "B": (_JSON_B, _ASSIGN_B)}
+# Чёрный список: полное имя (граница с обеих сторон), маскируется в любом режиме и раньше белого списка.
+_BLOCKED_ALT = "|".join(re.escape(n) for n in sorted(BLOCKED_NAMES, key=len, reverse=True))
+_BLOCK_ASSIGN = re.compile(r"(?i)(?<![\w.\-])(?P<name>" + _BLOCKED_ALT + r")(?![\w.\-])=(?P<value>" + _VALUE + r")")
+_BLOCK_JSON = re.compile(r"(?i)\"(?P<name>" + _BLOCKED_ALT + r")\"(?P<sep>\s*:\s*)\"[^\"\r\n]*\"?")
 
 # Пары с именами из белого списка для прохода redact_text (vast_client): такие пары остаются как есть.
 _ALLOWED_PAIR_RE = re.compile(
@@ -101,14 +112,20 @@ def _is_allowed(name: str) -> bool:
     return name.lower() in _ALLOWED_LOWER
 
 
+def _is_blocked(name: str) -> bool:
+    return name.lower() in _BLOCKED_LOWER
+
+
 def _json_repl(m: "re.Match[str]") -> str:
-    if _is_allowed(m.group("name")):
+    # чёрный список проверяется раньше белого: заблокированное имя не пропускается никогда
+    if not _is_blocked(m.group("name")) and _is_allowed(m.group("name")):
         return m.group(0)
     return f"\"{m.group('name')}\"{m.group('sep')}\"{_MASK}\""
 
 
 def _assign_repl(m: "re.Match[str]") -> str:
-    if _is_allowed(m.group("name")):
+    # чёрный список проверяется раньше белого
+    if not _is_blocked(m.group("name")) and _is_allowed(m.group("name")):
         return m.group(0)
     value = m.group("value")
     tail = value[0] + _MASK + value[0] if value[:1] in ('"', "'") else _MASK
@@ -137,6 +154,8 @@ def mask_text_with_mode(text: str, mode: str) -> str:
     if mode not in _PAIR_PATTERNS:
         raise ValueError("Режим маскирования должен быть A или B.")
     json_re, assign_re = _PAIR_PATTERNS[mode]
+    text = _BLOCK_JSON.sub(_json_repl, text)
+    text = _BLOCK_ASSIGN.sub(_assign_repl, text)
     text = json_re.sub(_json_repl, text)
     text = assign_re.sub(_assign_repl, text)
     text = _redact_free_text(text)
