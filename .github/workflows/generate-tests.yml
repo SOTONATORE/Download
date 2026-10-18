@@ -1,13 +1,6 @@
 name: generate-tests
 
 on:
-  push:
-    paths:
-      - "Generate/**"
-      - ".github/workflows/generate-tests.yml"
-  pull_request:
-    paths:
-      - "Generate/**"
   workflow_dispatch:
 
 jobs:
