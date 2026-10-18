@@ -4,6 +4,7 @@
 Сети и реального ключа нет.
 """
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,8 @@ from Generate.core.vast_client import InstanceInfo, VastInputError, VastRuntimeE
 NOW = 1_800_000_000.0
 YOUNG = NOW - 3600            # карта работает час
 OLD = NOW - 7 * 3600          # карта работает семь часов (больше 6 часов)
+YOUNG_AGE = 3600              # возраст карты, сек (1 час)
+OLD_AGE = 7 * 3600            # возраст карты, сек (больше 6 часов)
 VAST_TOKEN_ENV = "GEN_" + "VAST_API_KEY"
 CANARY = "TESTKEY-" + "12345"
 
@@ -51,23 +54,23 @@ def test_pilot_label_with_newline_is_unparsed():
 # ---------------------------------------------------------------- решение по карте
 
 @pytest.mark.parametrize("label, status, age, destroy", [
-    ("gen-1", "completed", YOUNG, True),             # завершённый запуск -> уничтожить
-    ("gen-1", "completed", OLD, True),
-    ("gen-1", "in_progress", YOUNG, False),          # идёт и карта молодая -> оставить
-    ("gen-1", "in_progress", OLD, True),             # идёт, но карта старше 6 ч -> уничтожить
-    ("gen-1", "queued", YOUNG, False),
-    ("gen-1", "waiting", YOUNG, False),
-    ("gen-1", "requested", YOUNG, False),
-    ("gen-1", "pending", YOUNG, False),
-    ("gen-1", None, YOUNG, False),                   # статус не прочитан, карта молодая -> оставить
-    ("gen-1", None, OLD, True),                      # статус не прочитан, карта старая -> уничтожить
-    ("gen-1", "weird", YOUNG, False),                # неизвестный статус трактуется как не прочитанный
-    ("pilot-7", "completed", YOUNG, True),
-    ("pilot-7", "in_progress", YOUNG, False),
+    ("gen-1", "completed", YOUNG_AGE, True),             # завершённый запуск -> уничтожить
+    ("gen-1", "completed", OLD_AGE, True),
+    ("gen-1", "in_progress", YOUNG_AGE, False),          # идёт и карта молодая -> оставить
+    ("gen-1", "in_progress", OLD_AGE, True),             # идёт, но карта старше 6 ч -> уничтожить
+    ("gen-1", "queued", YOUNG_AGE, False),
+    ("gen-1", "waiting", YOUNG_AGE, False),
+    ("gen-1", "requested", YOUNG_AGE, False),
+    ("gen-1", "pending", YOUNG_AGE, False),
+    ("gen-1", None, YOUNG_AGE, False),                   # статус не прочитан, карта молодая -> оставить
+    ("gen-1", None, OLD_AGE, True),                      # статус не прочитан, карта старая -> уничтожить
+    ("gen-1", "weird", YOUNG_AGE, False),                # неизвестный статус трактуется как не прочитанный
+    ("pilot-7", "completed", YOUNG_AGE, True),
+    ("pilot-7", "in_progress", YOUNG_AGE, False),
     ("gen-1", "in_progress", None, False),           # возраст неизвестен: предел по возрасту не срабатывает
-    ("gen-abc", "completed", YOUNG, True),           # метка не разобрана -> уничтожить при любом статусе
-    ("random", None, YOUNG, True),
-    (None, None, YOUNG, True),
+    ("gen-abc", "completed", YOUNG_AGE, True),           # метка не разобрана -> уничтожить при любом статусе
+    ("random", None, YOUNG_AGE, True),
+    (None, None, YOUNG_AGE, True),
 ])
 def test_decide_card(label, status, age, destroy):
     got, reason = cli.decide_card(label, status, age)
@@ -81,7 +84,7 @@ def test_max_age_is_six_hours():
 
 def test_decision_reason_does_not_repeat_label_text():
     # причина не печатает текст метки: метки приходят из Vast
-    _, reason = cli.decide_card("random-secret-label", None, YOUNG)
+    _, reason = cli.decide_card("random-secret-label", None, YOUNG_AGE)
     assert "random-secret-label" not in reason
 
 
@@ -140,7 +143,7 @@ def test_gh_missing_run_is_missing(stderr_text):
     assert cli.gh_run_status("o/r", "1", runner=_gh_failing(stderr_text)) == "missing"
 
 
-@pytest.mark.parametrize("age, destroy", [(YOUNG, True), (OLD, True)])
+@pytest.mark.parametrize("age, destroy", [(YOUNG_AGE, True), (OLD_AGE, True)])
 def test_missing_run_card_destroyed_regardless_of_age(age, destroy):
     status = cli.gh_run_status("o/r", "1", runner=_gh_failing("HTTP 404: Not Found"))
     got, reason = cli.decide_card("gen-1", status, age)
@@ -153,7 +156,7 @@ def test_classify_missing_is_finished():
     assert cli.classify_run_status("completed") == "finished"
 
 
-@pytest.mark.parametrize("age, destroy", [(YOUNG, False), (OLD, True)])
+@pytest.mark.parametrize("age, destroy", [(YOUNG_AGE, False), (OLD_AGE, True)])
 def test_network_error_is_unknown_kept_until_six_hours(age, destroy):
     status = cli.gh_run_status("o/r", "1", runner=_gh_failing("network timeout"))
     assert status is None                       # не 404: статус не прочитан, а не missing
@@ -163,12 +166,12 @@ def test_network_error_is_unknown_kept_until_six_hours(age, destroy):
 
 def test_in_progress_young_card_is_kept():
     status = cli.gh_run_status("o/r", "1", runner=lambda a: '{"status": "in_progress"}')
-    assert cli.decide_card("gen-1", status, YOUNG) == (False, "запуск 1 ещё выполняется")
+    assert cli.decide_card("gen-1", status, YOUNG_AGE) == (False, "запуск 1 ещё выполняется")
 
 
 def test_completed_card_is_destroyed():
     status = cli.gh_run_status("o/r", "1", runner=lambda a: '{"status": "completed"}')
-    got, _ = cli.decide_card("gen-1", status, YOUNG)
+    got, _ = cli.decide_card("gen-1", status, YOUNG_AGE)
     assert got is True
 
 
@@ -325,7 +328,7 @@ def test_cleanup_output_has_card_ids_not_addresses(capsys):
 
 
 def test_cleanup_command_exit_0_when_all_ok(capsys, cleanup_env, monkeypatch):
-    FakeCleanupVast.instances = [_inst(1, "gen-10", OLD)]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 7 * 3600)]
     monkeypatch.setattr(cli, "gh_run_status", lambda repo, rid, runner=None: "in_progress")
     code = cli.main(["cleanup-vast", "--repo", "owner/repo"])
     assert code == 0
@@ -334,7 +337,7 @@ def test_cleanup_command_exit_0_when_all_ok(capsys, cleanup_env, monkeypatch):
 
 
 def test_cleanup_command_exit_3_when_destroy_fails(capsys, cleanup_env, monkeypatch):
-    FakeCleanupVast.instances = [_inst(1, "gen-10", YOUNG)]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 3600)]
     FakeCleanupVast.fail_ids = {1}
     monkeypatch.setattr(cli, "gh_run_status", lambda repo, rid, runner=None: "completed")
     code = cli.main(["cleanup-vast", "--repo", "owner/repo"])
@@ -343,7 +346,7 @@ def test_cleanup_command_exit_3_when_destroy_fails(capsys, cleanup_env, monkeypa
 
 
 def test_cleanup_command_passes_repo_to_gh(cleanup_env, monkeypatch):
-    FakeCleanupVast.instances = [_inst(1, "gen-10", YOUNG)]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 3600)]
     seen = []
 
     def fake_status(repo, rid, runner=None):
@@ -356,13 +359,13 @@ def test_cleanup_command_passes_repo_to_gh(cleanup_env, monkeypatch):
 
 
 def test_cleanup_command_requires_repo(capsys, cleanup_env):
-    FakeCleanupVast.instances = [_inst(1, "gen-10", OLD)]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 7 * 3600)]
     assert cli.main(["cleanup-vast"]) == 2
     assert FakeCleanupVast.destroyed == []
 
 
 def test_cleanup_command_writes_summary_file(tmp_path, cleanup_env, monkeypatch):
-    FakeCleanupVast.instances = [_inst(1, "gen-10", YOUNG), _inst(2, "gen-11", YOUNG)]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 3600), _inst(2, "gen-11", time.time() - 3600)]
     monkeypatch.setattr(cli, "gh_run_status",
                         lambda repo, rid, runner=None: "completed" if rid == "10" else "in_progress")
     summary = tmp_path / "summary.md"
@@ -393,7 +396,7 @@ def test_cleanup_command_missing_key_is_input_error(capsys, monkeypatch):
 
 def test_cleanup_output_does_not_contain_key_canary(capsys, cleanup_env, monkeypatch):
     monkeypatch.setenv(VAST_TOKEN_ENV, CANARY)
-    FakeCleanupVast.instances = [_inst(1, "gen-10", YOUNG, ssh_host="203.0.113.9")]
+    FakeCleanupVast.instances = [_inst(1, "gen-10", time.time() - 3600, ssh_host="203.0.113.9")]
     monkeypatch.setattr(cli, "gh_run_status", lambda repo, rid, runner=None: "completed")
     cli.main(["cleanup-vast", "--repo", "o/r"])
     cap = capsys.readouterr()
