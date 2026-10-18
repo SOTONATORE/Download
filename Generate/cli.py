@@ -4,6 +4,7 @@
     check       проверка конфигурации и входных файлов (SRT разбирается, missing.txt существует);
     run         основной запуск генерации (оркестратор, Gemini, Vast.ai, Release);
     kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``);
+    watch-heartbeat  наблюдатель heartbeat: фоновый процесс шага run (SPEC 8.3 а);
     finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt
                 (шаг ``if: always()``, в том числе после отмены запуска).
 
@@ -27,16 +28,17 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 import math
 import os
-import re
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -84,9 +86,12 @@ STYLE_DIR = "Generate/model_profiles/prompt_styles"
 FALLBACK_STYLE_PROFILE = "ltx25"
 # значения по умолчанию, которых нет в config.default.yaml (описаны в профиле модели и SPEC 5)
 TIMING_FRAME_RULE = {"kind": "8k+1"}
-# образ воркера в GHCR: при пустом docker_image тег = номер коммита сборки (SPEC 8.4)
-WORKER_IMAGE_REPO = "ghcr.io/sotonatore/download/videogen-worker"
-WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
+# наблюдатель heartbeat (SPEC 8.3 а): пороги по умолчанию и формат времени в файле heartbeat
+WATCH_DEFAULT_SILENCE_SEC = 120
+WATCH_DEFAULT_CHECK_SEC = 30
+HEARTBEAT_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# метка «запуск завершён»: файл рядом с heartbeat (SPEC 8.3 а)
+FINISHED_SUFFIX = ".finished"
 
 
 def _err(text: str) -> None:
@@ -271,48 +276,17 @@ def _load_srt(srt_path: str):
         return None, EXIT_INPUT
 
 
-def _resolve_docker_image(docker_image: str, worker_build: str) -> str:
-    """Имя образа карты. Непустой вход берётся как есть; пустой = образ этого коммита (SPEC 8.4).
+def _resolve_docker_image(docker_image: str) -> str:
+    """Имя образа карты (SPEC 8.4, вариант A): значение возвращается как есть.
 
-    ValueError несёт текст для пользователя. Результат не содержит пробельных символов.
+    Проверяется только, что строка непустая и без пробельных символов. ValueError несёт текст
+    для пользователя.
     """
-    if docker_image:
-        ref = docker_image
-    else:
-        if not WORKER_BUILD_RE.fullmatch(worker_build or ""):
-            raise ValueError("пустой docker_image требует номер коммита --worker-build "
-                             "(7-64 символа 0-9 и a-f).")
-        ref = f"{WORKER_IMAGE_REPO}:{worker_build}"
-    if any(ch.isspace() for ch in ref):
+    if not docker_image:
+        raise ValueError("образ Docker пуст: укажите имя образа без пробелов.")
+    if any(ch.isspace() for ch in docker_image):
         raise ValueError("имя образа Docker содержит пробельные символы.")
-    return ref
-
-
-def _check_worker_image(docker_image: str, worker_build: str) -> Optional[int]:
-    """Проверка образа воркера в GHCR до любого вызова Vast (SPEC 8.4). None = можно продолжать.
-
-    docker manifest inspect требует входа в GHCR: его делает шаг workflow с GH_TOKEN.
-    Вывод команды не печатается: при сбое он может содержать заголовки запроса.
-    """
-    try:
-        ref = _resolve_docker_image(docker_image, worker_build)
-    except ValueError as e:
-        _err(f"Ошибка входных данных: {e}")
-        return EXIT_INPUT
-    try:
-        proc = subprocess.run(["docker", "manifest", "inspect", ref],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=120, check=False)
-        found = proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        found = False
-    if not found:
-        _err(f"Образ воркера не найден в GHCR или недоступен: {ref}. "
-             "Запуск не начат, карты не арендованы. Соберите образ workflow «Build Worker Image» "
-             "на этом коммите и проверьте доступ к пакету.")
-        return EXIT_INPUT
-    print(f"Образ воркера найден в GHCR: {ref}")
-    return None
+    return docker_image
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -329,12 +303,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.missing):
         _err(f"Ошибка входных данных: файл missing не найден: {args.missing}")
         return EXIT_INPUT
-
-    # образ проверяется, только если вход передан (workflow передаёт всегда)
-    if args.docker_image is not None:
-        code = _check_worker_image(args.docker_image, args.worker_build)
-        if code is not None:
-            return code
 
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
@@ -373,14 +341,14 @@ def _pilot_mode(args: argparse.Namespace) -> bool:
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Основной запуск генерации (этапы 4-9)."""
-    # пустой docker_image = образ этого коммита (SPEC 8.4); None = не задано, берётся из конфига
+    # None = вход не задан, образ берётся из конфига (стоковый образ, SPEC 8.4, вариант A)
     docker_image = args.docker_image
     if _pilot_mode(args) and not (docker_image or "").strip():
         _err("Ошибка входных данных: пилот ComfyUI требует явного образа (--docker-image).")
         return EXIT_INPUT
     if docker_image is not None and not _pilot_mode(args):
         try:
-            docker_image = _resolve_docker_image(docker_image, args.worker_build)
+            docker_image = _resolve_docker_image(docker_image)
         except ValueError as e:
             _err(f"Ошибка входных данных: {e}")
             return EXIT_INPUT
@@ -555,6 +523,89 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def finished_marker_path(heartbeat_path) -> Path:
+    """Метка «запуск завершён»: файл рядом с файлом heartbeat (SPEC 8.3 а)."""
+    hb = Path(heartbeat_path)
+    return hb.with_name(hb.name + FINISHED_SUFFIX)
+
+
+def _mark_run_finished(heartbeat_path) -> None:
+    """Пишет метку конца запуска при любом исходе run. Ошибка записи не фатальна:
+    тогда наблюдатель выйдет по тишине файла heartbeat."""
+    try:
+        marker = finished_marker_path(heartbeat_path)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("finished\n", encoding="utf-8")
+    except OSError:
+        _err("Не удалось записать метку конца запуска для наблюдателя heartbeat.")
+
+
+def _read_heartbeat_utc(path: Path) -> Optional[datetime]:
+    """Время записи heartbeat (UTC) или None: файла нет, он не читается или поле utc не разобрано.
+
+    Содержимое файла не печатается: в нём адреса и номера карт.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return datetime.strptime(str(data["utc"]), HEARTBEAT_UTC_FORMAT).replace(tzinfo=timezone.utc)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _watch_kill(run_id: str) -> int:
+    """Уборка для наблюдателя: та же логика, что у kill-cards, по метке gen-<run_id>."""
+    code = cmd_kill_cards(argparse.Namespace(label=None, run_id=run_id))
+    if code != EXIT_OK:
+        log.error("Наблюдатель: уничтожение карт не удалось (код %d). Проверьте Vast.ai и шаг уборки.", code)
+    return EXIT_OK
+
+
+def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
+    """Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс шага run в generate.yml.
+
+    Каждые check_every_sec читает файл heartbeat. Если метки конца запуска нет и запись старше
+    max_silence_sec, либо файл пропал после того, как появлялся, уничтожает карты запуска
+    (как kill-cards) и выходит с кодом 0. Если метка конца запуска появилась, выходит с кодом 0
+    без уборки. Пока файла нет, ждёт: оркестратор пишет его в цикле аренды, а карты до этого
+    не арендуются. Ключ Vast и адреса карт не печатаются.
+    """
+    if not args.run_id:
+        _err("Ошибка входных данных: наблюдателю нужен номер запуска (--run-id).")
+        return EXIT_INPUT
+    if not args.heartbeat_path:
+        _err("Ошибка входных данных: наблюдателю нужен путь файла heartbeat (--heartbeat-path).")
+        return EXIT_INPUT
+    if args.max_silence_sec <= 0 or args.check_every_sec <= 0:
+        _err("Ошибка входных данных: пороги наблюдателя должны быть больше нуля.")
+        return EXIT_INPUT
+
+    heartbeat = Path(args.heartbeat_path)
+    marker = finished_marker_path(heartbeat)
+    log.info("Наблюдатель heartbeat запущен: запуск %s, порог тишины %d с, проверка каждые %d с.",
+             args.run_id, args.max_silence_sec, args.check_every_sec)
+    seen = False
+    while True:
+        if marker.exists():
+            log.info("Метка конца запуска найдена: наблюдатель завершается, карты не трогаются.")
+            return EXIT_OK
+        beat = _read_heartbeat_utc(heartbeat)
+        if beat is not None:
+            seen = True
+            silence = (datetime.now(timezone.utc) - beat).total_seconds()
+            if silence <= args.max_silence_sec:
+                log.info("heartbeat свежий: последняя запись %d с назад.", int(silence))
+            else:
+                log.error("heartbeat не обновлялся %d с (порог %d с): уничтожаем карты запуска.",
+                          int(silence), args.max_silence_sec)
+                return _watch_kill(args.run_id)
+        elif seen:
+            log.error("Файл heartbeat пропал или не читается: уничтожаем карты запуска.")
+            return _watch_kill(args.run_id)
+        else:
+            log.info("Файла heartbeat ещё нет: карты запуска не арендовались, наблюдатель ждёт.")
+        time.sleep(args.check_every_sec)
+
+
 def cmd_finalize_release(args: argparse.Namespace) -> int:
     """Доводит выдачу до конца: prompts.json и generated_links.txt по уже загруженным клипам.
 
@@ -626,11 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # функции берутся из модуля при каждом вызове (удобно подменять в тестах)
     check_p = sub.add_parser("check", parents=[common],
-                             help="проверить конфигурацию, входные файлы и образ воркера")
-    check_p.add_argument("--docker-image", default=None,
-                         help="образ воркера для проверки в GHCR; пусто = образ этого коммита")
-    check_p.add_argument("--worker-build", default="",
-                         help="номер коммита сборки воркера (SHA), нужен для пустого образа")
+                             help="проверить конфигурацию и входные файлы")
     check_p.set_defaults(func=lambda a: cmd_check(a))
 
     # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
@@ -667,10 +714,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--max-inet-price-per-tb", type=float, default=None,
                        help="потолок цены трафика карты, USD за ТБ (загрузка и выгрузка); по умолчанию из конфига")
     run_p.add_argument("--docker-image", default=None,
-                       help="образ Docker для карты Vast.ai; пусто = образ этого коммита; "
-                            "не задано = из конфига")
+                       help="образ Docker для карты Vast.ai; не задано = из конфига (стоковый образ)")
     run_p.add_argument("--worker-build", default="",
-                       help="номер коммита сборки воркера (SHA), нужен для пустого образа")
+                       help="номер коммита сборки воркера (SHA) для оркестратора и onstart")
     run_p.add_argument("--artifact-dir", default="",
                        help="каталог артефакта запуска (SPEC 10.4); пусто = не вести")
     run_p.add_argument("--heartbeat-path", default=None,
@@ -698,6 +744,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="номер запуска (передаётся явно)")
     kill_p.set_defaults(func=lambda a: cmd_kill_cards(a))
 
+    watch_p = sub.add_parser("watch-heartbeat",
+                             help="наблюдатель heartbeat: уничтожает карты запуска при тишине")
+    watch_p.add_argument("--heartbeat-path", default="",
+                         help="путь файла heartbeat (тот же, что у run)")
+    watch_p.add_argument("--run-id", default="", help="номер запуска: метка карт gen-<номер>")
+    watch_p.add_argument("--max-silence-sec", type=int, default=WATCH_DEFAULT_SILENCE_SEC,
+                         help=f"порог тишины, с; по умолчанию {WATCH_DEFAULT_SILENCE_SEC}")
+    watch_p.add_argument("--check-every-sec", type=int, default=WATCH_DEFAULT_CHECK_SEC,
+                         help=f"период проверки, с; по умолчанию {WATCH_DEFAULT_CHECK_SEC}")
+    watch_p.set_defaults(func=lambda a: cmd_watch_heartbeat(a))
     fin_p = sub.add_parser("finalize-release",
                            help="загрузить prompts.json и generated_links.txt в Release")
     fin_p.add_argument("--srt", default=DEFAULT_SRT,
@@ -743,7 +799,13 @@ def main(argv: list[str] | None = None) -> int:
         # HTTP-библиотека на DEBUG выводит детали соединений: оставляем её на WARNING
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         args.log_level = level
-        return int(args.func(args))
+        try:
+            return int(args.func(args))
+        finally:
+            # метка конца запуска для наблюдателя heartbeat (SPEC 8.3 а): при любом исходе run
+            heartbeat = getattr(args, "heartbeat_path", None)
+            if args.command == "run" and heartbeat:
+                _mark_run_finished(heartbeat)
     except Exception as e:  # noqa: BLE001 - намеренно ловим всё непредвиденное
         # Печатаем только тип исключения: текст может содержать секреты (SPEC 0.1).
         _err(f"Непредвиденная ошибка выполнения ({type(e).__name__}).")

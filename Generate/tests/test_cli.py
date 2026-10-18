@@ -769,28 +769,27 @@ def test_no_environment_reading_in_cli():
     assert "get" + "env" not in CLI_SOURCE
 
 
-# ---------------------------------------------------------------- образ воркера (тег коммита, SPEC 8.4)
+# ---------------------------------------------------------------- образ карты (стоковый, SPEC 8.4, вариант A)
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
-COMMIT_IMAGE = f"ghcr.io/sotonatore/download/videogen-worker:{SHA}"
+STOCK_IMAGE = "vastai/comfy:v0.41.0-cuda-13.2-py312"
 
 
-def test_run_empty_image_uses_commit_tag(capsys, run_env, missing_file):
-    code = cli.main(_run_args(DATA, missing_file, "--docker-image", "", "--worker-build", SHA))
+def test_run_without_image_arg_uses_config_image(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--worker-build", SHA))
     assert code == 0
     _, kwargs = run_env.calls[0]
-    assert kwargs["docker_image"] == COMMIT_IMAGE
+    assert kwargs["docker_image"] == STOCK_IMAGE
 
 
-def test_run_empty_image_without_sha_is_input_error(capsys, run_env, missing_file):
-    assert cli.main(_run_args(DATA, missing_file, "--docker-image", "")) == 2
-    assert "--worker-build" in capsys.readouterr().err
+def test_run_empty_image_is_input_error(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--docker-image", "", "--worker-build", SHA))
+    assert code == 2
     assert run_env.calls == []
 
 
-@pytest.mark.parametrize("bad", ["", "ZZZ", "abc def", "0123 456", "g" * 40, "0123456789ABCDEF"])
-def test_run_bad_worker_build_is_input_error(capsys, run_env, missing_file, bad):
-    code = cli.main(_run_args(DATA, missing_file, "--docker-image", "", "--worker-build", bad))
+def test_run_image_with_space_is_input_error(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--docker-image", "a b:c", "--worker-build", SHA))
     assert code == 2
     assert run_env.calls == []
 
@@ -801,72 +800,32 @@ def test_explicit_image_is_used_as_is(capsys, run_env, missing_file):
     assert run_env.calls[0][1]["docker_image"] == "my/img:1"
 
 
-def test_commit_image_reference_has_no_whitespace(capsys, run_env, missing_file):
-    cli.main(_run_args(DATA, missing_file, "--docker-image", "", "--worker-build", SHA))
-    ref = run_env.calls[0][1]["docker_image"]
-    assert ref and not re.search(r"\s", ref)
-
-
-def test_resolve_image_pure_function():
-    assert cli._resolve_docker_image("", SHA) == COMMIT_IMAGE
-    assert cli._resolve_docker_image("a:b", "") == "a:b"
+def test_resolve_image_returns_value_as_is():
+    assert cli._resolve_docker_image("a:b") == "a:b"
+    assert cli._resolve_docker_image(STOCK_IMAGE) == STOCK_IMAGE
     with pytest.raises(ValueError):
-        cli._resolve_docker_image("", "")
+        cli._resolve_docker_image("")
     with pytest.raises(ValueError):
-        cli._resolve_docker_image("a b:c", "")
+        cli._resolve_docker_image("a b:c")
 
 
-def _fake_docker(monkeypatch, returncode):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return SimpleNamespace(returncode=returncode)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    return calls
+def test_no_ghcr_substitution_left_in_cli():
+    code = CLI_SOURCE
+    assert "ghcr.io" not in code
+    assert "manifest" not in code
+    assert "_check_worker_image" not in code
 
 
 def _check_args(missing, *extra):
     return ["check", "--srt", str(DATA), "--missing", str(missing), *extra]
 
 
-def test_check_missing_image_stops_with_2(capsys, missing_file, monkeypatch):
-    calls = _fake_docker(monkeypatch, 1)
-    code = cli.main(_check_args(missing_file, "--docker-image", "", "--worker-build", SHA))
-    err = capsys.readouterr().err
-    assert code == 2
-    assert calls == [["docker", "manifest", "inspect", COMMIT_IMAGE]]
-    assert "не найден в GHCR" in err and "карты не арендованы" in err
-    assert "Traceback" not in err
-
-
-def test_check_present_image_passes(capsys, missing_file, monkeypatch):
-    calls = _fake_docker(monkeypatch, 0)
-    assert cli.main(_check_args(missing_file, "--docker-image", "", "--worker-build", SHA)) == 0
-    assert len(calls) == 1
-    assert "найден в GHCR" in capsys.readouterr().out
-
-
-def test_check_without_image_args_does_not_call_docker(capsys, missing_file, monkeypatch):
-    calls = _fake_docker(monkeypatch, 1)
+def test_check_without_image_args_passes(capsys, missing_file):
     assert cli.main(_check_args(missing_file)) == 0
-    assert calls == []
 
 
-def test_check_docker_not_available_is_input_error(capsys, missing_file, monkeypatch):
-    def no_docker(cmd, **kwargs):
-        raise FileNotFoundError("docker")
-
-    monkeypatch.setattr(cli.subprocess, "run", no_docker)
-    assert cli.main(_check_args(missing_file, "--docker-image", "", "--worker-build", SHA)) == 2
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_check_empty_image_without_sha_is_input_error(capsys, missing_file, monkeypatch):
-    calls = _fake_docker(monkeypatch, 0)
-    assert cli.main(_check_args(missing_file, "--docker-image", "")) == 2
-    assert calls == []
+def test_check_rejects_removed_image_args(capsys, missing_file):
+    assert cli.main(_check_args(missing_file, "--docker-image", "x:y")) == 2
 
 
 def test_run_passes_loaded_bad_hosts_to_orchestrator(capsys, run_env, missing_file, monkeypatch):
