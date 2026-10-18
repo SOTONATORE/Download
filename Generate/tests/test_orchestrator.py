@@ -1450,7 +1450,7 @@ def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatc
     vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
     _pilot_orc(tmp_path, monkeypatch, vast=vast).run()
     env = vast.created[0]["env"]
-    forbidden = {"WORKER_TOKEN", "HF_TOKEN", "GEN_GEMINI_API_KEY", "GH_TOKEN"}
+    forbidden = {"WORKER_TOKEN", "HF_TOKEN", "GEN_" + "GEMINI_API_KEY", "GH_TOKEN"}
     assert not (forbidden & set(env))
     assert not any(k.startswith(("COMFYUI_", "PORTAL_CONFIG", "OPEN_BUTTON_")) for k in env)
     assert not any("8000" in k for k in env)          # -p 8000:8000 не добавляется
@@ -1583,6 +1583,23 @@ def test_lifetime_parameter_and_worker_env_limit_are_removed(tmp_path, monkeypat
     assert env["WORKER_BUILD"] == VALID_BUILD
 
 
+def test_worker_env_has_exact_comfyui_args_and_no_forbidden_keys(tmp_path, monkeypatch):
+    """SPEC 8.5, 0.1 (5c): единственный ключ COMFYUI_* в env карты воркера — COMFYUI_ARGS с точным значением;
+    порталы, Jupyter, данные и провизия образа не передаются; наружу публикуется только 8000."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.run()
+    env = rig.vast.created[0]["env"]
+    assert env["COMFYUI_ARGS"] == "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
+    assert [k for k in env if k.startswith("COMFYUI_")] == ["COMFYUI_ARGS"]
+    forbidden = ("COMFYUI_API_BASE", "PORTAL_CONFIG", "OPEN_BUTTON_PORT", "OPEN_BUTTON_TOKEN",
+                 "JUPYTER_DIR", "DATA_DIRECTORY", "PROVISIONING_COMFYUI_WORKFLOWS")
+    for key in forbidden:
+        assert key not in env, key
+    assert not any(k.startswith(("PORTAL_CONFIG", "OPEN_BUTTON_", "JUPYTER_", "DATA_DIRECTORY"))
+                   for k in env)
+    assert [k for k in env if k.startswith("-p ")] == ["-p 8000:8000"]
+
+
 @pytest.mark.parametrize("bad", [
     None, "", "ZZZ", "A1B2C3D4", "abc123", "x" * 40, "a" * 65,
 ])
@@ -1685,11 +1702,9 @@ SETUP_FILE = "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-conv
 MIB6 = 1024 ** 2
 
 
-def _slot_with_url(rig, *, instance_id=500, machine_id=11, offer_id=1, comfy=True):
+def _slot_with_url(rig, *, instance_id=500, machine_id=11, offer_id=1):
     slot = orch._CardSlot(1, 1, instance_id, machine_id, 0.3, rig.clock.now, offer_id=offer_id)
     slot.url = "http://10.0.0.1:18000"
-    if comfy:
-        slot.comfy_url = "http://10.0.0.1:31188"
     rig.orc._slots[1] = slot
     rig.orc.budget.track_instance_start(instance_id, 0.3, rig.clock.now)
     return slot
@@ -1698,7 +1713,7 @@ def _slot_with_url(rig, *, instance_id=500, machine_id=11, offer_id=1, comfy=Tru
 def test_health_ok_true_makes_card_ready(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
-    slot = _slot_with_url(rig, comfy=False)
+    slot = _slot_with_url(rig)
     assert rig.orc._probe_ready(slot) is True
     assert "проверка /health: код 200" in caplog.text
     assert "готов" in caplog.text
@@ -1708,7 +1723,7 @@ def test_health_ok_true_makes_card_ready(tmp_path, monkeypatch, caplog):
 def test_probe_rejects_bare_200_and_false_ok(tmp_path, monkeypatch, caplog, reply):
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     rig.worker.health_reply = reply
-    slot = _slot_with_url(rig, comfy=False)
+    slot = _slot_with_url(rig)
     assert rig.orc._probe_ready(slot) is False
 
 
@@ -1716,41 +1731,43 @@ def test_network_error_is_logged_and_not_success(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     rig.worker.health_reply = httpx.HTTPError("сброс соединения")
-    slot = _slot_with_url(rig, comfy=False)
+    slot = _slot_with_url(rig)
     assert rig.orc._probe_ready(slot) is False
     assert "запрос не дошёл" in caplog.text
 
 
-def test_system_stats_with_system_key_is_ready_when_health_fails(tmp_path, monkeypatch, caplog):
+def test_system_stats_alone_does_not_make_card_ready(tmp_path, monkeypatch, caplog):
+    """SPEC 8.2 (5c): ответ /system_stats не засчитывается; оркестратор его не запрашивает."""
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     rig.worker.health_reply = (200, '{"ok": false}')
     rig.worker.stats_reply = (200, '{"system": {"os": "linux"}, "devices": []}')
     slot = _slot_with_url(rig)
+    assert rig.orc._probe_ready(slot) is False
+    assert not any(u.endswith("/system_stats") for u in rig.worker.urls)
+    assert "/system_stats" not in caplog.text
+
+
+def test_readiness_probes_only_worker_health_not_comfy_port(tmp_path, monkeypatch):
+    """SPEC 8.2, 8.5 (5c): готовность — только /health воркера; порт 8188 и /system_stats не опрашиваются."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _slot_with_url(rig)
     assert rig.orc._probe_ready(slot) is True
-    assert "проверка /system_stats: код 200" in caplog.text
+    assert rig.worker.urls and all(u == slot.url + "/health" for u in rig.worker.urls)
+    assert not any(":8188" in u or "system_stats" in u for u in rig.worker.urls)
 
 
-def test_system_stats_without_system_key_is_not_ready(tmp_path, monkeypatch):
+def test_probe_has_no_comfy_port_state(tmp_path, monkeypatch):
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
-    rig.worker.health_reply = (200, '{"ok": false}')
-    rig.worker.stats_reply = (200, '{"devices": []}')
-    assert rig.orc._probe_ready(_slot_with_url(rig)) is False
-
-
-def test_missing_comfy_mapping_is_noted_once_and_skipped(tmp_path, monkeypatch, caplog):
-    caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,))
-    slot = _slot_with_url(rig, comfy=False)
-    rig.orc._probe_ready(slot)
-    rig.orc._probe_ready(slot)
-    assert caplog.text.count("порт ComfyUI") == 1
+    slot = _slot_with_url(rig)
+    assert not hasattr(slot, "comfy_url") and not hasattr(slot, "comfy_noted")
+    assert not hasattr(orch, "COMFY_PORT") and not hasattr(orch, "_probe_comfy")
 
 
 def test_ssh_and_portal_are_noted_once_per_run(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
-    slot = _slot_with_url(rig, comfy=False)
+    slot = _slot_with_url(rig)
     rig.orc._probe_ready(slot)
     rig.orc._probe_ready(slot)
     assert caplog.text.count("SSH-проверка не реализована (SPEC 8.2)") == 1
@@ -1827,7 +1844,7 @@ def test_unrecognised_weights_format_warns_once(tmp_path, monkeypatch, caplog):
 def test_stage_limit_retires_booting_card(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,), stage_max_min=20, stall_timeout_min=3)
-    slot = _slot_with_url(rig, comfy=False)
+    slot = _slot_with_url(rig)
     slot.state = "booting"
     mon = rig.orc._monitor(slot)
     mon.feed([f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}"])

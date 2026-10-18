@@ -159,7 +159,7 @@ say "шаг 4: ComfyUI найден (код 0)"
 # Значения по умолчанию совпадают с Dockerfile (ветка option B, в резерве). Переменные из onstart имеют приоритет.
 export COMFY_DIR
 export COMFY_OUTPUT_DIR="${COMFY_OUTPUT_DIR:-${COMFY_DIR}/output}"
-export COMFY_URL="${COMFY_URL:-http://127.0.0.1:8188}"
+export COMFY_URL="${COMFY_URL:-http://127.0.0.1:18188}"  # ComfyUI образа, порт из COMFYUI_ARGS (SPEC 8.5)
 export COMFY_LOG_PATH="${COMFY_LOG_PATH:-/workspace/comfyui.log}"
 export WORKER_HTTP_PORT="${WORKER_HTTP_PORT:-8000}"
 export WORKER_WORKFLOW_PATH="${WORKER_WORKFLOW_PATH:-${REPO_DIR}/model_profiles/workflows/ltx25.json}"

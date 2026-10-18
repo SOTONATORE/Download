@@ -60,6 +60,12 @@ BUILD_ENV = "WORKER_BUILD"
 BUILD_UNKNOWN = "unknown"
 # Заголовок ответа GET /logs: номер последней строки; передаётся обратно как since (SPEC 8.4)
 LOG_NEXT_HEADER = "X-Log-Next"
+# Файл готовности (SPEC 8.1): setup.sh создаёт его, когда ComfyUI отвечает; до этого /health даёт ok=false
+READY_FLAG_ENV = "WORKER_READY_FLAG"
+DEFAULT_READY_FLAG = "/workspace/worker_ready"
+# Лог setup.sh и aria2 (onstart перенаправляет туда вывод bootstrap.sh): хвост идёт в буфер GET /logs (SPEC 8.1)
+BOOTSTRAP_LOG_ENV = "WORKER_BOOTSTRAP_LOG"
+DEFAULT_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
 
 _ID_RE = r"([A-Za-z0-9_-]+)"
 _RE_TASK = re.compile(rf"^/task/{_ID_RE}$")
@@ -108,6 +114,15 @@ def mask_secrets(text: str) -> str:
         else:
             text = pattern.sub(MASK, text)
     return text
+
+
+# Адреса перенаправлений aria2 (Hugging Face, CDN) могут нести подписанную query-часть: она не нужна в логе (SPEC 0.1)
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)\?\S*")
+
+
+def strip_url_queries(text: str) -> str:
+    """Заменяет query-часть http(s)-адресов на «?***». Путь адреса остаётся для диагностики."""
+    return _URL_QUERY_RE.sub(lambda m: m.group(1) + "?" + MASK, text)
 
 
 class MaskingFormatter(logging.Formatter):
@@ -676,7 +691,8 @@ def _make_handler(app: "WorkerApp") -> type:
                 ok = True
             except (ComfyError, AttributeError, TypeError, ValueError) as exc:
                 log.error("Проверка состояния ComfyUI не пройдена: %s.", type(exc).__name__)
-            self._json(200, {"ok": ok, "gpu": gpu, "vram_free": vram_free,
+            # до файла готовности ok всегда false: веса и ComfyUI ещё не проверены setup.sh (SPEC 8.1)
+            self._json(200, {"ok": bool(ok and app.is_ready()), "gpu": gpu, "vram_free": vram_free,
                              "busy": app.manager.busy()})
 
         def _get_logs(self) -> None:
@@ -812,7 +828,9 @@ class WorkerApp:
                  build_id: str = BUILD_UNKNOWN,
                  comfy_log_path: Optional[str] = None,
                  telemetry_gpu_stats: Optional[Callable[[], dict]] = None,
-                 telemetry_interval_check: float = 1.0) -> None:
+                 telemetry_interval_check: float = 1.0,
+                 ready_flag: Optional[str] = None,
+                 bootstrap_log_path: Optional[str] = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -841,9 +859,21 @@ class WorkerApp:
         self.comfy_reader: Optional[ComfyOutputReader] = None
         if comfy_log_path:
             self.comfy_reader = ComfyOutputReader(comfy_log_path, self._comfy_line, mask_secrets)
+        # Файл готовности: без пути /health не ждёт файла (тесты, прямой запуск); в main() путь всегда задан
+        self.ready_flag: Optional[Path] = Path(ready_flag) if ready_flag else None
+        # Лог setup.sh и aria2: хвост с начала файла, маска и срез query-частей адресов (SPEC 8.1, 0.1)
+        self.bootstrap_reader: Optional[ComfyOutputReader] = None
+        if bootstrap_log_path:
+            self.bootstrap_reader = ComfyOutputReader(
+                bootstrap_log_path, self.logbuf.add,
+                lambda text: mask_secrets(strip_url_queries(text)))
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
         self._serve_thread: Optional[threading.Thread] = None
+
+    def is_ready(self) -> bool:
+        """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""
+        return self.ready_flag is None or self.ready_flag.exists()
 
     def _comfy_line(self, line: str) -> None:
         """Строка ComfyUI: в буфер логов, с русской пометкой; в контейнерный лог уже попала через tee."""
@@ -886,6 +916,8 @@ class WorkerApp:
         self.telemetry.start()  # первый снимок «запуск воркера» ставится в очередь здесь
         if self.comfy_reader is not None:
             self.comfy_reader.start()
+        if self.bootstrap_reader is not None:
+            self.bootstrap_reader.start()
 
     def serve_forever(self) -> None:
         self._start_workers()
@@ -909,6 +941,8 @@ class WorkerApp:
         self.telemetry.stop()
         if self.comfy_reader is not None:
             self.comfy_reader.stop()
+        if self.bootstrap_reader is not None:
+            self.bootstrap_reader.stop()
         if self._serve_thread is not None:
             self.httpd.shutdown()
             self._serve_thread.join(timeout=5)
@@ -952,12 +986,16 @@ def main() -> int:
     except ValueError as exc:
         log.error("Некорректная настройка воркера: %s", exc)
         return 2
-    comfy = ComfyClient(os.environ.get("COMFY_URL", "http://127.0.0.1:8188"))
+    # ComfyUI образа слушает 18188 (COMFYUI_ARGS в env карты, SPEC 8.5)
+    comfy = ComfyClient(os.environ.get("COMFY_URL", "http://127.0.0.1:18188"))
     app = WorkerApp(token, comfy, port=port, idle_timeout_seconds=idle_min * 60.0,
                     workflow=workflow, bindings=bindings,
                     output_dir=os.environ.get("COMFY_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
                     log_level=level, build_id=build,
-                    comfy_log_path=os.environ.get(COMFY_LOG_ENV, "") or None)
+                    comfy_log_path=os.environ.get(COMFY_LOG_ENV, "") or None,
+                    # пустое значение не отключает проверку: иначе /health отдал бы ok=true до готовности
+                    ready_flag=os.environ.get(READY_FLAG_ENV) or DEFAULT_READY_FLAG,
+                    bootstrap_log_path=os.environ.get(BOOTSTRAP_LOG_ENV) or DEFAULT_BOOTSTRAP_LOG)
     try:
         app.serve_forever()
     except KeyboardInterrupt:

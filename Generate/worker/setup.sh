@@ -8,16 +8,20 @@ COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
-COMFY_READY_URL="http://127.0.0.1:8188/system_stats"
+# ComfyUI не запускается этим скриптом: его запускает образ vastai/comfy на порту 18188 (COMFYUI_ARGS, SPEC 8.5).
+COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
 COMFY_TIMEOUT_SEC=180
 COMFY_POLL_SEC=2
 
-COMFY_PID=""
+# Файл готовности для GET /health сервера воркера (SPEC 8.1): создаётся после ответа ComfyUI.
+WORKER_READY_FLAG="${WORKER_READY_FLAG:-/workspace/worker_ready}"
+
 SERVER_PID=""
 
 # Счётчик файлов модели для строк лога: «[1/5] ...»
 MODEL_FILES_TOTAL=5
 MODEL_FILE_INDEX=0
+MODEL_PATHS=()
 
 log() {
     echo "[setup] $*"
@@ -28,15 +32,21 @@ stop_processes() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
     fi
-    if [ -n "${COMFY_PID}" ] && kill -0 "${COMFY_PID}" 2>/dev/null; then
-        kill -TERM "${COMFY_PID}" 2>/dev/null || true
-    fi
     wait 2>/dev/null || true
     log "Все процессы остановлены."
     exit 0
 }
 
 trap stop_processes SIGTERM SIGINT
+
+# Любой выход из скрипта (нет весов, ComfyUI не готов): сервер воркера не остаётся без setup.
+stop_server_on_exit() {
+    if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+        kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    fi
+}
+
+trap stop_server_on_exit EXIT
 
 # Загрузка одного файла модели: download_model <подкаталог в репозитории и в models/> <имя файла>
 download_model() {
@@ -50,6 +60,7 @@ download_model() {
     MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
     local tag="[${MODEL_FILE_INDEX}/${MODEL_FILES_TOTAL}]"
 
+    MODEL_PATHS+=("${path}")
     mkdir -p "${target_dir}"
 
     # Файл считается готовым, только если он непустой и нет контрольного файла незавершённой загрузки aria2
@@ -60,8 +71,9 @@ download_model() {
 
     log "${tag} Начинаю загрузку: ${subdir}/${name}"
     # --summary-interval=10: строка прогресса (процент, скорость) каждые 10 с.
-    # --console-log-level=warn снят: прогресс виден в логе контейнера. Служебные строки aria2
-    # (в т.ч. адреса перенаправлений) тоже попадают туда; в GET /logs воркера они не идут.
+    # --console-log-level=warn снят: прогресс виден в логе. Служебные строки aria2 (в т.ч. адреса
+    # перенаправлений) идут в bootstrap.log и через его хвост в GET /logs; query-часть адресов
+    # там заменяется на «?***» (server.py, strip_url_queries).
     # Заголовок Authorization идёт во входном файле aria2 (process substitution): токен не
     # попадает в аргументы процесса и не пишется на диск (SPEC 0.1, п. 3). Проверено локально
     # aria2c 1.37 на заглушке сервера; на живой карте UNVERIFIED.
@@ -82,7 +94,11 @@ download_model() {
 
 log "Запуск контейнера воркера. Уровень логов: ${GEN_LOG_LEVEL:-INFO}."
 
-# --- 1. Проверка токена и загрузка модульных файлов модели LTX-2.5 ---
+# Флаг от прошлого запуска не должен открыть /health до готовности (SPEC 8.1)
+rm -f "${WORKER_READY_FLAG}"
+log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
+
+# --- 1. Проверка токена и инструментов ---
 if [ -z "${HF_TOKEN:-}" ]; then
     log "ОШИБКА: Не задана переменная окружения HF_TOKEN. Репозиторий Lightricks/LTX-2.5 закрыт (gated), скачивание весов невозможно."
     exit 1
@@ -93,6 +109,15 @@ if ! command -v aria2c >/dev/null 2>&1; then
     exit 1
 fi
 
+# --- 2. Сервер воркера: стартует до загрузки весов (SPEC 8.1). Пока нет файла готовности, /health отвечает ok=false ---
+log "Запускаю сервер воркера (до загрузки весов)..."
+# stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
+# stderr (трассировки падения) остаётся в bootstrap.log, его хвост тоже попадает в GET /logs.
+python /workspace/Generate/worker/server.py >/dev/null &
+SERVER_PID=$!
+log "Сервер воркера запущен, PID: ${SERVER_PID}"
+
+# --- 3. Загрузка модульных файлов модели LTX-2.5 ---
 download_model "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
 download_model "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
 download_model "vae" "ltx-2.5-video-vae-bf16.safetensors"
@@ -100,24 +125,22 @@ download_model "vae" "ltx-2.5-audio-vae-bf16.safetensors"
 download_model "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
 log "Все файлы модели LTX-2.5 на месте."
 
-# --- 2. Запуск ComfyUI в headless-режиме ---
-log "Запускаю ComfyUI (127.0.0.1:8188)..."
-# Вывод ComfyUI (stdout и stderr) идёт и в лог контейнера, и в файл, который читает воркер (GET /logs).
-# ComfyUI по умолчанию пишет логи в stderr; --verbose DEBUG включает уровень DEBUG (в нём сообщения
-# «Unloading ...» и «freed ...»). Включается только при GEN_LOG_LEVEL=DEBUG.
-COMFY_LOG_PATH="${COMFY_LOG_PATH:-/workspace/comfyui.log}"
-COMFY_VERBOSE_ARGS=()
-if [ "${GEN_LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-    COMFY_VERBOSE_ARGS=(--verbose DEBUG)
+# --- 4. Ожидание ComfyUI образа на порту 18188 ---
+# Строка для разбора времени: все ли веса на месте в момент, когда ComfyUI образа уже может быть запущен.
+# Открытый вопрос (SPEC 8.5): поднимается ли ComfyUI раньше весов и видит ли он их. Первый прогон покажет.
+PRESENT=0
+for model_path in "${MODEL_PATHS[@]}"; do
+    if [ -s "${model_path}" ] && [ ! -f "${model_path}.aria2" ]; then
+        PRESENT=$((PRESENT + 1))
+    fi
+done
+ALL_PRESENT="нет"
+if [ "${PRESENT}" -eq "${MODEL_FILES_TOTAL}" ]; then
+    ALL_PRESENT="да"
 fi
-log "Вывод ComfyUI пишется в файл ${COMFY_LOG_PATH} и в лог контейнера."
-python "${COMFY_DIR}/main.py" --listen 127.0.0.1 --port 8188 "${COMFY_VERBOSE_ARGS[@]}" \
-    > >(tee -a "${COMFY_LOG_PATH}") 2>&1 &
-COMFY_PID=$!
-log "ComfyUI запущен, PID: ${COMFY_PID}"
+log "Веса перед ожиданием ComfyUI: все файлы на месте: ${ALL_PRESENT} (${PRESENT} из ${MODEL_FILES_TOTAL})."
 
-# --- 3. Ожидание готовности ComfyUI ---
-log "Ожидаю готовности ComfyUI (до ${COMFY_TIMEOUT_SEC} сек)..."
+log "Ожидаю готовности ComfyUI на порту 18188 (до ${COMFY_TIMEOUT_SEC} сек)..."
 ELAPSED=0
 READY=0
 while [ "${ELAPSED}" -lt "${COMFY_TIMEOUT_SEC}" ]; do
@@ -125,8 +148,8 @@ while [ "${ELAPSED}" -lt "${COMFY_TIMEOUT_SEC}" ]; do
         READY=1
         break
     fi
-    if ! kill -0 "${COMFY_PID}" 2>/dev/null; then
-        log "ОШИБКА: процесс ComfyUI неожиданно завершился."
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+        log "ОШИБКА: процесс сервера воркера неожиданно завершился."
         exit 1
     fi
     sleep "${COMFY_POLL_SEC}"
@@ -135,23 +158,21 @@ done
 
 if [ "${READY}" -ne 1 ]; then
     log "Проверка готовности ComfyUI (${COMFY_READY_URL}): НЕ ПРОЙДЕНА за ${COMFY_TIMEOUT_SEC} сек."
-    log "ОШИБКА: ComfyUI не стал готов за ${COMFY_TIMEOUT_SEC} сек."
-    kill -TERM "${COMFY_PID}" 2>/dev/null || true
+    log "ОШИБКА: ComfyUI на порту 18188 не стал готов за ${COMFY_TIMEOUT_SEC} сек."
     exit 1
 fi
 log "Проверка готовности ComfyUI (${COMFY_READY_URL}): пройдена, прошло ${ELAPSED} сек."
 log "ComfyUI готов к работе (прошло ${ELAPSED} сек)."
 
-# --- 4. Запуск сервера воркера ---
-log "Запускаю сервер воркера..."
-python /workspace/Generate/worker/server.py &
-SERVER_PID=$!
-log "Сервер воркера запущен, PID: ${SERVER_PID}"
+# Веса и ComfyUI готовы: создаём файл, по которому GET /health вернёт ok=true (SPEC 8.1)
+if ! touch "${WORKER_READY_FLAG}"; then
+    log "ОШИБКА: не удалось создать файл готовности воркера (${WORKER_READY_FLAG})."
+    exit 1
+fi
+log "Воркер готов: файл готовности создан, GET /health может вернуть ok=true."
 
-# --- 5. Ожидание завершения процессов ---
-wait -n "${COMFY_PID}" "${SERVER_PID}"
+# --- 5. Работа до завершения сервера воркера ---
+wait "${SERVER_PID}"
 EXIT_CODE=$?
-log "Один из процессов завершился (код ${EXIT_CODE}), останавливаю остальные..."
-kill -TERM "${SERVER_PID}" "${COMFY_PID}" 2>/dev/null || true
-wait 2>/dev/null || true
+log "Сервер воркера завершился (код ${EXIT_CODE})."
 exit "${EXIT_CODE}"

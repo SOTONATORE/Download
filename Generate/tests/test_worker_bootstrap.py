@@ -170,15 +170,25 @@ def test_token_never_in_bootstrap_output(tmp_path, kind):
 
 # --- setup.sh: токен HF не попадает в аргументы процессов (SPEC 0.1, п. 3) ---
 
-def test_setup_keeps_hf_token_out_of_argv(tmp_path):
-    try:
-        import httpx  # noqa: F401
-    except ImportError:
-        pytest.skip("нужен httpx")
+def _setup_env(tmp_path: Path, bin_dir: Path, comfy: Path, *, extra: dict | None = None) -> dict:
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "HF_TOKEN": CANARY,
+        "COMFY_DIR": str(comfy),
+        "COMFY_LOG_PATH": str(tmp_path / "comfy.log"),
+        "WORKER_READY_FLAG": str(tmp_path / "worker_ready"),
+    }
+    env.update(extra or {})
+    return env
+
+
+def _stub_tools(tmp_path: Path, *, curl_rc: int = 0) -> tuple:
+    """Заглушки aria2c (создаёт файлы моделей), curl (ответ ComfyUI), python (сервер воркера сразу завершается)."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     argv_log = tmp_path / "argv.txt"
-    # aria2c-заглушка: пишет свои аргументы и читает входной файл; создаёт файл модели
+    curl_log = tmp_path / "curl_args.txt"
     _write_exec(bin_dir / "aria2c", f"""#!{sys.executable}
 import os, sys
 with open({str(argv_log)!r}, "a", encoding="utf-8") as fh:
@@ -186,7 +196,6 @@ with open({str(argv_log)!r}, "a", encoding="utf-8") as fh:
 args = sys.argv[1:]
 src = args[args.index("-i") + 1]
 lines = [l for l in open(src, encoding="utf-8").read().splitlines() if l.strip()]
-url = lines[0].strip()
 opts = dict(l.strip().split("=", 1) for l in lines[1:])
 with open({str(argv_log)!r}, "a", encoding="utf-8") as fh:
     fh.write("header_seen=" + ("yes" if opts.get("header") == "Authorization: Bearer {CANARY}" else "no") + "\\n")
@@ -194,16 +203,21 @@ os.makedirs(opts["dir"], exist_ok=True)
 with open(os.path.join(opts["dir"], opts["out"]), "wb") as fh:
     fh.write(b"0123456789abcdef")
 """)
-    _write_exec(bin_dir / "python", "#!/bin/sh\nexit 0\n")  # ComfyUI «сразу упал»: setup.sh завершается
+    _write_exec(bin_dir / "ffmpeg", "#!/bin/sh\nexit 0\n")
+    _write_exec(bin_dir / "curl", f"#!/bin/sh\necho \"$@\" >> '{curl_log}'\nexit {curl_rc}\n")
+    _write_exec(bin_dir / "python", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка: завершается сразу
+    return bin_dir, argv_log, curl_log
+
+
+def test_setup_keeps_hf_token_out_of_argv_and_marks_ready(tmp_path):
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        pytest.skip("нужен httpx")
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
-        "HOME": str(tmp_path),
-        "HF_TOKEN": CANARY,
-        "COMFY_DIR": str(comfy),
-        "COMFY_LOG_PATH": str(tmp_path / "comfy.log"),
-    }
+    bin_dir, argv_log, curl_log = _stub_tools(tmp_path, curl_rc=0)
+    env = _setup_env(tmp_path, bin_dir, comfy)
     proc = subprocess.run(["/bin/bash", str(SETUP)], env=env, capture_output=True, text=True,
                           timeout=120, cwd=str(tmp_path))
     argv = argv_log.read_text(encoding="utf-8")
@@ -211,8 +225,74 @@ with open(os.path.join(opts["dir"], opts["out"]), "wb") as fh:
     assert "header_seen=yes" in argv
     assert (comfy / "models" / "diffusion_models").is_dir()  # COMFY_DIR учтён в setup.sh
     assert CANARY not in _output(proc)
-    assert proc.returncode != 0  # ComfyUI-заглушка упала, это ожидаемо для теста
+    # готовность проверяется по 18188, и только после неё создаётся файл готовности (SPEC 8.1, 8.5)
+    curl_args = curl_log.read_text(encoding="utf-8")
+    assert "http://127.0.0.1:18188/system_stats" in curl_args and ":8188" not in curl_args
+    assert (tmp_path / "worker_ready").exists()
+    assert proc.returncode == 0, _output(proc)
 
+
+def test_setup_readiness_timeout_exits_nonzero_in_russian_and_no_flag(tmp_path):
+    """Таймаут ожидания ComfyUI: код не 0, русская строка ошибки, файла готовности нет.
+    Копия setup.sh с нулевым таймаутом: рабочий файл не меняется, пауза не нужна."""
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        pytest.skip("нужен httpx")
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    bin_dir, _argv, _curl = _stub_tools(tmp_path, curl_rc=22)  # curl: ComfyUI не отвечает
+    quick = tmp_path / "setup_quick.sh"
+    quick.write_text(SETUP.read_text(encoding="utf-8").replace(
+        "COMFY_TIMEOUT_SEC=180", "COMFY_TIMEOUT_SEC=0", 1), encoding="utf-8")
+    env = _setup_env(tmp_path, bin_dir, comfy)
+    proc = subprocess.run(["/bin/bash", str(quick)], env=env, capture_output=True, text=True,
+                          timeout=120, cwd=str(tmp_path))
+    assert proc.returncode != 0
+    assert "ОШИБКА: ComfyUI на порту 18188 не стал готов за 0 сек." in _output(proc)
+    assert not (tmp_path / "worker_ready").exists()
+
+
+# --- setup.sh: структура (статические проверки, SPEC 8.1, 8.5) ---
+
+def _setup_code() -> str:
+    """Текст setup.sh без комментариев (всё после «#» в строке)."""
+    return "\n".join(line.split("#", 1)[0] for line in SETUP.read_text(encoding="utf-8").splitlines())
+
+
+def test_setup_does_not_start_comfyui_on_8188():
+    code = _setup_code()
+    assert "8188" not in code
+    assert "main.py" not in code
+    assert "--listen" not in code
+    assert "18188/system_stats" in code
+
+
+def test_setup_starts_server_before_weights_download():
+    text = SETUP.read_text(encoding="utf-8")
+    server = text.index("worker/server.py")
+    first_download = text.index('download_model "diffusion_models"')
+    assert server < first_download
+
+
+def test_setup_logs_weights_presence_before_readiness_wait():
+    text = SETUP.read_text(encoding="utf-8")
+    presence = text.index("Веса перед ожиданием ComfyUI")
+    wait = text.index("Ожидаю готовности ComfyUI на порту 18188")
+    assert presence < wait
+
+
+def test_setup_ready_flag_is_cleared_first_and_created_after_readiness():
+    text = SETUP.read_text(encoding="utf-8")
+    cleared = text.index('rm -f "${WORKER_READY_FLAG}"')
+    touched = text.index('touch "${WORKER_READY_FLAG}"')
+    readiness_ok = text.index("Проверка готовности ComfyUI (${COMFY_READY_URL}): пройдена")
+    assert cleared < touched and readiness_ok < touched
+
+
+def test_setup_has_no_leftover_comfy_pid():
+    code = _setup_code()
+    assert "COMFY_PID" not in code
 
 # --- конфиг: образ стокового Vast (вариант A) ---
 

@@ -79,8 +79,8 @@ LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
-COMFY_PORT = 8188            # порт ComfyUI внутри карты (setup.sh: 127.0.0.1:8188); внешний порт выдаёт Vast
-SYSTEM_STATS_LOG_CHARS = 200  # в лог пишется начало ответа /system_stats; ответ /health пишется целиком
+# Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
+COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
 READY_REASON = "воркер не готов"
 ACCEPT_REASON = "задача не принята"
 SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
@@ -192,8 +192,6 @@ class _CardSlot:
     not_found: int = 0                # подряд идущих ответов «экземпляр не найден» (NOT_FOUND_LIMIT, SPEC 8.3)
     cost_checked: bool = False        # цена по ответу Vast уже учтена или признана недоступной (SPEC 8.2)
     monitor: Optional[object] = None  # монитор загрузки весов (core/weights_log.py), создаётся по требованию
-    comfy_url: str = ""               # адрес ComfyUI через проброшенный порт 8188; пусто = не проброшен
-    comfy_noted: bool = False         # отсутствие проброса записано в лог один раз на карту
     ready_at: float = 0.0             # момент перехода в ready (срок принятия первой задачи, SPEC 8.2)
     accepted: bool = False            # воркер принял хотя бы одну задачу (POST /task)
     ready_wait_since: Optional[float] = None  # с какого момента ждём готовность воркера (SPEC 8.2)
@@ -928,6 +926,8 @@ class Orchestrator:
                 "WORKER_BUILD": self.worker_build,  # номер коммита: первая строка логов воркера (SPEC 8.4)
                 "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
                 "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
+                # аргументы ComfyUI образа vastai/comfy (SPEC 8.5): порт 18188, без автозапуска браузера
+                "COMFYUI_ARGS": COMFYUI_ARGS,
                 f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
             }
             # HF_TOKEN пробрасывается в контейнер для скачивания закрытых моделей LTX-2.5
@@ -1141,8 +1141,6 @@ class Orchestrator:
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"
-                    comfy_port = _mapped_port(info, COMFY_PORT)
-                    slot.comfy_url = f"http://{info.public_ip}:{comfy_port}" if comfy_port else ""
                     # готовность только после ответа воркера (не по статусу Vast), SPEC 8.2
                     if self._probe_ready(slot):
                         slot.state = "ready"
@@ -1194,15 +1192,14 @@ class Orchestrator:
         log.info("%s.", PORTAL_NOT_IMPLEMENTED)
 
     def _probe_ready(self, slot: _CardSlot) -> bool:
-        """Проверка готовности воркера (SPEC 8.2): /health и /system_stats, оба запускаются при каждом вызове.
+        """Проверка готовности воркера (SPEC 8.2): только GET /health самого воркера.
 
-        Готовность: /health отвечает JSON с ok == true, или /system_stats отвечает JSON с ключом system.
-        Голый код 200 без ожидаемого содержимого не засчитывается. Сбой связи пишется как «запрос не дошёл».
+        Готовность: /health отвечает JSON с ok == true (воркер выставляет его, когда setup.sh создал файл
+        готовности, SPEC 8.1). Порт ComfyUI снаружи оркестратор не проверяет (SPEC 8.5).
+        Голый код 200 без ok == true не засчитывается. Сбой связи пишется как «запрос не дошёл».
         """
         self._note_unimplemented()
-        health = self._probe_health(slot)
-        stats = self._probe_comfy(slot)
-        return health or stats
+        return self._probe_health(slot)
 
     def _probe_health(self, slot: _CardSlot) -> bool:
         name = _card_name(slot, cap=True)
@@ -1216,27 +1213,6 @@ class Orchestrator:
         ok = resp.status_code == 200 and data.get("ok") is True
         body = _one_line(self._mask_remote(resp.text))  # /health короткий: пишется целиком
         log.info("%s: проверка /health: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
-                 body or "пусто", self.clock() - start, "готов" if ok else "не готов")
-        return ok
-
-    def _probe_comfy(self, slot: _CardSlot) -> bool:
-        name = _card_name(slot, cap=True)
-        if not slot.comfy_url:
-            if not slot.comfy_noted:
-                slot.comfy_noted = True
-                log.info("%s: порт ComfyUI %d не проброшен: проверка /system_stats пропущена.", name, COMFY_PORT)
-            return False
-        start = self.clock()
-        try:
-            # без заголовка токена: ComfyUI его не знает, и токен не уходит на порт ComfyUI
-            resp = self._http.get(slot.comfy_url + "/system_stats", timeout=PROBE_TIMEOUT_SEC)
-        except httpx.HTTPError as exc:
-            log.warning("%s: проверка /system_stats: запрос не дошёл (%s).", name, type(exc).__name__)
-            return False
-        data = self._json(resp)
-        ok = resp.status_code == 200 and "system" in data
-        body = _one_line(self._mask_remote(resp.text))[:SYSTEM_STATS_LOG_CHARS]
-        log.info("%s: проверка /system_stats: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
                  body or "пусто", self.clock() - start, "готов" if ok else "не готов")
         return ok
 

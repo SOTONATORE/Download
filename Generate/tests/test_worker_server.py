@@ -8,12 +8,19 @@ import time
 import httpx
 import pytest
 
+from pathlib import Path
+
 try:
+    from Generate.core.weights_log import parse_line
     from Generate.worker.comfy_client import ComfyExecutionError
-    from Generate.worker.server import DeadManSwitch, WorkerApp, parse_range
+    from Generate.worker.server import DeadManSwitch, WorkerApp, parse_range, strip_url_queries
 except ImportError:
+    from core.weights_log import parse_line
     from worker.comfy_client import ComfyExecutionError
-    from worker.server import DeadManSwitch, WorkerApp, parse_range
+    from worker.server import DeadManSwitch, WorkerApp, parse_range, strip_url_queries
+
+SETUP_SH = Path(__file__).resolve().parents[1] / "worker" / "setup.sh"
+BUILD_LINE = "Сборка воркера: unknown"
 
 TOKEN = "SECRET-TOKEN-123"
 WRONG = "WRONG-TOKEN-999"
@@ -391,3 +398,111 @@ def test_repeat_post_is_not_refused_by_full_backlog(make_app):
         resp = c.post("/task", json={**TASK, "num": 0})
         assert resp.status_code == 200 and resp.json()["task_id"] == ids[0]
         assert len(comfy.graphs) == 2
+
+
+# --- файл готовности, лог загрузки bootstrap.log (SPEC 8.1, 8.5; этап 5c) ---
+
+def _wait_for(cond, timeout: float = 5.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _boot_lines(text: str) -> list:
+    """Строки setup.sh, bootstrap.sh и aria2 из буфера (без строк самого воркера)."""
+    return [line for line in text.splitlines() if line.startswith(("[setup]", "[bootstrap]", "[#"))]
+
+
+def test_health_is_false_until_ready_flag_exists(make_app, tmp_path):
+    flag = tmp_path / "worker_ready"
+    app, _ = make_app(ready_flag=str(flag))
+    with client_for(app) as c:
+        assert c.get("/health").json() == {"ok": False, "gpu": "FakeGPU", "vram_free": 12345, "busy": False}
+        flag.write_text("", encoding="utf-8")  # setup.sh создаёт файл после готовности ComfyUI
+        assert c.get("/health").json() == {"ok": True, "gpu": "FakeGPU", "vram_free": 12345, "busy": False}
+
+
+def test_auth_still_required_before_ready(make_app, tmp_path):
+    app, _ = make_app(ready_flag=str(tmp_path / "worker_ready"))
+    with client_for(app, None) as c:
+        assert c.get("/health").status_code == 401
+
+
+def test_strip_url_queries_keeps_path_and_drops_signed_query():
+    text = "Redirecting to https://cdn.example.test/a/b.bin?sig=SIGNEDVALUE&x=1 ok"
+    out = strip_url_queries(text)
+    assert out == "Redirecting to https://cdn.example.test/a/b.bin?*** ok"
+    assert "SIGNEDVALUE" not in out
+
+
+def test_bootstrap_log_lines_reach_logs_in_order_and_cursor_works(make_app, tmp_path):
+    boot = tmp_path / "bootstrap.log"
+    first = [
+        "[bootstrap] шаг 1: переменные на месте (код 0)",
+        "[setup] [1/5] Начинаю загрузку: diffusion_models/a.safetensors",
+        "[#2089b0 1.2GiB/21GiB(5%) CN:16 DL:450MiB ETA:40s]",
+    ]
+    boot.write_text("\n".join(first) + "\n", encoding="utf-8")
+    app, _ = make_app(bootstrap_log_path=str(boot))
+    with client_for(app) as c:
+        assert _wait_for(lambda: _boot_lines(c.get("/logs").text) == first)
+        r = c.get("/logs")
+        assert r.text.splitlines()[0] == BUILD_LINE          # сборка по-прежнему первая строка
+        cursor = int(r.headers["X-Log-Next"])
+        second = ["[setup] [1/5] Файл успешно загружен: diffusion_models/a.safetensors (16 байт)"]
+        with boot.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(second) + "\n")
+        assert _wait_for(lambda: _boot_lines(c.get("/logs", params={"since": cursor}).text) == second)
+        tail = c.get("/logs", params={"since": cursor})
+        assert _boot_lines(tail.text) == second              # прежние строки не повторяются
+        assert int(tail.headers["X-Log-Next"]) > cursor
+
+
+SETUP_LOG_LINES = [
+    "[setup] [1/5] Начинаю загрузку: diffusion_models/ltx-2.5-22b.safetensors",
+    "[setup] [1/5] Файл успешно загружен: diffusion_models/ltx-2.5-22b.safetensors (1048576 байт)",
+    "[setup] [2/5] Файл уже существует, пропускаю: text_encoders/gemma.safetensors",
+    "[setup] [3/5] ОШИБКА: не удалось загрузить файл vae/x.safetensors (код 1).",
+    "[setup] Все файлы модели LTX-2.5 на месте.",
+    "[#2089b0 1.2GiB/21GiB(5%) CN:16 DL:450MiB ETA:40s]",
+]
+
+
+def test_setup_log_lines_are_parsed_and_reach_logs_unchanged(make_app, tmp_path):
+    """B3: строки, которые печатает setup.sh, разбирает weights_log и отдаются в GET /logs без изменений."""
+    text = SETUP_SH.read_text(encoding="utf-8")
+    for fragment in ("Начинаю загрузку: ", "Файл успешно загружен: ", "Файл уже существует, пропускаю: ",
+                     "ОШИБКА: не удалось загрузить файл ", "Все файлы модели LTX-2.5 на месте.",
+                     "(код ", " байт)"):
+        assert fragment in text, fragment
+    kinds = [parse_line(line).kind for line in SETUP_LOG_LINES]
+    assert kinds == ["start", "done", "skip", "error", "stage_done", "progress"]
+    boot = tmp_path / "bootstrap.log"
+    boot.write_text("\n".join(SETUP_LOG_LINES) + "\n", encoding="utf-8")
+    app, _ = make_app(bootstrap_log_path=str(boot))
+    with client_for(app) as c:
+        assert _wait_for(lambda: _boot_lines(c.get("/logs").text) == SETUP_LOG_LINES)
+
+
+def test_canary_never_in_bootstrap_lines_returned_by_logs(make_app, tmp_path, monkeypatch):
+    """SPEC 0.1: канареечный ключ не попадает в строки, которые воркер отдаёт в GET /logs."""
+    canary = "TESTKEY-12345"
+    monkeypatch.setenv("HF_TOKEN", canary)
+    boot = tmp_path / "bootstrap.log"
+    boot.write_text(
+        f"header=Authorization: Bearer {canary}\n"
+        f"[setup] значение: {canary}\n"
+        f"[#1 Redirecting https://cas.example.test/xet/f.bin?X-Amz-Signature=abc&token={canary}]\n"
+        f"[bootstrap] WORKER_TOKEN={canary}\n",
+        encoding="utf-8")
+    app, _ = make_app(bootstrap_log_path=str(boot))
+    with client_for(app) as c:
+        assert _wait_for(lambda: "[bootstrap] WORKER_TOKEN=" in c.get("/logs").text)
+        body = c.get("/logs").text
+    assert canary not in body
+    assert "Authorization:***" in body
+    assert "?***" in body
+
