@@ -28,6 +28,7 @@ try:
     from Generate.core import gemini_prompts as gp
     from Generate.core import orchestrator as orch
     from Generate.core import vast_client as vc
+    from Generate.core import log_setup as ls
     from Generate.tests import test_orchestrator as to
     from Generate.tests import test_worker_server as tws
     from Generate.tests.test_worker_server import (  # noqa: F401  (фикстура make_app)
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - плоский импорт
     import cli  # type: ignore
     import orchestrator as orch  # type: ignore
     import vast_client as vc  # type: ignore
+    import log_setup as ls  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import test_orchestrator as to  # type: ignore
     import test_worker_server as tws  # type: ignore
@@ -540,3 +542,110 @@ def test_log_buffer_read_since_after_eviction():
     assert buf.read(since=5) == ([], 5)
     assert buf.read(since=99) == ([], 5)
     assert buf.read(tail=2) == (["строка 3", "строка 4"], 5)
+
+
+# ---------------------------------------------------------------------------
+# Маскирование журнала: режимы A и B, белый список, шаблоны по форме (SPEC 0.1, п. 14; этап 7в)
+# Проверка статическая по составу тестов; прогон владельцем на GitHub Actions.
+# ---------------------------------------------------------------------------
+
+CANARY = "TESTKEY-12345"
+SHAPE_TOKEN = "hf_abcdefghijklmnopqrstu"
+MASK_MODES = ("A", "B")
+ALLOWED_LINE = "max_tokens=512 tokenizer: gpt2 token_count=7 num_tokens=9"
+
+
+def test_mask_mode_default_is_a_and_mask_text_follows_it():
+    assert ls.MASK_MODE == "A"
+    assert ls.mask_text("status=running") == ls.mask_text_with_mode("status=running", ls.MASK_MODE)
+
+
+def test_unknown_mask_mode_is_rejected():
+    with pytest.raises(ValueError):
+        ls.mask_text_with_mode("TOKEN=x", "C")
+
+
+def test_allowlist_is_frozen():
+    """Белый список зафиксирован: любое добавление или удаление имени требует правки этого теста."""
+    assert isinstance(ls.ALLOWED_NAMES, frozenset)
+    assert tuple(sorted(ls.ALLOWED_NAMES)) == ("max_tokens", "num_tokens", "token_count", "tokenizer")
+    assert len(ls.ALLOWED_NAMES) == 4
+
+
+def test_mode_a_masks_key_suffix_and_keeps_name():
+    assert ls.mask_text_with_mode("MY_SERVICE_KEY=abcdef123456 done", "A") == "MY_SERVICE_KEY=*** done"
+
+
+def test_mode_a_plain_pair_is_not_masked():
+    assert ls.mask_text_with_mode("status=running", "A") == "status=running"
+
+
+def test_mode_a_keeps_allowlisted_names_in_any_case():
+    assert ls.mask_text_with_mode(ALLOWED_LINE, "A") == ALLOWED_LINE
+    assert ls.mask_text_with_mode("MAX_TOKENS=512", "A") == "MAX_TOKENS=512"
+
+
+def test_mode_b_masks_plain_pair_and_keeps_name():
+    assert ls.mask_text_with_mode("status=running", "B") == "status=***"
+
+
+def test_mode_b_keeps_allowlisted_names():
+    assert ls.mask_text_with_mode(ALLOWED_LINE, "B") == ALLOWED_LINE
+
+
+def test_mode_b_masks_key_suffix():
+    assert ls.mask_text_with_mode("MY_SERVICE_KEY=abcdef123456", "B") == "MY_SERVICE_KEY=***"
+
+
+@pytest.mark.parametrize("mode", MASK_MODES)
+def test_value_shape_token_is_masked_in_both_modes(mode):
+    out = ls.mask_text_with_mode(f"ответ {SHAPE_TOKEN} конец", mode)
+    assert SHAPE_TOKEN not in out and "***" in out
+
+
+@pytest.mark.parametrize("mode", MASK_MODES)
+def test_value_shape_inside_allowlisted_pair_is_still_masked(mode):
+    out = ls.mask_text_with_mode(f"max_tokens={SHAPE_TOKEN}", mode)
+    assert SHAPE_TOKEN not in out and out.startswith("max_tokens=")
+
+
+@pytest.mark.parametrize("shape", [
+    "github_pat_ABCDEFGHIJKL1234",
+    "ghp_ABCDEFGHIJ12",
+    "AIzaSyD1234567890abcdefghijk",
+    "sk-ABCDEFGH12345678",
+    "Bearer abcdefghijklmnop",
+])
+@pytest.mark.parametrize("mode", MASK_MODES)
+def test_known_key_shapes_are_masked(mode, shape):
+    out = ls.mask_text_with_mode(f"значение {shape} конец", mode)
+    assert shape not in out
+
+
+def test_bearer_keeps_word_and_masks_token():
+    out = ls.mask_text_with_mode("заголовок Bearer abcdefghijklmnop", "B")
+    assert "abcdefghijklmnop" not in out and "Bearer ***" in out
+
+
+def test_json_pairs_by_mode():
+    text = '{"HF_TOKEN": "abc123def", "status": "running", "max_tokens": "5"}'
+    out_a = ls.mask_text_with_mode(text, "A")
+    out_b = ls.mask_text_with_mode(text, "B")
+    assert "abc123def" not in out_a and "abc123def" not in out_b
+    assert "running" in out_a and "running" not in out_b
+    assert '"max_tokens": "5"' in out_a and '"max_tokens": "5"' in out_b
+
+
+@pytest.mark.parametrize("mode", MASK_MODES)
+@pytest.mark.parametrize("line", [
+    f"HF_TOKEN={CANARY}",
+    f'"HF_TOKEN": "{CANARY}"',
+    f"vast api_key: {CANARY}",
+])
+def test_canary_after_secret_name_is_masked(mode, line):
+    assert CANARY not in ls.mask_text_with_mode(line, mode)
+
+
+def test_canary_after_plain_name_is_masked_in_mode_b_only():
+    """Режим A по замыслу не маскирует пару с обычным именем; режим B маскирует любую пару."""
+    assert CANARY not in ls.mask_text_with_mode(f"status={CANARY}", "B")

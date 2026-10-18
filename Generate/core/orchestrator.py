@@ -632,8 +632,8 @@ class Orchestrator:
         self.cleanup_ok = True
         self.run_id = str(run_id).strip()
         self._publisher: Optional[RunPublisher] = None
-        # артефакт запуска (SPEC 10.4); для пилота не ведётся
-        self._artifact = RunArtifact(artifact_dir, self._mask_remote) if (artifact_dir and not self.pilot) else None
+        # артефакт запуска и пилота (SPEC 10.4, этап 7в); без --artifact-dir артефакта нет
+        self._artifact = RunArtifact(artifact_dir, self._mask_remote) if artifact_dir else None
 
     def __repr__(self) -> str:
         return f"Orchestrator(метка={self.label}, карт<={self.max_cards})"
@@ -970,7 +970,46 @@ class Orchestrator:
         summary.budget_exceeded = self.budget_exceeded
         summary.exit_code = EXIT_OK if (answered and self.cleanup_ok) else EXIT_PARTIAL
         self._log_budget()
+        self._finish_pilot_artifact(summary, verdict, result)
         return summary
+
+    def _finish_pilot_artifact(self, summary: RunSummary, verdict: str, result: str) -> None:
+        """Артефакт пилота (SPEC 10.4, этап 7в): run/summary.md и FILES.txt тем же путём, что у основного запуска.
+        Файлов, которых пилот не формирует (prompts.json, missing.txt), в service/ нет: пропуск одного файла
+        записывается в журнал, артефакт в целом не пропускается. Ошибка записи не меняет итог пилота."""
+        if self._artifact is None:
+            return
+        skipped = []
+        try:
+            for path, name in ((self.prompts_path, PROMPTS_FILENAME), (self.missing_path, MISSING_FILENAME)):
+                if os.path.isfile(str(path)):
+                    self._artifact.service_copy(str(path), name)
+                else:
+                    skipped.append(name)
+            if skipped:
+                log.info("PILOT: в service/ не попали: %s (пилот эти файлы не формирует).", ", ".join(skipped))
+            self._artifact.write_report(self._pilot_report_text(summary, verdict, result))
+            self._artifact.write_files_list()
+        except OSError as exc:
+            log.warning("PILOT: артефакт пилота записан не полностью: %s.", type(exc).__name__)
+
+    def _pilot_report_text(self, summary: RunSummary, verdict: str, result: str) -> str:
+        """Итог пилота для run/summary.md: вердикт, счётчики карт, уборка. Адресов и токенов нет."""
+        lines = [
+            f"# Итог пилота {self.run_id}",
+            "",
+            f"- результат: {verdict}",
+        ]
+        if verdict == "not_ready":
+            lines.append(f"- причина: {result}")
+        lines += [
+            f"- карт арендовано: {summary.cards_rented}",
+            f"- уничтожено карт: {summary.destroyed_cards}",
+            f"- потрачено, USD: {summary.spent_usd:.4f}",
+            f"- уборка: {'выполнена' if self.cleanup_ok else 'НЕ ПОДТВЕРЖДЕНА, проверьте Vast.ai'}",
+            f"- код завершения: {summary.exit_code}",
+        ]
+        return "\n".join(lines) + "\n"
 
     def _probe_pilot(self, base: str) -> Optional[int]:
         """GET PILOT_PROBE_PATH на порту ComfyUI. Возвращает код HTTP или None, если ответа нет."""

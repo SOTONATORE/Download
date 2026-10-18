@@ -33,37 +33,103 @@ DEBUG_FILE_PARTS = ("run", "debug.log")
 # строки сырого обмена с Vast: пишутся логгером клиента на уровне INFO (vast_client.py)
 JOURNAL_LOGGER = "Generate.vast_client"
 JOURNAL_PREFIXES = ("Запрос Vast #", "Ответ Vast #")
-# Маскирование по именам (SPEC 0.1, п. 11; решение владельца 18.10.2026).
-# ЗНАЧЕНИЯ ДЛЯ МАСКИРОВАНИЯ ИЗ ОКРУЖЕНИЯ НЕ ЧИТАЮТСЯ: маскируется то, что похоже на секрет по имени.
-# Имя секретное, если содержит API_KEY, APIKEY, TOKEN, SECRET или PASSWORD (без учёта регистра).
-# Значение заменяется на *** до первого пробела, кавычки, запятой или конца строки; значение в кавычках
-# маскируется до закрывающей кавычки. Формы: NAME=значение и "NAME": "значение".
-_SECRET_NAME = r"[\w.\-]*(?:API_?KEY|TOKEN|SECRET|PASSWORD)[\w.\-]*"
-_ASSIGN_RE = re.compile(
-    r"(?i)(?<![\w.\-])(" + _SECRET_NAME + r"=)(\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s\"',]*)"
+# Режим маскирования (SPEC 0.1, п. 14; решение владельца 18.10.2026).
+# Режим A — текущий: маскируется пара ИМЯ=значение и "ИМЯ": "значение", если в имени есть часть,
+# похожая на секрет (KEY, TOKEN, SECRET, PASSWORD, AUTH, CREDENTIAL, SESSION; без учёта регистра).
+# Режим B — цель: маскируется любая такая пара. Переходить на B, когда белый список ALLOWED_NAMES полный.
+# Переключение — одна константа здесь; тесты проверяют оба режима через mask_text_with_mode.
+MASK_MODE = "A"
+_MASK_MODES = ("A", "B")
+if MASK_MODE not in _MASK_MODES:
+    raise ValueError("Режим маскирования MASK_MODE должен быть A или B.")
+
+# Белый список имён (сравнение без учёта регистра по полному имени). Пары с этими именами не маскируются
+# ни в одном режиме; шаблоны по форме значения действуют всегда. Список короткий и явный: добавлять
+# только имя, которое нужно сохранить в строке журнала и которое не является секретом.
+ALLOWED_NAMES = frozenset({"max_tokens", "num_tokens", "token_count", "tokenizer"})
+
+# Имя с секретной частью (режим A) и любое имя (режим B). Значение: в кавычках до закрывающей кавычки,
+# иначе до первого пробела, кавычки, запятой или конца строки.
+_SECRET_WORDS = r"(?:KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|SESSION)"
+_NAME_A = r"[\w.\-]*" + _SECRET_WORDS + r"[\w.\-]*"
+_NAME_B = r"[\w.\-]+"
+_VALUE = r"\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s\"',]*"
+_ASSIGN_A = re.compile(r"(?i)(?<![\w.\-])(?P<name>" + _NAME_A + r")=(?P<value>" + _VALUE + r")")
+_ASSIGN_B = re.compile(r"(?i)(?<![\w.\-])(?P<name>" + _NAME_B + r")=(?P<value>" + _VALUE + r")")
+_JSON_A = re.compile(r"(?i)\"(?P<name>" + _NAME_A + r")\"(?P<sep>\s*:\s*)\"[^\"\r\n]*\"?")
+_JSON_B = re.compile(r"(?i)\"(?P<name>" + _NAME_B + r")\"(?P<sep>\s*:\s*)\"[^\"\r\n]*\"?")
+_PAIR_PATTERNS = {"A": (_JSON_A, _ASSIGN_A), "B": (_JSON_B, _ASSIGN_B)}
+
+# Пары с именами из белого списка для прохода redact_text (vast_client): такие пары остаются как есть.
+_ALLOWED_PAIR_RE = re.compile(
+    r"(?i)(?<![\w.\-])[\"']?(?:"
+    + "|".join(re.escape(n) for n in sorted(ALLOWED_NAMES, key=len, reverse=True))
+    + r")[\"']?\s*[:=]\s*(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s\"',;&}\]]*)"
 )
-_JSON_PAIR_RE = re.compile(r"(?i)(\"" + _SECRET_NAME + r"\"\s*:\s*)\"[^\"\r\n]*\"?")
+
+# Шаблоны по форме значения (любой режим, любое имя). Уже существующие шаблоны из orchestrator
+# (_SECRET_PATTERNS, включая Bearer) переиспользуются; добавлены только github_pat_ и ghp_ с порогом 10.
+_EXTRA_SHAPES = (
+    (re.compile(r"github_pat_[A-Za-z0-9_]{10,}"), False),
+    (re.compile(r"ghp_[A-Za-z0-9]{10,}"), False),
+)
+_VALUE_SHAPES = tuple(_SECRET_PATTERNS) + _EXTRA_SHAPES
+
+
+def _is_allowed(name: str) -> bool:
+    return name.lower() in ALLOWED_NAMES
+
+
+def _json_repl(m: "re.Match[str]") -> str:
+    if _is_allowed(m.group("name")):
+        return m.group(0)
+    return f"\"{m.group('name')}\"{m.group('sep')}\"{_MASK}\""
 
 
 def _assign_repl(m: "re.Match[str]") -> str:
-    value = m.group(2)
-    if value[:1] in ('"', "'"):
-        return m.group(1) + value[0] + _MASK + value[0]
-    return m.group(1) + _MASK
+    if _is_allowed(m.group("name")):
+        return m.group(0)
+    value = m.group("value")
+    tail = value[0] + _MASK + value[0] if value[:1] in ('"', "'") else _MASK
+    return m.group("name") + "=" + tail
 
 
-def mask_text(text: str) -> str:
-    """Маскирует пары по именам (см. выше), пары «имя: значение» из redact_text (тоже по именам),
-    заголовок Authorization и шаблоны ключей из orchestrator. Окружение не используется."""
-    text = _JSON_PAIR_RE.sub(lambda m: m.group(1) + f'"{_MASK}"', text)
-    text = _ASSIGN_RE.sub(_assign_repl, text)
-    text = redact_text(text)
-    for pattern, keep_prefix in _SECRET_PATTERNS:
+def _redact_free_text(text: str) -> str:
+    """Свободный текст через redact_text (vast_client): пары с секретными именами и «Bearer».
+    Пары из белого списка вырезаются до вызова и возвращаются без изменений."""
+    parts: list = []
+    pos = 0
+    for m in _ALLOWED_PAIR_RE.finditer(text):
+        parts.append(redact_text(text[pos:m.start()]))
+        parts.append(m.group(0))
+        pos = m.end()
+    parts.append(redact_text(text[pos:]))
+    return "".join(parts)
+
+
+def mask_text_with_mode(text: str, mode: str) -> str:
+    """Маскирует текст в режиме "A" или "B" (см. выше). Окружение не используется.
+
+    Порядок: пары «имя»: значение и имя=значение по режиму, затем свободный текст (redact_text),
+    затем шаблоны по форме значения. Белый список действует на пары; шаблоны по форме действуют всегда.
+    """
+    if mode not in _PAIR_PATTERNS:
+        raise ValueError("Режим маскирования должен быть A или B.")
+    json_re, assign_re = _PAIR_PATTERNS[mode]
+    text = json_re.sub(_json_repl, text)
+    text = assign_re.sub(_assign_repl, text)
+    text = _redact_free_text(text)
+    for pattern, keep_prefix in _VALUE_SHAPES:
         if keep_prefix:
             text = pattern.sub(lambda m: m.group(1) + _MASK, text)
         else:
             text = pattern.sub(_MASK, text)
     return text
+
+
+def mask_text(text: str) -> str:
+    """Маскирование текста в режиме MASK_MODE (сейчас A). Окружение не используется."""
+    return mask_text_with_mode(text, MASK_MODE)
 
 
 class MaskFilter(logging.Filter):

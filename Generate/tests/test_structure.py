@@ -74,3 +74,10 @@ def test_no_environment_reading_in_cli():
     assert code.count("os.environ") == 1
     assert "os.environ.get(LOG_LEVEL_ENV" in code
     assert "getenv" not in code
+
+
+def test_masking_module_reads_no_environment():
+    """Маскирование по именам (SPEC 0.1, п. 14): core/log_setup.py не читает окружение и значения секретов."""
+    code = _code_without_comments(CORE / "log_setup.py")
+    assert "environ" not in code
+    assert "getenv" not in code

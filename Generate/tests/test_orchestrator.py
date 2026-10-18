@@ -1470,6 +1470,28 @@ def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatc
     _no_secrets(json.dumps(env))
 
 
+def test_pilot_writes_artifact_layout_and_notes_skipped_files(tmp_path, monkeypatch, caplog):
+    """Этап 7в (SPEC 10.4): пилот ведёт артефакт тем же путём: run/summary.md, FILES.txt, cards/, service/.
+    prompts.json и missing.txt пилот не формирует: их нет в service/, это записано в журнал. Вердикт не меняется."""
+    caplog.set_level(logging.INFO)
+    art = tmp_path / "art"
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, artifact_dir=art).run()
+    assert summary.exit_code == orch.EXIT_OK
+    assert "PILOT-ИТОГ: результат=ok" in caplog.text
+    assert (art / "run" / "summary.md").is_file()
+    assert "Итог пилота pilot-test" in (art / "run" / "summary.md").read_text(encoding="utf-8")
+    assert not (art / "run" / "run.log").exists()
+    assert (art / "cards").is_dir() and (art / "service").is_dir()
+    assert not any((art / "service").iterdir())
+    assert "PILOT: в service/ не попали" in caplog.text and "prompts.json" in caplog.text
+    files_txt = (art / "FILES.txt").read_text(encoding="utf-8")
+    assert "run/summary.md" in files_txt and "FILES.txt" not in files_txt
+    for p in art.rglob("*"):
+        if p.is_file() and p.suffix != ".zip":
+            _no_secrets(p.read_text(encoding="utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Этап 6а: слоты, назначение клипов, поколения, сборка воркера, run_id, onstart (SPEC 8.2, 8.3, 8.4)
 # ---------------------------------------------------------------------------
