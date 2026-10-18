@@ -16,6 +16,13 @@ COMFY_POLL_SEC=2
 # Файл готовности для GET /health сервера воркера (SPEC 8.1): создаётся после ответа ComfyUI.
 WORKER_READY_FLAG="${WORKER_READY_FLAG:-/workspace/worker_ready}"
 
+# Лог setup.sh и aria2 (SPEC 8.1): stderr сервера воркера (трассировки падения) пишется сюда.
+WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"
+
+# COMFY_TEMPLATE_LOG_PATH (SPEC 8.5): значение приходит из окружения карты и здесь не задаётся.
+# Если его нет, сервер пишет одну строку «не задан» и ComfyUI не читает; путь не угадывается.
+# Этот скрипт не пишет вывод ComfyUI через tee и ComfyUI не запускает.
+
 SERVER_PID=""
 
 # Счётчик файлов модели для строк лога: «[1/5] ...»
@@ -112,8 +119,8 @@ fi
 # --- 2. Сервер воркера: стартует до загрузки весов (SPEC 8.1). Пока нет файла готовности, /health отвечает ok=false ---
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
-# stderr (трассировки падения) остаётся в bootstrap.log, его хвост тоже попадает в GET /logs.
-python /workspace/Generate/worker/server.py >/dev/null &
+# stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
+python /workspace/Generate/worker/server.py >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
 

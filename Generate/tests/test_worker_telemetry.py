@@ -535,13 +535,24 @@ def test_dockerfile_copies_every_worker_module():
     assert "COMFY_LOG_PATH=/workspace/comfyui.log" in flat
 
 
-def test_setup_sh_captures_comfy_output_and_is_valid_bash():
+def test_setup_sh_is_valid_bash_and_does_not_start_comfyui():
+    """A2 (а, б): setup.sh — валидный bash и ComfyUI не запускает (его поднимает образ)."""
     script = WORKER_DIR / "setup.sh"
     text = script.read_text(encoding="utf-8")
-    assert "tee -a" in text and "COMFY_LOG_PATH" in text
-    assert "--verbose DEBUG" in text and 'GEN_LOG_LEVEL:-INFO}" = "DEBUG"' in text
+    code = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+    assert "main.py" not in code
+    assert "--port 8188" not in code
     bash = shutil.which("bash")
     if bash is None:
         pytest.skip("bash недоступен")
     result = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_worker_reads_comfyui_log_from_template_env():
+    """A2 (в): воркер читает лог ComfyUI шаблона по COMFY_TEMPLATE_LOG_PATH, префикс [comfyui]."""
+    text = (WORKER_DIR / "server.py").read_text(encoding="utf-8")
+    assert 'TEMPLATE_COMFY_LOG_ENV = "COMFY_TEMPLATE_LOG_PATH"' in text
+    assert "template_log_path=os.environ.get(TEMPLATE_COMFY_LOG_ENV" in text
+    assert 'TEMPLATE_COMFY_PREFIX = "[comfyui] "' in text
+    assert "ComfyOutputReader(" in text and "self.template_reader" in text

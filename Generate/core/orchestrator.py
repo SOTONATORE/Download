@@ -26,6 +26,7 @@ import shutil
 import tempfile
 import threading
 import time
+import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
@@ -301,6 +302,175 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Артефакт запуска и выдача служебных файлов (SPEC 9.1, 9.4, 10.4, этап 6c)
+ARTIFACT_SAVE_LIMIT_SEC = 60.0      # SPEC 8.3 (в), шаг 1: сохранение логов и JSON до уничтожения карт
+ARTIFACT_RUN_LOG = "run.log"
+REPORT_FILENAME = "summary.md"
+FILES_LIST_NAME = "FILES.txt"
+LOG_BUNDLE_NAME = "run-logs.zip"
+MISSING_FILENAME = "missing.txt"
+SERVICE_DIR = "service"
+
+
+class ReleaseStartError(gp.GeminiInputError):
+    """Служебный релиз не открыт или файл запуска не загружен: остановка до трат, код 2 (SPEC 9.1, E1)."""
+
+
+class RunArtifact:
+    """Артефакт запуска (SPEC 10.4): run/, cards/, service/, FILES.txt.
+
+    Строки пишутся на диск по мере поступления (без накопления в памяти); каждая строка
+    маскируется до записи (SPEC 0.1). Файлы открываются на дозапись, поэтому данные не теряются
+    при падении процесса.
+    """
+
+    def __init__(self, root, mask: Callable[[str], str]) -> None:
+        self.root = Path(root)
+        self._mask = mask
+        for sub in ("run", "cards", SERVICE_DIR):
+            (self.root / sub).mkdir(parents=True, exist_ok=True)
+
+    def _append(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(self._mask(text) + "\n")
+
+    def _write(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self._mask(text), encoding="utf-8", newline="\n")
+
+    def run_line(self, text: str) -> None:
+        self._append(self.root / "run" / ARTIFACT_RUN_LOG, text)
+
+    def card_dir(self, slot) -> Path:
+        return self.root / "cards" / f"slot{slot.index}_generation{slot.generation}"
+
+    def card_line(self, slot, line: str) -> None:
+        self._append(self.card_dir(slot) / "worker_log.txt", line)
+
+    def card_status(self, slot, text: str) -> None:
+        self._append(self.card_dir(slot) / "status.txt", f"{_utc_now()} {text}")
+
+    def card_meta(self, slot, data: dict) -> None:
+        self._write(self.card_dir(slot) / "meta.json", json.dumps(data, ensure_ascii=False, indent=2))
+
+    def card_instance(self, slot, raw: dict) -> None:
+        self._write(self.card_dir(slot) / "instance.json",
+                    json.dumps(raw, ensure_ascii=False, indent=2, default=str))
+
+    def service_copy(self, src: str, name: str) -> None:
+        shutil.copyfile(src, self.root / SERVICE_DIR / name)
+
+    def write_report(self, text: str) -> None:
+        self._write(self.root / "run" / REPORT_FILENAME, text)
+
+    def write_files_list(self) -> None:
+        rows = []
+        for p in sorted(self.root.rglob("*")):
+            if p.is_file() and p.name != FILES_LIST_NAME:
+                rows.append(f"{p.relative_to(self.root).as_posix()}\t{p.stat().st_size}")
+        self._write(self.root / FILES_LIST_NAME, "\n".join(rows) + "\n")
+
+    def make_bundle(self, dest: str) -> None:
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(self.root.rglob("*")):
+                if p.is_file():
+                    zf.write(p, p.relative_to(self.root).as_posix())
+
+
+class _RunLogHandler(logging.Handler):
+    """Пишет журнал запуска (все записи пакета Generate) в run/run.log артефакта."""
+
+    def __init__(self, artifact: RunArtifact) -> None:
+        super().__init__(level=logging.DEBUG)
+        self._artifact = artifact
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._artifact.run_line(self.format(record))
+        except Exception:  # журнал не должен ронять запуск
+            self.handleError(record)
+
+
+class RunPublisher:
+    """Выдача служебных файлов запуска в релизы (SPEC 9.1, 9.4, 9.7; этап 6c, E1-E4).
+
+    Общая логика для оркестратора и для `finalize-release` (F2, без дублирования).
+    start(): missing.txt и prompts.json до трат; ошибка -> ReleaseStartError (код 2).
+    finish(): отчёт и архив логов -> служебный релиз, prompts.json -> служебный,
+    generated_links.txt -> итоговый. Ошибка одного файла: одна строка в лог с именем и причиной,
+    файл попадает в failures, остальные файлы всё равно пробуются (E4).
+    """
+
+    def __init__(self, uploader, repo: str, tmp_dir: str, *, artifact: Optional[RunArtifact] = None,
+                 mask: Optional[Callable[[str], str]] = None) -> None:
+        self.up = uploader
+        self.repo = repo
+        self.tmp = tmp_dir
+        self.artifact = artifact
+        self._mask = mask or (lambda text: text)
+        self.uploaded: list = []
+        self.failures: list = []
+
+    def _reason(self, exc: Exception) -> str:
+        if isinstance(exc, (gp.GeminiInputError, gp.GeminiRuntimeError)):
+            return self._mask(str(exc))
+        return type(exc).__name__
+
+    def _copy(self, src: str, name: str) -> str:
+        dst = os.path.join(self.tmp, name)
+        shutil.copyfile(src, dst)
+        if self.artifact is not None:
+            self.artifact.service_copy(dst, name)
+        return dst
+
+    def start(self, missing_path, prompts_path) -> None:
+        """E1: файлы запуска в служебный релиз до любых трат. Первая ошибка останавливает запуск."""
+        if os.path.isfile(str(missing_path)):
+            dst = self._copy(str(missing_path), MISSING_FILENAME)
+            self._required(lambda: self.up.upload_run_file(dst), MISSING_FILENAME)
+        if os.path.isfile(str(prompts_path)):
+            dst = self._copy(str(prompts_path), PROMPTS_FILENAME)
+            self._required(lambda: self.up.upload_service_file(dst), PROMPTS_FILENAME)
+
+    def _required(self, fn: Callable[[], None], name: str) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            raise ReleaseStartError(
+                f"Не удалось загрузить {name} в служебный релиз: {self._reason(exc)}. "
+                "Запуск остановлен до трат.") from None
+        self.uploaded.append(name)
+
+    def _soft(self, fn: Callable[[], None], name: str) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            self.failures.append(name)
+            log.error("Не удалось загрузить %s: %s.", name, self._reason(exc))
+            return
+        self.uploaded.append(name)
+
+    def finish(self, *, prompts_path=None, report_path=None, bundle_path=None) -> None:
+        """E2, E4: служебные файлы в служебный релиз, generated_links.txt в итоговый."""
+        if report_path:
+            self._soft(lambda: self.up.upload_run_file(report_path), os.path.basename(report_path))
+        if bundle_path:
+            self._soft(lambda: self.up.upload_run_file(bundle_path), os.path.basename(bundle_path))
+        if prompts_path and os.path.isfile(str(prompts_path)):
+            dst = self._copy(str(prompts_path), PROMPTS_FILENAME)
+            self._soft(lambda: self.up.upload_service_file(dst), PROMPTS_FILENAME)
+        if not self.repo:
+            log.warning("Репозиторий не задан: generated_links.txt не создан.")
+        elif not (getattr(self.up, "done", None) or getattr(self.up, "asset_tags", None)):
+            log.info("Нет готовых клипов: generated_links.txt не выкладывается.")  # SPEC 9.4
+        else:
+            dst = os.path.join(self.tmp, LINKS_FILENAME)
+            Path(dst).write_text(self.up.links_text(self.repo), encoding="utf-8", newline="\n")
+            self._soft(lambda: self.up.upload_service_file(dst), LINKS_FILENAME)
+
+
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
@@ -362,6 +532,7 @@ class Orchestrator:
         monitor_interval_sec: int = 10,
         min_inet_mbps: float = 800.0,
         heartbeat_path=None,
+        artifact_dir=None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -476,6 +647,10 @@ class Orchestrator:
         self.deadline_reached = False
         self.budget_exceeded = False
         self.cleanup_ok = True
+        self.run_id = str(run_id).strip()
+        self._publisher: Optional[RunPublisher] = None
+        # артефакт запуска (SPEC 10.4); для пилота не ведётся
+        self._artifact = RunArtifact(artifact_dir, self._mask_remote) if (artifact_dir and not self.pilot) else None
 
     def __repr__(self) -> str:
         return f"Orchestrator(метка={self.label}, карт<={self.max_cards})"
@@ -517,7 +692,7 @@ class Orchestrator:
                 stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec)
         return slot.monitor
 
-    def _pull_card_logs(self, slot: _CardSlot, *, final: bool) -> bool:
+    def _pull_card_logs(self, slot: _CardSlot, *, final: bool, timeout: float = LOGS_TIMEOUT_SEC) -> bool:
         """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
 
         Печатаются только строки после курсора, каждая с префиксом «[карта N]» и после маскирования.
@@ -528,7 +703,7 @@ class Orchestrator:
         params = {} if slot.log_next is None else {"since": slot.log_next}
         try:
             resp = self._http.get(slot.url + "/logs", headers=self._headers, params=params,
-                                  timeout=LOGS_TIMEOUT_SEC)
+                                  timeout=timeout)
             if resp.status_code != 200:
                 raise _WorkerHttpError(resp.status_code)
             cursor = resp.headers.get("X-Log-Next", "")
@@ -540,6 +715,9 @@ class Orchestrator:
             return False
         lines = self._mask_remote(text).splitlines()
         slot.log_next = int(cursor)
+        if self._artifact is not None:  # строки уже замаскированы; пишутся по мере получения (SPEC 10.3)
+            for line in lines:
+                self._artifact.card_line(slot, line)
         if not final and lines:
             reason = self._monitor(slot).feed(lines)
             if reason:
@@ -557,7 +735,7 @@ class Orchestrator:
         из цикла: цикл продолжается, уничтожение не задерживается.
         """
         for slot in list(self._slots.values()):
-            if slot.state != "ready" or not slot.url:
+            if slot.state not in ("booting", "ready") or not slot.url:  # C1: booting с адресом тоже
                 continue
             if slot.log_pulled is not None and now - slot.log_pulled < LOG_PULL_INTERVAL_SEC:
                 continue
@@ -576,6 +754,17 @@ class Orchestrator:
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
         self._t0 = self.clock()
+        handler = None
+        if self._artifact is not None:
+            handler = _RunLogHandler(self._artifact)
+            logging.getLogger("Generate").addHandler(handler)
+        try:
+            return self._run_body()
+        finally:
+            if handler is not None:
+                logging.getLogger("Generate").removeHandler(handler)
+
+    def _run_body(self) -> RunSummary:
         try:
             if self.pilot:
                 return self._run_pilot()
@@ -600,23 +789,37 @@ class Orchestrator:
         uploader = ReleaseUploader(
             self.release_store, self.segments, self.profile, release_tag=self.release_tag,
             release_asset_limit=self.release_asset_limit, filename_template=self.template,
-            log=self._info)
-        done = uploader.prepare()
+            log=self._info, run_id=self.run_id)
+        try:
+            done = uploader.prepare()  # открывает служебный релиз run-<run_id>-service (SPEC 9.1, E1)
+        except gp.GeminiRuntimeError as exc:
+            raise ReleaseStartError(
+                f"Не удалось открыть релиз запуска: {self._mask_remote(str(exc))}. "
+                "Запуск остановлен до трат.") from None
         self._uploader = uploader
+        self._publisher = RunPublisher(uploader, self.repo, self._tmp, artifact=self._artifact,
+                                       mask=self._mask_remote)
         needed = [n for n in missing if n not in done]
         summary = RunSummary(total_needed=len(needed), skipped_done=len(missing) - len(needed))
+        # E1: missing.txt и prompts.json до любых трат; ошибка загрузки останавливает запуск (код 2)
+        self._publisher.start(self.missing_path, self.prompts_path)
         if not needed:
             log.info("Все запрошенные клипы уже в Release (%d): аренда карт не требуется.", len(missing))
-            self._upload_services()
+            self._fill_summary(summary, needed)
+            self._finish(summary)
             return summary
-
         try:
-            ready = self._generate(needed)
-            self._work(ready)
+            try:
+                ready = self._generate(needed)
+                self._work(ready)
+            finally:
+                self._cleanup()  # F1 (1)-(2): логи и JSON с лимитом времени, затем уничтожение по метке
         finally:
-            self._cleanup()
-            self._upload_services()
+            self._fill_summary(summary, needed)
+            self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
+        return summary
 
+    def _fill_summary(self, summary: RunSummary, needed: list) -> None:
         summary.completed = len(self._done)
         summary.failed = len(self._failed)
         summary.pending = len(needed) - summary.completed - summary.failed
@@ -630,13 +833,52 @@ class Orchestrator:
                                   if self._durations else 0.0)
         full = summary.completed == len(needed) and self.cleanup_ok
         summary.exit_code = EXIT_OK if full else EXIT_PARTIAL
+
+    def _report_text(self, summary: RunSummary) -> str:
+        """Отчёт запуска (run/summary.md): только числа и итоговые признаки, без адресов и токенов."""
+        lines = [
+            f"# Итог запуска {self.run_id}",
+            "",
+            f"- нужно сделать клипов: {summary.total_needed}",
+            f"- готово: {summary.completed}",
+            f"- с ошибкой: {summary.failed}",
+            f"- не обработано: {summary.pending}",
+            f"- уже было в Release: {summary.skipped_done}",
+            f"- арендовано карт: {summary.cards_rented}",
+            f"- уничтожено карт: {summary.destroyed_cards}",
+            f"- среднее время клипа, с: {summary.avg_render_sec:.1f}",
+            f"- потрачено, USD: {summary.spent_usd:.4f}",
+            f"- код завершения (до загрузки отчёта): {summary.exit_code}",
+        ]
+        if not summary.cleanup_ok:
+            lines.append("- ВНИМАНИЕ: уничтожение карт не подтверждено, проверьте Vast.ai")
+        return "\n".join(lines) + "\n"
+
+    def _finish(self, summary: RunSummary) -> None:
+        """F1 (3)-(4) и E2: отчёт, архив логов и служебные файлы; итоговая строка последней."""
+        self._log_budget()
+        pub = self._publisher
+        if pub is not None and self._tmp:
+            report_path = os.path.join(self._tmp, REPORT_FILENAME)
+            text = self._report_text(summary)
+            Path(report_path).write_text(self._mask_remote(text), encoding="utf-8", newline="\n")
+            bundle_path = None
+            if self._artifact is not None:
+                self._artifact.write_report(text)
+                if os.path.isfile(str(self.prompts_path)):
+                    self._artifact.service_copy(str(self.prompts_path), PROMPTS_FILENAME)
+                self._artifact.write_files_list()
+                bundle_path = os.path.join(self._tmp, LOG_BUNDLE_NAME)
+                self._artifact.make_bundle(bundle_path)
+            pub.finish(prompts_path=str(self.prompts_path), report_path=report_path,
+                       bundle_path=bundle_path)
+            if pub.failures:  # E4: частичный итог, каждая ошибка уже записана одной строкой
+                summary.exit_code = EXIT_PARTIAL
         log.info("Итог: готово %d из %d, ошибок %d, не начато %d, арендовано карт %d, "
                  "уничтожено карт %d, среднее время клипа %.1f с, потрачено %.4f USD, код %d.",
-                 summary.completed, len(needed), summary.failed, summary.pending,
+                 summary.completed, summary.total_needed, summary.failed, summary.pending,
                  summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
                  summary.spent_usd, summary.exit_code)
-        self._log_budget()
-        return summary
 
     # --- пилот ComfyUI (pilot-comfyui.yml) -----------------------------------
     def _run_pilot(self) -> RunSummary:
@@ -961,10 +1203,16 @@ class Orchestrator:
         log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
                  _card_name(slot), offer.offer_id, mode, offer.price_per_hr)
         log.info("%s создана, ждём загрузку образа.", _card_name(slot, cap=True))
+        if self._artifact is not None:  # meta.json без ключей и токенов (SPEC 10.4)
+            self._artifact.card_meta(slot, {
+                "slot": slot.index, "generation": slot.generation, "instance_id": inst_id,
+                "machine_id": offer.machine_id, "offer_id": offer.offer_id,
+                "price_per_hr": offer.price_per_hr, "mode": mode, "created_utc": _utc_now()})
         return "ok"
 
     def _retire(self, slot: _CardSlot, reason: str, *, bad: bool = False) -> None:
         log.warning("%s снимается: %s.", _card_name(slot, cap=True), reason)
+        self._card_status(slot, f"снята: {reason}")
         self._budget_blocked = False
         task = slot.task
         slot.task = None  # клип больше не назначен этой карте до возврата в очередь (SPEC 8.2)
@@ -994,14 +1242,14 @@ class Orchestrator:
             self._destroyed += 1
         self._slots.pop(slot.index, None)
 
-    def _dump_before_destroy(self, slot: _CardSlot) -> None:
+    def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC) -> None:
         """Логи карты запрашиваются до уничтожения; без адреса воркера запрос невозможен.
 
         Любая ошибка здесь гасится: уничтожение карты от логов не зависит.
         """
         try:
             if slot.url:
-                self._pull_card_logs(slot, final=True)
+                self._pull_card_logs(slot, final=True, timeout=timeout)
             else:
                 log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
         except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
@@ -1129,6 +1377,7 @@ class Orchestrator:
                     slot.vast_status = info.actual_status
                     log.info("%s: состояние Vast «%s».", _card_name(slot, cap=True),
                              info.actual_status or "неизвестно")
+                    self._card_status(slot, f"состояние Vast «{info.actual_status or 'неизвестно'}»")
                 if info.actual_status == "loading":
                     slot.saw_loading = True
                 if info.actual_status == "created":
@@ -1454,9 +1703,16 @@ class Orchestrator:
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:
-        # логи карт, которые ещё живы, запрашиваются до уборки по метке (SPEC 10)
+        # F1 (1): логи и JSON живых карт до уборки по метке, не дольше ARTIFACT_SAVE_LIMIT_SEC
+        deadline = self.clock() + ARTIFACT_SAVE_LIMIT_SEC
         for slot in list(self._slots.values()):
-            self._dump_before_destroy(slot)
+            left = deadline - self.clock()
+            if left <= 0:
+                log.warning("Лимит %d с на сохранение логов исчерпан: карта %d без выгрузки логов.",
+                            int(ARTIFACT_SAVE_LIMIT_SEC), slot.instance_id)
+                continue
+            self._dump_before_destroy(slot, timeout=min(LOGS_TIMEOUT_SEC, left))
+            self._save_instance(slot)
         try:
             ids = self.vast.destroy_by_label(self.label)
             self._destroyed += len(ids)
@@ -1497,24 +1753,19 @@ class Orchestrator:
                 except BudgetError:
                     pass
 
-    def _upload_services(self) -> None:
-        """prompts.json и generated_links.txt в основной релиз; ошибки не фатальны."""
-        if self._uploader is None or not self._tmp:
+    def _card_status(self, slot: _CardSlot, text: str) -> None:
+        if self._artifact is not None:
+            self._artifact.card_status(slot, text)
+
+    def _save_instance(self, slot: _CardSlot) -> None:
+        """JSON экземпляра перед уничтожением (SPEC 8.3 в, 10.2); ошибка не мешает уборке."""
+        if self._artifact is None:
             return
         try:
-            if self.prompts_path.exists():
-                dst = os.path.join(self._tmp, PROMPTS_FILENAME)
-                shutil.copyfile(self.prompts_path, dst)
-                self._uploader.upload_service_file(dst)
-            if self.repo:
-                dst = os.path.join(self._tmp, LINKS_FILENAME)
-                Path(dst).write_text(self._uploader.links_text(self.repo), encoding="utf-8")
-                self._uploader.upload_service_file(dst)
-            else:
-                log.warning("Репозиторий не задан: generated_links.txt не создан.")
+            info = self.vast.get_instance(slot.instance_id)
+            self._artifact.card_instance(slot, dict(getattr(info, "raw", None) or {}))
         except Exception as exc:
-            log.error("Не удалось выложить служебные файлы: %s",
-                      exc if isinstance(exc, gp.GeminiRuntimeError) else type(exc).__name__)
+            log.warning("Не удалось сохранить JSON карты %d: %s.", slot.instance_id, type(exc).__name__)
 
 
 def run_generation(*args, **kwargs) -> RunSummary:

@@ -118,6 +118,10 @@ class FakeVast:
         self.is_bid: dict = {}          # предложение -> is_bid в ответе карты (нет записи = True)
         self._next = 100
 
+    def _redact(self, text: str) -> str:
+        """Как у VastClient._redact: ключ Vast в тексте заменяется на ***."""
+        return text.replace(VAST_KEY, "***")
+
     def search_offers(self, filters):
         self.search_calls += 1
         return list(self.offers)
@@ -325,7 +329,8 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
     assert summary.total_needed == 2 and summary.cleanup_ok
     assert summary.spent_usd > 0
 
-    assert rig.store.created == [TAG]
+    # релизы запуска: клип-релиз, служебный (в начале), итоговый (в конце, SPEC 9.1)
+    assert rig.store.created == [TAG, ra.service_tag("test"), ra.final_tag("test")]
     assert rig.store.clip_uploads() == ["1.mp4", "2.mp4"]
     # клип существовал на диске в момент загрузки
     assert all(existed for _, name, existed in rig.store.uploads if name.endswith(".mp4"))
@@ -336,9 +341,12 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
     assert rig.worker.acked == [1, 2]
 
     # служебные файлы и ссылки
-    links = rig.store.blobs[(TAG, "generated_links.txt")].decode()
+    # generated_links.txt -> итоговый релиз; prompts.json -> служебный (SPEC 9.1, 9.4, 9.7)
+    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode()
     assert f"https://github.com/owner/repo/releases/download/{TAG}/1.mp4" in links
-    assert (TAG, "prompts.json") in rig.store.blobs
+    assert (ra.service_tag("test"), "prompts.json") in rig.store.blobs
+    assert (TAG, "generated_links.txt") not in rig.store.blobs  # E3: клип-релиз без служебных файлов
+    assert (TAG, "prompts.json") not in rig.store.blobs
 
     # карты уничтожены по метке
     assert rig.vast.label_destroyed == [LABEL]
@@ -383,7 +391,8 @@ def test_all_clips_already_in_release(tmp_path, monkeypatch):
     assert summary.skipped_done == 2 and summary.total_needed == 0
     assert rig.gemini.calls == 0
     assert rig.vast.search_calls == 0 and rig.vast.created == []
-    assert rig.store.created == []
+    # служебный релиз открывается в начале, итоговый создаётся для ссылок (SPEC 9.1, 9.4)
+    assert rig.store.created == [ra.service_tag("test"), ra.final_tag("test")]
     assert rig.store.clip_uploads() == []
 
 
@@ -398,8 +407,10 @@ def test_no_clips_means_no_links_upload(tmp_path, monkeypatch, caplog):
     summary = rig.run()
     assert summary.completed == 0 and rig.vast.created == []
     assert rig.store.clip_uploads() == []
-    assert rig.store.uploads == []                          # ни prompts.json, ни generated_links.txt
-    assert (TAG, "generated_links.txt") not in rig.store.blobs
+    # клип-релиз не получает служебных файлов (E3); links пустые и не выкладываются
+    assert [u for u in rig.store.uploads if u[0] == TAG] == []
+    assert not any(name == "generated_links.txt" for _, name, _ in rig.store.uploads)
+    assert (ra.final_tag("test"), "generated_links.txt") not in rig.store.blobs
     assert caplog.text.count("Нет готовых клипов: generated_links.txt не выкладывается.") == 1
     _no_secrets(caplog.text)
 
@@ -1899,3 +1910,181 @@ def test_per_run_bad_host_is_not_kept_for_next_run(tmp_path, monkeypatch):
     rig2 = Rig(tmp_path / "second", monkeypatch, missing=(1,))
     assert rig2.orc._bad_machines == set() and rig2.orc._bad_offers == set()
     assert list(tmp_path.rglob("bad_hosts.txt")) == []
+
+
+# ---------------------------------------------------------------------------
+# Этап 6c: C1 (логи booting-карт), E1-E5 (релизы и артефакт), F1 (порядок отмены)
+# ---------------------------------------------------------------------------
+
+def _slot(index=1, generation=1, instance_id=77, url="http://10.0.0.1:18000", state="booting"):
+    return orch._CardSlot(index, generation, instance_id, 11, 0.3, 0.0, state=state, url=url)
+
+
+def test_booting_card_with_url_pulls_logs_and_weights_see_them(tmp_path, monkeypatch, caplog):
+    """C1: карта в booting с адресом отдаёт GET /logs; строки загрузки весов доходят до правил."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc._slots[1] = _slot()
+    rig.worker.logs_text = "[setup] [1/5] Начинаю загрузку: diffusion_models/x.safetensors\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert any(u.endswith("/logs") for u in rig.worker.urls)
+    assert "Начинаю загрузку" in caplog.text
+
+
+def test_booting_card_without_url_is_not_pulled(tmp_path, monkeypatch):
+    """C2: без адреса воркера GET /logs не выполняется."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc._slots[1] = _slot(url="")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert not any(u.endswith("/logs") for u in rig.worker.urls)
+
+
+def test_service_release_opened_and_start_files_uploaded_before_spending(tmp_path, monkeypatch):
+    """E1: служебный релиз и missing.txt до аренды; prompts.json в служебный релиз."""
+    (tmp_path / "missing.txt").write_text("1\n2\n", encoding="utf-8")
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2))
+    rig.run()
+    svc = ra.service_tag("test")
+    assert (svc, "missing.txt") in rig.store.blobs
+    assert (svc, "prompts.json") in rig.store.blobs
+    assert rig.events.index("upload:missing.txt") < rig.events.index("vast_create")
+    assert rig.store.created[0] == TAG                       # клип-релиз проверяется первым
+    assert svc in rig.store.created
+
+
+def test_service_start_upload_failure_stops_before_any_spending(tmp_path, monkeypatch):
+    """E1: сбой загрузки missing.txt в начале: ReleaseStartError (код 2), Vast и Gemini не вызваны."""
+    (tmp_path / "missing.txt").write_text("1\n", encoding="utf-8")
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+
+    def failing(tag, path):
+        import os
+        if os.path.basename(path) == "missing.txt":
+            raise orch.gp.GeminiRuntimeError("Команда gh завершилась с кодом 1: сбой")
+        rig.store.releases[tag].assets.append(os.path.basename(path))
+    monkeypatch.setattr(rig.store, "upload_asset", failing)
+    with pytest.raises(orch.ReleaseStartError) as exc:
+        rig.run()
+    assert "missing.txt" in str(exc.value) and "трат" in str(exc.value)
+    assert rig.vast.search_calls == 0 and rig.vast.created == []
+    assert rig.gemini.calls == 0
+
+
+def test_final_release_links_cover_clip_release_and_parts(tmp_path, monkeypatch):
+    """E2: generated_links.txt в итоговом релизе строится по основному релизу и всем частям."""
+    rig = Rig(tmp_path, monkeypatch, missing=(2,), preload=["1.mp4"])
+    part2 = ra.part_tag(TAG, 2)
+    rig.store.releases[part2] = orch.ReleaseInfo(
+        tag=part2, title="p2", body=f"hash: {FULL_HASH}\nmodel: ltx25", assets=["5.mp4"])
+    rig.run()
+    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode()
+    assert f"/releases/download/{TAG}/1.mp4" in links
+    assert f"/releases/download/{part2}/5.mp4" in links
+    assert f"/releases/download/{part2}/2.mp4" in links
+    assert (part2, "generated_links.txt") not in rig.store.blobs
+    assert not any(t in (TAG, part2) and n in ("prompts.json", "generated_links.txt", "summary.md")
+                   for t, n, _ in rig.store.uploads)
+
+
+def test_upload_failure_gives_exit_3_and_one_line_with_name(tmp_path, monkeypatch, caplog):
+    """E4: сбой выгрузки prompts.json: код 3, одна строка с именем файла; отчёт всё равно уходит."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    real = rig.store.upload_asset
+
+    def failing(tag, path):
+        import os
+        if os.path.basename(path) == "prompts.json":
+            raise orch.gp.GeminiRuntimeError("Команда gh завершилась с кодом 1: сбой выгрузки")
+        real(tag, path)
+    monkeypatch.setattr(rig.store, "upload_asset", failing)
+    summary = rig.run()
+    assert summary.exit_code == 3
+    lines = [r for r in caplog.records if "prompts.json" in r.getMessage() and "Не удалось загрузить" in r.getMessage()]
+    assert len(lines) == 1
+    names = [n for _, n, _ in rig.store.uploads]
+    assert "summary.md" in names and "generated_links.txt" in names
+    _no_secrets(caplog.text)
+
+
+def test_artifact_layout_masking_and_no_secrets(tmp_path, monkeypatch, caplog):
+    """E5 и 0.1: run/, cards/, service/, FILES.txt; строки замаскированы; ключей нет нигде."""
+    caplog.set_level(logging.DEBUG)
+    art = tmp_path / "art"
+    (tmp_path / "missing.txt").write_text("1\n2\n", encoding="utf-8")
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), artifact_dir=art)
+    rig.worker.logs_text = ("[setup] [1/5] Начинаю загрузку: m.safetensors\n"
+                            "[comfyui] Requested to load X\n"
+                            f"в логе токен {TOKEN} и ключ {VAST_KEY}\n")
+    rig.run()
+    assert (art / "run" / "summary.md").is_file()
+    assert (art / "run" / "run.log").is_file()
+    assert "Итог" in (art / "run" / "run.log").read_text(encoding="utf-8")
+    card = art / "cards" / "slot1_generation1"
+    assert (card / "meta.json").is_file() and (card / "status.txt").is_file()
+    wl = (card / "worker_log.txt").read_text(encoding="utf-8")
+    assert "[comfyui] Requested to load X" in wl and "[setup] [1/5]" in wl
+    assert TOKEN not in wl and VAST_KEY not in wl
+    assert (art / "service" / "missing.txt").is_file()
+    files_txt = (art / "FILES.txt").read_text(encoding="utf-8")
+    assert "run/summary.md" in files_txt and "cards/slot1_generation1/meta.json" in files_txt
+    # каждый файл артефакта и каждая загрузка без секретов
+    for p in art.rglob("*"):
+        if p.is_file() and p.suffix != ".zip":
+            _no_secrets(p.read_text(encoding="utf-8"))
+    for (_, _), blob in rig.store.blobs.items():
+        _no_secrets(blob.decode("utf-8", errors="replace"))
+    # журнал запуска и загрузки без клипов в служебном релизе
+    assert (ra.service_tag("test"), "run-logs.zip") in rig.store.blobs
+    _no_secrets(caplog.text)
+
+
+def test_canary_in_hf_token_never_reaches_artifact_or_uploads(tmp_path, monkeypatch):
+    """0.1 п. 10: канарейка TESTKEY-12345 (HF_TOKEN) не попадает в артефакт и в загрузки."""
+    canary = "TESTKEY-12345"
+    monkeypatch.setenv("HF_TOKEN", canary)
+    art = tmp_path / "art"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), artifact_dir=art)
+    rig.worker.logs_text = f"строка с {canary}\n"
+    rig.run()
+    for p in art.rglob("*"):
+        if p.is_file() and p.suffix != ".zip":
+            assert canary not in p.read_text(encoding="utf-8")
+    for blob in rig.store.blobs.values():
+        assert canary.encode() not in blob
+
+
+def test_cancel_saves_logs_destroys_then_uploads_then_summary_last(tmp_path, monkeypatch, caplog):
+    """F1: при остановке порядок: логи и JSON, уничтожение по метке, отчёт и архив, итоговая строка."""
+    caplog.set_level(logging.INFO)
+    art = tmp_path / "art"
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), artifact_dir=art)
+    rig.orc._sleep = lambda sec: (rig.orc._stop.set(), rig.clock.sleep(sec))  # сигнал после первой итерации
+    summary = rig.run()
+    assert summary.exit_code == 3
+    assert rig.vast.label_destroyed == [LABEL]
+    assert (art / "cards" / "slot1_generation1" / "instance.json").is_file()
+    ev = rig.events
+    assert ev.index("vast_create") < ev.index("destroy_by_label")
+    assert ev.index("destroy_by_label") < ev.index("upload:summary.md")
+    assert ev.index("upload:summary.md") < ev.index("upload:run-logs.zip")
+    assert caplog.records[-1].getMessage().startswith("Итог:")
+
+
+def test_cancel_log_saving_respects_60_second_limit(tmp_path, monkeypatch, caplog):
+    """F1 (1): при исчерпанном лимите 60 с логи карты не запрашиваются, уборка идёт дальше."""
+    caplog.set_level(logging.WARNING)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc._slots[1] = _slot(url="http://10.0.0.1:18000", state="ready")
+    rig.orc._cleanup_started = None
+    orig_clock = rig.orc.clock
+    calls = {"n": 0}
+
+    def fast_clock():
+        calls["n"] += 1
+        return orig_clock() + (0.0 if calls["n"] == 1 else orch.ARTIFACT_SAVE_LIMIT_SEC + 1)
+    rig.orc.clock = fast_clock
+    rig.orc._cleanup()
+    assert not any(u.endswith("/logs") for u in rig.worker.urls)
+    assert "Лимит 60 с на сохранение логов исчерпан" in caplog.text
+    assert rig.vast.label_destroyed == [LABEL]

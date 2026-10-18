@@ -178,6 +178,7 @@ def _setup_env(tmp_path: Path, bin_dir: Path, comfy: Path, *, extra: dict | None
         "COMFY_DIR": str(comfy),
         "COMFY_LOG_PATH": str(tmp_path / "comfy.log"),
         "WORKER_READY_FLAG": str(tmp_path / "worker_ready"),
+        "WORKER_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),  # D1: stderr сервера, в tmp
     }
     env.update(extra or {})
     return env
@@ -260,12 +261,48 @@ def _setup_code() -> str:
     return "\n".join(line.split("#", 1)[0] for line in SETUP.read_text(encoding="utf-8").splitlines())
 
 
+_PORT_8188_START = (
+    re.compile(r"--port 8188"),        # запуск ComfyUI на порту 8188
+    re.compile(r"127\.0\.0\.1:8188"),  # проверка или обращение к ComfyUI на 8188
+    re.compile(r"(?<![0-9])8188(?![0-9])"),  # порт 8188 как отдельное число (18188 не совпадает)
+)
+
+
+def _has_8188_start(code: str) -> bool:
+    return any(p.search(code) for p in _PORT_8188_START)
+
+
 def test_setup_does_not_start_comfyui_on_8188():
     code = _setup_code()
-    assert "8188" not in code
+    assert not _has_8188_start(code)
     assert "main.py" not in code
     assert "--listen" not in code
     assert "18188/system_stats" in code
+
+
+def test_port_8188_detector_still_catches_an_added_start():
+    """Проверка самой проверки: добавленный запуск на 8188 должен быть найден (не ослаблено)."""
+    injected = _setup_code() + "\npython main.py --port 8188 &\n"
+    assert _has_8188_start(injected)
+    assert _has_8188_start(_setup_code() + "\ncurl http://127.0.0.1:8188/system_stats\n")
+    assert not _has_8188_start("curl http://127.0.0.1:18188/system_stats")
+
+
+def test_setup_server_stderr_goes_to_bootstrap_log():
+    """D1: stdout сервера в /dev/null, stderr в bootstrap.log (падение сервера видно в логах)."""
+    lines = [ln for ln in SETUP.read_text(encoding="utf-8").splitlines() if "server.py" in ln and "python" in ln]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert ">/dev/null" in line
+    assert '2>>"${WORKER_BOOTSTRAP_LOG}"' in line
+    assert 'WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"' in SETUP.read_text(encoding="utf-8")
+
+
+def test_setup_does_not_invent_template_comfy_log_path():
+    """B3: setup.sh не задаёт COMFY_TEMPLATE_LOG_PATH и не пишет вывод ComfyUI через tee."""
+    code = _setup_code()
+    assert "COMFY_TEMPLATE_LOG_PATH=" not in code
+    assert "tee" not in code
 
 
 def test_setup_starts_server_before_weights_download():

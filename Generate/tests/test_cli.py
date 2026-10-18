@@ -907,3 +907,43 @@ def test_orchestrator_input_error_is_exit_2_in_russian(capsys, run_env, missing_
     assert code == 2
     assert "Ошибка входных данных" in err and "run_id" in err
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------- этап 6c: релиз запуска, артефакт, отмена
+
+def test_release_start_error_is_exit_2_in_russian(capsys, run_env, missing_file, monkeypatch):
+    """E1: служебный релиз не открыт или файл не загружен — код 2 до трат, текст на русском."""
+    def refuse(*args, **kwargs):
+        raise cli.ReleaseStartError("Не удалось загрузить missing.txt в служебный релиз: сбой. Запуск остановлен до трат.")
+    monkeypatch.setattr(cli, "run_generation", refuse)
+    code = cli.main(_run_args(DATA, missing_file, "--worker-build", SHA, "--run-id", "9"))
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Ошибка выдачи в релиз" in err and "missing.txt" in err
+    assert "Traceback" not in err
+
+
+def test_artifact_dir_is_passed_to_orchestrator(capsys, run_env, missing_file, tmp_path):
+    """E5: --artifact-dir доходит до оркестратора; без него артефакт не ведётся (None)."""
+    art = tmp_path / "art"
+    assert cli.main(_run_args(DATA, missing_file, "--run-id", "5", "--worker-build", SHA,
+                              "--artifact-dir", str(art))) == 0
+    assert run_env.calls[-1][1]["artifact_dir"] == str(art)
+    assert cli.main(_run_args(DATA, missing_file, "--run-id", "5", "--worker-build", SHA)) == 0
+    assert run_env.calls[-1][1]["artifact_dir"] is None
+
+
+def test_stop_signal_sets_flag_and_restores_handlers(monkeypatch):
+    """F1: SIGTERM и SIGINT только выставляют флаг остановки; прежние обработчики возвращаются."""
+    import signal
+    import threading
+    stop = threading.Event()
+    before = {s: signal.getsignal(s) for s in cli.STOP_SIGNALS}
+    previous = cli._install_stop_handlers(stop)
+    try:
+        assert not stop.is_set()
+        signal.raise_signal(signal.SIGTERM)
+        assert stop.is_set()
+    finally:
+        cli._restore_handlers(previous)
+    assert {s: signal.getsignal(s) for s in cli.STOP_SIGNALS} == before

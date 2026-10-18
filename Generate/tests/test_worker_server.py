@@ -13,10 +13,12 @@ from pathlib import Path
 try:
     from Generate.core.weights_log import parse_line
     from Generate.worker.comfy_client import ComfyExecutionError
+    from Generate.worker import server as srv
     from Generate.worker.server import DeadManSwitch, WorkerApp, parse_range, strip_url_queries
 except ImportError:
     from core.weights_log import parse_line
     from worker.comfy_client import ComfyExecutionError
+    from worker import server as srv
     from worker.server import DeadManSwitch, WorkerApp, parse_range, strip_url_queries
 
 SETUP_SH = Path(__file__).resolve().parents[1] / "worker" / "setup.sh"
@@ -506,3 +508,58 @@ def test_canary_never_in_bootstrap_lines_returned_by_logs(make_app, tmp_path, mo
     assert "Authorization:***" in body
     assert "?***" in body
 
+
+
+# ---------------------------------------------------------------------------
+# Лог ComfyUI шаблона (этап 6c, B1, B2): COMFY_TEMPLATE_LOG_PATH
+# ---------------------------------------------------------------------------
+
+def test_template_log_unset_writes_one_russian_line_at_start(make_app):
+    """B1: путь не задан — одна строка «не задан», ComfyUI не читается."""
+    app, _ = make_app()
+    with client_for(app) as c:
+        assert _wait_for(lambda: srv.TEMPLATE_COMFY_NOT_SET in c.get("/logs").text)
+        text = c.get("/logs").text
+    assert text.count(srv.TEMPLATE_COMFY_NOT_SET) == 1
+    assert text.splitlines()[0] == BUILD_LINE
+    assert "не задан (COMFY_TEMPLATE_LOG_PATH)" in srv.TEMPLATE_COMFY_NOT_SET
+
+
+def test_template_log_lines_reach_logs_with_comfyui_prefix(make_app, tmp_path):
+    """B2: строки файла ComfyUI попадают в GET /logs с префиксом «[comfyui] », без строки «не задан»."""
+    log = tmp_path / "comfyui_template.log"
+    log.write_text("Starting server\nLoading model weights\n", encoding="utf-8")
+    app, _ = make_app(template_log_path=str(log))
+    with client_for(app) as c:
+        assert _wait_for(lambda: "[comfyui] Loading model weights" in c.get("/logs").text)
+        text = c.get("/logs").text
+    lines = text.splitlines()
+    assert "[comfyui] Starting server" in lines
+    assert srv.TEMPLATE_COMFY_NOT_SET not in text
+
+
+def test_template_log_lines_are_masked_before_buffer(make_app, tmp_path):
+    """B2 и 0.1: токен воркера, попавший в лог ComfyUI, в GET /logs не виден."""
+    log = tmp_path / "comfyui_template.log"
+    log.write_text(f"Authorization: Bearer {TOKEN}\nготово\n", encoding="utf-8")
+    app, _ = make_app(template_log_path=str(log))
+    with client_for(app) as c:
+        assert _wait_for(lambda: "[comfyui] готово" in c.get("/logs").text)
+        text = c.get("/logs").text
+    assert TOKEN not in text
+    assert "[comfyui] готово" in text
+
+
+def test_template_log_is_read_from_start_with_cursor(make_app, tmp_path):
+    """B2: курсор since работает и для строк ComfyUI: новые строки приходят без повторов."""
+    log = tmp_path / "comfyui_template.log"
+    log.write_text("первая\n", encoding="utf-8")
+    app, _ = make_app(template_log_path=str(log))
+    with client_for(app) as c:
+        assert _wait_for(lambda: "[comfyui] первая" in c.get("/logs").text)
+        cursor = int(c.get("/logs").headers["X-Log-Next"])
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write("вторая\n")
+        assert _wait_for(lambda: "[comfyui] вторая" in c.get("/logs", params={"since": cursor}).text)
+        tail = c.get("/logs", params={"since": cursor}).text
+    assert "[comfyui] первая" not in tail

@@ -47,7 +47,8 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from Generate.core.gemini_prompts import GeminiInputError
-    from Generate.core.orchestrator import run_generation
+    from Generate.core.orchestrator import (
+        ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
     from Generate.core.vast_client import (
@@ -57,7 +58,8 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from gemini_prompts import GeminiInputError  # type: ignore
-    from orchestrator import run_generation  # type: ignore
+    from orchestrator import (  # type: ignore
+        ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
     from vast_client import (  # type: ignore
@@ -505,7 +507,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             pilot=_pilot_mode(args),
             # пустая команда не передаётся дальше (None): onstart в payload не попадает
             pilot_start_cmd=(getattr(args, "pilot_start_cmd", "") or "").strip() or None,
+            # артефакт запуска (SPEC 10.4): каталог задаёт workflow; пусто = не ведётся
+            artifact_dir=(getattr(args, "artifact_dir", "") or None),
         )
+    except ReleaseStartError as e:
+        # служебный релиз или файл запуска не загружены: остановка до трат, код 2 (SPEC 9.1, E1)
+        _err(f"Ошибка выдачи в релиз: {e}")
+        return EXIT_INPUT
     except GeminiInputError as e:
         # ошибка входа из оркестратора (run_id, номер сборки): код 2, текст на русском, карт не арендовано
         _err(f"Ошибка входных данных: {e}")
@@ -550,8 +558,8 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
 def cmd_finalize_release(args: argparse.Namespace) -> int:
     """Доводит выдачу до конца: prompts.json и generated_links.txt по уже загруженным клипам.
 
-    Безопасна при повторном запуске и после отмены: если Release ещё не создан,
-    завершается с кодом 0 (финализировать нечего).
+    Та же логика выдачи, что у оркестратора (RunPublisher, SPEC 9.1, 9.4, 9.7; F2).
+    Безопасна при повторном запуске: если клип-релиз ещё не создан, завершается с кодом 0.
     """
     cfg, code = _load_cfg(args.config, {"model_profile": args.model_profile})
     if code is not None:
@@ -571,28 +579,14 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
         uploader = ReleaseUploader(store, segments, cfg.model_profile,
                                    release_tag=args.release_tag,
                                    release_asset_limit=cfg.release_asset_limit,
-                                   filename_template=cfg.filename_template)
+                                   filename_template=cfg.filename_template,
+                                   run_id=args.run_id or None)
         uploader.prepare()
         clips = len(uploader.done)
 
         with tempfile.TemporaryDirectory() as tmp:
-            prompts_uploaded = False
-            if os.path.isfile(args.prompts_path):
-                # служебный файл должен называться строго prompts.json
-                prompts_copy = os.path.join(tmp, PROMPTS_FILENAME)
-                shutil.copyfile(args.prompts_path, prompts_copy)
-                uploader.upload_service_file(prompts_copy)
-                prompts_uploaded = True
-            else:
-                print(f"Файл промптов не найден ({args.prompts_path}): он не загружен.")
-
-            links_uploaded = False
-            if args.repo and uploader.done:
-                links_path = os.path.join(tmp, LINKS_FILENAME)
-                with open(links_path, "w", encoding="utf-8", newline="\n") as fh:
-                    fh.write(uploader.links_text(args.repo))
-                uploader.upload_service_file(links_path)
-                links_uploaded = True
+            pub = RunPublisher(uploader, args.repo, tmp)
+            pub.finish(prompts_path=args.prompts_path)
     except Exception as e:  # noqa: BLE001
         # текст берём только у своих ошибок проекта (у них есть exit_code); иначе только тип
         if hasattr(e, "exit_code"):
@@ -601,12 +595,18 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
             _err(f"Не удалось завершить выдачу клипов ({type(e).__name__}).")
         return EXIT_RUNTIME
 
+    prompts_uploaded = PROMPTS_FILENAME in pub.uploaded
+    links_uploaded = LINKS_FILENAME in pub.uploaded
+    if not os.path.isfile(args.prompts_path):
+        print(f"Файл промптов не найден ({args.prompts_path}): он не загружен.")
     print("Выдача клипов завершена.")
     print(f"  релиз: {tag}")
     print(f"  клипов в релизах: {clips}")
     print(f"  prompts.json загружен: {'да' if prompts_uploaded else 'нет'}")
     print(f"  generated_links.txt загружен: {'да' if links_uploaded else 'нет'}")
-    return EXIT_OK
+    for name in pub.failures:
+        _err(f"Не удалось загрузить {name}.")
+    return EXIT_RUNTIME if pub.failures else EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -671,6 +671,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "не задано = из конфига")
     run_p.add_argument("--worker-build", default="",
                        help="номер коммита сборки воркера (SHA), нужен для пустого образа")
+    run_p.add_argument("--artifact-dir", default="",
+                       help="каталог артефакта запуска (SPEC 10.4); пусто = не вести")
     run_p.add_argument("--heartbeat-path", default=None,
                        help="путь файла heartbeat (JSON, для наблюдателя); по умолчанию не пишется")
     run_p.add_argument("--disk-gb", type=int, default=None,
@@ -708,6 +710,8 @@ def build_parser() -> argparse.ArgumentParser:
     fin_p.add_argument("--release-tag", default=None, help="тег Release (необязательно)")
     fin_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
+    fin_p.add_argument("--run-id", default="",
+                       help="номер запуска: нужен для служебного и итогового релизов (необязательно)")
     fin_p.set_defaults(func=lambda a: cmd_finalize_release(a))
     return parser
 

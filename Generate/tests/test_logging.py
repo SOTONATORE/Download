@@ -458,11 +458,22 @@ def test_periodic_pull_interval_and_stop_after_destroy(logs_rig):
     assert rig.worker.logs_calls == 2
 
 
-def test_booting_card_is_not_polled_for_logs(logs_rig):
+def test_booting_card_with_url_is_polled_for_logs(logs_rig):
+    """C1 (этап 6c): карта в booting с адресом воркера отдаёт GET /logs (строки весов нужны правилам)."""
     rig = logs_rig(missing=(1,))
     rig.orc._slots[1] = orch._CardSlot(
         index=1, generation=1, instance_id=101, machine_id=11, price=0.3,
         created=rig.clock(), state="booting", url="http://10.0.0.1:18000")
+    rig.orc._pull_due_logs(rig.clock())
+    assert rig.worker.logs_calls == 1
+
+
+def test_booting_card_without_url_is_not_polled_for_logs(logs_rig):
+    """C2: без адреса воркера GET /logs не выполняется."""
+    rig = logs_rig(missing=(1,))
+    rig.orc._slots[1] = orch._CardSlot(
+        index=1, generation=1, instance_id=101, machine_id=11, price=0.3,
+        created=rig.clock(), state="booting", url="")
     rig.orc._pull_due_logs(rig.clock())
     assert rig.worker.logs_calls == 0
 

@@ -66,6 +66,12 @@ DEFAULT_READY_FLAG = "/workspace/worker_ready"
 # Лог setup.sh и aria2 (onstart перенаправляет туда вывод bootstrap.sh): хвост идёт в буфер GET /logs (SPEC 8.1)
 BOOTSTRAP_LOG_ENV = "WORKER_BOOTSTRAP_LOG"
 DEFAULT_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
+# Лог ComfyUI шаблона образа (SPEC 8.5, B1, B2): путь пока не известен, первый прогон его подтвердит.
+# Пустое значение = не настроено: в лог пишется одна строка, файл не читается. Путь в коде не угадывается.
+TEMPLATE_COMFY_LOG_ENV = "COMFY_TEMPLATE_LOG_PATH"
+TEMPLATE_COMFY_PREFIX = "[comfyui] "
+TEMPLATE_COMFY_NOT_SET = ("Лог ComfyUI шаблона не задан (COMFY_TEMPLATE_LOG_PATH): "
+                          "строки ComfyUI не читаются.")
 
 _ID_RE = r"([A-Za-z0-9_-]+)"
 _RE_TASK = re.compile(rf"^/task/{_ID_RE}$")
@@ -830,7 +836,8 @@ class WorkerApp:
                  telemetry_gpu_stats: Optional[Callable[[], dict]] = None,
                  telemetry_interval_check: float = 1.0,
                  ready_flag: Optional[str] = None,
-                 bootstrap_log_path: Optional[str] = None) -> None:
+                 bootstrap_log_path: Optional[str] = None,
+                 template_log_path: Optional[str] = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -867,6 +874,13 @@ class WorkerApp:
             self.bootstrap_reader = ComfyOutputReader(
                 bootstrap_log_path, self.logbuf.add,
                 lambda text: mask_secrets(strip_url_queries(text)))
+        # Лог ComfyUI шаблона: тот же читатель, что у bootstrap.log (без второго), строки с пометкой [comfyui]
+        self.template_reader: Optional[ComfyOutputReader] = None
+        self.template_log_path = template_log_path or None
+        if self.template_log_path:
+            self.template_reader = ComfyOutputReader(
+                self.template_log_path, self._template_line,
+                lambda text: mask_secrets(strip_url_queries(text)))
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
         self._serve_thread: Optional[threading.Thread] = None
@@ -874,6 +888,10 @@ class WorkerApp:
     def is_ready(self) -> bool:
         """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""
         return self.ready_flag is None or self.ready_flag.exists()
+
+    def _template_line(self, line: str) -> None:
+        """Строка ComfyUI шаблона (B2): в буфер GET /logs с пометкой [comfyui]."""
+        self.logbuf.add(TEMPLATE_COMFY_PREFIX + line)
 
     def _comfy_line(self, line: str) -> None:
         """Строка ComfyUI: в буфер логов, с русской пометкой; в контейнерный лог уже попала через tee."""
@@ -918,6 +936,10 @@ class WorkerApp:
             self.comfy_reader.start()
         if self.bootstrap_reader is not None:
             self.bootstrap_reader.start()
+        if self.template_reader is not None:
+            self.template_reader.start()
+        else:
+            self.logbuf.add(TEMPLATE_COMFY_NOT_SET)  # B1: одна строка при старте, если путь не задан
 
     def serve_forever(self) -> None:
         self._start_workers()
@@ -943,6 +965,8 @@ class WorkerApp:
             self.comfy_reader.stop()
         if self.bootstrap_reader is not None:
             self.bootstrap_reader.stop()
+        if self.template_reader is not None:
+            self.template_reader.stop()
         if self._serve_thread is not None:
             self.httpd.shutdown()
             self._serve_thread.join(timeout=5)
@@ -992,7 +1016,8 @@ def main() -> int:
                     workflow=workflow, bindings=bindings,
                     output_dir=os.environ.get("COMFY_OUTPUT_DIR", DEFAULT_OUTPUT_DIR),
                     log_level=level, build_id=build,
-                    comfy_log_path=os.environ.get(COMFY_LOG_ENV, "") or None,
+                    # COMFY_LOG_PATH больше не читается: путь лога ComfyUI шаблона задаёт COMFY_TEMPLATE_LOG_PATH
+                    template_log_path=os.environ.get(TEMPLATE_COMFY_LOG_ENV, "") or None,
                     # пустое значение не отключает проверку: иначе /health отдал бы ok=true до готовности
                     ready_flag=os.environ.get(READY_FLAG_ENV) or DEFAULT_READY_FLAG,
                     bootstrap_log_path=os.environ.get(BOOTSTRAP_LOG_ENV) or DEFAULT_BOOTSTRAP_LOG)
