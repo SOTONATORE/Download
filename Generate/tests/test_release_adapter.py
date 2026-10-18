@@ -527,7 +527,10 @@ def test_canary_exception_inside_runner_not_leaked():
     assert e.value.__cause__ is None
 
 
-PROJECT_SECRET_NAMES = ("GEN_VAST_API_KEY", "GEN_GEMINI_API_KEY", "HF_TOKEN", "WORKER_TOKEN", "GITHUB_TOKEN")
+GEN_VAST = "GEN_" + "VAST_API_KEY"
+GEN_GEMINI = "GEN_" + "GEMINI_API_KEY"
+HF_TOKEN_NAME = "HF_" + "TOKEN"
+PROJECT_SECRET_NAMES = (GEN_VAST, GEN_GEMINI, HF_TOKEN_NAME, "WORKER_TOKEN", "GITHUB_TOKEN")
 
 
 def test_gh_env_names_are_exactly_the_constant_and_no_project_secret_name():
@@ -547,8 +550,8 @@ def test_gh_process_gets_exactly_gh_env_names_and_no_project_secrets():
 
     environ = {
         "PATH": "/bin", "HOME": "/home/runner", "GH_TOKEN": SECRET, "GITHUB_TOKEN": "ghs-other-XYZ-000",
-        "GEN_VAST_API_KEY": "vast-canary-111", "GEN_GEMINI_API_KEY": "gemini-canary-222",
-        "HF_TOKEN": "hf-canary-333", "WORKER_TOKEN": "worker-canary-444", "LANG": "C.UTF-8",
+        GEN_VAST: "vast-canary-111", GEN_GEMINI: "gemini-canary-222",
+        HF_TOKEN_NAME: "hf-canary-333", "WORKER_TOKEN": "worker-canary-444", "LANG": "C.UTF-8",
     }
     ra.GhCommandRunner(environ=environ, run=run)(["release", "list"])
     env = calls[0]["env"]

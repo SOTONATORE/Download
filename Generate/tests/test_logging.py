@@ -8,6 +8,7 @@ GEN_LOG_LEVEL (передача карте, код 2 при неверном з�
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sys
@@ -688,6 +689,7 @@ def test_remote_text_and_log_share_one_masking_function(monkeypatch):
               f"ip=46.224.213.21 max_tokens=512")
     remote = orch.Orchestrator.__new__(orch.Orchestrator)  # без конструктора: нужны только _token и vast
     remote._token = ""
+    remote._card_addresses = set()
     remote.vast = None
     out = remote._mask_remote(sample)
     assert out == ls.mask_remote_text(sample) == ls.mask_text(sample)
