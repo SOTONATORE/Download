@@ -130,3 +130,41 @@ def test_messages_are_russian_and_no_traceback(tmp_path, segments):
     assert any("а" <= ch.lower() <= "я" for ch in msg)
     assert "Traceback" not in msg
     assert ei.value.__cause__ is None
+
+
+# --- SPEC 9.6: заглушка и ошибки (этап 3) ----------------------------------
+
+SPEC_STUB = "Пропущенных сегментов нет - все найдены и успешно скачаны."
+
+
+def test_stub_text_matches_spec_96():
+    assert STUB_LINE == SPEC_STUB
+
+
+def test_stub_alone_needs_no_srt_segments(tmp_path):
+    # генерировать нечего: SRT не нужен и ошибки отсутствия номеров не будет
+    assert parse_missing(_write(tmp_path, (SPEC_STUB + "\r\n").encode()), []) == []
+
+
+def test_stub_after_numbers_is_error(tmp_path, segments):
+    with pytest.raises(GeminiInputError) as ei:
+        parse_missing(_write(tmp_path, (f"2\n{SPEC_STUB}\n").encode()), segments)
+    assert ei.value.exit_code == 2 and "одновременно" in str(ei.value)
+
+
+def test_stub_with_only_blank_lines_around_is_ok(tmp_path, segments):
+    data = ("\n\n  " + SPEC_STUB + "  \n\n").encode()
+    assert parse_missing(_write(tmp_path, data), segments) == []
+
+
+def test_number_missing_in_srt_is_error_before_any_spend(tmp_path, segments):
+    with pytest.raises(GeminiInputError) as ei:
+        parse_missing(_write(tmp_path, b"10\n11\n"), segments)
+    assert ei.value.exit_code == 2 and "[11]" in str(ei.value)
+
+
+def test_error_text_has_no_traceback_and_names_file(tmp_path, segments):
+    with pytest.raises(GeminiInputError) as ei:
+        parse_missing(_write(tmp_path, b"1\nabc\n"), segments)
+    msg = str(ei.value)
+    assert "missing.txt" in msg and "abc" in msg and "Traceback" not in msg

@@ -33,6 +33,7 @@ SERVICE_FILES = frozenset({PROMPTS_FILENAME, LINKS_FILENAME})
 
 DEFAULT_ASSET_LIMIT = 900
 HASH_PREFIX_LEN = 12
+CLIP_TAG_PREFIX = "clips-"
 
 # Шаблоны токенов GitHub: вырезаем даже если токен не был передан явно.
 _TOKEN_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})")
@@ -43,29 +44,57 @@ _TOKEN_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10
 # ---------------------------------------------------------------------------
 
 def make_tag(segments, release_tag: Optional[str] = None) -> str:
-    """gen-<первые 12 символов srt_hash>, если не задан свой тег."""
+    """clips-<первые 12 символов srt_hash> (клип-релиз, SPEC 9.1), если не задан свой тег."""
     if release_tag:
         return release_tag
-    return f"gen-{srt_hash(segments)[:HASH_PREFIX_LEN]}"
+    return f"{CLIP_TAG_PREFIX}{srt_hash(segments)[:HASH_PREFIX_LEN]}"
 
 
 def part_tag(tag: str, part: int) -> str:
-    """Тег части: <tag>-part2, <tag>-part3, ..."""
+    """Тег части клип-релиза: <tag>-part2, <tag>-part3, ... (SPEC 9.5)."""
     return f"{tag}-part{part}"
 
 
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _check_run_id(run_id: str) -> str:
+    if not run_id or not _RUN_ID_RE.match(run_id):
+        raise GeminiInputError(f"Недопустимый идентификатор запуска: {run_id!r}")
+    return run_id
+
+
+def service_tag(run_id: str) -> str:
+    """Тег служебного релиза run-<run_id>-service (SPEC 9.1)."""
+    return f"run-{_check_run_id(run_id)}-service"
+
+
+def final_tag(run_id: str) -> str:
+    """Тег итогового релиза run-<run_id>-final (SPEC 9.1)."""
+    return f"run-{_check_run_id(run_id)}-final"
+
+
 def format_title(full_hash: str, when: datetime, part: int = 1) -> str:
-    """gen-<12> · YYYY-MM-DD HH:MM UTC [· часть N]."""
+    """clips-<12> · часть N · YYYY-MM-DD HH:MM UTC (SPEC 9.1)."""
     when = when.astimezone(timezone.utc)
-    title = f"gen-{full_hash[:HASH_PREFIX_LEN]} · {when:%Y-%m-%d %H:%M} UTC"
-    if part > 1:
-        title += f" · часть {part}"
-    return title
+    return (f"{CLIP_TAG_PREFIX}{full_hash[:HASH_PREFIX_LEN]} · часть {part} · "
+            f"{when:%Y-%m-%d %H:%M} UTC")
 
 
 def format_body(full_hash: str, model: str) -> str:
-    """Описание релиза: полный хэш и профиль модели."""
+    """Описание клип-релиза: полный хэш и профиль модели (SPEC 9.1)."""
     return f"hash: {full_hash}\nmodel: {model}"
+
+
+def format_run_title(kind: str, run_id: str, when: datetime) -> str:
+    """Заголовок служебного или итогового релиза (SPEC 9.1)."""
+    when = when.astimezone(timezone.utc)
+    return f"run-{run_id} · {kind} · {when:%Y-%m-%d %H:%M} UTC"
+
+
+def format_run_body(kind: str, run_id: str) -> str:
+    """Описание служебного или итогового релиза: без хэша, только идентификаторы."""
+    return f"run: {run_id}\nkind: {kind}"
 
 
 # ---------------------------------------------------------------------------
@@ -216,12 +245,24 @@ def create_generated_links(repo: str, tag: str, asset_filenames: Sequence[str],
 # ---------------------------------------------------------------------------
 
 class ReleaseUploader:
+    """Выдача клипов и служебных файлов (SPEC 9.1-9.7).
+
+    Проверки 9.2 относятся только к клип-релизам (тег clips-<хэш> и его части).
+    Служебный (run-<run_id>-service) и итоговый (run-<run_id>-final) релизы создаются
+    на каждый запуск и хэш не проверяют. Им нужен run_id: без него служебные файлы
+    (prompts.json, generated_links.txt, missing.txt) не загружаются, и это ошибка,
+    а не тихий пропуск. Клипы без run_id загружаются как раньше.
+    """
+
+    _KIND_LABEL = {"service": "служебный", "final": "итоговый"}
+
     def __init__(self, store: ReleaseStore, segments, model: str,
                  release_tag: Optional[str] = None,
                  release_asset_limit: int = DEFAULT_ASSET_LIMIT,
                  filename_template: str = "{num}.mp4",
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print,
+                 run_id: Optional[str] = None):
         if release_asset_limit <= 0:
             raise GeminiInputError(
                 f"release_asset_limit должен быть положительным: {release_asset_limit}"
@@ -234,13 +275,16 @@ class ReleaseUploader:
         self.template = filename_template
         self._now = now
         self._log = log
-        self._counts: dict = {}      # тег -> число файлов в релизе
+        self.run_id = _check_run_id(run_id) if run_id is not None else None
+        self.service_tag = service_tag(self.run_id) if self.run_id is not None else None
+        self.final_tag = final_tag(self.run_id) if self.run_id is not None else None
+        self._counts: dict = {}      # тег клип-релиза -> число файлов в нём
         self._parts: list = [self.tag]
-        self.asset_tags: dict = {}   # имя файла клипа -> тег релиза
+        self.asset_tags: dict = {}   # имя файла клипа -> тег клип-релиза
         self.done: set = set()
         self._prepared = False
 
-    # --- предполётные проверки -------------------------------------------
+    # --- предполётные проверки (клип-релизы) ----------------------------------
     def _check_release(self, tag: str) -> Optional[ReleaseInfo]:
         found = self.store.find_releases(tag)
         if len(found) > 1:
@@ -255,7 +299,9 @@ class ReleaseUploader:
         return rel
 
     def prepare(self) -> set:
-        """Проверки 1-3. Возвращает номера уже загруженных клипов."""
+        """Проверки 1-3 для клип-релизов. Возвращает номера уже загруженных клипов.
+
+        При заданном run_id заодно открывает служебный релиз (начало запуска, 9.1)."""
         done: set = set()
         main = self._check_release(self.tag)
         if main is None:
@@ -277,6 +323,8 @@ class ReleaseUploader:
             self._log(f"Продолжение: в релизах уже {len(done)} клипов.")
         self.done = done
         self._prepared = True
+        if self.run_id is not None:
+            self._open_run_release("service")
         return set(done)
 
     def _absorb(self, rel: ReleaseInfo, done: set) -> None:
@@ -287,7 +335,37 @@ class ReleaseUploader:
                 done.add(num)
                 self.asset_tags[name] = rel.tag
 
-    # --- загрузка ----------------------------------------------------------
+    # --- служебный и итоговый релизы (SPEC 9.1, 9.2) ---------------------------
+    def _open_run_release(self, kind: str) -> str:
+        """Создаёт служебный или итоговый релиз, если его нет. Хэш не проверяется.
+
+        Больше одного релиза с тегом: та же остановка, что и для клип-релизов."""
+        if self.run_id is None:
+            raise GeminiInputError("Не задан идентификатор запуска (run_id): релиз запуска не открыт.")
+        tag = self.service_tag if kind == "service" else self.final_tag
+        found = self.store.find_releases(tag)
+        if len(found) > 1:
+            raise GeminiInputError(
+                f"Найдено несколько релизов с тегом {tag}, удалите лишние вручную."
+            )
+        if not found:
+            self.store.create_release(tag,
+                                      format_run_title(self._KIND_LABEL[kind], self.run_id, self._now()),
+                                      format_run_body(kind, self.run_id))
+            self._log(f"Создан релиз {tag}.")
+        return tag
+
+    def open_service_release(self) -> str:
+        """Открывает служебный релиз run-<run_id>-service (в начале запуска)."""
+        self._ensure_prepared()
+        return self._open_run_release("service")
+
+    def open_final_release(self) -> str:
+        """Открывает итоговый релиз run-<run_id>-final (один раз, в конце запуска)."""
+        self._ensure_prepared()
+        return self._open_run_release("final")
+
+    # --- загрузка -------------------------------------------------------------
     def _ensure_prepared(self) -> None:
         if not self._prepared:
             raise GeminiInputError("Сначала нужно вызвать prepare() (предполётные проверки).")
@@ -306,7 +384,7 @@ class ReleaseUploader:
         return pt
 
     def upload_clip(self, path: str) -> bool:
-        """Загружает клип; False, если клип с таким номером уже загружен."""
+        """Загружает клип в активную часть клип-релиза; False, если номер уже загружен."""
         self._ensure_prepared()
         name = os.path.basename(path)
         num = parse_clip_num(name, self.template)
@@ -326,8 +404,25 @@ class ReleaseUploader:
         name = clip_filename(num, width, self.template)
         return self.upload_clip(os.path.join(directory, name))
 
+    def upload_run_file(self, path: str) -> None:
+        """Файл запуска (prompts.json, missing.txt, отчёт, логи) в служебный релиз (SPEC 9.1, 9.7).
+
+        Клипы и generated_links.txt сюда не принимаются."""
+        self._ensure_prepared()
+        name = os.path.basename(path)
+        if self.run_id is None:
+            raise GeminiInputError(
+                "Служебные файлы некуда загрузить: не задан идентификатор запуска (run_id)."
+            )
+        if parse_clip_num(name, self.template) is not None:
+            raise GeminiInputError(f"Клип не относится к служебному релизу: {name}")
+        if name == LINKS_FILENAME:
+            raise GeminiInputError(f"{LINKS_FILENAME} загружается в итоговый релиз, не в служебный.")
+        tag = self._open_run_release("service")
+        self.store.upload_asset(tag, path)
+
     def upload_service_file(self, path: str) -> None:
-        """prompts.json / generated_links.txt: только в основной релиз.
+        """prompts.json -> служебный релиз; generated_links.txt -> итоговый релиз (SPEC 9.4, 9.7).
 
         generated_links.txt нулевой длины (клипов нет) не выкладывается: GitHub отвергает
         пустой ассет (HTTP 400, Bad Content-Length). prompts.json проверка не касается."""
@@ -338,11 +433,20 @@ class ReleaseUploader:
         if name == LINKS_FILENAME and os.path.isfile(path) and os.path.getsize(path) == 0:
             self._log("Нет готовых клипов: generated_links.txt не выкладывается.")
             return
-        self.store.upload_asset(self.tag, path)
-        self._counts[self.tag] = self._counts.get(self.tag, 0) + 1
+        if name == LINKS_FILENAME:
+            if self.run_id is None:
+                raise GeminiInputError(
+                    "generated_links.txt некуда загрузить: не задан идентификатор запуска (run_id)."
+                )
+            tag = self._open_run_release("final")
+            self.store.upload_asset(tag, path)
+            return
+        self.upload_run_file(path)
 
     def links_text(self, repo: str) -> str:
-        """Содержимое generated_links.txt по всем загруженным клипам; пустая строка, если клипов нет."""
+        """Содержимое generated_links.txt по всем загруженным клипам всех клип-релизов.
+
+        Пустая строка, если клипов нет (SPEC 9.4)."""
         names = sorted(self.asset_tags,
                        key=lambda n: (parse_clip_num(n, self.template) or 0, n))
         return create_generated_links(repo, self.tag, names, self.asset_tags)

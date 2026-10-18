@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover
     from core import vast_client as vc  # type: ignore
 
 FULL_HASH = "ab12cd34ef56" + "0" * 52
-TAG = "gen-ab12cd34ef56"
+TAG = "clips-ab12cd34ef56"
 TOKEN = "WTOK-secret-0123456789"
 VAST_KEY = "vast-key-SECRET-777"
 GEMINI_KEY = "gemini-key-SECRET-888"
