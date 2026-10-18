@@ -525,3 +525,36 @@ def test_canary_exception_inside_runner_not_leaked():
     text = "".join(traceback.format_exception(e.value))
     assert CANARY not in text and CANARY not in repr(e.value)
     assert e.value.__cause__ is None
+
+
+PROJECT_SECRET_NAMES = ("GEN_VAST_API_KEY", "GEN_GEMINI_API_KEY", "HF_TOKEN", "WORKER_TOKEN", "GITHUB_TOKEN")
+
+
+def test_gh_env_names_are_exactly_the_constant_and_no_project_secret_name():
+    """9а п. 6: набор имён окружения, которые получает gh, равен GH_ENV_NAMES; имён секретов проекта в нём нет."""
+    assert set(ra.GH_ENV_NAMES) == {"PATH", "HOME", "GH_TOKEN"}
+    for name in PROJECT_SECRET_NAMES:
+        assert name not in ra.GH_ENV_NAMES
+
+
+def test_gh_process_gets_exactly_gh_env_names_and_no_project_secrets():
+    """9а п. 6: процессу gh передаётся ровно набор GH_ENV_NAMES; ключи проекта и лишние имена не попадают."""
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(kw)
+        return FakeProc(out="ok")
+
+    environ = {
+        "PATH": "/bin", "HOME": "/home/runner", "GH_TOKEN": SECRET, "GITHUB_TOKEN": "ghs-other-XYZ-000",
+        "GEN_VAST_API_KEY": "vast-canary-111", "GEN_GEMINI_API_KEY": "gemini-canary-222",
+        "HF_TOKEN": "hf-canary-333", "WORKER_TOKEN": "worker-canary-444", "LANG": "C.UTF-8",
+    }
+    ra.GhCommandRunner(environ=environ, run=run)(["release", "list"])
+    env = calls[0]["env"]
+    assert set(env) == set(ra.GH_ENV_NAMES)               # точный набор имён, без лишних
+    assert env["GH_TOKEN"] == SECRET
+    for name in PROJECT_SECRET_NAMES:
+        assert name not in env
+    for value in ("vast-canary-111", "gemini-canary-222", "hf-canary-333", "worker-canary-444", "ghs-other-XYZ-000"):
+        assert value not in env.values()

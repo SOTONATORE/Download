@@ -40,7 +40,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
-    from .log_setup import _MASK, mask_remote_text
+    from .log_setup import _MASK, mask_remote_text, set_known_secrets
     from .missing import parse_missing
     from .naming import clip_filename
     from .release_adapter import (  # noqa: F401
@@ -48,14 +48,14 @@ try:  # пакетный и «плоский» импорт (как в оста�
     )
     from .vast_client import (  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
-        VastError, VastInstanceNotFound,
+        VastError, VastInstanceNotFound, remove_instance_fields,
     )
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
-    from log_setup import _MASK, mask_remote_text  # type: ignore
+    from log_setup import _MASK, mask_remote_text, set_known_secrets  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover
     )
     from vast_client import (  # type: ignore  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
-        VastError, VastInstanceNotFound,
+        VastError, VastInstanceNotFound, remove_instance_fields,
     )
 
 log = logging.getLogger("Generate.orchestrator")
@@ -306,6 +306,24 @@ class ReleaseStartError(gp.GeminiInputError):
     """Служебный релиз не открыт или файл запуска не загружен: остановка до трат, код 2 (SPEC 9.1, E1)."""
 
 
+_SCAN_CHUNK = 1 << 20
+
+
+def _file_has_any(path: Path, needles) -> bool:
+    """Есть ли в файле хотя бы одна из строк needles. Файл читается кусками (SPEC 10.3), не целиком."""
+    keep = max(len(n) for n in needles) - 1  # хвост предыдущего куска: строка могла разорваться на границе
+    tail = ""
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as fh:
+        while True:
+            chunk = fh.read(_SCAN_CHUNK)
+            if not chunk:
+                return False
+            window = tail + chunk
+            if any(n in window for n in needles):
+                return True
+            tail = window[-keep:] if keep > 0 else ""
+
+
 class RunArtifact:
     """Артефакт запуска (SPEC 10.4): run/, cards/, service/, FILES.txt.
 
@@ -317,8 +335,16 @@ class RunArtifact:
     def __init__(self, root, mask: Callable[[str], str]) -> None:
         self.root = Path(root)
         self._mask = mask
+        # адреса карт (IP и IP:порт), известные оркестратору; файл, где адрес остался, в архив не идёт (этап 9а)
+        self._addresses: set = set()
         for sub in ("run", "cards", SERVICE_DIR):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
+
+    def add_address(self, value: str) -> None:
+        """Запоминает адрес карты (этап 9а). Текст, который пишется после этого, маскируется оркестратором;
+        файл, записанный раньше с адресом внутри, исключается из run-logs.zip (make_bundle)."""
+        if value:
+            self._addresses.add(str(value))
 
     def _append(self, path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,8 +368,9 @@ class RunArtifact:
         self._write(self.card_dir(slot) / "meta.json", json.dumps(data, ensure_ascii=False, indent=2))
 
     def card_instance(self, slot, raw: dict) -> None:
+        # единственный писатель instance.json: поля адреса, портов, ssh и env удаляются до записи (этап 9а)
         self._write(self.card_dir(slot) / "instance.json",
-                    json.dumps(raw, ensure_ascii=False, indent=2, default=str))
+                    json.dumps(remove_instance_fields(raw), ensure_ascii=False, indent=2, default=str))
 
     def service_copy(self, src: str, name: str) -> None:
         shutil.copyfile(src, self.root / SERVICE_DIR / name)
@@ -361,10 +388,17 @@ class RunArtifact:
         self._write(self.root / FILES_LIST_NAME, "\n".join(rows) + "\n")
 
     def make_bundle(self, dest: str) -> None:
+        """Архив каталога. Файл, в котором остался адрес карты, в архив не попадает; одна строка в журнал на файл (этап 9а)."""
+        needles = sorted(self._addresses, key=len, reverse=True)
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(self.root.rglob("*")):
-                if p.is_file():
-                    zf.write(p, p.relative_to(self.root).as_posix())
+                if not p.is_file():
+                    continue
+                name = p.relative_to(self.root).as_posix()
+                if needles and _file_has_any(p, needles):
+                    log.warning("Файл %s не включён в архив: в нём есть адрес карты.", name)
+                    continue
+                zf.write(p, name)
 
 
 class RunPublisher:
@@ -591,6 +625,11 @@ class Orchestrator:
 
         self._token = worker_token or secrets.token_urlsafe(24)
         self._headers = {"X-Worker-Token": self._token}
+        # значения секретов известны: маска журнала и текста с карты получает их явно, из окружения модуль не читает
+        # (решение владельца 18.10.2026, риск F11; этап 9а). Вызов один раз на запуск.
+        set_known_secrets([self._token, os.environ.get("HF_TOKEN", "")])
+        # адреса карт (IP и IP:порт), которые маскируются в тексте с карты и не попадают в архив (этап 9а)
+        self._card_addresses: set = set()
         self._owns_http = http_client is None
         self._http = http_client if http_client is not None else httpx.Client(timeout=http_timeout_sec)
         self.budget = BudgetTracker(budget_limit_usd, clock=clock)
@@ -635,12 +674,26 @@ class Orchestrator:
     def _redact(self, text: str) -> str:
         return text.replace(self._token, "***") if self._token else text
 
+    def _remember_card_address(self, ip, port) -> None:
+        """Запоминает адрес карты (IP и IP:порт) для маски и для архива (SPEC 0.1, 10.4; этап 9а)."""
+        if not ip:
+            return
+        found = {str(ip)}
+        if port:
+            found.add(f"{ip}:{port}")
+        self._card_addresses |= found
+        if self._artifact is not None:
+            for value in found:
+                self._artifact.add_address(value)
+
     def _mask_remote(self, text: str) -> str:
         """Маскирует текст, пришедший с карты (SPEC 0.1, п. 14).
 
-        Здесь только литеральные значения, известные оркестратору: токен воркера, HF_TOKEN, ключ Vast.
-        Шаблоны и правила пар берутся из core/log_setup.py (mask_remote_text), как у журнала.
+        Здесь литеральные значения, известные оркестратору: адреса карт (этап 9а), токен воркера,
+        HF_TOKEN, ключ Vast. Шаблоны и правила пар берутся из core/log_setup.py (mask_remote_text), как у журнала.
         """
+        for addr in sorted(self._card_addresses, key=len, reverse=True):
+            text = text.replace(addr, _MASK)
         text = self._redact(text)
         hf_token = os.environ.get("HF_TOKEN", "").strip()
         if len(hf_token) >= 8:
@@ -923,6 +976,7 @@ class Orchestrator:
                                 log.error("PILOT: в поле ports нет ключа %d/tcp. Пришедшие ключи: %s.",
                                           PILOT_HTTP_PORT, _port_keys_text(info))
                         else:
+                            self._remember_card_address(info.public_ip, port)
                             code = self._probe_pilot(f"http://{info.public_ip}:{port}")
                             last_code = code
                             verdict = _pilot_verdict(code)
@@ -1394,6 +1448,7 @@ class Orchestrator:
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"
+                    self._remember_card_address(info.public_ip, info.direct_port)
                     # готовность только после ответа воркера (не по статусу Vast), SPEC 8.2
                     if self._probe_ready(slot):
                         slot.state = "ready"

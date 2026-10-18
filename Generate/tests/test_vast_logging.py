@@ -93,9 +93,14 @@ def test_redact_headers_and_query_by_name():
 # ---------------------------------------------------------------- маскирование запроса
 
 def test_authorization_header_and_nested_body_keys_are_redacted(caplog):
+    sent: list = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         # в самом запросе ключ уходит в заголовок, как и раньше; маскируется только лог
         assert SECRET in request.headers["authorization"]
+        if request.content:
+            body = json.loads(request.content)
+            sent.append(body)
         return httpx.Response(200, json={"new_contract": 42, "success": True})
 
     client = make(handler)
@@ -104,11 +109,15 @@ def test_authorization_header_and_nested_body_keys_are_redacted(caplog):
         env_vars={"WORKER_TOKEN": WORKER_TOKEN, "HF_TOKEN": HF_VALUE, "GEN_LOG_LEVEL": "DEBUG"},
         label="gen-1")
     assert inst_id == 42
+    # отправляемый запрос не меняется: env с переменными карты уходит как прежде (этап 9а)
+    assert sent and sent[0]["env"] == {"WORKER_TOKEN": WORKER_TOKEN, "HF_TOKEN": HF_VALUE, "GEN_LOG_LEVEL": "DEBUG"}
     text = "\n".join(debug_lines(caplog))
     assert SECRET not in text and WORKER_TOKEN not in text and HF_VALUE not in text
     assert '"Authorization": "***"' in text
-    assert '"WORKER_TOKEN": "***"' in text and '"HF_TOKEN": "***"' in text
-    assert '"GEN_LOG_LEVEL": "DEBUG"' in text   # несекретные значения остаются
+    # поле env из лога удалено целиком (этап 9а, решение владельца 18.10.2026); остальные поля тела остаются
+    assert '"env"' not in text and "WORKER_TOKEN" not in text and "HF_TOKEN" not in text
+    assert "GEN_LOG_LEVEL" not in text
+    assert '"label": "gen-1"' in text and '"img:latest"' in text
 
 
 def test_token_like_query_parameter_is_redacted(caplog):
@@ -274,7 +283,9 @@ def test_extra_env_pairs_in_response_are_not_logged(caplog):
     assert any(m.startswith("Ответ Vast #1") for m in lines)
     assert EXTRA_TOKEN not in all_text(caplog)             # ни в одной строке журнала
     assert CRISP_VALUE not in all_text(caplog)
-    assert '"extra_env": "***"' in text and '"crisp_hmac": "***"' in text
+    # поля окружения карты удаляются целиком (этап 9а), прочие секретные имена по-прежнему маскируются
+    assert '"extra_env"' not in text and '"env"' not in text
+    assert '"crisp_hmac": "***"' in text
     assert '"actual_status": "running"' in text and '"label": "gen-1"' in text   # имена остальных ключей видны
 
 

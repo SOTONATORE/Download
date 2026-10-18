@@ -726,3 +726,100 @@ def test_blocked_pairs_are_masked_in_both_modes(mode, line, expected):
 def test_blocked_name_is_masked_by_remote_path():
     out = ls.mask_remote_text(f"crisp_hmac={CANARY}")
     assert out == "crisp_hmac=***" and CANARY not in out
+
+
+# ---------------------------------------------------------------------------
+# Этап 9а: поля экземпляра, значения токенов, _err
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_known_secrets_in_this_module():
+    yield
+    ls.set_known_secrets([])
+
+
+def test_remove_instance_fields_removes_named_fields_at_any_depth():
+    """9а п. 1: адрес, порты, ssh, env, extra_env, ключ экземпляра и любые ключи с ssh, ipaddr, host_ip, port
+    удаляются на любой глубине; прочие поля остаются; исходный объект не меняется."""
+    body = {
+        "id": 7, "label": "gen-1", "actual_status": "running", "dph_total": 0.3,
+        "public_ipaddr": "203.0.113.77", "direct_port_start": 47123, "direct_port_end": 47123,
+        "direct_port_count": 1, "ports": {"18188/tcp": [{"HostPort": "47123"}]},
+        "ssh_host": "ssh.example", "ssh_port": 39871, "env": {"A": "1"}, "extra_env": [["A", "1"]],
+        "instance_api_key": "k", "local_ipaddrs": "10.0.0.2", "host_ip": "1.1.1.1", "SSH_KEY_PATH": "/x",
+        "offers": [{"id": 1, "public_ipaddr": "1.2.3.4", "dph_total": 0.3}],
+        "nested": {"deep": {"ports_x": 1, "status": "ok"}},
+    }
+    out = vc.remove_instance_fields(body)
+    assert out == {
+        "id": 7, "label": "gen-1", "actual_status": "running", "dph_total": 0.3,
+        "offers": [{"id": 1, "dph_total": 0.3}], "nested": {"deep": {"status": "ok"}},
+    }
+    assert body["env"] == {"A": "1"} and body["public_ipaddr"] == "203.0.113.77"   # исходный объект цел
+
+
+def test_debug_body_for_log_removes_instance_fields_and_keeps_the_rest():
+    raw = json.dumps({"instances": [{
+        "id": 7, "public_ipaddr": "203.0.113.77", "ssh_host": "ssh.example",
+        "env": {"WORKER_TOKEN": CANARY}, "extra_env": [["WORKER_TOKEN", CANARY]],
+        "status_msg": "ok", "dph_total": 0.3}]})
+    out = vc.debug_body_for_log(raw)
+    for needle in ("203.0.113.77", "ssh.example", CANARY, '"env"', "extra_env", "public_ipaddr"):
+        assert needle not in out
+    assert '"status_msg": "ok"' in out and '"dph_total": 0.3' in out and '"id": 7' in out
+
+
+def test_known_secret_without_name_or_shape_is_masked_in_log_and_remote_text():
+    """9а п. 4: значение, переданное оркестратором, маскируется в свободном тексте без имени и без известной формы."""
+    ls.set_known_secrets([CANARY])
+    line = f"в ответе карты стоит {CANARY} без имени"
+    assert CANARY not in ls.mask_text(line) and "***" in ls.mask_text(line)
+    assert CANARY not in ls.mask_remote_text(line)
+
+
+def test_known_secrets_ignore_empty_none_and_short_values():
+    """9а п. 4: пустые значения и значения короче 8 символов игнорируются; длиннее 8 маскируются."""
+    ls.set_known_secrets(["", "   ", None, "abc1234"])          # 7 символов: не маскируется
+    assert ls.mask_text("x abc1234 y") == "x abc1234 y"
+    ls.set_known_secrets(["abc12345"])                         # 8 символов: маскируется
+    assert ls.mask_text("x abc12345 y") == "x *** y"
+
+
+def test_set_known_secrets_replaces_previous_values():
+    ls.set_known_secrets([CANARY])
+    ls.set_known_secrets(["OTHER-VALUE-99"])
+    assert ls.mask_text(CANARY) == CANARY                      # прежнее значение больше не маскируется
+    assert ls.mask_text("OTHER-VALUE-99") == "***"
+
+
+def test_err_prints_masked_text_only(capsys):
+    """9а п. 5: _err пропускает текст через маску; текст не обрезается."""
+    ls.set_known_secrets([CANARY])
+    cli._err(f"Ошибка: сервер вернул значение {CANARY} и HF_TOKEN={CANARY} в конце сообщения")
+    err = capsys.readouterr().err
+    assert CANARY not in err and "Ошибка: сервер вернул значение" in err and "в конце сообщения" in err
+
+
+def test_canary_absent_from_debug_log_file_written_by_cli(tmp_path, monkeypatch):
+    """9а п. 10 (e): run/debug.log, который пишет cli через файловый обработчик, не содержит канарейку ни
+    с именем, ни без имени. Значения токенов передаёт маске оркестратор (set_known_secrets), как в __init__."""
+    import os
+    canary = "TESTKEY-12345"
+    monkeypatch.setenv("WORKER_TOKEN", canary)
+    monkeypatch.setenv("HF_TOKEN", canary)
+    ls.set_known_secrets([os.environ["WORKER_TOKEN"], os.environ["HF_TOKEN"]])
+    art = tmp_path / "art"
+    handlers, note = ls.setup_logging("DEBUG", str(art))
+    try:
+        log = logging.getLogger("Generate.test_canary")
+        log.debug("без имени: %s", canary)
+        log.info("WORKER_TOKEN=%s HF_TOKEN=%s", canary, canary)
+        log.info('{"WORKER_TOKEN": "%s"}', canary)
+    finally:
+        ls.teardown_logging(handlers)
+        ls.set_known_secrets([])
+    assert note is None
+    text = (art / "run" / "debug.log").read_text(encoding="utf-8")
+    assert text.strip(), "файл журнала пуст: проверка значима только при записанных строках"
+    assert canary not in text
+    assert "***" in text

@@ -165,19 +165,62 @@ def redact_headers(headers: dict, secret: str = "") -> dict:
             for n, v in headers.items()}
 
 
+# --- поля экземпляра, которых нет в артефакте, релизе и журнале (SPEC 0.1, 10.4; этап 9а) ---
+# Точные имена: адрес карты, проброшенные порты, ssh, окружение карты (env, extra_env), ключ экземпляра.
+INSTANCE_REMOVED_NAMES = frozenset({
+    "public_ipaddr", "direct_port_start", "direct_port_end", "direct_port_count", "ports",
+    "ssh_host", "ssh_port", "env", "extra_env", "instance_api_key",
+})
+# Части имени: любое другое поле, в имени которого есть одна из них (без учёта регистра), тоже удаляется.
+INSTANCE_REMOVED_PARTS = ("ssh", "ipaddr", "host_ip", "port")
+
+
+def _is_removed_instance_name(name: Any) -> bool:
+    lowered = str(name).lower()
+    return lowered in INSTANCE_REMOVED_NAMES or any(part in lowered for part in INSTANCE_REMOVED_PARTS)
+
+
+def remove_instance_fields(obj: Any) -> Any:
+    """Возвращает копию JSON-объекта без полей адреса, портов, ssh и окружения карты.
+
+    Удаляет ключи, перечисленные в INSTANCE_REMOVED_NAMES, и любые ключи, в имени которых есть
+    ssh, ipaddr, host_ip или port (без учёта регистра), на любой глубине: во вложенных словарях
+    и в элементах списков. Ключ удаляется целиком вместе со значением, маска не ставится.
+    Исходный объект не меняется. Окружение процесса не читается.
+    Вызывается перед любой записью JSON экземпляра (artifact) и перед маскированием тела ответа Vast
+    для журнала (debug_body_for_log): так адреса и порты не попадают ни в файлы, ни в релиз."""
+    if isinstance(obj, dict):
+        return {k: remove_instance_fields(v) for k, v in obj.items() if not _is_removed_instance_name(k)}
+    if isinstance(obj, list):
+        return [remove_instance_fields(x) for x in obj]
+    return obj
+
+
 def debug_body_for_log(raw: str, secret: str = "") -> str:
-    """Сырое тело ответа для лога целиком. JSON маскируется по ключам, прочий текст шаблонами.
+    """Сырое тело ответа для лога целиком. JSON: поля адреса, портов, ssh и env удаляются
+    (remove_instance_fields, этап 9а), остальное маскируется по ключам. Прочий текст маскируется шаблонами.
     Тело, которое не разобралось как JSON, остаётся текстом и не теряется."""
     try:
         parsed = json.loads(raw)
     except ValueError:
         return redact_text(raw, secret)
-    return json.dumps(redact_value(parsed, secret), ensure_ascii=False)
+    return json.dumps(redact_value(remove_instance_fields(parsed), secret), ensure_ascii=False)
+
+
+def _without_env_field(obj: Any) -> Any:
+    """Копия тела запроса без поля env на любой глубине (этап 9а, решение владельца 18.10.2026).
+    В env лежат значения токена воркера и HF_TOKEN, поэтому в лог поле не попадает совсем, даже замаскированным.
+    Остальные поля остаются, текст не обрезается. Отправляемый запрос этой функцией не меняется."""
+    if isinstance(obj, dict):
+        return {k: _without_env_field(v) for k, v in obj.items() if k != "env"}
+    if isinstance(obj, list):
+        return [_without_env_field(x) for x in obj]
+    return obj
 
 
 def _request_body_for_log(body: Any, secret: str) -> str:
-    """Тело запроса для лога целиком (маскирование то же, что у ответа)."""
-    return json.dumps(redact_value(body, secret), ensure_ascii=False, default=str)
+    """Тело запроса для лога целиком, без поля env (_without_env_field); маскирование то же, что у ответа."""
+    return json.dumps(redact_value(_without_env_field(body), secret), ensure_ascii=False, default=str)
 
 
 class VastError(Exception):

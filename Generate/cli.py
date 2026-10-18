@@ -49,7 +49,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from Generate.core.gemini_prompts import GeminiInputError
-    from Generate.core.log_setup import setup_logging, teardown_logging
+    from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
     from gemini_prompts import GeminiInputError  # type: ignore
-    from log_setup import setup_logging, teardown_logging  # type: ignore
+    from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
@@ -97,7 +97,9 @@ FINISHED_SUFFIX = ".finished"
 
 
 def _err(text: str) -> None:
-    print(text, file=sys.stderr)
+    # текст проходит маску до печати: в сообщении об ошибке может оказаться значение секрета (SPEC 0.1; этап 9а).
+    # Код выхода не меняется; текст не обрезается.
+    print(mask_text(text), file=sys.stderr)
 
 
 def _usd_floor(value: float) -> str:

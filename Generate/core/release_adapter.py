@@ -138,6 +138,13 @@ def scrub_secrets(text: str, tokens: Sequence[str] = ()) -> str:
     return _TOKEN_RE.sub("***", text)
 
 
+# Имена переменных окружения, которые получает процесс gh (SPEC 0.1; этап 9а, G09, F25).
+# PATH — поиск исполняемого файла gh; HOME — каталог настроек gh (~/.config/gh); GH_TOKEN — токен для gh.
+# Всё остальное не передаётся: в частности GEN_VAST_API_KEY, GEN_GEMINI_API_KEY, HF_TOKEN, WORKER_TOKEN, GITHUB_TOKEN.
+# Для запуска gh на Windows (локальный запуск) могут понадобиться USERPROFILE, APPDATA, SYSTEMROOT: НЕ ПРОВЕРЕНО, в константу не добавлены.
+GH_ENV_NAMES = ("PATH", "HOME", "GH_TOKEN")
+
+
 class GhCommandRunner:
     """Запускает `gh <args>` через subprocess; токен только в env процесса."""
 
@@ -159,9 +166,9 @@ class GhCommandRunner:
 
     def __call__(self, args: Sequence[str]) -> str:
         token = self._token()
-        env = dict(self._environ)
+        # окружение процесса gh: только GH_ENV_NAMES; GH_TOKEN берётся из _token(); остальной os.environ не передаётся (этап 9а)
+        env = {name: self._environ[name] for name in GH_ENV_NAMES if name in self._environ}
         env["GH_TOKEN"] = token
-        env.pop("GITHUB_TOKEN", None)
         try:
             proc = self._run([self._gh, *args], env=env, capture_output=True,
                              text=True, timeout=self._timeout)

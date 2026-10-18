@@ -6,6 +6,7 @@ Vast — заглушка, время — фальшивые часы (sleep д�
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import re
@@ -14,6 +15,7 @@ from collections import deque
 import sys
 import types
 from pathlib import Path
+import zipfile
 
 import httpx
 import pytest
@@ -39,6 +41,13 @@ VAST_KEY = "vast-key-SECRET-777"
 GEMINI_KEY = "gemini-key-SECRET-888"
 LABEL = "gen-test"
 SECRETS = (TOKEN, VAST_KEY, GEMINI_KEY)
+# Этап 9а: адрес карты, порт, ssh и ключ экземпляра в ответах Vast (документационные значения)
+CARD_IP = "203.0.113.77"
+CARD_PORT = 47123
+SSH_HOST = "ssh-gw.example.invalid"
+SSH_PORT = 39871
+INSTKEY = "INSTKEY-98765"
+CANARY = "TESTKEY-12345"
 VALID_BUILD = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"   # номер коммита сборки воркера (SPEC 8.4)
 
 
@@ -117,6 +126,22 @@ class FakeVast:
         self.destroy_exc = None         # если задано, destroy_instance бросает эту ошибку
         self.is_bid: dict = {}          # предложение -> is_bid в ответе карты (нет записи = True)
         self._next = 100
+        self.raw_env: dict = {}         # переменные окружения карты, которые Vast вернул бы в ответе (этап 9а)
+
+    def _raw(self, instance_id: int, up: bool) -> dict:
+        """Ответ Vast со всеми полями, которых не должно быть в артефакте, логах и релизах (этап 9а)."""
+        port = CARD_PORT if up else None
+        return {
+            "id": instance_id, "label": LABEL, "is_bid": True, "dph_total": 0.3,
+            "actual_status": "running" if up else "loading", "intended_status": "running",
+            "public_ipaddr": CARD_IP if up else None,
+            "ports": {f"{vc.WORKER_HTTP_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(port)}]} if up else {},
+            "direct_port_start": port, "direct_port_end": port, "direct_port_count": 1 if up else 0,
+            "ssh_host": SSH_HOST, "ssh_port": SSH_PORT,
+            "env": dict(self.raw_env),
+            "extra_env": [[k, v] for k, v in self.raw_env.items()],
+            "instance_api_key": INSTKEY,
+        }
 
     def _redact(self, text: str) -> str:
         """Как у VastClient._redact: ключ Vast в тексте заменяется на ***."""
@@ -152,16 +177,18 @@ class FakeVast:
             extra = {} if msg is None else {"status_msg": msg}   # None: поля статуса нет совсем
             return vc.InstanceInfo(
                 instance_id=instance_id, actual_status=status, intended_status="running",
-                public_ip="10.0.0.1" if up else None, direct_port=18000 if up else None,
-                dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True), **extra)
+                public_ip=CARD_IP if up else None, direct_port=CARD_PORT if up else None,
+                dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True),
+                raw=self._raw(instance_id, up), **extra)
         stuck = offer in self.stuck_offers
         return vc.InstanceInfo(
             instance_id=instance_id,
             actual_status="loading" if stuck else "running",
             intended_status="running",
-            public_ip=None if stuck else "10.0.0.1",
-            direct_port=None if stuck else 18000,
-            dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True))
+            public_ip=None if stuck else CARD_IP,
+            direct_port=None if stuck else CARD_PORT,
+            dph=self.dph.get(offer, 0.0), is_bid=self.is_bid.get(offer, True),
+            raw=self._raw(instance_id, not stuck))
 
     def destroy_instance(self, instance_id):
         if self.destroy_exc is not None:
@@ -2110,3 +2137,129 @@ def test_cancel_log_saving_respects_60_second_limit(tmp_path, monkeypatch, caplo
     assert not any(u.endswith("/logs") for u in rig.worker.urls)
     assert "Лимит 60 с на сохранение логов исчерпан" in caplog.text
     assert rig.vast.label_destroyed == [LABEL]
+
+
+
+# ---------------------------------------------------------------------------
+# Этап 9а: адреса карт, поля экземпляра Vast, значения токенов в артефакте, архиве и релизах
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_known_secrets_after_test():
+    """Значения токенов, переданные оркестратором (set_known_secrets), не переживают тест."""
+    yield
+    orch.set_known_secrets([])
+
+
+# поля, которых не должно быть в артефакте (SPEC 10.4; этап 9а, п. 1)
+FORBIDDEN_FIELD_NAMES = ('"public_ipaddr"', '"direct_port_start"', '"direct_port_end"', '"direct_port_count"',
+                         '"ssh_host"', '"ssh_port"', '"env"', '"extra_env"', '"instance_api_key"')
+
+
+def _leak_markers() -> tuple:
+    """Значения, которых не должно быть ни в одном файле артефакта, архиве, загрузке и релизе."""
+    return (CARD_IP, f"{CARD_IP}:{CARD_PORT}", str(CARD_PORT), SSH_HOST, str(SSH_PORT), INSTKEY, CANARY)
+
+
+def _assert_no_markers(text: str, markers, *, where: str) -> None:
+    # сообщение не печатает само значение: тестовые секреты не должны попадать и в отчёт теста
+    for marker in markers:
+        assert marker not in text, f"в {where} найдено значение из списка утечек"
+
+
+def test_instance_json_has_no_address_port_ssh_or_env(tmp_path, monkeypatch):
+    """9а п. 1: instance.json без адреса, портов, ssh, env, extra_env и ключа экземпляра; значения не попадают."""
+    art = tmp_path / "art"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), artifact_dir=art)
+    rig.vast.raw_env = {"WORKER_TOKEN": CANARY, "HF_TOKEN": CANARY}
+    rig.orc._save_instance(_slot(url=f"http://{CARD_IP}:{CARD_PORT}", state="ready"))
+    text = (art / "cards" / "slot1_generation1" / "instance.json").read_text(encoding="utf-8")
+    parsed = json.loads(text)                                  # JSON цел
+    assert parsed["id"] == 77 and parsed["label"] == LABEL     # прочие поля остались
+    for field in FORBIDDEN_FIELD_NAMES:
+        assert field not in text
+    _assert_no_markers(text, _leak_markers(), where="instance.json")
+
+
+def test_artifact_bundle_and_releases_have_no_card_fields_or_canary(tmp_path, monkeypatch, caplog):
+    """9а п. 3, 9, 10: файлы артефакта, run-logs.zip, все загрузки, названия и описания релизов и журнал
+    не содержат адреса карты, порта, ssh, полей Vast и канарейку (токен воркера и HF_TOKEN)."""
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("HF_TOKEN", CANARY)      # до создания оркестратора: он передаёт значение маске
+    art = tmp_path / "art"
+    (tmp_path / "missing.txt").write_text("1\n2\n", encoding="utf-8")
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), artifact_dir=art, token=CANARY)
+    rig.vast.raw_env = {"WORKER_TOKEN": CANARY, "HF_TOKEN": CANARY}
+    rig.worker.logs_text = ("[setup] [1/5] Начинаю загрузку: m.safetensors\n"
+                            f"адрес карты {CARD_IP}:{CARD_PORT} и токен {CANARY}\n")
+    rig.run()
+    markers = _leak_markers() + FORBIDDEN_FIELD_NAMES
+    # 1. файлы артефакта на диске (кроме архива)
+    for p in art.rglob("*"):
+        if p.is_file() and p.suffix != ".zip":
+            _assert_no_markers(p.read_text(encoding="utf-8"), markers, where=p.name)
+    # 2. архив run-logs.zip, который уходит в служебный релиз
+    bundle = rig.store.blobs[(ra.service_tag("test"), "run-logs.zip")]
+    with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
+        names = zf.namelist()
+        assert names and "run/summary.md" in names
+        for name in names:
+            _assert_no_markers(zf.read(name).decode("utf-8", errors="replace"), markers, where=f"архив: {name}")
+    # 3. все загрузки в релизы
+    for (_tag, name), blob in rig.store.blobs.items():
+        _assert_no_markers(blob.decode("utf-8", errors="replace"), markers, where=f"загрузка {name}")
+    # 4. названия и описания релизов
+    for rel in rig.store.releases.values():
+        _assert_no_markers(f"{rel.title}\n{rel.body}", markers, where=f"релиз {rel.tag}")
+    # 5. журнал
+    _assert_no_markers(caplog.text, markers, where="журнал")
+
+
+def test_token_values_reach_mask_without_name_or_shape(tmp_path, monkeypatch):
+    """9а п. 4: оркестратор передаёт токен воркера и HF_TOKEN в модуль маски; значение без имени и без формы маскируется."""
+    monkeypatch.setenv("HF_TOKEN", "HF-VALUE-PLAIN-12345")
+    Rig(tmp_path, monkeypatch, token=CANARY)
+    line = f"свободный текст: {CANARY} и HF-VALUE-PLAIN-12345 конец"
+    out = orch.mask_remote_text(line)
+    assert CANARY not in out and "HF-VALUE-PLAIN-12345" not in out and "***" in out
+
+
+def test_bundle_excludes_file_with_card_address_and_logs_once(tmp_path, caplog):
+    """9а п. 3: файл, где адрес карты остался (записан до регистрации адреса), в архив не идёт; одна строка в журнал."""
+    caplog.set_level(logging.WARNING)
+    art = orch.RunArtifact(tmp_path / "art", lambda text: text)     # без маски: адрес ещё не известен
+    art.card_line(_slot(), f"строка до регистрации адреса {CARD_IP}")
+    art.add_address(CARD_IP)
+    art.write_report("итог без адреса")
+    dest = tmp_path / "run-logs.zip"
+    art.make_bundle(str(dest))
+    with zipfile.ZipFile(dest) as zf:
+        names = zf.namelist()
+    assert "run/summary.md" in names
+    assert "cards/slot1_generation1/worker_log.txt" not in names
+    notes = [r for r in caplog.records if "worker_log.txt" in r.getMessage()]
+    assert len(notes) == 1
+
+
+def test_canary_absent_from_status_meta_prompts_and_links(tmp_path, monkeypatch, caplog):
+    """9а п. 10 (a–d): канарейка TESTKEY-12345 как WORKER_TOKEN и как HF_TOKEN не попадает в
+    status.txt, meta.json, prompts.json (копия для служебного релиза) и generated_links.txt.
+    run/debug.log проверяется в test_logging.py (файловый обработчик cli)."""
+    canary = "TESTKEY-12345"
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("HF_TOKEN", canary)            # до создания оркестратора: он передаёт значение маске
+    art = tmp_path / "art"
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), artifact_dir=art, token=canary)
+    rig.vast.raw_env = {"WORKER_TOKEN": canary, "HF_TOKEN": canary}
+    rig.worker.logs_text = f"строка с {canary} без имени\n"
+    rig.run()
+    card = art / "cards" / "slot1_generation1"
+    status = (card / "status.txt").read_text(encoding="utf-8")
+    meta = (card / "meta.json").read_text(encoding="utf-8")
+    prompts = (art / "service" / "prompts.json").read_text(encoding="utf-8")
+    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode("utf-8")
+    assert status.strip() and meta.strip() and prompts.strip()        # файлы не пустые: проверка значима
+    assert "https://github.com/" in links
+    for name, text in (("status.txt", status), ("meta.json", meta),
+                       ("prompts.json", prompts), ("generated_links.txt", links)):
+        assert canary not in text, f"канарейка найдена в {name}"
