@@ -206,16 +206,34 @@ class FakeWorker:
         self.urls: list = []
         self.bad_token = 0
         self._seq = 0
+        self.health_reply = None     # None: как раньше (ok true); иначе (код, тело) или исключение
+        self.stats_reply = None      # ответ /system_stats (код, тело) или None = 404
+        self.logs_text = ""          # текст GET /logs (строки лога карты)
+        self.health_hits = []        # время каждого GET /health с верным токеном
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.urls.append(str(request.url))
-        if request.headers.get("X-Worker-Token") != self.token:
+        # /system_stats живёт на порту ComfyUI, а не воркера: токен там не нужен и не проверяется
+        if request.url.path != "/system_stats" and request.headers.get("X-Worker-Token") != self.token:
             self.bad_token += 1
             return httpx.Response(401, json={"error": "токен"})
         path, method = request.url.path, request.method
         # проверка готовности воркера (healthcheck gate: booting -> ready)
         if method == "GET" and path == "/health":
+            self.health_hits.append(self.clock())
+            if isinstance(self.health_reply, Exception):
+                raise self.health_reply
+            if self.health_reply is not None:
+                code, body = self.health_reply
+                return httpx.Response(code, text=body)
             return httpx.Response(200, json={"ok": True, "gpu": "FakeGPU", "vram_free": 12345})
+        if method == "GET" and path == "/system_stats":
+            if self.stats_reply is None:
+                return httpx.Response(404)
+            code, body = self.stats_reply
+            return httpx.Response(code, text=body)
+        if method == "GET" and path == "/logs":
+            return httpx.Response(200, text=self.logs_text, headers={"X-Log-Next": str(len(self.logs_text.splitlines()))})
         if method == "POST" and path == "/task":
             body = json.loads(request.content)
             num = body["num"]
@@ -1656,4 +1674,211 @@ def test_bad_host_is_excluded_for_this_run_only_and_no_file_is_written(tmp_path,
     rig2 = Rig(tmp_path / "second", monkeypatch, missing=(1,), offers=[make_offer(1, 11)])
     assert rig2.orc._bad_machines == set() and rig2.orc._bad_offers == set()
     assert rig2.orc._rent_one(rig2.clock.now) == "ok"      # в новом запуске хост снова доступен
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []
+
+
+# ---------------------------------------------------------------------------
+# Этап 6б: мониторинг весов, готовность, heartbeat, принятие задачи (SPEC 8.2, 8.3 а)
+# ---------------------------------------------------------------------------
+
+SETUP_FILE = "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+MIB6 = 1024 ** 2
+
+
+def _slot_with_url(rig, *, instance_id=500, machine_id=11, offer_id=1, comfy=True):
+    slot = orch._CardSlot(1, 1, instance_id, machine_id, 0.3, rig.clock.now, offer_id=offer_id)
+    slot.url = "http://10.0.0.1:18000"
+    if comfy:
+        slot.comfy_url = "http://10.0.0.1:31188"
+    rig.orc._slots[1] = slot
+    rig.orc.budget.track_instance_start(instance_id, 0.3, rig.clock.now)
+    return slot
+
+
+def test_health_ok_true_makes_card_ready(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _slot_with_url(rig, comfy=False)
+    assert rig.orc._probe_ready(slot) is True
+    assert "проверка /health: код 200" in caplog.text
+    assert "готов" in caplog.text
+
+
+@pytest.mark.parametrize("reply", [(200, '{"ok": false}'), (200, "OK"), (503, '{"ok": true}')])
+def test_probe_rejects_bare_200_and_false_ok(tmp_path, monkeypatch, caplog, reply):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.worker.health_reply = reply
+    slot = _slot_with_url(rig, comfy=False)
+    assert rig.orc._probe_ready(slot) is False
+
+
+def test_network_error_is_logged_and_not_success(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.worker.health_reply = httpx.HTTPError("сброс соединения")
+    slot = _slot_with_url(rig, comfy=False)
+    assert rig.orc._probe_ready(slot) is False
+    assert "запрос не дошёл" in caplog.text
+
+
+def test_system_stats_with_system_key_is_ready_when_health_fails(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.worker.health_reply = (200, '{"ok": false}')
+    rig.worker.stats_reply = (200, '{"system": {"os": "linux"}, "devices": []}')
+    slot = _slot_with_url(rig)
+    assert rig.orc._probe_ready(slot) is True
+    assert "проверка /system_stats: код 200" in caplog.text
+
+
+def test_system_stats_without_system_key_is_not_ready(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.worker.health_reply = (200, '{"ok": false}')
+    rig.worker.stats_reply = (200, '{"devices": []}')
+    assert rig.orc._probe_ready(_slot_with_url(rig)) is False
+
+
+def test_missing_comfy_mapping_is_noted_once_and_skipped(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _slot_with_url(rig, comfy=False)
+    rig.orc._probe_ready(slot)
+    rig.orc._probe_ready(slot)
+    assert caplog.text.count("порт ComfyUI") == 1
+
+
+def test_ssh_and_portal_are_noted_once_per_run(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _slot_with_url(rig, comfy=False)
+    rig.orc._probe_ready(slot)
+    rig.orc._probe_ready(slot)
+    assert caplog.text.count("SSH-проверка не реализована (SPEC 8.2)") == 1
+    assert caplog.text.count("проверка через портал не реализована") == 1
+
+
+def test_heartbeat_reaches_card_every_interval(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _ready_slot(rig, 1, instance_id=500)
+    for _ in range(6):                       # шесть шагов по 10 с, как в основном цикле
+        rig.orc._heartbeat(rig.clock.now)
+        rig.clock.sleep(10.0)
+    gaps = [b - a for a, b in zip(rig.worker.health_hits, rig.worker.health_hits[1:])]
+    assert len(rig.worker.health_hits) == 6
+    assert gaps and all(g == 10.0 for g in gaps)
+    assert slot.last_ok_utc.endswith("Z")
+
+
+def test_heartbeat_file_is_written_without_secrets(tmp_path, monkeypatch):
+    hb = tmp_path / "heartbeat.json"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), token="TESTKEY-12345", heartbeat_path=hb)
+    _ready_slot(rig, 1, instance_id=500)
+    rig.orc._heartbeat(rig.clock.now)
+    text = hb.read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["utc"])
+    assert record["cards"][0]["instance_id"] == 500
+    assert "TESTKEY-12345" not in text      # канарейка: токен воркера в файл не попадает
+    _no_secrets(text)
+    assert "http" not in text, "адрес карты в файл не пишем"
+
+
+def test_heartbeat_file_absent_by_default(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.orc._heartbeat(rig.clock.now)
+    assert list(tmp_path.rglob("heartbeat*.json")) == []
+
+
+def test_speed_below_threshold_in_log_retires_card_and_host(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=7)
+    rig.worker.logs_text = (f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 2.1GiB/21GiB(10%) CN:16 DL:20MiB ETA:40s]\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert rig.orc._slots.get(1) is None
+    assert "скорость загрузки весов ниже порога" in caplog.text
+    assert 11 in rig.orc._bad_machines and 7 in rig.orc._bad_offers
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []     # только на этот запуск
+
+
+def test_file_error_line_retires_card_with_file_name(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    _ready_slot(rig, 1, instance_id=500, machine_id=11)
+    rig.worker.logs_text = f"[setup] [1/5] ОШИБКА: не удалось загрузить файл {SETUP_FILE} (код 4).\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert rig.orc._slots.get(1) is None
+    assert ("ошибка загрузки весов: " + SETUP_FILE) in caplog.text
+    assert 11 in rig.orc._bad_machines
+
+
+def test_unrecognised_weights_format_warns_once(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    _ready_slot(rig, 1, instance_id=500)
+    rig.worker.logs_text = f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}\n[#2089b0 ??? ]\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig.clock.sleep(60.0)
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert caplog.text.count("загрузки весов не распознан") == 1
+
+
+def test_stage_limit_retires_booting_card(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), stage_max_min=20, stall_timeout_min=3)
+    slot = _slot_with_url(rig, comfy=False)
+    slot.state = "booting"
+    mon = rig.orc._monitor(slot)
+    mon.feed([f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}"])
+    rig.clock.sleep(20 * 60.0 + 1)
+    rig.orc._step_slot(slot, rig.clock.now, False)
+    assert rig.orc._slots.get(1) is None
+    assert "этап загрузки весов превысил лимит" in caplog.text
+
+
+def test_worker_not_ready_within_timeout_retires_card(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), worker_ready_timeout_min=10, silent_host_timeout_min=60)
+    rig.worker.health_reply = (200, '{"ok": false}')
+    slot = _booting_slot(rig, instance_id=500, machine_id=11)
+    _poll(rig, slot, 70)                      # ~11.7 мин при шаге 10 с
+    assert rig.orc._slots.get(1) is None
+    assert "воркер не готов" in caplog.text
+    assert 11 in rig.orc._bad_machines
+
+
+def test_task_not_accepted_within_timeout_retires_card(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), task_accept_timeout_min=3)
+    rig.orc._queue = deque([1, 2])
+    slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=3)
+    slot.ready_at = rig.clock.now
+    assert rig.orc._accept_timed_out(slot, rig.clock.now + 179.0) is False
+    assert rig.orc._slots.get(1) is slot
+    assert rig.orc._accept_timed_out(slot, rig.clock.now + 181.0) is True
+    assert rig.orc._slots.get(1) is None
+    assert "задача не принята" in caplog.text
+    assert 11 in rig.orc._bad_machines and 3 in rig.orc._bad_offers
+
+
+def test_accepted_card_is_not_retired_by_accept_timer(tmp_path, monkeypatch, caplog):
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), task_accept_timeout_min=3)
+    rig.orc._prompts = {str(n): {"status": "ready", "prompt": "p", "num_frames": 49} for n in (1, 2)}
+    rig.orc._queue = deque([1, 2])
+    slot = _ready_slot(rig, 1, instance_id=500)
+    slot.ready_at = rig.clock.now - 3600.0
+    slot.accepted = True
+    rig.orc._step_slot(slot, rig.clock.now, False)
+    assert rig.orc._slots.get(1) is slot
+    assert "задача не принята" not in caplog.text
+
+
+def test_per_run_bad_host_is_not_kept_for_next_run(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=7)
+    rig.worker.logs_text = f"[setup] [1/5] ОШИБКА: не удалось загрузить файл {SETUP_FILE} (код 4).\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig2 = Rig(tmp_path / "second", monkeypatch, missing=(1,))
+    assert rig2.orc._bad_machines == set() and rig2.orc._bad_offers == set()
     assert list(tmp_path.rglob("bad_hosts.txt")) == []

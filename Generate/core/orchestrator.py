@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -36,6 +37,7 @@ import httpx
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from . import gemini_orchestrator as go
     from . import gemini_prompts as gp
+    from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
     from .missing import parse_missing
     from .naming import clip_filename
@@ -49,6 +51,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
+    import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
@@ -75,6 +78,13 @@ EXIT_PARTIAL = 3
 LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический и перед уничтожением карты), SPEC 8.4
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
+PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
+COMFY_PORT = 8188            # порт ComfyUI внутри карты (setup.sh: 127.0.0.1:8188); внешний порт выдаёт Vast
+SYSTEM_STATS_LOG_CHARS = 200  # в лог пишется начало ответа /system_stats; ответ /health пишется целиком
+READY_REASON = "воркер не готов"
+ACCEPT_REASON = "задача не принята"
+SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
+PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
@@ -181,6 +191,15 @@ class _CardSlot:
     mode_mismatch: bool = False       # Vast не подтвердил bid (is_bid не True): бюджет по dph_total
     not_found: int = 0                # подряд идущих ответов «экземпляр не найден» (NOT_FOUND_LIMIT, SPEC 8.3)
     cost_checked: bool = False        # цена по ответу Vast уже учтена или признана недоступной (SPEC 8.2)
+    monitor: Optional[object] = None  # монитор загрузки весов (core/weights_log.py), создаётся по требованию
+    comfy_url: str = ""               # адрес ComfyUI через проброшенный порт 8188; пусто = не проброшен
+    comfy_noted: bool = False         # отсутствие проброса записано в лог один раз на карту
+    ready_at: float = 0.0             # момент перехода в ready (срок принятия первой задачи, SPEC 8.2)
+    accepted: bool = False            # воркер принял хотя бы одну задачу (POST /task)
+    ready_wait_since: Optional[float] = None  # с какого момента ждём готовность воркера (SPEC 8.2)
+    last_beat: float = -1e9           # время последнего heartbeat-запроса (SPEC 8.3 а)
+    last_ok_utc: str = ""              # UTC последнего успешного heartbeat (файл heartbeat)
+    weights_reason: Optional[str] = None  # причина из разбора логов весов, ждёт снятия карты
 
     @property
     def started(self) -> bool:
@@ -279,6 +298,11 @@ def _card_name(slot, *, cap: bool = False) -> str:
     return name[:1].upper() + name[1:] if cap else name
 
 
+def _utc_now() -> str:
+    """Текущее время UTC, ISO 8601 с суффиксом Z (для файла heartbeat)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
@@ -329,6 +353,17 @@ class Orchestrator:
         pilot: bool = False,
         pilot_start_cmd: str = "",
         worker_build: Optional[str] = None,
+        speed_check_at_pct: int = 10,
+        speed_min_mbps: float = 400.0,
+        progress_step_pct: int = 10,
+        stall_timeout_min: int = 3,
+        stage_max_min: int = 20,
+        worker_ready_timeout_min: int = 10,
+        task_accept_timeout_min: int = 3,
+        heartbeat_interval_sec: int = 10,
+        monitor_interval_sec: int = 10,
+        min_inet_mbps: float = 800.0,
+        heartbeat_path=None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -342,6 +377,13 @@ class Orchestrator:
             raise gp.GeminiInputError("Номер сборки воркера (--worker-build) должен быть из 7-64 символов 0-9 и a-f.")
         if log_level not in LOG_LEVELS:
             raise gp.GeminiInputError("Уровень логов должен быть INFO или DEBUG.")
+        # пороги мониторинга (SPEC 8.2): значения приходят из конфига; здесь только проверка знаков
+        sec_values = (stall_timeout_min, stage_max_min, worker_ready_timeout_min, task_accept_timeout_min,
+                      heartbeat_interval_sec, monitor_interval_sec)
+        if min(sec_values) < 1 or speed_min_mbps <= 0 or speed_check_at_pct < 1 or progress_step_pct < 1:
+            raise gp.GeminiInputError("Пороги мониторинга весов и готовности должны быть положительными.")
+        if stage_max_min < stall_timeout_min:
+            raise gp.GeminiInputError("«stage_max_min» не может быть меньше «stall_timeout_min».")
         self.log_level = log_level
         self.segments = segments
         self.missing_path = missing_path
@@ -355,6 +397,21 @@ class Orchestrator:
         self.max_cards = int(max_cards)
         self.job_deadline_min = job_deadline_min
         self.worker_idle_timeout_min = worker_idle_timeout_min
+        # пороги мониторинга (SPEC 8.2, 8.3 а); значения из конфига
+        self.speed_check_at_pct = int(speed_check_at_pct)
+        self.speed_min_mbps = float(speed_min_mbps)
+        self.progress_step_pct = int(progress_step_pct)
+        self.min_inet_mbps = float(min_inet_mbps)   # ожидаемая скорость; правило скорости берёт speed_min_mbps
+        self.monitor_interval_sec = int(monitor_interval_sec)  # в 6б не используется: снимки делает воркер (SPEC 10)
+        self._stall_sec = stall_timeout_min * 60.0
+        self._stage_max_sec = stage_max_min * 60.0
+        self._ready_sec = worker_ready_timeout_min * 60.0
+        self._accept_sec = task_accept_timeout_min * 60.0
+        self._heartbeat_sec = float(heartbeat_interval_sec)
+        self.heartbeat_path = Path(heartbeat_path) if heartbeat_path else None
+        self._last_heartbeat_tick = -1e9
+        self._probe_notes_logged = False
+        self._weights_source_noted = False
         self._deadline_sec = job_deadline_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
         self.offer_filter = offer_filter or OfferFilter()
@@ -447,6 +504,21 @@ class Orchestrator:
                 text = pattern.sub(_MASK, text)
         return text
 
+    def _monitor(self, slot: _CardSlot):
+        """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой."""
+        if slot.monitor is None:
+            def emit(text: str, warn: bool = False, _slot=slot) -> None:
+                msg = f"{_card_name(_slot, cap=True)}: {text}"
+                if warn:
+                    log.warning("%s", msg)
+                else:
+                    log.info("%s", msg)
+            slot.monitor = wl.WeightsMonitor(
+                clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
+                speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
+                stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec)
+        return slot.monitor
+
     def _pull_card_logs(self, slot: _CardSlot, *, final: bool) -> bool:
         """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
 
@@ -470,6 +542,10 @@ class Orchestrator:
             return False
         lines = self._mask_remote(text).splitlines()
         slot.log_next = int(cursor)
+        if not final and lines:
+            reason = self._monitor(slot).feed(lines)
+            if reason:
+                slot.weights_reason = reason  # снятие карты делает _pull_due_logs, не здесь (нет рекурсии)
         if final:
             log.info("Логи карты %d перед уничтожением: новых строк %d.", slot.instance_id, len(lines))
         for line in lines:
@@ -490,6 +566,9 @@ class Orchestrator:
             slot.log_pulled = now  # время фиксируется и при сбое: повтор не раньше чем через минуту
             try:
                 self._pull_card_logs(slot, final=False)
+                if slot.weights_reason and self._slots.get(slot.index) is slot:
+                    reason, slot.weights_reason = slot.weights_reason, None
+                    self._retire_bad(slot, reason)
             except Exception as exc:  # выгрузка логов не должна ронять конвейер
                 log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
@@ -758,6 +837,7 @@ class Orchestrator:
             for slot in list(self._slots.values()):
                 self._step_slot(slot, now, stopping)
             self._pull_due_logs(now)
+            self._heartbeat(now)
 
             inflight = self._inflight()
             if stopping:
@@ -1021,6 +1101,11 @@ class Orchestrator:
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
         if slot.state == "booting":
+            # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
+            reason = self._monitor(slot).check()
+            if reason:
+                self._retire_bad(slot, reason)
+                return
             info = None
             try:
                 info = self.vast.get_instance(slot.instance_id)
@@ -1056,13 +1141,18 @@ class Orchestrator:
                     return
                 if info.actual_status == "running" and info.public_ip and info.direct_port:
                     slot.url = f"http://{info.public_ip}:{info.direct_port}"
-                    # готовность только после ответа воркера на /health (не по статусу Vast)
-                    if self._health_ok(slot):
+                    comfy_port = _mapped_port(info, COMFY_PORT)
+                    slot.comfy_url = f"http://{info.public_ip}:{comfy_port}" if comfy_port else ""
+                    # готовность только после ответа воркера (не по статусу Vast), SPEC 8.2
+                    if self._probe_ready(slot):
                         slot.state = "ready"
+                        slot.ready_at = now
                         slot.contacted = True
                         slot.net_fail = 0
                         log.info("%s: healthcheck OK через %.0f с после создания, "
                                  "готова к приёму задач.", _card_name(slot, cap=True), age)
+                    elif self._track_ready_wait(slot, now):
+                        return
         if not slot.contacted and age >= self._silent_sec:
             log.error("%s: healthcheck не прошёл за %d мин (таймаут).",
                       _card_name(slot, cap=True), int(self._silent_sec // 60))
@@ -1078,6 +1168,8 @@ class Orchestrator:
         if self._slots.get(slot.index) is not slot or slot.task is not None:
             return
         if not stopping and self._queue:
+            if not slot.accepted and self._accept_timed_out(slot, now):
+                return
             self._dispatch(slot, now)
         elif stopping or not self._queue:
             self._retire(slot, "работы для карты больше нет")
@@ -1093,16 +1185,144 @@ class Orchestrator:
             raise _WorkerHttpError(resp.status_code)
         return resp
 
-    def _health_ok(self, slot: _CardSlot) -> bool:
-        """Одна проверка GET /health; сбой не учитывается в net_fail (карта остаётся в booting)."""
+    def _note_unimplemented(self) -> None:
+        """SSH и портал не проверяются в 6б (SPEC 8.2, 13.1): одна строка на запуск."""
+        if self._probe_notes_logged:
+            return
+        self._probe_notes_logged = True
+        log.info("%s.", SSH_NOT_IMPLEMENTED)
+        log.info("%s.", PORTAL_NOT_IMPLEMENTED)
+
+    def _probe_ready(self, slot: _CardSlot) -> bool:
+        """Проверка готовности воркера (SPEC 8.2): /health и /system_stats, оба запускаются при каждом вызове.
+
+        Готовность: /health отвечает JSON с ok == true, или /system_stats отвечает JSON с ключом system.
+        Голый код 200 без ожидаемого содержимого не засчитывается. Сбой связи пишется как «запрос не дошёл».
+        """
+        self._note_unimplemented()
+        health = self._probe_health(slot)
+        stats = self._probe_comfy(slot)
+        return health or stats
+
+    def _probe_health(self, slot: _CardSlot) -> bool:
+        name = _card_name(slot, cap=True)
+        start = self.clock()
         try:
-            resp = self._http.get(slot.url + "/health", headers=self._headers, timeout=5.0)
-        except httpx.HTTPError:
-            return False
-        if resp.status_code != 200:
+            resp = self._http.get(slot.url + "/health", headers=self._headers, timeout=PROBE_TIMEOUT_SEC)
+        except httpx.HTTPError as exc:
+            log.warning("%s: проверка /health: запрос не дошёл (%s).", name, type(exc).__name__)
             return False
         data = self._json(resp)
-        return data.get("ok") is True
+        ok = resp.status_code == 200 and data.get("ok") is True
+        body = _one_line(self._mask_remote(resp.text))  # /health короткий: пишется целиком
+        log.info("%s: проверка /health: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
+                 body or "пусто", self.clock() - start, "готов" if ok else "не готов")
+        return ok
+
+    def _probe_comfy(self, slot: _CardSlot) -> bool:
+        name = _card_name(slot, cap=True)
+        if not slot.comfy_url:
+            if not slot.comfy_noted:
+                slot.comfy_noted = True
+                log.info("%s: порт ComfyUI %d не проброшен: проверка /system_stats пропущена.", name, COMFY_PORT)
+            return False
+        start = self.clock()
+        try:
+            # без заголовка токена: ComfyUI его не знает, и токен не уходит на порт ComfyUI
+            resp = self._http.get(slot.comfy_url + "/system_stats", timeout=PROBE_TIMEOUT_SEC)
+        except httpx.HTTPError as exc:
+            log.warning("%s: проверка /system_stats: запрос не дошёл (%s).", name, type(exc).__name__)
+            return False
+        data = self._json(resp)
+        ok = resp.status_code == 200 and "system" in data
+        body = _one_line(self._mask_remote(resp.text))[:SYSTEM_STATS_LOG_CHARS]
+        log.info("%s: проверка /system_stats: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
+                 body or "пусто", self.clock() - start, "готов" if ok else "не готов")
+        return ok
+
+    def _track_ready_wait(self, slot: _CardSlot, now: float) -> bool:
+        """Правило (г), SPEC 8.2: готовность не подтверждена за worker_ready_timeout_min.
+
+        Таймер запускается, когда загрузка весов завершена, или когда строк загрузки нет вовсе
+        (тогда таймер идёт от первого адреса карты с public IP). True: карта снята.
+        """
+        mon = self._monitor(slot)
+        if slot.ready_wait_since is None and (mon.stage_done or not mon.seen_start):
+            slot.ready_wait_since = now
+            if not mon.seen_start:
+                self._note_weights_source()
+        if slot.ready_wait_since is None or now - slot.ready_wait_since < self._ready_sec:
+            return False
+        log.error("%s: воркер не готов за %d мин: /health не ответил ok=true. Карта снимается, "
+                  "хост исключён из этого запуска.", _card_name(slot, cap=True), int(self._ready_sec // 60))
+        self._retire_bad(slot, READY_REASON)
+        return True
+
+    def _note_weights_source(self) -> None:
+        """Строки загрузки весов не пришли по GET /logs: один раз на запуск (SPEC 8.2, 13.1 п. 5)."""
+        if self._weights_source_noted:
+            return
+        self._weights_source_noted = True
+        log.warning("Строки загрузки весов не получены по GET /logs: правила загрузки весов (SPEC 8.2) "
+                    "в этом запуске могут не действовать; см. раздел 13.1.")
+
+    def _accept_timed_out(self, slot: _CardSlot, now: float) -> bool:
+        """Правило (д), SPEC 8.2: первая задача не принята за task_accept_timeout_min после готовности."""
+        if now - slot.ready_at < self._accept_sec:
+            return False
+        log.error("%s: задача не принята за %d мин после готовности. Карта снимается, хост исключён "
+                  "из этого запуска.", _card_name(slot, cap=True), int(self._accept_sec // 60))
+        self._retire_bad(slot, ACCEPT_REASON)
+        return True
+
+    # --- heartbeat (SPEC 8.3 а) -----------------------------------------------
+    def _heartbeat(self, now: float) -> None:
+        """Каждые heartbeat_interval_sec: запрос с токеном к каждой карте с адресом, затем файл heartbeat.
+
+        Любой запрос с верным токеном сбрасывает дед-свитч воркера, так что это и есть heartbeat карты.
+        Сбой связи пишется в отладочный журнал и на карту не влияет (решают net_fail и таймауты).
+        """
+        if now - self._last_heartbeat_tick < self._heartbeat_sec:
+            return
+        self._last_heartbeat_tick = now
+        for slot in list(self._slots.values()):
+            if not slot.url:
+                continue
+            slot.last_beat = now
+            try:
+                resp = self._http.get(slot.url + "/health", headers=self._headers, timeout=PROBE_TIMEOUT_SEC)
+            except httpx.HTTPError:
+                log.debug("%s: heartbeat: запрос не дошёл.", _card_name(slot, cap=True))
+                continue
+            if resp.status_code == 200:
+                slot.last_ok_utc = _utc_now()
+        self._write_heartbeat()
+
+    def _write_heartbeat(self) -> None:
+        """Файл heartbeat для наблюдателя (этап 7). Без токенов и без адресов карт (SPEC 0.1)."""
+        if self.heartbeat_path is None:
+            return
+        record = {
+            "utc": _utc_now(),
+            "label": self.label,
+            "cards": [
+                {"slot": s.index, "generation": s.generation, "instance_id": s.instance_id,
+                 "state": s.state, "last_ok_utc": s.last_ok_utc}
+                for s in self._slots.values()
+            ],
+        }
+        try:
+            go.atomic_write_json(self.heartbeat_path, record)
+        except OSError as exc:
+            log.warning("Не удалось записать файл heartbeat: %s.", type(exc).__name__)
+
+    def _retire_bad(self, slot: _CardSlot, reason: str) -> None:
+        """Снятие карты по правилам 8.2 (мониторинг, готовность, принятие задачи): хост и предложение
+        исключаются только на этот запуск (bad_hosts.txt не пишется)."""
+        if slot.offer_id:
+            self._bad_offers.add(slot.offer_id)
+        self._retire(slot, reason, bad=True)
+
 
     @staticmethod
     def _json(resp) -> dict:
@@ -1179,6 +1399,7 @@ class Orchestrator:
         data = self._json(resp)
         tid = str(data.get("id") or data.get("task_id") or num)
         slot.task = _Task(num, tid, now)
+        slot.accepted = True
         # текст промпта не логируем: только длина и короткий SHA-256 (SPEC 0.1)
         prompt = str(payload["prompt"])
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]

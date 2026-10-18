@@ -483,6 +483,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             silent_host_timeout_min=cfg.silent_host_timeout_min,
             job_deadline_min=cfg.job_deadline_min,
             worker_idle_timeout_min=cfg.worker_idle_timeout_min,
+            # мониторинг весов и готовности (SPEC 8.2): пороги из конфига, без литералов в оркестраторе
+            speed_check_at_pct=cfg.speed_check_at_pct,
+            speed_min_mbps=cfg.speed_min_mbps,
+            progress_step_pct=cfg.progress_step_pct,
+            stall_timeout_min=cfg.stall_timeout_min,
+            stage_max_min=cfg.stage_max_min,
+            worker_ready_timeout_min=cfg.worker_ready_timeout_min,
+            task_accept_timeout_min=cfg.task_accept_timeout_min,
+            heartbeat_interval_sec=cfg.heartbeat_interval_sec,
+            monitor_interval_sec=cfg.monitor_interval_sec,
+            min_inet_mbps=cfg.min_inet_mbps,
+            # файл heartbeat для наблюдателя (этап 7, SPEC 8.3 а); по умолчанию не пишется
+            heartbeat_path=getattr(args, "heartbeat_path", None),
             filename_template=cfg.filename_template,
             clip_name_width=cfg.clip_name_width,
             release_asset_limit=cfg.release_asset_limit,
@@ -658,6 +671,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "не задано = из конфига")
     run_p.add_argument("--worker-build", default="",
                        help="номер коммита сборки воркера (SHA), нужен для пустого образа")
+    run_p.add_argument("--heartbeat-path", default=None,
+                       help="путь файла heartbeat (JSON, для наблюдателя); по умолчанию не пишется")
     run_p.add_argument("--disk-gb", type=int, default=None,
                        help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
