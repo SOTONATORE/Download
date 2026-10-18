@@ -20,10 +20,8 @@ from pathlib import Path
 from typing import Optional
 
 try:  # пакетный и «плоский» импорт, как в cli.py
-    from Generate.core.orchestrator import _MASK, _SECRET_PATTERNS
     from Generate.core.vast_client import redact_text
 except ImportError:  # pragma: no cover
-    from orchestrator import _MASK, _SECRET_PATTERNS  # type: ignore
     from vast_client import redact_text  # type: ignore
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -46,7 +44,16 @@ if MASK_MODE not in _MASK_MODES:
 # Белый список имён (сравнение без учёта регистра по полному имени). Пары с этими именами не маскируются
 # ни в одном режиме; шаблоны по форме значения действуют всегда. Список короткий и явный: добавлять
 # только имя, которое нужно сохранить в строке журнала и которое не является секретом.
-ALLOWED_NAMES = frozenset({"max_tokens", "num_tokens", "token_count", "tokenizer"})
+# Список имён, которые владелец подтвердил как не секретные в логах запусков 18.10.2026;
+# имя добавляется только явным решением владельца.
+ALLOWED_NAMES = frozenset({
+    "status", "ip", "size", "port", "msg", "is_bid", "dph", "run_id", "target", "gpu", "limit", "rc",
+    "id", "name", "component", "identity", "address", "hash", "event", "connIndex", "threshold",
+    "device", "protocol", "location",
+    "max_tokens", "num_tokens", "token_count", "tokenizer",
+})
+# Сравнение без учёта регистра: имя connIndex в списке написано с заглавной буквой, сверяем в нижнем регистре.
+_ALLOWED_LOWER = frozenset(n.lower() for n in ALLOWED_NAMES)
 
 # Имя с секретной частью (режим A) и любое имя (режим B). Значение: в кавычках до закрывающей кавычки,
 # иначе до первого пробела, кавычки, запятой или конца строки.
@@ -67,8 +74,22 @@ _ALLOWED_PAIR_RE = re.compile(
     + r")[\"']?\s*[:=]\s*(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^\s\"',;&}\]]*)"
 )
 
-# Шаблоны по форме значения (любой режим, любое имя). Уже существующие шаблоны из orchestrator
-# (_SECRET_PATTERNS, включая Bearer) переиспользуются; добавлены только github_pat_ и ghp_ с порогом 10.
+# Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
+# Список шаблонов по форме значения живёт только здесь; оркестратор берёт его через mask_remote_text.
+# Тот же набор, что в worker/server.py (воркер собирается отдельно, модуль не импортируется).
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)(authorization\s*:)[^\r\n]*"), True),
+    (re.compile(r"(?i)(x-worker-token\s*[:=]\s*)\S+"), True),
+    (re.compile(r"(?i)(bearer\s+)\S+"), True),
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), False),
+    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), False),
+    (re.compile(r"hf_[A-Za-z0-9]{20,}"), False),
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), False),
+)
+_MASK = "***"
+
+# Шаблоны по форме значения (любой режим, любое имя). Из _SECRET_PATTERNS берутся все;
+# добавлены только github_pat_ и ghp_ с порогом 10.
 _EXTRA_SHAPES = (
     (re.compile(r"github_pat_[A-Za-z0-9_]{10,}"), False),
     (re.compile(r"ghp_[A-Za-z0-9]{10,}"), False),
@@ -77,7 +98,7 @@ _VALUE_SHAPES = tuple(_SECRET_PATTERNS) + _EXTRA_SHAPES
 
 
 def _is_allowed(name: str) -> bool:
-    return name.lower() in ALLOWED_NAMES
+    return name.lower() in _ALLOWED_LOWER
 
 
 def _json_repl(m: "re.Match[str]") -> str:
@@ -130,6 +151,15 @@ def mask_text_with_mode(text: str, mode: str) -> str:
 def mask_text(text: str) -> str:
     """Маскирование текста в режиме MASK_MODE (сейчас A). Окружение не используется."""
     return mask_text_with_mode(text, MASK_MODE)
+
+
+def mask_remote_text(text: str) -> str:
+    """Общая функция маски для текста с карты (оркестратор, _mask_remote) и для журнала.
+
+    Те же шаблоны по форме значения, пары режима MASK_MODE и белый список, что у журнала (SPEC 0.1, п. 14).
+    Литеральные значения (токен воркера, HF_TOKEN, ключ Vast) оркестратор маскирует сам до вызова.
+    """
+    return mask_text(text)
 
 
 class MaskFilter(logging.Filter):

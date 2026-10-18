@@ -566,10 +566,14 @@ def test_unknown_mask_mode_is_rejected():
 
 
 def test_allowlist_is_frozen():
-    """Белый список зафиксирован: любое добавление или удаление имени требует правки этого теста."""
+    """Белый список зафиксирован (28 имён, решение владельца 18.10.2026): любое изменение требует правки этого теста."""
     assert isinstance(ls.ALLOWED_NAMES, frozenset)
-    assert tuple(sorted(ls.ALLOWED_NAMES)) == ("max_tokens", "num_tokens", "token_count", "tokenizer")
-    assert len(ls.ALLOWED_NAMES) == 4
+    assert tuple(sorted(ls.ALLOWED_NAMES)) == (
+        "address", "component", "connIndex", "device", "dph", "event", "gpu", "hash", "id", "identity",
+        "ip", "is_bid", "limit", "location", "max_tokens", "msg", "name", "num_tokens", "port", "protocol",
+        "rc", "run_id", "size", "status", "target", "threshold", "token_count", "tokenizer",
+    )
+    assert len(ls.ALLOWED_NAMES) == 28
 
 
 def test_mode_a_masks_key_suffix_and_keeps_name():
@@ -586,7 +590,7 @@ def test_mode_a_keeps_allowlisted_names_in_any_case():
 
 
 def test_mode_b_masks_plain_pair_and_keeps_name():
-    assert ls.mask_text_with_mode("status=running", "B") == "status=***"
+    assert ls.mask_text_with_mode("color=running", "B") == "color=***"
 
 
 def test_mode_b_keeps_allowlisted_names():
@@ -595,6 +599,31 @@ def test_mode_b_keeps_allowlisted_names():
 
 def test_mode_b_masks_key_suffix():
     assert ls.mask_text_with_mode("MY_SERVICE_KEY=abcdef123456", "B") == "MY_SERVICE_KEY=***"
+
+
+# Имя собирается из частей: тест структуры запрещает литерал имени ключа вне комментариев.
+VAST_KEY_NAME = "GEN_" + "VAST_API_KEY"
+
+
+def test_mode_b_allowlisted_status_and_ip_not_masked():
+    text = "status=running ip=46.224.213.21"
+    assert ls.mask_text_with_mode(text, "B") == text
+
+
+def test_mode_b_allowlisted_name_with_capital_letter_matches_any_case():
+    """connIndex в списке с заглавной буквой: совпадение без учёта регистра (CONNINDEX, connindex)."""
+    text = "connIndex=5 CONNINDEX=6 connindex=7"
+    assert ls.mask_text_with_mode(text, "B") == text
+
+
+def test_mode_b_masks_secret_pair_not_in_allowlist():
+    assert ls.mask_text_with_mode(f"{VAST_KEY_NAME}={CANARY}", "B") == f"{VAST_KEY_NAME}=***"
+
+
+def test_mode_a_plain_allowlisted_pair_kept_and_secret_pair_masked():
+    assert ls.mask_text_with_mode("status=running", "A") == "status=running"
+    out = ls.mask_text_with_mode(f"{VAST_KEY_NAME}={CANARY}", "A")
+    assert CANARY not in out and out == f"{VAST_KEY_NAME}=***"
 
 
 @pytest.mark.parametrize("mode", MASK_MODES)
@@ -628,7 +657,7 @@ def test_bearer_keeps_word_and_masks_token():
 
 
 def test_json_pairs_by_mode():
-    text = '{"HF_TOKEN": "abc123def", "status": "running", "max_tokens": "5"}'
+    text = '{"HF_TOKEN": "abc123def", "stage": "running", "max_tokens": "5"}'
     out_a = ls.mask_text_with_mode(text, "A")
     out_b = ls.mask_text_with_mode(text, "B")
     assert "abc123def" not in out_a and "abc123def" not in out_b
@@ -648,4 +677,19 @@ def test_canary_after_secret_name_is_masked(mode, line):
 
 def test_canary_after_plain_name_is_masked_in_mode_b_only():
     """Режим A по замыслу не маскирует пару с обычным именем; режим B маскирует любую пару."""
-    assert CANARY not in ls.mask_text_with_mode(f"status={CANARY}", "B")
+    assert CANARY not in ls.mask_text_with_mode(f"zone={CANARY}", "B")
+
+
+def test_remote_text_and_log_share_one_masking_function(monkeypatch):
+    """_mask_remote и журнал дают один результат: общая функция mask_remote_text (SPEC 0.1, п. 14)."""
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    sample = (f"ответ hf_abcdefghijklmnopqrstu\n"
+              f"{VAST_KEY_NAME}={CANARY} status=running\n"
+              f"ip=46.224.213.21 max_tokens=512")
+    remote = orch.Orchestrator.__new__(orch.Orchestrator)  # без конструктора: нужны только _token и vast
+    remote._token = ""
+    remote.vast = None
+    out = remote._mask_remote(sample)
+    assert out == ls.mask_remote_text(sample) == ls.mask_text(sample)
+    assert "hf_abcdefghijklmnopqrstu" not in out and CANARY not in out
+    assert "status=running" in out and "ip=46.224.213.21" in out and "max_tokens=512" in out

@@ -40,6 +40,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
+    from .log_setup import _MASK, mask_remote_text
     from .missing import parse_missing
     from .naming import clip_filename
     from .release_adapter import (  # noqa: F401
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
+    from log_setup import _MASK, mask_remote_text  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
@@ -113,18 +115,7 @@ WORKER_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
 NOT_FOUND_LIMIT = 10
 NOT_FOUND_REASON = "экземпляр не найден в Vast"
 
-# Маскирование текста, пришедшего с карты (SPEC 0.1): карта может напечатать что угодно.
-# Тот же набор шаблонов, что в worker/server.py (воркер собирается отдельно, модуль не импортируется).
-_SECRET_PATTERNS = (
-    (re.compile(r"(?i)(authorization\s*:)[^\r\n]*"), True),
-    (re.compile(r"(?i)(x-worker-token\s*[:=]\s*)\S+"), True),
-    (re.compile(r"(?i)(bearer\s+)\S+"), True),
-    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), False),
-    (re.compile(r"AIza[0-9A-Za-z_-]{20,}"), False),
-    (re.compile(r"hf_[A-Za-z0-9]{20,}"), False),
-    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), False),
-)
-_MASK = "***"
+# Шаблоны маскирования текста с карты живут в core/log_setup.py (mask_remote_text): один список на журнал и на _mask_remote.
 
 
 class _WorkerNetError(Exception):
@@ -645,7 +636,11 @@ class Orchestrator:
         return text.replace(self._token, "***") if self._token else text
 
     def _mask_remote(self, text: str) -> str:
-        """Маскирует текст, пришедший с карты: токен воркера, HF_TOKEN, ключ Vast и шаблоны ключей."""
+        """Маскирует текст, пришедший с карты (SPEC 0.1, п. 14).
+
+        Здесь только литеральные значения, известные оркестратору: токен воркера, HF_TOKEN, ключ Vast.
+        Шаблоны и правила пар берутся из core/log_setup.py (mask_remote_text), как у журнала.
+        """
         text = self._redact(text)
         hf_token = os.environ.get("HF_TOKEN", "").strip()
         if len(hf_token) >= 8:
@@ -653,12 +648,7 @@ class Orchestrator:
         vast_redact = getattr(self.vast, "_redact", None)  # метод клиента Vast маскирует свой ключ
         if callable(vast_redact):
             text = vast_redact(text)
-        for pattern, keep_prefix in _SECRET_PATTERNS:
-            if keep_prefix:
-                text = pattern.sub(lambda m: m.group(1) + _MASK, text)
-            else:
-                text = pattern.sub(_MASK, text)
-        return text
+        return mask_remote_text(text)
 
     def _monitor(self, slot: _CardSlot):
         """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой."""
