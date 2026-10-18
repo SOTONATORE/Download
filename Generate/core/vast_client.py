@@ -28,6 +28,10 @@ from typing import Any, Optional
 import httpx
 
 log = logging.getLogger("Generate.vast_client")
+# SPEC 0.1 (п. 5): httpx пишет URL запроса на уровне INFO, а URL содержит параметры (например after_token).
+# Журнал HTTP-библиотек выключен ниже WARNING; свои строки клиент пишет сам, с маскированием.
+for _http_logger in ("httpx", "httpcore"):
+    logging.getLogger(_http_logger).setLevel(logging.WARNING)
 
 # Имя секрета собрано из частей (test_structure.py: литерал в коде запрещён).
 ENV_KEY_NAME = "GEN_" + "VAST_API_KEY"
@@ -238,6 +242,7 @@ class GpuOffer:
     inet_up_price_per_tb: Optional[float] = None
     inet_down_price_per_tb: Optional[float] = None
     # dph_total из поиска (цена обычной аренды): запасной расчёт бюджета, если Vast не ответил ставкой bid.
+    # 0.0 = поля нет или не читается: оркестратор берёт такую цену только при значении больше нуля (SPEC 8.2).
     dph_total: float = 0.0
 
 
@@ -251,6 +256,7 @@ class InstanceInfo:
     direct_port: Optional[int] = None
     ssh_host: Optional[str] = None
     ssh_port: Optional[int] = None
+    # 0.0 = поля dph_total в ответе нет или не читается; оркестратор (_adopt_vast_price) принимает только dph > 0
     dph: float = 0.0
     status_msg: str = ""      # текст статуса (см. STATUS_MSG_FIELD); "" если поля нет
     # is_bid из ответа экземпляра: True для прерываемой аренды; None, если поля нет (UNVERIFIED в API)
@@ -335,7 +341,8 @@ class VastClient:
             self._client.close()
 
     def _redact(self, text: str) -> str:
-        return text.replace(self._api_key, "***")
+        # литерал ключа и пары «имя: значение» с секретным именем (тело ошибки Vast, SPEC 0.1 п. 2, 11)
+        return redact_text(text, self._api_key)
 
     def _debug_request(self, req_no: int, method: str, path: str, params: Optional[dict],
                        body: Any, headers: dict) -> None:
@@ -477,9 +484,15 @@ class VastClient:
         offer_id = _to_int(b.get("id"))
         if offer_id is None:
             return None
-        price = _to_float(b.get("dph_total"))
-        if interruptible and b.get("min_bid") is not None:
-            price = _to_float(b.get("min_bid"), price)
+        # цена предложения: для прерываемой аренды ставка bid (min_bid, если читается), иначе dph_total.
+        # Цена не читается или не больше нуля: предложение не разбирается (fail-closed), 0.0 в учёт не уходит.
+        price = _to_price_or_none(b.get("dph_total"))
+        if interruptible:
+            bid = _to_price_or_none(b.get("min_bid"))
+            if bid is not None:
+                price = bid
+        if price is None or not price > 0:
+            return None
         reliability = b.get("reliability2", b.get("reliability"))
         return GpuOffer(
             offer_id=offer_id,
@@ -541,7 +554,9 @@ class VastClient:
             return "unparsed", None
         # Аренда только одиночных карт: проверяем сырое значение из ответа,
         # а не GpuOffer.num_gpus (там пропуск уже заменён на 1).
-        if _to_int(b.get("num_gpus")) != 1:
+        # bool и дробные значения (1.5 при int() стало бы 1) не считаются одиночной картой
+        raw_gpus = b.get("num_gpus")
+        if isinstance(raw_gpus, bool) or _to_float(raw_gpus, 0.0) != 1.0:
             return "single_gpu", None
         # Повторная проверка на клиенте: сервер может вернуть лишнее.
         if offer.price_per_hr < filters.min_price:

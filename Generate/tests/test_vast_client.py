@@ -233,6 +233,28 @@ def test_search_uses_min_bid_for_interruptible(key):
     assert c.search_offers(OfferFilter())[0].price_per_hr == 0.4
 
 
+def test_search_drops_bool_and_fractional_num_gpus(key):
+    # bool и дробные значения не являются одиночной картой (int() превращал 1.5 и True в 1)
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        {**bundle(1, price=0.5), "num_gpus": True},
+        {**bundle(2, price=0.5), "num_gpus": 1.5},
+        bundle(3, price=0.5),
+    ]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [3]
+
+
+def test_offer_without_readable_price_is_dropped_even_with_zero_min_price(key):
+    # без цены и с нулевой ставкой предложение не попадает в учёт с ценой 0.0 (SPEC 8.2)
+    no_price = bundle(1, price=0.5)
+    del no_price["dph_total"]
+    c = make(lambda r: httpx.Response(200, json={"offers": [
+        no_price, bundle(2, price=0.5, bid=0.0), bundle(3, price=0.5),
+    ]}))
+    offers = c.search_offers(OfferFilter(min_price=0.0))
+    assert [o.offer_id for o in offers] == [3]
+    assert all(o.price_per_hr > 0 for o in offers)
+
+
 def test_search_invalid_filter(key):
     c = make(lambda r: httpx.Response(200, json={"offers": []}))
     with pytest.raises(VastInputError):
@@ -523,6 +545,18 @@ def test_key_never_leaks(key, caplog, capsys):
     texts += [caplog.text, out.out, out.err]
     for t in texts:
         assert SECRET not in t
+
+
+@pytest.mark.parametrize("status", [401, 500])
+def test_error_body_secret_pairs_are_masked_in_exception(key, status):
+    # канарейка на пути с ошибкой: тело ответа с секретными парами (не только сам ключ) не попадает в текст исключения
+    body = '{"error": "bad", "instance_api_key": "ZZ-PAIR-VALUE-77", "auth_token": "ZZ-TOKEN-88"}'
+    c = make(lambda r: httpx.Response(status, text=body))
+    with pytest.raises(VastRuntimeError) as e:
+        c.list_instances()
+    text = str(e.value)
+    assert "ZZ-PAIR-VALUE-77" not in text and "ZZ-TOKEN-88" not in text
+    assert SECRET not in text and f"HTTP {status}" in text and "***" in text
 
 
 def test_source_has_no_secret_names():
