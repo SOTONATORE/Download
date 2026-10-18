@@ -55,7 +55,9 @@ jobs:
           from Generate.core.vast_client import VastClient, VastError
 
           MAX_AGE_SEC = 6 * 3600  # Rule 3: аварийный предел возраста карты
+          # Метки карт (SPEC 8.3 г): gen-<номер запуска> и pilot-<что угодно> (пилот ComfyUI).
           LABEL_RE = re.compile(r"^gen-(\d+)$")
+          PILOT_LABEL_RE = re.compile(r"^pilot-(.+)$")
           repo = os.environ["REPO"]
           summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
@@ -97,23 +99,30 @@ jobs:
 
           try:
               with VastClient() as client:
-                  cards = [i for i in client.list_instances() if (i.label or "").startswith("gen-")]
+                  cards = [i for i in client.list_instances()
+                           if (i.label or "").startswith(("gen-", "pilot-"))]
                   if not cards:
-                      print("Карт с меткой gen-* нет — убирать нечего.")
+                      print("Карт с метками gen-* и pilot-* нет — убирать нечего.")
                   for inst in cards:
                       iid = inst.instance_id
                       m = LABEL_RE.match(inst.label or "")
+                      p = PILOT_LABEL_RE.match(inst.label or "")
                       age = age_sec(inst)
                       too_old = age is not None and age > MAX_AGE_SEC
                       reason = None
 
-                      if m is None:
+                      if m is None and p is None:
                           reason = f"Метка «{inst.label}» не разобрана. Уничтожаем карту {iid}."
                       elif too_old:
                           reason = (f"Карта {iid} работает дольше {MAX_AGE_SEC // 60} мин "
-                                    f"(запуск {m.group(1)}). Уничтожаем карту.")
+                                    f"(метка {inst.label}). Уничтожаем карту.")
+                      elif m is None and not p.group(1).isdigit():
+                          # пилот без номера запуска: статус запуска не проверить, действует только возраст
+                          print(f"Карта {iid} пилота без номера запуска оставлена до предела по возрасту.")
+                          spared += 1
+                          continue
                       else:
-                          run_id = m.group(1)
+                          run_id = (m or p).group(1)
                           state = run_state(run_id)
                           if state == "active":
                               print(f"Запуск {run_id} ещё выполняется — карта {iid} оставлена в работе.")
