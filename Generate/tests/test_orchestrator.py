@@ -1866,6 +1866,52 @@ def test_heartbeat_file_absent_by_default(tmp_path, monkeypatch):
     assert list(tmp_path.rglob("heartbeat*.json")) == []
 
 
+class _SlowGeminiSpy(GeminiSpy):
+    """GeminiSpy, который «долго работает» по фейковым часам и запоминает файл heartbeat на первом вызове."""
+
+    def __init__(self, events: list, clock: FakeClock, hb: Path) -> None:
+        super().__init__(events)
+        self.clock = clock
+        self.hb = hb
+        self.exists_at_first = None
+        self.text_at_first = None
+
+    def __call__(self, *args, **kwargs):
+        if self.calls == 0:
+            self.exists_at_first = self.hb.exists()
+            self.text_at_first = self.hb.read_text(encoding="utf-8") if self.exists_at_first else None
+        self.clock.sleep(900.0)              # Gemini занимает 15 минут по фейковым часам, без реального сна
+        return super().__call__(*args, **kwargs)
+
+
+def test_first_heartbeat_exists_before_gemini_call(tmp_path, monkeypatch):
+    """SPEC 8.3 а: первый heartbeat пишется до фазы Gemini, наблюдатель не ждёт карту 10 минут зря."""
+    hb = tmp_path / "heartbeat.json"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), heartbeat_path=hb)
+    spy = _SlowGeminiSpy(rig.events, rig.clock, hb)
+    monkeypatch.setattr(orch.go, "generate_and_store", spy)
+    rig.run()
+    assert spy.calls >= 1
+    assert spy.exists_at_first is True, "heartbeat должен существовать к первому вызову Gemini"
+    record = json.loads(spy.text_at_first)
+    assert record["cards"] == [], "на старте карт ещё нет"
+
+
+def test_first_heartbeat_has_no_secrets_no_addresses_and_utc_format(tmp_path, monkeypatch):
+    hb = tmp_path / "heartbeat.json"
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), token="TESTKEY-12345", heartbeat_path=hb)
+    spy = _SlowGeminiSpy(rig.events, rig.clock, hb)
+    monkeypatch.setattr(orch.go, "generate_and_store", spy)
+    rig.run()
+    text = spy.text_at_first
+    assert text is not None
+    record = json.loads(text)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["utc"])
+    assert "TESTKEY-12345" not in text, "канарейка: токен воркера в файл не попадает"
+    _no_secrets(text)
+    assert "http" not in text and "10.0.0.1" not in text, "адреса карт в файл не пишем"
+
+
 def test_speed_below_threshold_in_log_retires_card_and_host(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))

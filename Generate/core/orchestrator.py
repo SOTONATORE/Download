@@ -826,6 +826,8 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)
             return summary
+        # SPEC 8.3 а: первый heartbeat пишется до фазы Gemini, чтобы наблюдатель не ждал дольше 10 минут
+        self._write_heartbeat()
         try:
             try:
                 ready = self._generate(needed)

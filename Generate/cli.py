@@ -5,6 +5,7 @@
     run         основной запуск генерации (оркестратор, Gemini, Vast.ai, Release);
     kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``);
     watch-heartbeat  наблюдатель heartbeat: фоновый процесс шага run (SPEC 8.3 а);
+    cleanup-vast  уборка забытых карт по метке и статусу запуска (SPEC 8.3 г; cleanup_vast.yml);
     finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt
                 (шаг ``if: always()``, в том числе после отмены запуска).
 
@@ -32,15 +33,17 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import signal
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 
@@ -48,24 +51,24 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
-    from Generate.core.gemini_prompts import GeminiInputError
+    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
-        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
+        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
     from Generate.core.vast_client import (
         OfferFilter, VastClient, VastError, VastRuntimeError)
 except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
-    from gemini_prompts import GeminiInputError  # type: ignore
+    from gemini_prompts import GeminiInputError, GeminiRuntimeError  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
-        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseUploader, make_tag)
+        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
     from vast_client import (  # type: ignore
         OfferFilter, VastClient, VastError, VastRuntimeError)
 
@@ -94,6 +97,16 @@ WATCH_DEFAULT_CHECK_SEC = 30
 HEARTBEAT_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # метка «запуск завершён»: файл рядом с heartbeat (SPEC 8.3 а)
 FINISHED_SUFFIX = ".finished"
+# наблюдатель: сколько ждать первый файл heartbeat (решение владельца 18.10.2026); до первой записи карты не арендуются
+WATCH_FIRST_HEARTBEAT_LIMIT_SEC = 600
+# уборка по расписанию (SPEC 8.3 г): аварийный предел возраста карты и метки карт
+MAX_AGE_SEC = 6 * 3600
+GEN_LABEL_RE = re.compile(r"gen-([0-9]+)")
+PILOT_LABEL_RE = re.compile(r"pilot-(.+)")
+CARD_LABEL_PREFIXES = ("gen-", "pilot-")
+# статусы запуска GitHub Actions, при которых запуск ещё идёт (SPEC 8.3 г)
+ACTIVE_RUN_STATUSES = ("in_progress", "queued", "waiting", "requested", "pending")
+GH_STATUS_TIMEOUT_SEC = 60
 
 
 def _err(text: str) -> None:
@@ -557,21 +570,74 @@ def _read_heartbeat_utc(path: Path) -> Optional[datetime]:
 
 
 def _watch_kill(run_id: str) -> int:
-    """Уборка для наблюдателя: та же логика, что у kill-cards, по метке gen-<run_id>."""
+    """Уборка для наблюдателя: та же логика, что у kill-cards, по метке gen-<run_id>.
+
+    Возвращает EXIT_OK, если уничтожение прошло, иначе EXIT_RUNTIME (решение владельца 18.10.2026).
+    """
     code = cmd_kill_cards(argparse.Namespace(label=None, run_id=run_id))
     if code != EXIT_OK:
-        log.error("Наблюдатель: уничтожение карт не удалось (код %d). Проверьте Vast.ai и шаг уборки.", code)
+        log.error("Наблюдатель: уничтожение карт запуска %s не удалось (код %d). "
+                  "Проверьте Vast.ai и шаг уборки.", run_id, code)
+        return EXIT_RUNTIME
     return EXIT_OK
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check_every_sec: int,
+                    first_limit_sec: int = WATCH_FIRST_HEARTBEAT_LIMIT_SEC,
+                    kill=None, clock=time.monotonic, sleep=time.sleep,
+                    utc_now=_utc_now) -> int:
+    """Цикл наблюдателя (SPEC 8.3 а). Часы, сон и уборка передаются параметрами (для тестов).
+
+    Порядок в каждом обходе:
+      - есть метка конца запуска: выход с кодом 0, карты не трогаются;
+      - файл heartbeat читается и свежий: ждём дальше;
+      - файл heartbeat старше max_silence_sec или пропал после первой записи: уборка gen-<run_id>,
+        код выхода — код уборки (0 или 3);
+      - первого файла ещё нет: ждём не дольше first_limit_sec; по истечении выход с кодом 3,
+        уборка не запускается (карт до первой записи нет).
+    Ключ Vast, адреса и содержимое файла не печатаются.
+    """
+    run_kill = kill if kill is not None else _watch_kill
+    marker = finished_marker_path(heartbeat)
+    started = clock()
+    seen = False
+    while True:
+        if marker.exists():
+            log.info("Метка конца запуска найдена: наблюдатель завершается, карты не трогаются.")
+            return EXIT_OK
+        beat = _read_heartbeat_utc(heartbeat)
+        if beat is not None:
+            seen = True
+            silence = (utc_now() - beat).total_seconds()
+            if silence <= max_silence_sec:
+                log.info("heartbeat свежий: последняя запись %d с назад.", int(silence))
+            else:
+                log.error("heartbeat не обновлялся %d с (порог %d с): уничтожаем карты запуска.",
+                          int(silence), max_silence_sec)
+                return run_kill(run_id)
+        elif seen:
+            log.error("Файл heartbeat пропал или не читается: уничтожаем карты запуска.")
+            return run_kill(run_id)
+        else:
+            waited = clock() - started
+            if waited >= first_limit_sec:
+                log.error("Файл heartbeat не появился за %d с: карты запуска не арендовались, "
+                          "наблюдатель завершается с кодом 3.", first_limit_sec)
+                return EXIT_RUNTIME
+            log.info("Файла heartbeat ещё нет (ждём не дольше %d с): карты запуска не арендовались.",
+                     first_limit_sec)
+        sleep(check_every_sec)
 
 
 def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
     """Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс шага run в generate.yml.
 
-    Каждые check_every_sec читает файл heartbeat. Если метки конца запуска нет и запись старше
-    max_silence_sec, либо файл пропал после того, как появлялся, уничтожает карты запуска
-    (как kill-cards) и выходит с кодом 0. Если метка конца запуска появилась, выходит с кодом 0
-    без уборки. Пока файла нет, ждёт: оркестратор пишет его в цикле аренды, а карты до этого
-    не арендуются. Ключ Vast и адреса карт не печатаются.
+    Коды выхода: 0 — метка конца запуска, либо уборка прошла; 3 — уборка не удалась, либо
+    первый файл heartbeat не появился за WATCH_FIRST_HEARTBEAT_LIMIT_SEC; 2 — неверные аргументы.
     """
     if not args.run_id:
         _err("Ошибка входных данных: наблюдателю нужен номер запуска (--run-id).")
@@ -583,31 +649,180 @@ def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
         _err("Ошибка входных данных: пороги наблюдателя должны быть больше нуля.")
         return EXIT_INPUT
 
-    heartbeat = Path(args.heartbeat_path)
-    marker = finished_marker_path(heartbeat)
     log.info("Наблюдатель heartbeat запущен: запуск %s, порог тишины %d с, проверка каждые %d с.",
              args.run_id, args.max_silence_sec, args.check_every_sec)
-    seen = False
-    while True:
-        if marker.exists():
-            log.info("Метка конца запуска найдена: наблюдатель завершается, карты не трогаются.")
-            return EXIT_OK
-        beat = _read_heartbeat_utc(heartbeat)
-        if beat is not None:
-            seen = True
-            silence = (datetime.now(timezone.utc) - beat).total_seconds()
-            if silence <= args.max_silence_sec:
-                log.info("heartbeat свежий: последняя запись %d с назад.", int(silence))
-            else:
-                log.error("heartbeat не обновлялся %d с (порог %d с): уничтожаем карты запуска.",
-                          int(silence), args.max_silence_sec)
-                return _watch_kill(args.run_id)
-        elif seen:
-            log.error("Файл heartbeat пропал или не читается: уничтожаем карты запуска.")
-            return _watch_kill(args.run_id)
-        else:
-            log.info("Файла heartbeat ещё нет: карты запуска не арендовались, наблюдатель ждёт.")
-        time.sleep(args.check_every_sec)
+    return watch_heartbeat(args.run_id, Path(args.heartbeat_path),
+                           max_silence_sec=args.max_silence_sec,
+                           check_every_sec=args.check_every_sec)
+
+
+# ---------------------------------------------------------------- уборка по расписанию (SPEC 8.3 г)
+
+def parse_card_label(label: Optional[str]) -> Optional[str]:
+    """Номер запуска из метки карты: gen-<номер> или pilot-<что угодно>. None, если метка не разобрана."""
+    text = label or ""
+    m = GEN_LABEL_RE.fullmatch(text) or PILOT_LABEL_RE.fullmatch(text)
+    return m.group(1) if m else None
+
+
+def classify_run_status(status: Optional[str]) -> str:
+    """'finished' (completed или missing), 'active' (идёт или в очереди) или 'unknown' (статус не прочитан).
+
+    missing (запуска нет, HTTP 404) считается завершённым: карта уничтожается независимо от возраста.
+    """
+    if status in ("completed", "missing"):
+        return "finished"
+    if status in ACTIVE_RUN_STATUSES:
+        return "active"
+    return "unknown"
+
+
+def card_age_sec(inst, now: float) -> Optional[float]:
+    """Возраст карты, сек, по полю start_date ответа Vast; None, если поля нет или оно не читается."""
+    try:
+        start = float(inst.raw.get("start_date"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return max(0.0, now - start)
+
+
+def decide_card(label: Optional[str], run_status: Optional[str],
+                age_sec: Optional[float]) -> tuple[bool, str]:
+    """Решение по карте: (уничтожить, причина). Чистая функция, без обращения к сети (SPEC 8.3 г).
+
+    Порядок: метка не разобрана -> уничтожить; запуск завершён -> уничтожить;
+    возраст больше MAX_AGE_SEC -> уничтожить; запуск идёт -> оставить;
+    статус не прочитан -> оставить до следующей проверки.
+    """
+    run_id = parse_card_label(label)
+    if run_id is None:
+        return True, "метка не разобрана"
+    if run_status == "missing":
+        return True, f"запуск {run_id} не найден (считается завершённым)"
+    state = classify_run_status(run_status)
+    if state == "finished":
+        return True, f"запуск {run_id} завершён"
+    if age_sec is not None and age_sec > MAX_AGE_SEC:
+        return True, f"карта старше {MAX_AGE_SEC // 3600} ч (предел по возрасту)"
+    if state == "active":
+        return False, f"запуск {run_id} ещё выполняется"
+    return False, f"статус запуска {run_id} не прочитан"
+
+
+def gh_run_status(repo: str, run_id: str, runner=None) -> Optional[str]:
+    """Статус запуска GitHub Actions через gh.
+
+    Возвращает статус из ответа gh, 'missing' (запуска нет: в ошибке gh есть «HTTP 404» или «not found»)
+    или None (статус не прочитан: другая ошибка gh, таймаут, нет поля).
+
+    gh запускается через GhCommandRunner (core/release_adapter.py): окружение только PATH, HOME, GH_TOKEN.
+    Текст ошибок gh не печатается; для решения используется только признак 404 / not found.
+    """
+    call = runner if runner is not None else GhCommandRunner(timeout=GH_STATUS_TIMEOUT_SEC)
+    try:
+        data = json.loads(call(["run", "view", run_id, "--repo", repo, "--json", "status,conclusion"]))
+    except GeminiRuntimeError as exc:
+        # Признак отсутствующего запуска ищется в тексте stderr gh (GhCommandRunner кладёт его в сообщение).
+        # Зависим только от строк «HTTP 404» и «not found» (без учёта регистра). Если gh напишет для
+        # несуществующего запуска что-то другое, результат будет «неизвестно», карта останется до 6 часов:
+        # это безопасная сторона, карта не уничтожается по ошибочному признаку.
+        text = str(exc).lower()
+        if "http 404" in text or "not found" in text:
+            return "missing"
+        return None
+    except (GeminiInputError, ValueError, AttributeError):
+        return None
+    status = data.get("status") if isinstance(data, dict) else None
+    return status if isinstance(status, str) else None
+
+
+@dataclass
+class CleanupResult:
+    kept: int = 0
+    destroyed: int = 0
+    failed: int = 0
+    unclassified: int = 0
+
+    @property
+    def exit_code(self) -> int:
+        """0, если все уничтожения прошли или уничтожать нечего; 3 при неудаче или карте без номера."""
+        return EXIT_RUNTIME if (self.failed or self.unclassified) else EXIT_OK
+
+    def summary_lines(self) -> list[str]:
+        return [
+            "## Уборка карт Vast",
+            f"- Оставлено (запуск идёт или статус не прочитан): {self.kept}",
+            f"- Уничтожено карт: {self.destroyed}",
+            f"- Ошибок уничтожения: {self.failed}",
+            f"- Карт без номера, не обработано: {self.unclassified}",
+        ]
+
+
+def cleanup_cards(client, *, run_status_fn: Callable[[str], Optional[str]], now: float,
+                  out: Callable[[str], None] = print) -> CleanupResult:
+    """Уборка карт с метками gen-* и pilot-* (SPEC 8.3 г). Остальные карты аккаунта не трогаются.
+
+    run_status_fn(run_id) возвращает статус запуска или None. Решение по каждой карте печатается
+    с номером карты (не адресом) и причиной.
+    """
+    result = CleanupResult()
+    cards = [i for i in client.list_instances() if (i.label or "").startswith(CARD_LABEL_PREFIXES)]
+    if not cards:
+        out("Карт с метками gen-* и pilot-* нет — убирать нечего.")
+    for inst in cards:
+        iid = inst.instance_id
+        if not iid:
+            result.unclassified += 1
+            out("Карта без номера в ответе Vast: уничтожить нельзя, пропущена.")
+            continue
+        run_id = parse_card_label(inst.label)
+        run_status = run_status_fn(run_id) if run_id is not None else None
+        destroy, reason = decide_card(inst.label, run_status, card_age_sec(inst, now))
+        if not destroy:
+            result.kept += 1
+            out(f"Карта {iid}: оставлена, {reason}.")
+            continue
+        out(f"Карта {iid}: уничтожается, {reason}.")
+        try:
+            client.destroy_instance(iid)
+            result.destroyed += 1
+        except VastError as exc:
+            result.failed += 1
+            out(f"Карта {iid}: ошибка уничтожения ({type(exc).__name__}).")
+    return result
+
+
+def cmd_cleanup_vast(args: argparse.Namespace) -> int:
+    """Уборка забытых карт (SPEC 8.3 г): вызывается из cleanup_vast.yml по расписанию и вручную."""
+    if not args.repo:
+        _err("Ошибка входных данных: не задан репозиторий (--repo).")
+        return EXIT_INPUT
+    client = None
+    try:
+        client = VastClient()
+        result = cleanup_cards(
+            client,
+            run_status_fn=lambda rid: gh_run_status(args.repo, rid),
+            now=time.time(),
+        )
+    except VastError as e:
+        _err(f"Ошибка клиента Vast: {e}")
+        return EXIT_INPUT if e.exit_code == EXIT_INPUT else EXIT_RUNTIME
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    lines = result.summary_lines()
+    print("\n".join(lines))
+    if args.summary_file:
+        try:
+            with open(args.summary_file, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        except OSError:
+            _err("Не удалось записать итоги уборки в файл сводки.")
+    return result.exit_code
+
 
 
 def cmd_finalize_release(args: argparse.Namespace) -> int:
@@ -758,6 +973,12 @@ def build_parser() -> argparse.ArgumentParser:
     watch_p.add_argument("--check-every-sec", type=int, default=WATCH_DEFAULT_CHECK_SEC,
                          help=f"период проверки, с; по умолчанию {WATCH_DEFAULT_CHECK_SEC}")
     watch_p.set_defaults(func=lambda a: cmd_watch_heartbeat(a))
+    clean_p = sub.add_parser("cleanup-vast",
+                             help="уборка забытых карт Vast по метке и статусу запуска (SPEC 8.3 г)")
+    clean_p.add_argument("--repo", default="", help="репозиторий owner/name (передаётся явно)")
+    clean_p.add_argument("--summary-file", default="",
+                         help="файл итогов (в Actions: $GITHUB_STEP_SUMMARY); пусто = не писать")
+    clean_p.set_defaults(func=lambda a: cmd_cleanup_vast(a))
     fin_p = sub.add_parser("finalize-release",
                            help="загрузить prompts.json и generated_links.txt в Release")
     fin_p.add_argument("--srt", default=DEFAULT_SRT,

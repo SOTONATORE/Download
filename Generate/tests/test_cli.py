@@ -1,7 +1,9 @@
 """Тесты cli.py: всё через main(argv), без сети и ключей (всё внешнее подменено)."""
+import json
 import logging
 import pathlib
 import re
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -906,3 +908,175 @@ def test_stop_signal_sets_flag_and_restores_handlers(monkeypatch):
     finally:
         cli._restore_handlers(previous)
     assert {s: signal.getsignal(s) for s in cli.STOP_SIGNALS} == before
+
+
+# ---------------------------------------------------------------- наблюдатель heartbeat (SPEC 8.3 а)
+
+WATCH_BASE = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class FakeWatchClock:
+    """Часы и сон для наблюдателя: сон двигает время, реального ожидания нет."""
+
+    def __init__(self):
+        self.t = 0.0
+        self.sleeps = 0
+        self.on_sleep = None
+
+    def clock(self):
+        return self.t
+
+    def utc_now(self):
+        return WATCH_BASE + timedelta(seconds=self.t)
+
+    def sleep(self, sec):
+        self.sleeps += 1
+        if self.sleeps > 500:  # защита от зависания теста: наблюдатель должен был выйти раньше
+            raise AssertionError("наблюдатель не завершился")
+        self.t += sec
+        if self.on_sleep is not None:
+            self.on_sleep(self)
+
+
+def _write_hb(path, at_sec):
+    """Файл heartbeat с временем WATCH_BASE + at_sec (секунды относительно фейковых часов)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    when = WATCH_BASE + timedelta(seconds=at_sec)
+    path.write_text(json.dumps({"utc": when.strftime(cli.HEARTBEAT_UTC_FORMAT), "label": "gen-123"}),
+                    encoding="utf-8")
+
+
+@pytest.fixture
+def watch(tmp_path):
+    kills = []
+    clock = FakeWatchClock()
+
+    def fake_kill(run_id):
+        kills.append(run_id)
+        return fake_kill.code
+
+    fake_kill.code = cli.EXIT_OK
+    return SimpleNamespace(hb=tmp_path / "generate-heartbeat" / "heartbeat.json",
+                           clock=clock, kills=kills, kill=fake_kill)
+
+
+def _run_watch(w, run_id="123"):
+    return cli.watch_heartbeat(run_id, w.hb, max_silence_sec=120, check_every_sec=30,
+                               kill=w.kill, clock=w.clock.clock, sleep=w.clock.sleep,
+                               utc_now=w.clock.utc_now)
+
+
+def test_watch_first_limit_constant_is_600():
+    assert cli.WATCH_FIRST_HEARTBEAT_LIMIT_SEC == 600
+    assert cli.WATCH_DEFAULT_SILENCE_SEC == 120
+    assert cli.WATCH_DEFAULT_CHECK_SEC == 30
+
+
+def test_watch_first_heartbeat_never_appears_gives_3_without_kill(watch):
+    code = _run_watch(watch)
+    assert code == 3
+    assert watch.kills == []                 # до первой записи карт нет: уборка не запускается
+    assert watch.clock.t == 600              # выход ровно по пределу, без реального ожидания
+
+
+def test_watch_fresh_heartbeat_keeps_running_until_marker(watch):
+    _write_hb(watch.hb, 0)
+
+    def on_sleep(c):
+        _write_hb(watch.hb, c.t)             # оркестратор пишет свежий файл
+        if c.sleeps == 4:
+            cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
+
+    watch.clock.on_sleep = on_sleep
+    assert _run_watch(watch) == 0
+    assert watch.kills == []
+    assert watch.clock.sleeps == 4           # продолжал работать, пока не появилась метка
+
+
+def test_watch_stale_heartbeat_kills_gen_run_and_exits_0(watch):
+    _write_hb(watch.hb, -200)                # запись старше порога 120 с
+    assert _run_watch(watch) == 0
+    assert watch.kills == ["123"]
+
+
+def test_watch_heartbeat_lost_after_first_write_kills(watch):
+    _write_hb(watch.hb, 0)
+
+    def on_sleep(c):
+        if c.sleeps == 1:
+            watch.hb.unlink()                # файл пропал после того, как появлялся
+
+    watch.clock.on_sleep = on_sleep
+    assert _run_watch(watch) == 0
+    assert watch.kills == ["123"]
+
+
+def test_watch_kill_failure_gives_3(watch):
+    watch.kill.code = cli.EXIT_RUNTIME
+    _write_hb(watch.hb, -200)
+    assert _run_watch(watch) == 3
+    assert watch.kills == ["123"]
+
+
+def test_watch_marker_exits_0_without_kill_even_if_stale(watch):
+    _write_hb(watch.hb, -500)
+    cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
+    assert _run_watch(watch) == 0
+    assert watch.kills == []
+
+
+def test_watch_marker_without_any_heartbeat_exits_0(watch):
+    cli.finished_marker_path(watch.hb).parent.mkdir(parents=True, exist_ok=True)
+    cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
+    assert _run_watch(watch) == 0
+    assert watch.kills == []
+
+
+def _write_real_hb(path, age_sec):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    when = datetime.now(timezone.utc) - timedelta(seconds=age_sec)
+    path.write_text(json.dumps({"utc": when.strftime(cli.HEARTBEAT_UTC_FORMAT)}), encoding="utf-8")
+
+
+def test_watch_main_stale_kills_through_kill_cards(capsys, kill_env, tmp_path):
+    hb = tmp_path / "heartbeat.json"
+    _write_real_hb(hb, 300)
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
+    assert code == 0
+    assert kill_env.labels == ["gen-123"]
+
+
+def test_watch_main_real_kill_failure_gives_3(capsys, kill_env, tmp_path):
+    # G11: неудачная уборка не должна выглядеть как успех
+    kill_env.error = cli.VastError("Не удалось уничтожить экземпляры Vast: [11]")
+    hb = tmp_path / "heartbeat.json"
+    _write_real_hb(hb, 300)
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
+    cap = capsys.readouterr()
+    assert code == 3
+    assert kill_env.labels == ["gen-123"]
+    assert "Traceback" not in cap.err
+    assert "не удалось" in cap.err.lower()
+
+
+def test_watch_main_marker_exits_0_without_vast(capsys, kill_env, tmp_path):
+    hb = tmp_path / "heartbeat.json"
+    cli.finished_marker_path(hb).write_text("finished\n", encoding="utf-8")
+    assert cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"]) == 0
+    assert kill_env.labels == []
+
+
+def test_watch_does_not_print_key_or_heartbeat_content(capsys, kill_env, tmp_path, monkeypatch):
+    # канарейка: значение ключа в окружении и в содержимом файла heartbeat не должно попасть в вывод
+    canary = "TESTKEY-12345"
+    monkeypatch.setenv(VAST_KEY_ENV, canary)
+    kill_env.error = cli.VastError("Не удалось уничтожить экземпляры Vast: [11]")
+    hb = tmp_path / "heartbeat.json"
+    when = datetime.now(timezone.utc) - timedelta(seconds=300)
+    hb.write_text(json.dumps({"utc": when.strftime(cli.HEARTBEAT_UTC_FORMAT), "note": canary,
+                              "cards": [{"public_ipaddr": "203.0.113.5"}]}), encoding="utf-8")
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
+    cap = capsys.readouterr()
+    assert code == 3
+    assert canary not in cap.out + cap.err
+    assert "203.0.113.5" not in cap.out + cap.err
