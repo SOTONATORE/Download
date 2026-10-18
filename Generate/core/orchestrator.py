@@ -304,7 +304,6 @@ def _utc_now() -> str:
 
 # Артефакт запуска и выдача служебных файлов (SPEC 9.1, 9.4, 10.4, этап 6c)
 ARTIFACT_SAVE_LIMIT_SEC = 60.0      # SPEC 8.3 (в), шаг 1: сохранение логов и JSON до уничтожения карт
-ARTIFACT_RUN_LOG = "run.log"
 REPORT_FILENAME = "summary.md"
 FILES_LIST_NAME = "FILES.txt"
 LOG_BUNDLE_NAME = "run-logs.zip"
@@ -339,9 +338,6 @@ class RunArtifact:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self._mask(text), encoding="utf-8", newline="\n")
 
-    def run_line(self, text: str) -> None:
-        self._append(self.root / "run" / ARTIFACT_RUN_LOG, text)
-
     def card_dir(self, slot) -> Path:
         return self.root / "cards" / f"slot{slot.index}_generation{slot.generation}"
 
@@ -365,6 +361,8 @@ class RunArtifact:
         self._write(self.root / "run" / REPORT_FILENAME, text)
 
     def write_files_list(self) -> None:
+        # Список строится обходом каталога. Единственный журнал запуска: run/debug.log (пишет cli через
+        # core/log_setup.py, SPEC 10.4); run/run.log оркестратор больше не пишет (этап 7б).
         rows = []
         for p in sorted(self.root.rglob("*")):
             if p.is_file() and p.name != FILES_LIST_NAME:
@@ -376,21 +374,6 @@ class RunArtifact:
             for p in sorted(self.root.rglob("*")):
                 if p.is_file():
                     zf.write(p, p.relative_to(self.root).as_posix())
-
-
-class _RunLogHandler(logging.Handler):
-    """Пишет журнал запуска (все записи пакета Generate) в run/run.log артефакта."""
-
-    def __init__(self, artifact: RunArtifact) -> None:
-        super().__init__(level=logging.DEBUG)
-        self._artifact = artifact
-        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self._artifact.run_line(self.format(record))
-        except Exception:  # журнал не должен ронять запуск
-            self.handleError(record)
 
 
 class RunPublisher:
@@ -754,15 +737,7 @@ class Orchestrator:
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
         self._t0 = self.clock()
-        handler = None
-        if self._artifact is not None:
-            handler = _RunLogHandler(self._artifact)
-            logging.getLogger("Generate").addHandler(handler)
-        try:
-            return self._run_body()
-        finally:
-            if handler is not None:
-                logging.getLogger("Generate").removeHandler(handler)
+        return self._run_body()
 
     def _run_body(self) -> RunSummary:
         try:

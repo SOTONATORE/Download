@@ -2018,8 +2018,8 @@ def test_artifact_layout_masking_and_no_secrets(tmp_path, monkeypatch, caplog):
                             f"в логе токен {TOKEN} и ключ {VAST_KEY}\n")
     rig.run()
     assert (art / "run" / "summary.md").is_file()
-    assert (art / "run" / "run.log").is_file()
-    assert "Итог" in (art / "run" / "run.log").read_text(encoding="utf-8")
+    assert not (art / "run" / "run.log").exists()  # единственный журнал запуска: run/debug.log (этап 7б)
+    assert "Итог" in caplog.text
     card = art / "cards" / "slot1_generation1"
     assert (card / "meta.json").is_file() and (card / "status.txt").is_file()
     wl = (card / "worker_log.txt").read_text(encoding="utf-8")
