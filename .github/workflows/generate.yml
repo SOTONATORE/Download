@@ -192,8 +192,9 @@ jobs:
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          # Подробные логи всегда (SPEC 10): уровень DEBUG и сырой журнал обмена с Vast (--debug-logs).
-          # Сырые строки обмена в сводку шага не попадают (фильтр summary_filter ниже).
+          # Два обработчика журнала (SPEC 10, Generate/core/log_setup.py). Консоль (окно шага) пишет только INFO:
+          # сырой журнал обмена с Vast в неё не попадает. Файл <артефакт>/run/debug.log пишет уровень DEBUG
+          # (GEN_LOG_LEVEL) и весь журнал, включая сырой обмен с Vast (--debug-logs); он уходит в артефакт.
           GEN_LOG_LEVEL: "DEBUG"
         run: |
           # образ карты не передаётся: берётся из config.default.yaml (стоковый образ, SPEC 8.4)
@@ -253,7 +254,7 @@ jobs:
           PY
 
           # Фильтр сводки (SPEC 0.1, 10): сырые строки обмена с Vast («Запрос Vast #», «Ответ Vast #»)
-          # в $GITHUB_STEP_SUMMARY не попадают. В $RUN_LOG и в журнал шага они идут полностью.
+          # Консоль их уже не печатает (INFO, см. выше); фильтр оставлен как запасной и ничего не режет.
           # Строки записи лога начинаются с «ДАТА ВРЕМЯ [УРОВЕНЬ]», поэтому префикс ищется после них.
           summary_filter="$RUNNER_TEMP/summary_filter.py"
           cat > "$summary_filter" <<'PY'
@@ -394,7 +395,8 @@ jobs:
             | python3 -I -u -c "$mask_code" \
             | tee -a "$RUN_LOG"
 
-      # Полный лог шага run (с маскированием) сохраняется даже при отмене и ошибке.
+      # Журнал окна шага run (INFO, с маскированием) сохраняется даже при отмене и ошибке.
+      # Подробный журнал (DEBUG и сырой обмен с Vast) лежит в артефакте generate-artifact-<run_id>.
       - name: Upload run log
         if: always()
         uses: actions/upload-artifact@v4
