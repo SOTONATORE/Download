@@ -524,3 +524,14 @@ def test_messages_are_russian(tmp_path):
     with pytest.raises(GeminiRuntimeError) as ei:
         run(tmp_path, FakeTransport([quota(), quota()]), [1])
     assert any("а" <= ch <= "я" for ch in str(ei.value).lower())
+
+
+def test_success_logs_model_time_and_attempts_without_prompt_text(tmp_path, caplog):
+    # SPEC 7 / 0.1 п.24: в лог идут модель, время и число сбоев; текст промпта не идёт
+    caplog.set_level(logging.INFO)
+    run(tmp_path, FakeTransport([unavail(), ok([1, 2])]), [1, 2])
+    lines = [r.getMessage() for r in caplog.records if r.name == "Generate.gemini_orchestrator"]
+    # первый вызов падает (503), второй успешен: в логе успеха один предшествующий сбой
+    assert any(l.startswith(f"Модель {M1}: ответ получен за") and "сбоев подряд до этого: 1" in l
+               for l in lines)
+    assert "A wide shot" not in caplog.text

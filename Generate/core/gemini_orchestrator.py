@@ -122,6 +122,7 @@ class ManagedTransport:
         self._reserve = max(0, output_reserve_tokens)
         self._max_retries = max_rate_retries
         self._sleep = sleep
+        self._clock = clock
         self._limiters = {m: RateLimiter(rpm_limit, tpm_limit, clock, sleep) for m in self._models}
         self._used = {m: int((rpd_used or {}).get(m, 0)) for m in self._models}
         self._exhausted: set = set()
@@ -176,8 +177,12 @@ class ManagedTransport:
                 tries, tries_model = 0, m
             self._limiters[m].acquire(tokens)
             self._used[m] += 1
+            t0 = self._clock()
             try:
-                return self._inner.generate_json(m, system, user, schema)
+                text = self._inner.generate_json(m, system, user, schema)
+                log.info("Модель %s: ответ получен за %.1f с (сбоев подряд до этого: %d).",
+                         m, self._clock() - t0, tries)
+                return text
             except gp.GeminiRuntimeError as e:
                 if e.daily_quota:
                     self._exhausted.add(m)
