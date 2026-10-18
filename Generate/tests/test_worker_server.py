@@ -110,7 +110,7 @@ def test_auth_missing_invalid_valid(make_app):
     with client_for(app, None) as c:
         assert c.get("/health").status_code == 401
     with client_for(app, WRONG) as c:
-        assert c.get("/health").status_code == 403
+        assert c.get("/health").status_code == 401
     with client_for(app) as c:
         assert c.get("/health").status_code == 200
 
@@ -118,7 +118,7 @@ def test_auth_missing_invalid_valid(make_app):
 def test_invalid_token_does_not_create_task(make_app):
     app, comfy = make_app()
     with client_for(app, WRONG) as c:
-        assert c.post("/task", json=TASK).status_code == 403
+        assert c.post("/task", json=TASK).status_code == 401
     assert comfy.graphs == []
 
 
@@ -282,7 +282,7 @@ def test_deadman_reset_by_authenticated_request_only(make_app):
             time.sleep(0.12)
         assert not fired.is_set()
         for _ in range(8):  # неавторизованные запросы таймер не сбрасывают
-            assert bad.get("/health").status_code == 403
+            assert bad.get("/health").status_code == 401
             time.sleep(0.12)
     assert fired.wait(3)
 
@@ -334,3 +334,60 @@ def test_empty_token_refused(tmp_path):
 ])
 def test_parse_range(header, expected):
     assert parse_range(header, 100) == expected
+
+
+# --- идемпотентность POST /task (SPEC 8.1, 13.1 п. 3) ---
+
+def test_repeat_post_same_num_unacked_returns_same_task(make_app):
+    app, comfy = make_app()
+    with client_for(app) as c:
+        first = submit_done(c)
+        again = c.post("/task", json=TASK)
+        assert again.status_code == 200
+        assert again.json() == {"task_id": first}
+        assert len(comfy.graphs) == 1  # второй рендер не запущен
+
+
+def test_repeat_post_while_queued_returns_same_task(make_app, tmp_path):
+    gate = threading.Event()
+    app, comfy = make_app(FakeComfy(tmp_path / "out", gate=gate))
+    with client_for(app) as c:
+        first = c.post("/task", json=TASK).json()["task_id"]
+        assert comfy.started.wait(5)
+        assert c.post("/task", json=TASK).json()["task_id"] == first
+        gate.set()
+        wait_state(c, first, "done")
+        assert len(comfy.graphs) == 1
+
+
+def test_repeat_post_after_ack_creates_new_task(make_app):
+    app, comfy = make_app()
+    with client_for(app) as c:
+        first = submit_done(c)
+        assert c.post(f"/ack/{first}").status_code == 200
+        second = c.post("/task", json=TASK).json()["task_id"]
+        assert second != first
+        wait_state(c, second, "done")
+        assert len(comfy.graphs) == 2
+
+
+def test_repeat_post_after_error_creates_new_task(make_app, tmp_path):
+    app, comfy = make_app(FakeComfy(tmp_path / "out", fail="сбой сэмплера"))
+    with client_for(app) as c:
+        first = c.post("/task", json=TASK).json()["task_id"]
+        wait_state(c, first, "error")
+        second = c.post("/task", json=TASK).json()["task_id"]
+        assert second != first
+        wait_state(c, second, "error")
+        assert len(comfy.graphs) == 2
+
+
+def test_repeat_post_is_not_refused_by_full_backlog(make_app):
+    app, comfy = make_app(max_unacked=2)
+    with client_for(app) as c:
+        ids = [submit_done(c, num=i) for i in range(2)]
+        # очередь полна: новый клип получает 429, повтор уже принятого клипа — нет
+        assert c.post("/task", json={**TASK, "num": 9}).status_code == 429
+        resp = c.post("/task", json={**TASK, "num": 0})
+        assert resp.status_code == 200 and resp.json()["task_id"] == ids[0]
+        assert len(comfy.graphs) == 2

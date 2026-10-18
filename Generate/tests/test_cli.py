@@ -382,7 +382,7 @@ def test_run_default_card_params(capsys, run_env, missing_file):
     """Без флагов docker_image/disk_gb/silent_host_timeout_min получают значения по умолчанию."""
     assert cli.main(_run_args(DATA, missing_file)) == 0
     _, kwargs = run_env.calls[0]
-    assert kwargs["docker_image"] == "ghcr.io/sotonatore/download/videogen-worker:latest"
+    assert kwargs["docker_image"] == "vastai/comfy:v0.41.0-cuda-13.2-py312"
     assert kwargs["disk_gb"] == 100
     assert kwargs["silent_host_timeout_min"] == 20
 

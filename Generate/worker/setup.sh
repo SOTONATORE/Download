@@ -3,7 +3,9 @@
 
 set -u
 
-COMFY_MODELS_DIR="/workspace/ComfyUI/models"
+# Папка ComfyUI задаётся bootstrap.sh (COMFY_DIR); по умолчанию /workspace/ComfyUI.
+COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
+COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
 COMFY_READY_URL="http://127.0.0.1:8188/system_stats"
@@ -60,13 +62,13 @@ download_model() {
     # --summary-interval=10: строка прогресса (процент, скорость) каждые 10 с.
     # --console-log-level=warn снят: прогресс виден в логе контейнера. Служебные строки aria2
     # (в т.ч. адреса перенаправлений) тоже попадают туда; в GET /logs воркера они не идут.
-    # Заголовок Authorization передаётся aria2 аргументом и не печатается (UNVERIFIED: вывод
-    # aria2 на живой карте не проверялся).
+    # Заголовок Authorization идёт во входном файле aria2 (process substitution): токен не
+    # попадает в аргументы процесса и не пишется на диск (SPEC 0.1, п. 3). Проверено локально
+    # aria2c 1.37 на заглушке сервера; на живой карте UNVERIFIED.
     aria2c \
-        --header="Authorization: Bearer ${HF_TOKEN}" \
         -x 16 -s 16 -k 1M -c --summary-interval=10 \
-        -d "${target_dir}" -o "${name}" \
-        "${url}"
+        -i <(printf '%s\n' "${url}" "  header=Authorization: Bearer ${HF_TOKEN}" \
+             "  dir=${target_dir}" "  out=${name}")
     rc=$?
 
     if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
@@ -109,7 +111,7 @@ if [ "${GEN_LOG_LEVEL:-INFO}" = "DEBUG" ]; then
     COMFY_VERBOSE_ARGS=(--verbose DEBUG)
 fi
 log "Вывод ComfyUI пишется в файл ${COMFY_LOG_PATH} и в лог контейнера."
-python /workspace/ComfyUI/main.py --listen 127.0.0.1 --port 8188 "${COMFY_VERBOSE_ARGS[@]}" \
+python "${COMFY_DIR}/main.py" --listen 127.0.0.1 --port 8188 "${COMFY_VERBOSE_ARGS[@]}" \
     > >(tee -a "${COMFY_LOG_PATH}") 2>&1 &
 COMFY_PID=$!
 log "ComfyUI запущен, PID: ${COMFY_PID}"

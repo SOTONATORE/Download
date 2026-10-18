@@ -83,7 +83,9 @@ min_balance_usd: 2.0
 # Карта не вышла на связь после создания, минут (хватает на загрузку образа и старт ComfyUI).
 silent_host_timeout_min: 20
 # Образ Docker для карты (непустая строка без пробелов). Вход workflow переопределяет его.
-docker_image: "ghcr.io/sotonatore/download/videogen-worker:latest"
+# Вариант A (решение владельца, 18.10.2026): стоковый образ Vast, код приходит через onstart (bootstrap.sh).
+# Тег назван владельцем как использованный в тестовых прогонах; подтверждение владельца ожидается (SPEC 8.4).
+docker_image: "vastai/comfy:v0.41.0-cuda-13.2-py312"
 # Диск карты, ГБ: ComfyUI + PyTorch + модели + выходные клипы.
 disk_gb: 100
 # Heartbeat timeout (дед-свитч, раздел 8.3 (а)), минут: 2 минуты без heartbeat, после которых карты запуска уничтожаются.

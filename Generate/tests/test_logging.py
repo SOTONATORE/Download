@@ -62,7 +62,7 @@ def test_logs_refused_without_token_and_no_content(make_app):
         assert "Воркер запущен" not in resp.text and TOKEN not in resp.text
     with client_for(app, WRONG) as bad:
         resp = bad.get("/logs")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
         assert "Воркер запущен" not in resp.text and WRONG not in resp.text
 
 
@@ -94,7 +94,7 @@ def test_deadman_trigger_is_logged(make_app):
     fired = threading.Event()
     app, _ = make_app(idle_timeout_seconds=0.2, check_interval=0.05, on_idle_timeout=fired.set)
     assert fired.wait(3)
-    assert any("самоуничтожение" in line for line in app.logbuf.tail())
+    assert any("остановка воркера" in line for line in app.logbuf.tail())
 
 
 def test_http_request_lines_only_at_debug(make_app):
@@ -517,7 +517,7 @@ def test_logs_since_keeps_auth_behaviour(make_app):
         assert resp.status_code == 401 and "X-Log-Next" not in resp.headers
     with client_for(app, WRONG) as bad:
         resp = bad.get("/logs?since=0")
-        assert resp.status_code == 403 and "X-Log-Next" not in resp.headers
+        assert resp.status_code == 401 and "X-Log-Next" not in resp.headers
 
 
 def test_log_buffer_read_since_after_eviction():

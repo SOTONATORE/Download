@@ -290,11 +290,12 @@ class DeadManSwitch:
             if self._clock() - self._last < self.timeout:
                 return False
             self._fired = True
-        log.error("Нет запросов от раннера дольше %g с: самоуничтожение воркера.", self.timeout)
+        # воркер только останавливает себя; уничтожение карты делает наблюдатель (SPEC 8.3, а)
+        log.error("Нет запросов от раннера дольше %g с: остановка воркера.", self.timeout)
         try:
             self._callback()
         except Exception as exc:  # callback не должен ронять монитор
-            log.error("Ошибка в обработчике самоуничтожения: %s.", type(exc).__name__)
+            log.error("Ошибка в обработчике остановки воркера: %s.", type(exc).__name__)
         return True
 
     def _loop(self) -> None:
@@ -393,15 +394,32 @@ class TaskManager:
         with self._lock:
             return any(t.state in ("queued", "running") for t in self._tasks.values())
 
+    def _open_task_locked(self, num: int) -> Optional[_Task]:
+        """Задача этого клипа, ещё не подтверждённая и не завершившаяся ошибкой (SPEC 8.1, идемпотентность)."""
+        for task in self._tasks.values():
+            if task.num == num and not task.acked and task.state != "error":
+                return task
+        return None
+
     def submit(self, num: int, prompt: str, num_frames: int, seed: int) -> str:
+        """Ставит клип в очередь. Идемпотентность: если для того же номера есть открытая задача
+        (не подтверждена и не в ошибке), возвращается её id и новая задача не создаётся.
+        Проверка идёт до лимита очереди: повтор не должен получить 429 из-за собственной задачи."""
         received = _clock_text()
         with self._lock:
-            if self._unacked_locked() >= self.max_unacked:
-                raise BacklogFullError()
-            task_id = uuid.uuid4().hex
-            task = _Task(task_id, num, prompt, num_frames, seed, received=received)
-            self._log(task, "задача принята, в очереди")
-            self._tasks[task_id] = task
+            existing = self._open_task_locked(num)
+            if existing is not None:
+                task_id = existing.task_id
+            else:
+                if self._unacked_locked() >= self.max_unacked:
+                    raise BacklogFullError()
+                task_id = uuid.uuid4().hex
+                task = _Task(task_id, num, prompt, num_frames, seed, received=received)
+                self._log(task, "задача принята, в очереди")
+                self._tasks[task_id] = task
+        if existing is not None:
+            log.info("Клип %d уже принят (id %s): повтор не создаёт новую задачу.", num, task_id[:8])
+            return task_id
         self._queue.put(task_id)
         # текст промпта в лог не пишем: только номер клипа, время, длина и хеш (SPEC 0.1)
         log.info("Клип %d принят в %s (id %s, промпт %d симв., sha256 %s).",
@@ -588,7 +606,7 @@ def _make_handler(app: "WorkerApp") -> type:
                 self._error(401, "Требуется заголовок аутентификации воркера.")
                 return False
             if not hmac.compare_digest(given.encode("utf-8"), app.token.encode("utf-8")):
-                self._error(403, "Неверный токен воркера.")
+                self._error(401, "Неверный токен воркера.")
                 return False
             app.deadman.touch()
             return True
