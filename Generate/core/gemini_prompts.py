@@ -362,7 +362,7 @@ class _Builder:
         self.by_num = {s.num: s for s in segments}
         absent = [n for n in wanted if n not in self.by_num]
         if absent:
-            shown = ", ".join(str(n) for n in absent[:20]) + (" и др." if len(absent) > 20 else "")
+            shown = ", ".join(str(n) for n in absent)  # полный список номеров, без обрезки
             raise GeminiInputError(f"Номера отсутствуют в SRT: {shown}.")
         self.wanted = wanted
         self.cfg = cfg

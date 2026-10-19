@@ -2,7 +2,7 @@
 
 setup.sh пишет stdout и stderr ComfyUI через tee: в контейнерный лог (как раньше) и в файл.
 Воркер читает этот файл с начала, построчно, и отдаёт строки в буфер логов.
-Строки проходят маскирование, из них убираются ANSI-коды цвета и они усекаются до 300 символов.
+Строки проходят маскирование, из них убираются ANSI-коды цвета; длина строки не ограничивается.
 Текст строк ComfyUI не переводится (SPEC 0.5): к нему добавляется только русская пометка.
 Только стандартная библиотека (SPEC 0.2).
 """
@@ -16,34 +16,26 @@ from typing import Callable, Optional
 
 log = logging.getLogger("Generate.worker.comfy_output")
 
-COMFY_LINE_MAX = 300             # символов в одной строке буфера (вместе с «…»)
 COMFY_LOG_LOGGER = "Generate.worker.comfy"  # логгер строк ComfyUI: в буфер, в контейнерный лог не дублируется
 COMFY_MARK = "Вывод ComfyUI: "   # русская пометка перед строкой, текст строки не меняется
 READ_CHUNK = 1024 * 1024         # за один проход читаем не больше 1 МиБ
-MAX_PENDING = 8192               # длиннее без перевода строки — отдаём кусками
 POLL_SEC = 0.5
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def clean_comfy_line(raw: str, mask: Callable[[str], str]) -> str:
     """Строка для буфера: последняя версия строки после «\\r» (прогресс), без ANSI-кодов,
-    с маской секретов, усечённая до COMFY_LINE_MAX символов.
-
-    Порядок важен: маска применяется до усечения, иначе секрет, разрезанный границей,
-    не совпадёт с шаблоном и попадёт в лог частично.
+    с маской секретов. Строка целиком, без усечения длины.
     """
     text = _ANSI_RE.sub("", raw.rsplit("\r", 1)[-1]).rstrip()
-    text = mask(text)
-    if len(text) > COMFY_LINE_MAX:
-        text = text[:COMFY_LINE_MAX - 1] + "…"
-    return text
+    return mask(text)
 
 
 class ComfyOutputReader:
     """Читает файл вывода ComfyUI и передаёт готовые строки в sink.
 
     Строки поступают с начала файла (в том числе вывод запуска ComfyUI). Если файл усечён,
-    чтение начинается заново. Частично записанная строка ждёт продолжения (до MAX_PENDING байт).
+    чтение начинается заново. Частично записанная строка ждёт продолжения и отдаётся целиком, когда придёт её конец.
     Ошибка чтения не останавливает поток: одно предупреждение, затем повтор по расписанию.
     """
 
@@ -77,9 +69,6 @@ class ComfyOutputReader:
         self._offset += len(data)
         parts = (self._pending + data).split(b"\n")
         self._pending = parts.pop()
-        if len(self._pending) > MAX_PENDING:
-            parts.append(self._pending)
-            self._pending = b""
         emitted = 0
         for raw in parts:
             cleaned = clean_comfy_line(raw.decode("utf-8", errors="replace"), self._mask)

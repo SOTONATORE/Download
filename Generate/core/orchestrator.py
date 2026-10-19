@@ -1334,7 +1334,7 @@ class Orchestrator:
         by_status = new_status in STOPPED_AFTER_START_STATUSES
         if not (by_message or by_status):
             return False
-        # маскирование всего текста до обрезки и сворачивания пробелов (SPEC 0.1)
+        # маскирование всего текста и сворачивание пробелов (SPEC 0.1)
         text = _one_line(self._mask_remote(raw_msg)) if raw_msg else ""
         detail = f"статус «{prev_status or 'неизвестно'}» → «{new_status or 'неизвестно'}»"
         if text:
@@ -1716,7 +1716,7 @@ class Orchestrator:
             self._finish_clip(slot, now)
         elif status in _FAILED_STATUSES:
             slot.task = None
-            err = self._redact(str(data.get("error", "")))[:200]
+            err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
             self._fail_clip(task.num, f"воркер сообщил об ошибке: {err}")
 
     def _download(self, slot: _CardSlot, tid: str, path: str) -> None:

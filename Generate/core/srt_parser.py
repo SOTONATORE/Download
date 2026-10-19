@@ -44,9 +44,9 @@ def _normalize_text(lines: list[str]) -> str:
     return _SPACES_RE.sub(" ", text).strip()
 
 
-def _preview(block: str) -> str:
-    one = _SPACES_RE.sub(" ", block).strip()
-    return one[:50] + ("…" if len(one) > 50 else "")
+def _one_line(block: str) -> str:
+    """Блок в одну строку для сообщения об ошибке: пробелы сворачиваются, текст не обрезается."""
+    return _SPACES_RE.sub(" ", block).strip()
 
 
 def parse_srt_text(raw: str) -> list[Segment]:
@@ -64,7 +64,7 @@ def parse_srt_text(raw: str) -> list[Segment]:
         first = lines[0].strip()
         m = _TIMING_RE.match(lines[1]) if len(lines) > 1 else None
         if not first.isdigit() or m is None:
-            bad_blocks.append(f"блок №{k} по порядку в файле: «{_preview(block)}»")
+            bad_blocks.append(f"блок №{k} по порядку в файле: «{_one_line(block)}»")
             continue
         g = m.groups()
         start = _to_ms(*g[0:4])
@@ -79,9 +79,8 @@ def parse_srt_text(raw: str) -> list[Segment]:
 
     errors: list[str] = []
     if bad_blocks:
-        shown = "; ".join(bad_blocks[:10])
-        more = f" (и ещё {len(bad_blocks) - 10})" if len(bad_blocks) > 10 else ""
-        errors.append(f"Не удалось разобрать блоков: {len(bad_blocks)}: {shown}{more}")
+        shown = "; ".join(bad_blocks)
+        errors.append(f"Не удалось разобрать блоков: {len(bad_blocks)}: {shown}")
 
     if reversed_nums:
         errors.append(

@@ -21,12 +21,6 @@ log = logging.getLogger("Generate.missing")
 STUB_LINE = "Пропущенных сегментов нет - все найдены и успешно скачаны."
 _STUB_NORMALIZED = STUB_LINE.casefold()
 
-_PREVIEW_LEN = 80
-
-
-def _preview(line: str) -> str:
-    return line if len(line) <= _PREVIEW_LEN else line[:_PREVIEW_LEN] + "…"
-
 
 def _is_number(line: str) -> bool:
     # str.isdigit() пропускает «²» и подобное, поэтому дополнительно требуем ASCII
@@ -72,7 +66,7 @@ def parse_missing(missing_path: str | Path, segments: list[Segment]) -> list[int
         else:
             raise GeminiInputError(
                 f"В файле пропущенных сегментов {path.name} найдена недопустимая строка: "
-                f"«{_preview(ln)}». Допустимы только целые номера или строка «{STUB_LINE}»."
+                f"«{ln}». Допустимы только целые номера или строка «{STUB_LINE}»."
             )
 
     if has_stub:

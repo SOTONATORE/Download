@@ -46,10 +46,9 @@ MAX_BODY_BYTES = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
 
-# Логи (SPEC 8.4, 10): уровень из GEN_LOG_LEVEL, буфер для GET /logs
+# Логи (SPEC 8.4, 10): уровень из GEN_LOG_LEVEL, буфер для GET /logs (без вытеснения строк, этап 9в)
 LOG_LEVEL_ENV = "GEN_LOG_LEVEL"
 LOG_LEVELS = ("INFO", "DEBUG")
-LOG_BUFFER_MAX_LINES = 5000
 LOGS_PATH = "/logs"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 STDOUT_HANDLER_NAME = "worker-stdout"
@@ -153,12 +152,13 @@ def build_line(build: Optional[str]) -> str:
 
 
 class LogBuffer:
-    """Кольцевой буфер последних строк лога, не больше max_lines. Старые строки уходят первыми.
+    """Буфер строк лога за весь запуск воркера. Строки не вытесняются: без max_lines
+    ничего не теряется. max_lines (только для явного вызова) ограничивает буфер кольцом.
 
-    Каждая строка имеет номер с 1 в порядке поступления (номер не сбрасывается при вытеснении).
+    Каждая строка имеет номер с 1 в порядке поступления.
     """
 
-    def __init__(self, max_lines: int = LOG_BUFFER_MAX_LINES) -> None:
+    def __init__(self, max_lines: Optional[int] = None) -> None:
         self._lines: Deque[str] = collections.deque(maxlen=max_lines)
         self._lock = threading.Lock()
         self._seq = 0
@@ -353,7 +353,7 @@ class _Task:
     path: Optional[Path] = None
     size_bytes: Optional[int] = None
     acked: bool = False
-    lines: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=20))
+    lines: Deque[str] = field(default_factory=collections.deque)  # журнал клипа целиком, без хвоста (этап 9в)
 
 
 def _clock_text() -> str:
@@ -490,7 +490,8 @@ class TaskManager:
     # --- внутреннее ---
     @staticmethod
     def _log(task: _Task, line: str) -> None:
-        task.lines.append(f"[{time.strftime('%H:%M:%S')}] {line}")
+        # журнал клипа отдаётся целиком (log_tail): строка маскируется при записи (этап 9в)
+        task.lines.append(mask_secrets(f"[{time.strftime('%H:%M:%S')}] {line}"))
 
     def _set(self, task: _Task, state: str, stage: str) -> None:
         with self._lock:
@@ -846,7 +847,7 @@ class WorkerApp:
         self.log_level = log_level
         register_secret(token)
         register_secret(os.environ.get("HF_TOKEN", ""))
-        self.logbuf = LogBuffer(LOG_BUFFER_MAX_LINES)
+        self.logbuf = LogBuffer()
         self.build_id = normalize_build(build_id)
         self.logbuf.add(build_line(self.build_id))  # первая строка буфера (SPEC 8.4)
         self._log_handler = BufferHandler(self.logbuf)
@@ -927,8 +928,8 @@ class WorkerApp:
 
     def _start_workers(self) -> None:
         self._attach_logs()
-        log.info("Воркер запущен: уровень логов %s, буфер логов до %d строк.",
-                 self.log_level, LOG_BUFFER_MAX_LINES)
+        log.info("Воркер запущен: уровень логов %s, буфер логов без ограничения числа строк.",
+                 self.log_level)
         self.manager.start()
         self.deadman.start()
         self.telemetry.start()  # первый снимок «запуск воркера» ставится в очередь здесь

@@ -126,8 +126,6 @@ HF_BASE_RE = re.compile(r'^HF_BASE_URL="([^"]+)"\s*$', re.MULTILINE)
 HF_CALL_RE = re.compile(r'^\s*download_model\s+"([^"]+)"\s+"([^"]+)"\s*$')
 HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определение функции «download_model() {» не совпадает
 
-SNIPPET_LIMIT = 200
-
 # Сверка с фильтром verified=True (только число предложений и вывод полей).
 # Ключ verified в запросе взят из production-кода (VastClient._build_query); живой ответ Vast
 # на этот ключ в репозитории не проверен: UNVERIFIED.
@@ -176,10 +174,8 @@ def _clean(text: str) -> str:
 
 
 def _snippet(text: str) -> str:
-    """Первые SNIPPET_LIMIT символов тела с замёнными секретами. Текст берётся с запасом
-    на длину самого длинного секрета, чтобы секрет на границе заменился целиком, а не остался частью."""
-    margin = max((len(s) for s in _secrets), default=0)
-    return _clean(text[: SNIPPET_LIMIT + margin])[:SNIPPET_LIMIT].replace("\n", " ")
+    """Тело ответа целиком с замёнными секретами; переводы строк заменяются пробелами (форматирование, не обрезка)."""
+    return _clean(text).replace("\n", " ")
 
 
 def say(text: str = "") -> None:
@@ -380,7 +376,7 @@ def _check_vast_paths(base_url: str, timeout: float, key: str) -> list[dict]:
             if note:
                 line += f" — {note}"
             say(line)
-            say(f"  тело (первые {SNIPPET_LIMIT} символов): {snippet}")
+            say(f"  тело: {snippet}")
     return results
 
 

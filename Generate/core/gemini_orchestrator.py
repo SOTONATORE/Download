@@ -297,7 +297,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     by_num = {s.num: s for s in segments}
     absent = [n for n in wanted if n not in by_num]
     if absent:
-        raise gp.GeminiInputError("Номера отсутствуют в SRT: " + ", ".join(map(str, absent[:20])) + ".")
+        raise gp.GeminiInputError("Номера отсутствуют в SRT: " + ", ".join(map(str, absent)) + ".")
 
     state = load_state(prompts_path, segments, profile)
     try:

@@ -38,7 +38,6 @@ ENV_KEY_NAME = "GEN_" + "VAST_API_KEY"
 # Корень сервера; версия API входит в каждый путь (см. константы ниже).
 DEFAULT_BASE_URL = "https://console.vast.ai"
 WORKER_HTTP_PORT = 8000
-_SNIPPET_LIMIT = 200
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 _LIST_PAGE_LIMIT = 25
 # Предел страниц списка: защита от бесконечного цикла при сбое курсора.
@@ -450,10 +449,10 @@ class VastClient:
 
         if resp.status_code != 200:
             code = resp.status_code
-            snippet = self._redact(resp.text or "")[:_SNIPPET_LIMIT]
+            snippet = self._redact(resp.text or "")  # тело целиком, замаскировано
             if code in _REDIRECT_CODES:
                 # Клиент не следует перенаправлению: адрес сервера показываем, но не используем.
-                location = self._redact(str(resp.headers.get("location", "")))[:_SNIPPET_LIMIT]
+                location = self._redact(str(resp.headers.get("location", "")))
                 log.warning("Vast ответил перенаправлением HTTP %s: %s %s", code, method, path)
                 raise VastRuntimeError(
                     f"Vast API ответил перенаправлением HTTP {code}: {method} {path}. "

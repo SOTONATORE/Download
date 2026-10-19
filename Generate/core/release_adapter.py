@@ -183,7 +183,7 @@ class GhCommandRunner:
                 f"Не удалось запустить gh ({type(exc).__name__})."
             ) from None
         if proc.returncode != 0:
-            detail = scrub_secrets((proc.stderr or "").strip(), [token])[:500]
+            detail = scrub_secrets((proc.stderr or "").strip(), [token])
             raise GeminiRuntimeError(
                 f"Команда gh завершилась с кодом {proc.returncode}: {detail}"
             )
