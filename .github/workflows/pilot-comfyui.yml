@@ -53,7 +53,7 @@ on:
         options:
           - "1"
           - "0"
-        default: "0"
+        default: "1"
       rental_type:
         description: "Режим аренды карт Vast: interruptible или on-demand"
         type: choice
@@ -69,10 +69,6 @@ on:
         description: "Таймаут до ответа ComfyUI на порту 18188, минут"
         type: number
         default: 20
-      debug_logs:
-        description: "Подробный лог (DEBUG) и сырой журнал Vast"
-        type: boolean
-        default: false
 
 # отдельная группа: пилот не блокирует и не отменяет боевой generate; запущенный не отменять
 concurrency:
@@ -130,7 +126,7 @@ jobs:
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          GEN_LOG_LEVEL: ${{ inputs.debug_logs && 'DEBUG' || 'INFO' }}
+          GEN_LOG_LEVEL: "DEBUG"
         run: |
           # образ: вход, иначе переменная репозитория PILOT_IMAGE; без образа не начинаем (Vast не тронут)
           DOCKER_IMAGE="${DOCKER_IMAGE_INPUT:-$DOCKER_IMAGE_VAR}"
@@ -159,11 +155,8 @@ jobs:
             --pilot
             --pilot-start-cmd "$PILOT_START_CMD"
             --artifact-dir "$PILOT_ART_DIR"
+            --debug-logs
           )
-          debug_args=()
-          if [ "${{ inputs.debug_logs }}" = "true" ]; then
-            debug_args=(--debug-logs)
-          fi
           # Фильтр маскирует значения секретов до записи в лог (SPEC 0.1). Ключи Gemini и GH сюда не передаются.
           mask_code='
           import os, sys
@@ -180,7 +173,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           rc=0
-          python -m Generate.cli run "${args[@]}" "${debug_args[@]}" 2>&1 \
+          python -m Generate.cli run "${args[@]}" 2>&1 \
             | python3 -I -u -c "$mask_code" \
             | tee -a "$RUN_LOG" || rc=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
