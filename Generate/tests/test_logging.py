@@ -137,15 +137,45 @@ def test_comfy_error_logged_fully_but_prompt_scrubbed(make_app, tmp_path):
     assert TASK["prompt"] not in body and TASK["prompt"] not in state["error"]
 
 
-def test_buffer_keeps_at_most_5000_and_drops_oldest():
-    buf = server.LogBuffer()
-    assert buf._lines.maxlen == 5000
-    for i in range(5005):
+def test_buffer_writes_segments_and_keeps_no_line_list_in_memory(tmp_path):
+    seg_dir = tmp_path / "logs"
+    buf = server.LogBuffer(log_dir=str(seg_dir))
+    total = server.SEGMENT_LINES * 2 + 5
+    for i in range(total):
         buf.add(f"строка {i}")
-    assert len(buf) == 5000
-    lines = buf.tail()
-    assert lines[0] == "строка 5" and lines[-1] == "строка 5004"
-    assert buf.tail(3) == ["строка 5002", "строка 5003", "строка 5004"]
+    assert len(buf) == total                       # строки не вытесняются
+    names = sorted(p.name for p in seg_dir.glob("seg-*.log"))
+    assert names == ["seg-000001.log", "seg-000002.log", "seg-000003.log"]
+    assert not hasattr(buf, "_lines")              # списка всех строк в памяти нет
+    assert all(len(v) <= server.SEGMENT_LINES for v in vars(buf._store).values()
+               if isinstance(v, (list, dict, set)))
+    assert buf.tail(3) == [f"строка {total - 3}", f"строка {total - 2}", f"строка {total - 1}"]
+    assert buf.read(since=server.SEGMENT_LINES * 2 - 1)[0] == [f"строка {i}" for i in range(19999, total)]
+
+
+def test_logs_since_9999_across_segment_boundary(make_app, tmp_path):
+    app, _ = make_app()
+    app.logbuf = server.LogBuffer(log_dir=str(tmp_path / "seg"))  # чистый буфер: номера строк известны
+    for i in range(1, server.SEGMENT_LINES + 1):
+        app.logbuf.add(f"строка {i}")                             # строка k имеет номер k
+    app.logbuf.add(f"строка {server.SEGMENT_LINES + 1}")
+    with client_for(app) as c:
+        resp = c.get("/logs?since=9999")
+        assert resp.text.splitlines() == ["строка 10000", "строка 10001"]  # на границе сегментов, без пропуска и повтора
+        assert resp.headers["X-Log-Next"] == "10001"
+        everything = c.get("/logs").text.splitlines()
+    assert len(everything) == 10001 and everything[9999] == "строка 10000"
+    assert (tmp_path / "seg" / "seg-000002.log").exists()
+
+
+def test_masking_happens_before_segment_file_write(tmp_path):
+    server.register_secret(CANARY)                 # так же регистрируются токен воркера и HF_TOKEN
+    seg_dir = tmp_path / "mask"
+    buf = server.LogBuffer(log_dir=str(seg_dir))
+    buf.add(f"токен воркера {CANARY}, HF_TOKEN={CANARY}")
+    written = (seg_dir / "seg-000001.log").read_text(encoding="utf-8")
+    assert CANARY not in written and "***" in written   # на диск попадает уже замаскированная строка
+    assert CANARY not in buf.tail()[0]
 
 
 def test_token_masked_in_worker_line_and_stdout_format():
@@ -534,11 +564,11 @@ def test_logs_since_keeps_auth_behaviour(make_app):
         assert resp.status_code == 401 and "X-Log-Next" not in resp.headers
 
 
-def test_log_buffer_read_since_after_eviction():
-    buf = server.LogBuffer(max_lines=3)
+def test_log_buffer_read_ignores_max_lines_and_reads_since():
+    buf = server.LogBuffer(max_lines=3)  # параметр принимается и не используется: строки не вытесняются (этап 9в2)
     for i in range(5):
         buf.add(f"строка {i}")
-    assert buf.read(since=0) == (["строка 2", "строка 3", "строка 4"], 5)
+    assert buf.read(since=0) == (["строка 0", "строка 1", "строка 2", "строка 3", "строка 4"], 5)
     assert buf.read(since=4) == (["строка 4"], 5)
     assert buf.read(since=5) == ([], 5)
     assert buf.read(since=99) == ([], 5)

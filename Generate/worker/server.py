@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -71,6 +72,12 @@ TEMPLATE_COMFY_LOG_ENV = "COMFY_TEMPLATE_LOG_PATH"
 TEMPLATE_COMFY_PREFIX = "[comfyui] "
 TEMPLATE_COMFY_NOT_SET = ("Лог ComfyUI шаблона не задан (COMFY_TEMPLATE_LOG_PATH): "
                           "строки ComfyUI не читаются.")
+
+# Буфер логов на диске (этап 9в2): строки в файлах-сегментах по SEGMENT_LINES строк, каталог из WORKER_LOG_DIR
+SEGMENT_LINES = 10000
+SEGMENT_NAME = "seg-{:06d}.log"
+LOG_DIR_ENV = "WORKER_LOG_DIR"
+DEFAULT_LOG_DIR = "/workspace/worker_logs"
 
 _ID_RE = r"([A-Za-z0-9_-]+)"
 _RE_TASK = re.compile(rf"^/task/{_ID_RE}$")
@@ -151,47 +158,223 @@ def build_line(build: Optional[str]) -> str:
     return f"Сборка воркера: {normalize_build(build)}"
 
 
-class LogBuffer:
-    """Буфер строк лога за весь запуск воркера. Строки не вытесняются: без max_lines
-    ничего не теряется. max_lines (только для явного вызова) ограничивает буфер кольцом.
+def _escape_entry(text: str) -> str:
+    # Запись занимает одну физическую строку файла: обратная косая черта удваивается,
+    # перевод строки записывается как два символа «\n» (обратно разбирается в _unescape_entry).
+    return text.replace("\\", "\\\\").replace("\n", "\\n")
 
+
+_UNESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
+
+
+def _unescape_entry(text: str) -> str:
+    return _UNESCAPE_RE.sub(lambda m: "\n" if m.group(1) == "n" else m.group(1), text)
+
+
+def worker_log_dir() -> Optional[str]:
+    """Каталог сегментов: WORKER_LOG_DIR не задана — DEFAULT_LOG_DIR; задана пустой — временный каталог (None)."""
+    raw = os.environ.get(LOG_DIR_ENV)
+    if raw is None:
+        return DEFAULT_LOG_DIR
+    return raw.strip() or None
+
+
+class LogSegmentStore:
+    """Строки лога в файлах seg-NNNNNN.log по SEGMENT_LINES строк. Номер строки сквозной, с 1.
+
+    Строка N лежит в сегменте (N-1)//SEGMENT_LINES + 1 на месте (N-1)%SEGMENT_LINES.
+    В памяти держатся только счётчики и позиция незавершённой строки в текущем файле; строки
+    читаются с диска. Каждая часть маскируется до записи. Файл сбрасывается после каждой записи.
+    Незавершённая строка (часть из ComfyUI) уже в файле, но в GET /logs не видна, пока не закрыта.
+    """
+
+    def __init__(self, directory: Optional[str]) -> None:
+        self.dir = self._prepare_dir(directory)
+        self._archive_previous()
+        self._lock = threading.RLock()
+        self._seq = 0                          # закрытых строк
+        self._seg = 0                          # номер текущего файла
+        self._seg_count = 0                    # закрытых строк в текущем файле
+        self._fh: Any = None
+        self._open_pos: Optional[int] = None   # байт в текущем файле, с которого начата незакрытая строка
+        self._closed = False
+
+    @staticmethod
+    def _prepare_dir(directory: Optional[str]) -> Path:
+        if directory:
+            path = Path(directory)
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError as exc:
+                print(f"Каталог логов недоступен ({type(exc).__name__}): логи пишутся во временный каталог.",
+                      file=sys.stderr, flush=True)
+        return Path(tempfile.mkdtemp(prefix="worker_logs_"))
+
+    def _archive_previous(self) -> None:
+        """Файлы прошлого запуска не смешиваются с текущим: переносятся в подкаталог previous-ДАТА."""
+        old = sorted(self.dir.glob("seg-*.log"))
+        if not old:
+            return
+        target = self.dir / time.strftime("previous-%Y%m%d-%H%M%S")
+        target.mkdir(parents=True, exist_ok=True)
+        for path in old:
+            path.replace(target / path.name)
+
+    def _begin_entry(self) -> None:
+        if self._fh is None or self._seg_count >= SEGMENT_LINES:
+            if self._fh is not None:
+                self._fh.close()
+            self._seg += 1
+            self._seg_count = 0
+            self._fh = open(self.dir / SEGMENT_NAME.format(self._seg), "ab")
+        self._fh.seek(0, os.SEEK_END)
+        self._open_pos = self._fh.tell()
+
+    def write(self, text: str) -> None:
+        """Часть строки (без перевода строки). Маска применяется до записи в файл."""
+        data = _escape_entry(mask_secrets(text)).encode("utf-8")
+        with self._lock:
+            if self._closed:
+                return
+            if self._open_pos is None:
+                self._begin_entry()
+            self._fh.write(data)
+            self._fh.flush()
+
+    def commit(self) -> None:
+        """Закрывает строку: перевод строки в файл, строка получает номер."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._open_pos is None:
+                self._begin_entry()
+            self._fh.write(b"\n")
+            self._fh.flush()
+            self._open_pos = None
+            self._seq += 1
+            self._seg_count += 1
+
+    def cancel(self) -> None:
+        """Отменяет незавершённую строку: её части удаляются из файла (строка с «\\r» заменяется последним состоянием)."""
+        with self._lock:
+            if self._closed or self._open_pos is None:
+                return
+            self._fh.flush()
+            os.ftruncate(self._fh.fileno(), self._open_pos)
+            self._fh.seek(0, os.SEEK_END)
+            self._open_pos = None
+
+    def add_entry(self, text: str) -> None:
+        with self._lock:
+            self.write(text)
+            self.commit()
+
+    def read(self, since: Optional[int] = None, tail: Optional[int] = None) -> Tuple[list, int]:
+        """(строки, номер последней строки). since: строки с номером больше since; tail без since."""
+        with self._lock:
+            last = self._seq
+            if since is not None:
+                first = since + 1
+            elif tail is not None:
+                first = max(1, last - tail + 1)
+            else:
+                first = 1
+            if first > last:
+                return [], last
+            out: list = []
+            for seg in range((first - 1) // SEGMENT_LINES + 1, (last - 1) // SEGMENT_LINES + 2):
+                seg_first = (seg - 1) * SEGMENT_LINES + 1
+                seg_last = min(seg * SEGMENT_LINES, last)
+                parts = self._segment_bytes(seg).split(b"\n")
+                chosen = parts[max(first, seg_first) - seg_first: seg_last - seg_first + 1]
+                out.extend(_unescape_entry(p.decode("utf-8", errors="replace")) for p in chosen)
+            return out, last
+
+    def _segment_bytes(self, seg: int) -> bytes:
+        with open(self.dir / SEGMENT_NAME.format(seg), "rb") as fh:
+            return fh.read()
+
+    @property
+    def count(self) -> int:
+        return self._seq
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+
+
+class LogBuffer:
+    """Буфер логов за весь запуск воркера: строки лежат на диске в сегментах (LogSegmentStore).
+    Строки не вытесняются. max_lines принимается для совместимости и не используется (этап 9в2).
     Каждая строка имеет номер с 1 в порядке поступления.
     """
 
-    def __init__(self, max_lines: Optional[int] = None) -> None:
-        self._lines: Deque[str] = collections.deque(maxlen=max_lines)
-        self._lock = threading.Lock()
-        self._seq = 0
+    def __init__(self, log_dir: Optional[str] = None, max_lines: Optional[int] = None) -> None:
+        self._store = LogSegmentStore(log_dir)
 
     def add(self, line: str) -> None:
-        masked = mask_secrets(line)
-        with self._lock:
-            self._lines.append(masked)
-            self._seq += 1
+        self._store.add_entry(line)
+
+    def write_piece(self, text: str) -> None:
+        self._store.write(text)
+
+    def end_piece(self) -> None:
+        self._store.commit()
+
+    def cancel_piece(self) -> None:
+        self._store.cancel()
 
     def read(self, since: Optional[int] = None, tail: Optional[int] = None) -> Tuple[list, int]:
-        """(строки, номер последней строки). since: только строки с номером больше since;
-        строки, вытесненные из буфера, не отдаются. tail учитывается только без since."""
-        with self._lock:
-            lines = list(self._lines)
-            last = self._seq
-        first = last - len(lines) + 1  # номер первой строки в буфере
-        if since is not None:
-            lines = lines[max(since + 1 - first, 0):]
-        elif tail is not None:
-            lines = lines[max(len(lines) - tail, 0):]
-        return lines, last
+        """(строки, номер последней строки). since: только строки с номером больше since; tail без since."""
+        return self._store.read(since=since, tail=tail)
 
     def tail(self, n: Optional[int] = None) -> list:
-        with self._lock:
-            lines = list(self._lines)
-        if n is None:
-            return lines
-        return lines[max(len(lines) - n, 0):]
+        return self._store.read(tail=n)[0]
 
     def __len__(self) -> int:
-        with self._lock:
-            return len(self._lines)
+        return self._store.count
+
+    def close(self) -> None:
+        self._store.close()
+
+
+_COMFY_RECORD_FORMAT = logging.Formatter(LOG_FORMAT)
+
+
+def _comfy_header() -> str:
+    """Начало строки ComfyUI в буфере: как у записи логгера COMFY_LOG_LOGGER (время, уровень, имя, пометка)."""
+    record = logging.LogRecord(COMFY_LOG_LOGGER, logging.INFO, __file__, 0, COMFY_MARK, None, None)
+    return _COMFY_RECORD_FORMAT.format(record)
+
+
+class _LineSink:
+    """Приёмник частей строки для ComfyOutputReader: части сразу пишутся в сегменты (этап 9в2).
+    header — начало строки (для ComfyUI: как у записи логгера), prefix — пометка перед текстом."""
+
+    def __init__(self, logbuf: LogBuffer, *, header: Optional[Callable[[], str]] = None,
+                 prefix: str = "") -> None:
+        self._logbuf = logbuf
+        self._header = header
+        self._prefix = prefix
+        self._started = False
+
+    def write_piece(self, text: str) -> None:
+        if not self._started:
+            self._started = True
+            text = (self._header() if self._header else "") + self._prefix + text
+        self._logbuf.write_piece(text)
+
+    def cancel_line(self) -> None:
+        self._started = False
+        self._logbuf.cancel_piece()
+
+    def end_line(self) -> None:
+        self._started = False
+        self._logbuf.end_piece()
 
 
 class BufferHandler(logging.Handler):
@@ -838,7 +1021,8 @@ class WorkerApp:
                  telemetry_interval_check: float = 1.0,
                  ready_flag: Optional[str] = None,
                  bootstrap_log_path: Optional[str] = None,
-                 template_log_path: Optional[str] = None) -> None:
+                 template_log_path: Optional[str] = None,
+                 log_dir: Optional[str] = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -847,7 +1031,7 @@ class WorkerApp:
         self.log_level = log_level
         register_secret(token)
         register_secret(os.environ.get("HF_TOKEN", ""))
-        self.logbuf = LogBuffer()
+        self.logbuf = LogBuffer(log_dir)  # строки на диске, сегменты по SEGMENT_LINES (этап 9в2)
         self.build_id = normalize_build(build_id)
         self.logbuf.add(build_line(self.build_id))  # первая строка буфера (SPEC 8.4)
         self._log_handler = BufferHandler(self.logbuf)
@@ -866,21 +1050,22 @@ class WorkerApp:
         # Вывод ComfyUI: файл из setup.sh; без пути строки ComfyUI в буфер не попадают
         self.comfy_reader: Optional[ComfyOutputReader] = None
         if comfy_log_path:
-            self.comfy_reader = ComfyOutputReader(comfy_log_path, self._comfy_line, mask_secrets)
+            self.comfy_reader = ComfyOutputReader(
+                comfy_log_path, _LineSink(self.logbuf, header=_comfy_header), mask_secrets)
         # Файл готовности: без пути /health не ждёт файла (тесты, прямой запуск); в main() путь всегда задан
         self.ready_flag: Optional[Path] = Path(ready_flag) if ready_flag else None
         # Лог setup.sh и aria2: хвост с начала файла, маска и срез query-частей адресов (SPEC 8.1, 0.1)
         self.bootstrap_reader: Optional[ComfyOutputReader] = None
         if bootstrap_log_path:
             self.bootstrap_reader = ComfyOutputReader(
-                bootstrap_log_path, self.logbuf.add,
+                bootstrap_log_path, _LineSink(self.logbuf),
                 lambda text: mask_secrets(strip_url_queries(text)))
         # Лог ComfyUI шаблона: тот же читатель, что у bootstrap.log (без второго), строки с пометкой [comfyui]
         self.template_reader: Optional[ComfyOutputReader] = None
         self.template_log_path = template_log_path or None
         if self.template_log_path:
             self.template_reader = ComfyOutputReader(
-                self.template_log_path, self._template_line,
+                self.template_log_path, _LineSink(self.logbuf, prefix=TEMPLATE_COMFY_PREFIX),
                 lambda text: mask_secrets(strip_url_queries(text)))
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
@@ -889,14 +1074,6 @@ class WorkerApp:
     def is_ready(self) -> bool:
         """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""
         return self.ready_flag is None or self.ready_flag.exists()
-
-    def _template_line(self, line: str) -> None:
-        """Строка ComfyUI шаблона (B2): в буфер GET /logs с пометкой [comfyui]."""
-        self.logbuf.add(TEMPLATE_COMFY_PREFIX + line)
-
-    def _comfy_line(self, line: str) -> None:
-        """Строка ComfyUI: в буфер логов, с русской пометкой; в контейнерный лог уже попала через tee."""
-        logging.getLogger(COMFY_LOG_LOGGER).info("%s%s", COMFY_MARK, line)
 
     @property
     def port(self) -> int:
@@ -974,6 +1151,7 @@ class WorkerApp:
             self._serve_thread = None
         self.httpd.server_close()
         self._detach_logs()
+        self.logbuf.close()
 
 
 def _load_json_file(path: Optional[str], what: str) -> dict:
@@ -1021,7 +1199,8 @@ def main() -> int:
                     template_log_path=os.environ.get(TEMPLATE_COMFY_LOG_ENV, "") or None,
                     # пустое значение не отключает проверку: иначе /health отдал бы ok=true до готовности
                     ready_flag=os.environ.get(READY_FLAG_ENV) or DEFAULT_READY_FLAG,
-                    bootstrap_log_path=os.environ.get(BOOTSTRAP_LOG_ENV) or DEFAULT_BOOTSTRAP_LOG)
+                    bootstrap_log_path=os.environ.get(BOOTSTRAP_LOG_ENV) or DEFAULT_BOOTSTRAP_LOG,
+                    log_dir=worker_log_dir())
     try:
         app.serve_forever()
     except KeyboardInterrupt:

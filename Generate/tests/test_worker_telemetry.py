@@ -453,21 +453,19 @@ def test_clean_line_strips_ansi_and_keeps_last_progress_state():
     assert co.clean_comfy_line("progress 10%\rprogress 50%\rprogress 100%", identity) == "progress 100%"
 
 
-def test_clean_line_truncates_to_300_characters():
+def test_clean_line_keeps_whole_line_without_cut():
     out = co.clean_comfy_line("a" * 500, identity)
-    assert len(out) == 300 and out.endswith("…")
+    assert out == "a" * 500                       # строка целиком, обрезки нет (этап 9в2)
     assert co.clean_comfy_line("b" * 300, identity) == "b" * 300
 
 
-def test_clean_line_masks_before_truncation():
+def test_clean_line_masks_whole_line():
     secret = "TESTSECRET-VALUE-XYZ"
     server.register_secret(secret)
-    raw = "x" * 296 + secret + " tail"            # граница обрезки (299 символов) попадает внутрь секрета
+    raw = "x" * 296 + secret + " tail"
     out = co.clean_comfy_line(raw, server.mask_secrets)
-    # маска сначала: 296 x + «***» + « tail» = 304 символа, усечение до 299 + «…»
-    assert out == "x" * 296 + "***…"
+    assert out == "x" * 296 + "*** tail"          # маска по всей строке, без усечения
     assert "TES" not in out and "XYZ" not in out  # обрывка секрета нет
-    assert len(out) == 300
 
 
 def test_clean_line_masks_key_shapes_and_authorization():
@@ -514,12 +512,56 @@ def test_reader_keeps_capturing_after_traceback(tmp_path):
     assert got[-1] == "Prompt executed in 3.00 seconds"
 
 
-def test_reader_gives_up_on_endless_line_in_chunks(tmp_path):
+def test_reader_keeps_whole_long_line_without_newline(tmp_path):
     path = tmp_path / "c.log"
-    path.write_text("x" * (co.MAX_PENDING + 10), encoding="utf-8")
+    long_line = "x" * 20000
+    path.write_text(long_line, encoding="utf-8")
     got = []
-    co.ComfyOutputReader(path, got.append, identity).poll_once()
-    assert len(got) == 1 and len(got[0]) == 300 and got[0].endswith("…")
+    reader = co.ComfyOutputReader(path, got.append, identity)
+    assert reader.poll_once() == 0 and got == []          # конца строки ещё нет
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n")
+    assert reader.poll_once() == 1 and got == [long_line]  # строка целиком, без обрезки
+
+
+def test_long_comfy_line_reaches_get_logs_whole(make_app, tmp_path):
+    comfy_log = tmp_path / "comfyui.log"
+    long_text = "y" * 20000
+    comfy_log.write_text(long_text + "\n", encoding="utf-8")
+    app, _ = make_app(comfy_log_path=str(comfy_log))
+    assert wait_for(lambda: any(s.endswith(long_text) for s in app.logbuf.tail()))
+    with client_for(app) as c:
+        body = c.get("/logs").text
+    assert ("Вывод ComfyUI: " + long_text) in body
+
+
+def test_reader_splits_line_over_1mib_with_marker(tmp_path):
+    raw = "ab " * 350525                              # 1 051 575 символов с пробелами, без перевода строки
+    path = tmp_path / "c.log"
+    path.write_text(raw + "\n", encoding="utf-8")
+    got = []
+    reader = co.ComfyOutputReader(path, got.append, identity)
+    emitted = sum(reader.poll_once() for _ in range(3))
+    assert emitted == 1 and len(got) == 1
+    assert got[0].count(co.PIECE_MARK) == 1          # граница 1 МиБ отмечена пометкой
+    assert got[0].replace(co.PIECE_MARK, "") == raw.rstrip()   # текст строки не потерян и не обрезан
+
+
+def test_reader_masks_secret_straddling_part_boundary(tmp_path):
+    secret = "PIECESECRET-VALUE-42"
+    server.register_secret(secret)
+    head = "word " * 209000                          # 1 045 000 символов с пробелами
+    pad = "x" * (co.READ_CHUNK - len(head) - 10)     # секрет начинается за 10 символов до границы порции чтения
+    raw = head + pad + " " + secret + " tail"
+    path = tmp_path / "c.log"
+    path.write_text(raw + "\n", encoding="utf-8")
+    got = []
+    reader = co.ComfyOutputReader(path, got.append, server.mask_secrets)
+    for _ in range(3):
+        reader.poll_once()
+    assert len(got) == 1
+    assert "PIECESECRET" not in got[0] and secret not in got[0]
+    assert "*** tail" in got[0].replace(co.PIECE_MARK, "")   # секрет замаскирован целиком, в части с ним
 
 
 # ---------------------------------------------------------------------------
