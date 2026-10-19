@@ -97,6 +97,7 @@ def make_app(tmp_path):
         comfy = comfy or FakeComfy(out)
         kw.setdefault("idle_timeout_seconds", 3600)
         kw.setdefault("on_idle_timeout", lambda: None)
+        kw.setdefault("log_dir", str(tmp_path / "logs"))   # буфер логов в tmp_path: без временных каталогов в /tmp
         app = WorkerApp(TOKEN, comfy, host="127.0.0.1", port=0, workflow=WORKFLOW,
                         bindings=BINDINGS, output_dir=out, **kw)
         app.start_background()
@@ -432,7 +433,7 @@ def test_comfy_logger_restored_on_close(tmp_path):
     comfy_log = tmp_path / "comfyui.log"
     comfy_log.write_text("", encoding="utf-8")
     app = WorkerApp(TOKEN, FakeComfy(tmp_path), host="127.0.0.1", port=0,
-                    output_dir=tmp_path, comfy_log_path=str(comfy_log))
+                    output_dir=tmp_path, comfy_log_path=str(comfy_log), log_dir=str(tmp_path / "logs"))
     app.start_background()
     assert logging.getLogger(server.COMFY_LOG_LOGGER).propagate is False
     app.close()
@@ -481,6 +482,14 @@ def test_clean_line_skips_blank_lines_in_reader(tmp_path):
     got = []
     reader = co.ComfyOutputReader(path, got.append, identity)
     assert reader.poll_once() == 1 and got == ["not blank"]
+
+
+def test_reader_crlf_line_end_loses_nothing(tmp_path):
+    path = tmp_path / "c.log"
+    path.write_bytes(b"abc\r\n")                        # конец строки CRLF: строка «abc», ничего не теряется
+    got = []
+    reader = co.ComfyOutputReader(path, got.append, identity)
+    assert reader.poll_once() == 1 and got == ["abc"]
 
 
 def test_reader_partial_line_truncation_and_missing_file(tmp_path):

@@ -153,6 +153,19 @@ def test_buffer_writes_segments_and_keeps_no_line_list_in_memory(tmp_path):
     assert buf.read(since=server.SEGMENT_LINES * 2 - 1)[0] == [f"строка {i}" for i in range(19999, total)]
 
 
+def test_start_removes_previous_segments_and_numbers_from_one(tmp_path):
+    seg_dir = tmp_path / "logs"
+    seg_dir.mkdir()
+    (seg_dir / "seg-000001.log").write_text("старая строка 1\n", encoding="utf-8")
+    (seg_dir / "seg-000002.log").write_text("старая строка 2\n", encoding="utf-8")
+    buf = server.LogBuffer(log_dir=str(seg_dir))
+    assert list(seg_dir.iterdir()) == []                   # прошлый запуск удалён, подкаталогов не создано
+    buf.add("новая строка")
+    assert len(buf) == 1 and buf.tail() == ["новая строка"]  # номера строк с 1
+    assert (seg_dir / "seg-000001.log").read_text(encoding="utf-8") == "новая строка\n"
+    assert sorted(p.name for p in seg_dir.iterdir()) == ["seg-000001.log"]
+
+
 def test_logs_since_9999_across_segment_boundary(make_app, tmp_path):
     app, _ = make_app()
     app.logbuf = server.LogBuffer(log_dir=str(tmp_path / "seg"))  # чистый буфер: номера строк известны
@@ -178,13 +191,13 @@ def test_masking_happens_before_segment_file_write(tmp_path):
     assert CANARY not in buf.tail()[0]
 
 
-def test_token_masked_in_worker_line_and_stdout_format():
+def test_token_masked_in_worker_line_and_stdout_format(tmp_path):
     server.register_secret(TOKEN)
     record = logging.LogRecord("Generate.worker.server", logging.INFO, __file__, 1,
                                "утечка %s в строке", (TOKEN,), None)
     text = server.MaskingFormatter(server.LOG_FORMAT).format(record)
     assert TOKEN not in text and LOGS_TOKEN_MARK in text
-    buf = server.LogBuffer()
+    buf = server.LogBuffer(log_dir=str(tmp_path / "logs"))
     buf.add(f"Authorization: Bearer {TOKEN}")
     assert TOKEN not in buf.tail()[0]
 
@@ -564,8 +577,8 @@ def test_logs_since_keeps_auth_behaviour(make_app):
         assert resp.status_code == 401 and "X-Log-Next" not in resp.headers
 
 
-def test_log_buffer_read_ignores_max_lines_and_reads_since():
-    buf = server.LogBuffer(max_lines=3)  # параметр принимается и не используется: строки не вытесняются (этап 9в2)
+def test_log_buffer_read_ignores_max_lines_and_reads_since(tmp_path):
+    buf = server.LogBuffer(max_lines=3, log_dir=str(tmp_path / "logs"))  # параметр принимается и не используется: строки не вытесняются (этап 9в2)
     for i in range(5):
         buf.add(f"строка {i}")
     assert buf.read(since=0) == (["строка 0", "строка 1", "строка 2", "строка 3", "строка 4"], 5)

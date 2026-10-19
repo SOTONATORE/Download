@@ -102,8 +102,6 @@ START_FAILURE_MARKERS = ("failed to", "unresolvable", "error", "failed to create
 # Статусы Vast, которые после начала старта (loading или created) означают неудачный старт (SPEC 8.2)
 STOPPED_AFTER_START_STATUSES = ("offline", "exited")
 START_FAILURE_REASON = "старт карты не удался"
-# Срок жизни карты только для пилота (SPEC 8.3 б): основной путь срока жизни не имеет
-PILOT_MAX_LIFETIME_SEC = 90 * 60.0
 # Сборка воркера (SPEC 8.4): номер коммита, 7-64 символа 0-9 и a-f
 WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
 WORKER_ARCHIVE_URL = "https://codeload.github.com/SOTONATORE/Download/tar.gz/{sha}"
@@ -497,7 +495,7 @@ class Orchestrator:
         budget_limit_usd: float = 2.0,
         job_deadline_min: int = 330,
         silent_host_timeout_min: int = 20,
-        worker_idle_timeout_min: int = 5,
+        worker_idle_timeout_min: int = 2,
         offer_filter: Optional[OfferFilter] = None,
         excluded_machines: Optional[frozenset] = None,
         docker_image: str = "",
@@ -940,9 +938,6 @@ class Orchestrator:
                 now = self.clock()
                 if self._stop.is_set():
                     result = "stop"
-                    break
-                if now - rent_at >= PILOT_MAX_LIFETIME_SEC:
-                    result = "lifetime"
                     break
                 if now - rent_at >= self._silent_sec and port_at is None:
                     result = "timeout"

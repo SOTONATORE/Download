@@ -77,6 +77,7 @@ def make_app(tmp_path):
         comfy = comfy or FakeComfy(out)
         kw.setdefault("idle_timeout_seconds", 3600)
         kw.setdefault("on_idle_timeout", lambda: None)
+        kw.setdefault("log_dir", str(tmp_path / "logs"))   # буфер логов в tmp_path: без временных каталогов в /tmp
         app = WorkerApp(TOKEN, comfy, host="127.0.0.1", port=0, workflow=WORKFLOW,
                         bindings=BINDINGS, output_dir=out, **kw)
         app.start_background()
@@ -298,7 +299,7 @@ def test_deadman_reset_by_authenticated_request_only(make_app):
 
 def test_default_callback_stops_server(tmp_path):
     app = WorkerApp(TOKEN, FakeComfy(tmp_path), host="127.0.0.1", port=0,
-                    idle_timeout_seconds=0.2, check_interval=0.05)
+                    idle_timeout_seconds=0.2, check_interval=0.05, log_dir=str(tmp_path / "logs"))
     thread = threading.Thread(target=app.httpd.serve_forever, daemon=True)
     app.manager.start()
     app.deadman.start()

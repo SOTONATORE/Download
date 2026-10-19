@@ -104,6 +104,7 @@ class ComfyOutputReader:
         self._cur = ""          # ещё не записанный хвост текущей строки (ограничен PIECE_LIMIT + HOLD_CHARS + порцией)
         self._wrote = False     # часть текущей строки уже передана приёмнику
         self._raw_written = 0   # сколько исходных символов текущей строки уже записано (для пометки границы)
+        self._held_cr = ""      # «\\r» в конце прочитанной порции: пара «\\r\\n» может продолжиться в следующей
         self._warned = False
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -117,6 +118,7 @@ class ComfyOutputReader:
             return 0
         if size < self._offset:  # файл усечён или пересоздан
             self._reset_line()
+            self._held_cr = ""
             self._offset = 0
             self._decoder.reset()
         if size == self._offset:
@@ -125,14 +127,20 @@ class ComfyOutputReader:
             fh.seek(self._offset)
             data = fh.read(min(size - self._offset, READ_CHUNK))
         self._offset += len(data)
-        text = self._decoder.decode(data)
+        text = self._held_cr + self._decoder.decode(data)
+        self._held_cr = ""
+        if text.endswith("\r"):  # решим при следующей порции: «\r\n» — конец строки, одиночный «\r» — прогресс
+            text, self._held_cr = text[:-1], "\r"
         emitted = 0
         pos = 0
         while True:
             idx = text.find("\n", pos)
             if idx < 0:
                 break
-            self._add_text(text[pos:idx])
+            segment = text[pos:idx]
+            if segment.endswith("\r"):  # «\r\n»: «\r» — часть конца строки, а не прогресс
+                segment = segment[:-1]
+            self._add_text(segment)
             if self._end_line():
                 emitted += 1
             pos = idx + 1

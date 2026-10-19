@@ -40,7 +40,7 @@ except ImportError:  # запуск прямо на карте, без паке�
 log = logging.getLogger("Generate.worker.server")
 
 DEFAULT_PORT = 8000
-DEFAULT_IDLE_TIMEOUT_MIN = 5
+DEFAULT_IDLE_TIMEOUT_MIN = 2
 DEFAULT_MAX_UNACKED = 3
 DEFAULT_OUTPUT_DIR = "/workspace/ComfyUI/output"
 MAX_BODY_BYTES = 1024 * 1024
@@ -190,7 +190,7 @@ class LogSegmentStore:
 
     def __init__(self, directory: Optional[str]) -> None:
         self.dir = self._prepare_dir(directory)
-        self._archive_previous()
+        self._remove_previous()
         self._lock = threading.RLock()
         self._seq = 0                          # закрытых строк
         self._seg = 0                          # номер текущего файла
@@ -211,15 +211,10 @@ class LogSegmentStore:
                       file=sys.stderr, flush=True)
         return Path(tempfile.mkdtemp(prefix="worker_logs_"))
 
-    def _archive_previous(self) -> None:
-        """Файлы прошлого запуска не смешиваются с текущим: переносятся в подкаталог previous-ДАТА."""
-        old = sorted(self.dir.glob("seg-*.log"))
-        if not old:
-            return
-        target = self.dir / time.strftime("previous-%Y%m%d-%H%M%S")
-        target.mkdir(parents=True, exist_ok=True)
-        for path in old:
-            path.replace(target / path.name)
+    def _remove_previous(self) -> None:
+        """Файлы сегментов прошлого запуска удаляются при создании хранилища: номера строк начинаются с 1."""
+        for path in self.dir.glob("seg-*.log"):
+            path.unlink(missing_ok=True)
 
     def _begin_entry(self) -> None:
         if self._fh is None or self._seg_count >= SEGMENT_LINES:
