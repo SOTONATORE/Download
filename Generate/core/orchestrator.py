@@ -1440,7 +1440,7 @@ class Orchestrator:
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
         log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
                  _card_name(slot), offer.offer_id, mode, price)
-        if from_scan:
+        if from_scan and self._scan_started is not None:
             log.info("Окно сбора цен: выбрано предложение %d, dph_total %.4f USD/ч, "
                      "загрузка интернета %.1f Мбит/с; от старта окна до аренды %.0f с.",
                      offer.offer_id, offer.dph_total, offer.inet_down_mbps,

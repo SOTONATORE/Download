@@ -1118,7 +1118,7 @@ def test_zero_dph_keeps_search_price_and_warns_once(tmp_path, monkeypatch, caplo
 
     inst = rig.vast.created[0]["id"]
     recs = [r for r in rig.orc.budget._records if r.instance_id == inst]
-    assert [r.dph for r in recs] == [0.3]      # цена поиска сохранена
+    assert [r.dph for r in recs] == [0.33]     # записана ставка bid: цена поиска + bid_margin 0.03
     assert caplog.text.count("Vast не вернул цену") == 1
     assert summary.completed == 1
 

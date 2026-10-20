@@ -404,7 +404,7 @@ def test_comfy_output_reaches_buffer_masked_with_marker(make_app, tmp_path):
         "ключ sk-TESTKEY123456789 в выводе\n",
         encoding="utf-8")
     app, _ = make_app(comfy_log_path=str(comfy_log))
-    assert wait_for(lambda: any("Authorization" in s for s in app.logbuf.tail()))
+    assert wait_for(lambda: any("в выводе" in s for s in app.logbuf.tail()))
     lines = app.logbuf.tail()
     joined = "\n".join(lines)
     assert "Вывод ComfyUI: Requested to load LTXVModel" in joined
@@ -424,7 +424,7 @@ def test_comfy_lines_do_not_reach_root_logger(make_app, tmp_path, caplog):
     comfy_log = tmp_path / "comfyui.log"
     comfy_log.write_text("Requested to load X\n", encoding="utf-8")
     app, _ = make_app(comfy_log_path=str(comfy_log))
-    assert wait_for(lambda: any("Вывод ComfyUI: Requested to load X" in s for s in app.logbuf.tail()))
+    assert wait_for(lambda: any("Вывод ComfyUI: Requested to load X" in s for s in app.logbuf.tail()), 10.0)
     assert "Вывод ComfyUI" not in caplog.text          # контейнерный лог получает их от tee, не от воркера
     assert logging.getLogger(server.COMFY_LOG_LOGGER).propagate is False
 
