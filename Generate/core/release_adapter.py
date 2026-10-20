@@ -231,6 +231,12 @@ class GhReleaseStore(ReleaseStore):
 # Ссылки (SPEC 9.4)
 # ---------------------------------------------------------------------------
 
+def _is_already_exists(exc: Exception) -> bool:
+    """Ошибка GitHub «релиз или ассет уже существует» (HTTP 422, already_exists)."""
+    text = str(exc).lower()
+    return "already_exists" in text or ("422" in text and "exist" in text)
+
+
 def create_generated_links(repo: str, tag: str, asset_filenames: Sequence[str],
                            tag_of: Optional[Mapping[str, str]] = None) -> str:
     """
@@ -290,6 +296,7 @@ class ReleaseUploader:
         self.asset_tags: dict = {}   # имя файла клипа -> тег клип-релиза
         self.done: set = set()
         self._prepared = False
+        self._service_opened: Optional[str] = None  # служебный релиз, открытый в этом запуске
 
     # --- предполётные проверки (клип-релизы) ----------------------------------
     def _check_release(self, tag: str) -> Optional[ReleaseInfo]:
@@ -350,16 +357,29 @@ class ReleaseUploader:
         if self.run_id is None:
             raise GeminiInputError("Не задан идентификатор запуска (run_id): релиз запуска не открыт.")
         tag = self.service_tag if kind == "service" else self.final_tag
+        # Служебный релиз уже открыт в этом запуске (prepare() и первая загрузка): повторно не создаём.
+        # Список релизов GitHub может отставать сразу после создания, поэтому опираться только на него нельзя.
+        if kind == "service" and self._service_opened == tag:
+            return tag
         found = self.store.find_releases(tag)
         if len(found) > 1:
             raise GeminiInputError(
                 f"Найдено несколько релизов с тегом {tag}, удалите лишние вручную."
             )
         if not found:
-            self.store.create_release(tag,
-                                      format_run_title(self._KIND_LABEL[kind], self.run_id, self._now()),
-                                      format_run_body(kind, self.run_id))
-            self._log(f"Создан релиз {tag}.")
+            try:
+                self.store.create_release(tag,
+                                          format_run_title(self._KIND_LABEL[kind], self.run_id, self._now()),
+                                          format_run_body(kind, self.run_id))
+                self._log(f"Создан релиз {tag}.")
+            except GeminiRuntimeError as exc:
+                # Повторная попытка: релиз уже появился (422 already_exists). Для служебного это не ошибка:
+                # файлы всё равно грузятся через upload --clobber, поэтому продолжаем с существующим релизом.
+                if kind != "service" or not _is_already_exists(exc):
+                    raise
+                self._log(f"Служебный релиз {tag} уже существует: продолжаем с ним.")
+        if kind == "service":
+            self._service_opened = tag
         return tag
 
     def open_service_release(self) -> str:
