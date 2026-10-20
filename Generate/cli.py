@@ -58,7 +58,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
     from Generate.core.vast_client import (
-        OfferFilter, VastClient, VastError, VastRuntimeError)
+        OfferFilter, VastClient, VastError, VastInstanceNotFound, VastRuntimeError)
 except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
     from vast_client import (  # type: ignore
-        OfferFilter, VastClient, VastError, VastRuntimeError)
+        OfferFilter, VastClient, VastError, VastInstanceNotFound, VastRuntimeError)
 
 EXIT_OK = 0
 EXIT_INPUT = 2
@@ -523,18 +523,82 @@ def cmd_run(args: argparse.Namespace) -> int:
     return EXIT_OK if int(getattr(summary, "exit_code", EXIT_RUNTIME)) == EXIT_OK else EXIT_RUNTIME
 
 
+def read_card_ids(card_dir) -> list[int]:
+    """ID экземпляров из meta.json карт артефакта запуска (cards/*/meta.json, пишет оркестратор при аренде).
+
+    Читаются только номера экземпляров: адреса, ключи и токены из этих файлов не берутся.
+    Битый файл или поле без целого положительного номера пропускается.
+    """
+    ids: list[int] = []
+    for meta in sorted(Path(card_dir).glob("cards/*/meta.json")):
+        try:
+            value = json.loads(meta.read_text(encoding="utf-8")).get("instance_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            continue
+        if value not in ids:
+            ids.append(value)
+    return ids
+
+
 def cmd_kill_cards(args: argparse.Namespace) -> int:
-    """Уничтожает все карты запуска по метке (SPEC 8.3 (в))."""
-    label = args.label or (f"gen-{args.run_id}" if args.run_id else "")
+    """Уничтожает все карты запуска по метке (SPEC 8.3 (в)).
+
+    Основной путь: уничтожение по метке gen-<run_id>. Резерв (при --card-dir): карты из meta.json
+    артефакта запуска, которые метка не нашла; их ID записал оркестратор сразу после аренды.
+    Код 3, если хотя бы одно уничтожение не прошло (по метке или по ID).
+    """
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    label = args.label or (f"gen-{run_id}" if run_id else "")
     if not label:
         _err("Ошибка входных данных: не задана метка (--label) и номер запуска (--run-id).")
         return EXIT_INPUT
+    card_dir = str(getattr(args, "card_dir", "") or "")
 
+    errors: list[str] = []
+    by_label: list[int] = []
+    by_id: list[int] = []
+    already_gone: list[int] = []
+    failed_ids: list[int] = []
+    card_ids: list[int] = []
     client = None
     try:
         # отладочный журнал Vast здесь не включается (по умолчанию выключен; флага у kill-cards нет)
         client = VastClient()
-        destroyed = client.destroy_by_label(label)
+        try:
+            by_label = list(client.destroy_by_label(label))
+        except VastError as e:
+            # частичный результат (VastDestroyError) сохраняем: эти карты уже уничтожены
+            by_label = list(getattr(e, "destroyed_ids", []) or [])
+            errors.append(str(e))
+
+        if card_dir:
+            card_ids = read_card_ids(card_dir)
+            for inst_id in (i for i in card_ids if i not in by_label):
+                try:
+                    client.get_instance(inst_id)
+                except VastInstanceNotFound:
+                    already_gone.append(inst_id)
+                    continue
+                except VastError:
+                    failed_ids.append(inst_id)
+                    continue
+                try:
+                    client.destroy_instance(inst_id)
+                    by_id.append(inst_id)
+                except VastError as e:
+                    failed_ids.append(inst_id)
+                    errors.append(str(e))
+
+        if not by_label and not by_id:
+            # метка ничего не нашла: печатаем, сколько карт вообще видно аккаунту (без адресов и ключей)
+            try:
+                everything = client.list_instances()
+                tagged = sum(1 for i in everything if (i.label or "").startswith(CARD_LABEL_PREFIXES))
+                print(f"Всего экземпляров в аккаунте: {len(everything)}; с метками gen-/pilot-: {tagged}.")
+            except Exception:  # диагностика не должна менять исход уборки
+                pass
     except VastError as e:
         _err(f"Не удалось уничтожить карты: {e}")
         return EXIT_RUNTIME
@@ -543,10 +607,18 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
         if callable(close):
             close()
 
-    print(f"Уничтожено карт: {len(destroyed)} (метка {label}).")
-    if destroyed:
+    total = len(by_label) + len(by_id)
+    print(f"Уничтожено карт: {total} (метка {label}).")
+    if card_dir:
+        print(f"Резерв по ID из артефакта: записано карт {len(card_ids)}, уничтожено по ID {len(by_id)}, "
+              f"уже не было {len(already_gone)}, не удалось {len(failed_ids)}.")
+    if total:
         # токен воркера создаётся в процессе run и здесь неизвестен: логи карт не запрашиваются
         print("Логи карт в этой команде не выгружаются: токен воркера есть только у процесса run.")
+    for text in errors:
+        _err(f"Не удалось уничтожить карты: {text}")
+    if errors or failed_ids:
+        return EXIT_RUNTIME
     return EXIT_OK
 
 
@@ -971,6 +1043,8 @@ def build_parser() -> argparse.ArgumentParser:
     kill_p.add_argument("--label", default=None, help="метка карт (по умолчанию gen-<run-id>)")
     kill_p.add_argument("--run-id", default="",
                         help="номер запуска (передаётся явно)")
+    kill_p.add_argument("--card-dir", default="",
+                        help="каталог артефакта запуска: резерв, ID карт из cards/*/meta.json")
     kill_p.set_defaults(func=lambda a: cmd_kill_cards(a))
 
     watch_p = sub.add_parser("watch-heartbeat",

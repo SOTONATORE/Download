@@ -209,11 +209,15 @@ def debug_body_for_log(raw: str, secret: str = "") -> str:
 # Поля ответа Vast, которые пишутся в отладочный журнал (приватность, 20.10.2026). Белый список:
 # всё, чего нет в нём (username, email, phone, billing_*, paypal/wise, huggingface_*, discord_id,
 # rights, sid, password*, tfa_*, oauth_* и любые новые поля), в журнал не попадает.
-# Адрес и порты карты сюда не входят: SPEC 0.1 (п. 11) и remove_instance_fields запрещают их в журнале.
+# Адрес карты сюда не входит: SPEC 0.1 (п. 11) и remove_instance_fields запрещают его в журнале.
+# error, msg, message: текст ошибки Vast (безопасные поля, нужны для диагностики).
 LOG_RESPONSE_FIELDS = frozenset({
     "success", "id", "credit", "balance", "actual_status", "cur_state", "intended_status",
-    "is_bid", "dph_total",
+    "is_bid", "dph_total", "error", "msg", "message",
 })
+# Поле «ports» пишется только именами ключей (например «8000/tcp, 8188/tcp»). Значения (HostPort, IP)
+# в журнал не попадают (SPEC 0.1, п. 11).
+LOG_PORTS_FIELD = "ports"
 
 
 def _log_records(obj: Any) -> list:
@@ -230,13 +234,16 @@ def _log_records(obj: Any) -> list:
     if not isinstance(obj, dict):
         return []
     own: dict = {}
-    for k, v in obj.items():
-        if str(k) not in LOG_RESPONSE_FIELDS:
-            continue
-        own[k] = _keep_log_fields(v) if isinstance(v, (dict, list)) else v
     nested: list = []
     for k, v in obj.items():
-        if str(k) not in LOG_RESPONSE_FIELDS and isinstance(v, (dict, list)):
+        name = str(k)
+        if name == LOG_PORTS_FIELD:
+            if isinstance(v, dict) and v:
+                own[k] = ", ".join(str(port) for port in v)   # только имена ключей, без значений
+            continue
+        if name in LOG_RESPONSE_FIELDS:
+            own[k] = _keep_log_fields(v) if isinstance(v, (dict, list)) else v
+        elif isinstance(v, (dict, list)):
             nested.extend(_log_records(v))
     return ([own] if own else []) + nested
 
@@ -260,6 +267,20 @@ def response_summary_for_log(raw: str, secret: str = "") -> Optional[str]:
     except ValueError:
         return None
     return json.dumps(redact_value(_keep_log_fields(parsed), secret), ensure_ascii=False)
+
+
+def top_level_keys_for_log(raw: str, secret: str = "") -> str:
+    """Имена верхнеуровневых ключей JSON-ответа без значений. Нужно, когда сводка пустая, а тело не пустое.
+    Ключ с секретным именем показывается как «***». Не объект или не JSON: «нет»."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return "нет"
+    if not isinstance(parsed, dict):
+        return f"нет, ответ типа {type(parsed).__name__}"
+    if not parsed:
+        return "нет"
+    return ", ".join("***" if is_sensitive_name(k) else redact_text(str(k), secret) for k in parsed)
 
 
 def _without_env_field(obj: Any) -> Any:
@@ -470,6 +491,9 @@ class VastClient:
             log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело %d байт, не JSON",
                      req_no, status, elapsed, size)
             return
+        if summary == "{}" and text:
+            # ни одно поле не прошло белый список: пишем имена верхнеуровневых ключей, без значений
+            summary += f" (ключи ответа: {top_level_keys_for_log(text, self._api_key)})"
         log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело %d байт, поля: %s",
                  req_no, status, elapsed, size, summary)
 

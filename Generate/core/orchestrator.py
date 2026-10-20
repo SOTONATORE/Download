@@ -82,6 +82,7 @@ LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
+WAIT_LOG_INTERVAL_SEC = 60.0  # строка состояния ожидания воркера: не чаще раза в минуту
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
 BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
@@ -228,6 +229,9 @@ class _CardSlot:
     last_beat: float = -1e9           # время последнего heartbeat-запроса (SPEC 8.3 а)
     last_ok_utc: str = ""              # UTC последнего успешного heartbeat (файл heartbeat)
     weights_reason: Optional[str] = None  # причина из разбора логов весов, ждёт снятия карты
+    probe_result: str = ""              # последний результат /health: HTTP-код или тип ошибки (для строки состояния)
+    probe_answered: bool = False      # последний /health получил HTTP-ответ (не ошибку связи)
+    wait_log_at: float = -1e9         # время последней строки состояния ожидания (раз в минуту)
 
     @property
     def started(self) -> bool:
@@ -649,7 +653,8 @@ class Orchestrator:
         self.pilot = bool(pilot)
         # пустая команда не передаётся дальше: onstart в payload не попадает
         self.pilot_start_cmd = (pilot_start_cmd or "").strip() or None
-        self.label = f"{'pilot' if self.pilot else 'gen'}-{run_id}"
+        # метка должна совпадать с той, что ищет kill-cards: номер запуска без пробелов по краям (cli.cmd_kill_cards)
+        self.label = f"{'pilot' if self.pilot else 'gen'}-{str(run_id).strip()}"
         self.worker_build = "" if self.pilot else worker_build
         self._onstart = None if self.pilot else _worker_onstart(worker_build)
         self.profile = profile
@@ -1657,6 +1662,8 @@ class Orchestrator:
                                  "готова к приёму задач.", _card_name(slot, cap=True), age)
                     elif self._track_ready_wait(slot, now):
                         return
+            if slot.state == "booting":
+                self._log_wait_state(slot, now)
         if not slot.contacted and age >= self._silent_sec:
             log.error("%s: healthcheck не прошёл за %d мин (таймаут).",
                       _card_name(slot, cap=True), int(self._silent_sec // 60))
@@ -1713,14 +1720,35 @@ class Orchestrator:
         try:
             resp = self._http.get(slot.url + "/health", headers=self._headers, timeout=PROBE_TIMEOUT_SEC)
         except httpx.HTTPError as exc:
+            slot.probe_result = type(exc).__name__
+            slot.probe_answered = False
             log.warning("%s: проверка /health: запрос не дошёл (%s).", name, type(exc).__name__)
             return False
         data = self._json(resp)
+        slot.probe_result = f"код {resp.status_code}"
+        slot.probe_answered = True
         ok = resp.status_code == 200 and data.get("ok") is True
         body = _one_line(self._mask_remote(resp.text))  # /health короткий: пишется целиком
         log.info("%s: проверка /health: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
                  body or "пусто", self.clock() - start, "готов" if ok else "не готов")
         return ok
+
+    def _log_wait_state(self, slot: _CardSlot, now: float) -> None:
+        """Одна строка состояния ожидания воркера не чаще раза в минуту.
+
+        Этапы: booting (адреса ещё нет или воркер отвечает, но готовности нет), без ответа (адрес есть,
+        связь с /health не удалась). Без адреса, порта и значений; номер экземпляра Vast не пишется.
+        """
+        if now - slot.wait_log_at < WAIT_LOG_INTERVAL_SEC:
+            return
+        slot.wait_log_at = now
+        if slot.url and slot.probe_result and not slot.probe_answered:
+            stage = "без ответа"
+        else:
+            stage = "booting"
+        log.info("карта %d поколение %d: ожидание воркера, этап «%s», ждём %d с, последний результат: %s.",
+                 slot.index, slot.generation, stage, int(now - slot.created),
+                 slot.probe_result or "проверки ещё не было")
 
     def _track_ready_wait(self, slot: _CardSlot, now: float) -> bool:
         """Правило (г), SPEC 8.2: готовность не подтверждена за worker_ready_timeout_min.
@@ -1734,6 +1762,10 @@ class Orchestrator:
             if not mon.seen_start:
                 self._note_weights_source()
         if slot.ready_wait_since is None or now - slot.ready_wait_since < self._ready_sec:
+            return False
+        # пока строк загрузки весов нет, отсчёт идёт от первого адреса карты, а загрузка может быть дольше
+        # (SPEC 8.2, риск). Карта не снимается раньше silent_host_timeout_min от создания
+        if not mon.seen_start and now - slot.created < self._silent_sec:
             return False
         log.error("%s: воркер не готов за %d мин: /health не ответил ok=true. Карта снимается, "
                   "хост исключён из этого запуска.", _card_name(slot, cap=True), int(self._ready_sec // 60))
