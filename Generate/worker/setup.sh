@@ -5,6 +5,8 @@ set -u
 
 # Папка ComfyUI задаётся bootstrap.sh (COMFY_DIR); по умолчанию /workspace/ComfyUI.
 COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
