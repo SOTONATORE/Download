@@ -30,11 +30,11 @@ try:
     from Generate.worker.comfy_client import (
         ComfyClient, ComfyError, inject_workflow)
     from Generate.worker.comfy_output import (
-        COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader)
+        COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT)
     from Generate.worker.telemetry import SystemSampler, TelemetrySampler
 except ImportError:  # запуск прямо на карте, без пакета Generate
     from worker.comfy_client import ComfyClient, ComfyError, inject_workflow
-    from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader
+    from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT
     from worker.telemetry import SystemSampler, TelemetrySampler
 
 log = logging.getLogger("Generate.worker.server")
