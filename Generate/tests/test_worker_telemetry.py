@@ -407,7 +407,7 @@ def test_comfy_output_reaches_buffer_masked_with_marker(make_app, tmp_path):
     assert wait_for(lambda: any("в выводе" in s for s in app.logbuf.tail()))
     lines = app.logbuf.tail()
     joined = "\n".join(lines)
-    assert "Вывод ComfyUI: Requested to load LTXVModel" in joined
+    assert "Вывод ComfyUI: Requested to load LTXVModel" in joined, joined
     assert "Вывод ComfyUI: [INFO] Unloaded partially: 1.00 MB freed" in joined   # ANSI убран
     assert "\x1b" not in joined
     assert TOKEN not in joined and "TESTKEY123456789" not in joined

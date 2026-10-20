@@ -197,6 +197,7 @@ class LogSegmentStore:
         self._seg_count = 0                    # закрытых строк в текущем файле
         self._fh: Any = None
         self._open_pos: Optional[int] = None   # байт в текущем файле, с которого начата незакрытая строка
+        self._queued: collections.deque = collections.deque()  # готовые строки, ждущие закрытия незакрытой
         self._closed = False
 
     @staticmethod
@@ -238,7 +239,7 @@ class LogSegmentStore:
             self._fh.flush()
 
     def commit(self) -> None:
-        """Закрывает строку: перевод строки в файл, строка получает номер."""
+        """Закрывает строку: перевод строки в файл, строка получает номер. Затем пишутся строки, ждавшие её."""
         with self._lock:
             if self._closed:
                 return
@@ -249,9 +250,11 @@ class LogSegmentStore:
             self._open_pos = None
             self._seq += 1
             self._seg_count += 1
+            self._drain_locked()
 
     def cancel(self) -> None:
-        """Отменяет незавершённую строку: её части удаляются из файла (строка с «\\r» заменяется последним состоянием)."""
+        """Отменяет незавершённую строку: её части удаляются из файла (строка с «\\r» заменяется последним состоянием).
+        Трогает только свою незакрытую строку: строки других источников не удаляются."""
         with self._lock:
             if self._closed or self._open_pos is None:
                 return
@@ -259,11 +262,32 @@ class LogSegmentStore:
             os.ftruncate(self._fh.fileno(), self._open_pos)
             self._fh.seek(0, os.SEEK_END)
             self._open_pos = None
+            self._drain_locked()
+
+    def write_line(self, parts: list) -> None:
+        """Строка целиком (части без перевода строки). Маска, запись и перевод строки выполняются под одной
+        блокировкой, поэтому строки других источников в неё не попадают. Если открыта незакрытая строка
+        (части длиннее PIECE_LIMIT), эта строка ждёт её закрытия и пишется сразу после неё."""
+        data = b"".join(_escape_entry(mask_secrets(part)).encode("utf-8") for part in parts)
+        with self._lock:
+            if self._closed:
+                return
+            self._queued.append(data)
+            self._drain_locked()
+
+    def _drain_locked(self) -> None:
+        """Пишет ожидающие строки, пока нет незакрытой строки. Вызывать под блокировкой."""
+        while self._queued and self._open_pos is None and not self._closed:
+            data = self._queued.popleft()
+            self._begin_entry()
+            self._fh.write(data + b"\n")
+            self._fh.flush()
+            self._open_pos = None
+            self._seq += 1
+            self._seg_count += 1
 
     def add_entry(self, text: str) -> None:
-        with self._lock:
-            self.write(text)
-            self.commit()
+        self.write_line([text])
 
     def read(self, since: Optional[int] = None, tail: Optional[int] = None) -> Tuple[list, int]:
         """(строки, номер последней строки). since: строки с номером больше since; tail без since."""
@@ -297,6 +321,7 @@ class LogSegmentStore:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._queued.clear()
             if self._fh is not None:
                 self._fh.close()
                 self._fh = None
@@ -323,6 +348,9 @@ class LogBuffer:
     def cancel_piece(self) -> None:
         self._store.cancel()
 
+    def write_line(self, parts: list) -> None:
+        self._store.write_line(parts)
+
     def read(self, since: Optional[int] = None, tail: Optional[int] = None) -> Tuple[list, int]:
         """(строки, номер последней строки). since: только строки с номером больше since; tail без since."""
         return self._store.read(since=since, tail=tail)
@@ -347,7 +375,10 @@ def _comfy_header() -> str:
 
 
 class _LineSink:
-    """Приёмник частей строки для ComfyOutputReader: части сразу пишутся в сегменты (этап 9в2).
+    """Приёмник частей строки для ComfyOutputReader. Части копятся в памяти и пишутся в буфер одной записью
+    по окончании строки (LogSegmentStore.write_line): строка ComfyUI не перемешивается с записями других
+    источников (телеметрия, журнал, bootstrap.log). Только строка длиннее PIECE_LIMIT без перевода строки
+    начинает писаться в буфер как незакрытая запись по частям (write_piece), как и раньше.
     header — начало строки (для ComfyUI: как у записи логгера), prefix — пометка перед текстом."""
 
     def __init__(self, logbuf: LogBuffer, *, header: Optional[Callable[[], str]] = None,
@@ -355,21 +386,39 @@ class _LineSink:
         self._logbuf = logbuf
         self._header = header
         self._prefix = prefix
-        self._started = False
+        self._parts: list = []
+        self._size = 0
+        self._spilled = False          # строка уже открыта в буфере по частям
 
     def write_piece(self, text: str) -> None:
-        if not self._started:
-            self._started = True
+        if self._spilled:
+            self._logbuf.write_piece(text)
+            return
+        if not self._parts:            # первая часть строки: начало и пометка
             text = (self._header() if self._header else "") + self._prefix + text
-        self._logbuf.write_piece(text)
+        self._parts.append(text)
+        self._size += len(text)
+        if self._size > PIECE_LIMIT:
+            self._spilled = True
+            self._logbuf.write_piece("".join(self._parts))
+            self._parts = []
 
     def cancel_line(self) -> None:
-        self._started = False
-        self._logbuf.cancel_piece()
+        if self._spilled:
+            self._logbuf.cancel_piece()
+        self._reset()
 
     def end_line(self) -> None:
-        self._started = False
-        self._logbuf.end_piece()
+        if self._spilled:
+            self._logbuf.end_piece()
+        elif self._parts:
+            self._logbuf.write_line(self._parts)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._parts = []
+        self._size = 0
+        self._spilled = False
 
 
 class BufferHandler(logging.Handler):

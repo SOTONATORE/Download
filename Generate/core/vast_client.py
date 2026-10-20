@@ -216,24 +216,40 @@ LOG_RESPONSE_FIELDS = frozenset({
 })
 
 
+def _log_records(obj: Any) -> list:
+    """Плоский список записей журнала. Ключ вне LOG_RESPONSE_FIELDS отбрасывается вместе со своим
+    именем на любой глубине. Его дочерние объекты (элементы списка «instances», пары «extra_env»)
+    разворачиваются и фильтруются сами. Поле из белого списка с контейнером в значении сохраняется
+    с отфильтрованным содержимым."""
+    if isinstance(obj, list):
+        records: list = []
+        for x in obj:
+            if isinstance(x, (dict, list)):
+                records.extend(_log_records(x))
+        return records
+    if not isinstance(obj, dict):
+        return []
+    own: dict = {}
+    for k, v in obj.items():
+        if str(k) not in LOG_RESPONSE_FIELDS:
+            continue
+        own[k] = _keep_log_fields(v) if isinstance(v, (dict, list)) else v
+    nested: list = []
+    for k, v in obj.items():
+        if str(k) not in LOG_RESPONSE_FIELDS and isinstance(v, (dict, list)):
+            nested.extend(_log_records(v))
+    return ([own] if own else []) + nested
+
+
 def _keep_log_fields(obj: Any) -> Any:
     """Копия JSON-объекта только с полями LOG_RESPONSE_FIELDS на любой глубине.
-    Скалярные элементы списков отбрасываются (в списке строк может оказаться что угодно)."""
-    if isinstance(obj, dict):
-        out: dict = {}
-        for k, v in obj.items():
-            if str(k) in LOG_RESPONSE_FIELDS:
-                out[k] = _keep_log_fields(v)
-            elif isinstance(v, (dict, list)):
-                # контейнер (например, список предложений) сохраняется, если в нём есть нужные поля;
-                # его имя и прочие скалярные поля отбрасываются
-                kept = _keep_log_fields(v)
-                if kept:
-                    out[k] = kept
-        return out
-    if isinstance(obj, list):
-        return [_keep_log_fields(x) for x in obj if isinstance(x, (dict, list))]
-    return obj
+    Ключи вне белого списка (включая контейнеры вроде «instances» и «extra_env») в результат не
+    попадают. Одна запись возвращается словарём, несколько записей, например элементы списка,
+    списком словарей. Скалярные элементы списков отбрасываются."""
+    records = _log_records(obj)
+    if not records:
+        return {}
+    return records[0] if len(records) == 1 else records
 
 
 def response_summary_for_log(raw: str, secret: str = "") -> Optional[str]:

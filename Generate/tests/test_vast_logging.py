@@ -178,13 +178,15 @@ def test_debug_off_adds_no_log_records_and_keeps_return_value(caplog):
 
 # ---------------------------------------------------------------- тела ответа
 
-def test_non_json_body_is_logged_as_text(caplog):
-    client = make(lambda r: httpx.Response(200, text="<html>технические работы у провайдера</html>"))
+def test_non_json_body_logs_only_code_time_and_length(caplog):
+    body = "<html>технические работы у провайдера</html>"
+    client = make(lambda r: httpx.Response(200, text=body))
     with pytest.raises(VastRuntimeError):
         client.get_balance_usd()          # поведение прежнее: не JSON остаётся ошибкой
     text = "\n".join(debug_lines(caplog))
-    assert "технические работы у провайдера" in text
     assert "HTTP 200" in text
+    assert f"тело {len(body.encode('utf-8'))} байт" in text
+    assert "технические работы у провайдера" not in text and "<html>" not in text
 
 
 def test_non_json_body_secrets_are_masked(caplog):
@@ -193,18 +195,25 @@ def test_non_json_body_secrets_are_masked(caplog):
     with pytest.raises(VastRuntimeError):
         client.get_balance_usd()
     text = "\n".join(debug_lines(caplog))
-    assert "ошибка шлюза" in text
+    assert "HTTP 200" in text
     assert "GW-VALUE-55" not in text and SECRET not in text
-    assert "auth_token=***" in text
+    assert "ошибка шлюза" not in text                  # текст тела не логируется вообще
 
 
-def test_body_is_logged_in_full(caplog):
-    # длинное тело (около 200 КБ): без обрезки весь текст попадает в лог
-    payload = {"credit": 5.0, "note": "полный текст ответа, который не должен обрезаться",
+def test_only_whitelisted_fields_are_logged_for_large_body(caplog):
+    # длинное тело (около 200 КБ): в лог попадают только поля белого списка, остальное отбрасывается
+    payload = {"credit": 5.0, "note": "полный текст ответа, который не должен попасть в лог",
                "blob": "b" * 200_000}
-    assert make(lambda r: httpx.Response(200, json=payload)).get_balance_usd() == 5.0
-    text = all_text(caplog)
-    assert json.dumps(payload, ensure_ascii=False) in text
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    assert make(lambda r: httpx.Response(200, content=raw,
+                                         headers={"content-type": "application/json"})
+                ).get_balance_usd() == 5.0
+    lines = debug_lines(caplog)
+    text = "\n".join(lines)
+    assert '"credit": 5.0' in text                       # поле из белого списка есть
+    assert "note" not in text and "полный текст ответа" not in text   # лишний ключ и его текст отброшены
+    assert "bbbbbbbbbb" not in text and len(text) < 2_000             # 200 КБ blob в лог не попадает
+    assert f"тело {len(raw)} байт" in text               # длина тела пишется
 
 
 # ---------------------------------------------------------------- сбои и ответы с ключом
@@ -283,10 +292,11 @@ def test_extra_env_pairs_in_response_are_not_logged(caplog):
     assert any(m.startswith("Ответ Vast #1") for m in lines)
     assert EXTRA_TOKEN not in all_text(caplog)             # ни в одной строке журнала
     assert CRISP_VALUE not in all_text(caplog)
-    # поля окружения карты удаляются целиком (этап 9а), прочие секретные имена по-прежнему маскируются
-    assert '"extra_env"' not in text and '"env"' not in text
-    assert '"crisp_hmac": "***"' in text
-    assert '"actual_status": "running"' in text and '"label": "gen-1"' in text   # имена остальных ключей видны
+    # ключи вне белого списка не попадают в лог: ни имена, ни значения
+    assert "extra_env" not in text and "label" not in text and "crisp_hmac" not in text
+    assert '"env"' not in text
+    # поля из белого списка остаются, контейнер «instances» отброшен, его поля видны на верхнем уровне
+    assert '"actual_status": "running"' in text and '"id": 7' in text
 
 
 def test_crisp_hmac_value_is_not_logged_outside_debug_too(caplog):
