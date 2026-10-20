@@ -357,7 +357,10 @@ jobs:
               sys.stdout.write(line)
               sys.stdout.flush()
           '
-          python -m Generate.cli kill-cards --run-id "$RUN_ID" 2>&1 \
+          # Резерв (SPEC 8.3 в): если метка gen-<run_id> не нашла карту, уничтожаются карты из
+          # cards/*/meta.json каталога артефакта запуска (тот же $ART_DIR, что в шаге run; только ID).
+          python -m Generate.cli kill-cards --run-id "$RUN_ID" \
+            --card-dir "$RUNNER_TEMP/generate-artifact" 2>&1 \
             | python3 -I -u -c "$mask_code" \
             | tee -a "$RUN_LOG"
 
