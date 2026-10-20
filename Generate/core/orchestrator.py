@@ -515,6 +515,8 @@ class Orchestrator:
         seed_base: int = 0,
         poll_interval_sec: float = 10.0,
         rent_retry_sec: float = 30.0,
+        scan_sec: float = 0.0,
+        scan_step_sec: float = 20.0,
         drain_grace_sec: float = 900.0,
         task_timeout_sec: float = 1200.0,
         render_estimate_sec: float = 120.0,
@@ -557,6 +559,9 @@ class Orchestrator:
                       heartbeat_interval_sec, monitor_interval_sec)
         if min(sec_values) < 1 or speed_min_mbps <= 0 or speed_check_at_pct < 1 or progress_step_pct < 1:
             raise gp.GeminiInputError("Пороги мониторинга весов и готовности должны быть положительными.")
+        if scan_sec < 0 or scan_step_sec <= 0:
+            raise gp.GeminiInputError("Окно сбора цен: scan_sec не может быть отрицательным, "
+                                      "scan_step_sec должен быть больше нуля.")
         if stage_max_min < stall_timeout_min:
             raise gp.GeminiInputError("«stage_max_min» не может быть меньше «stall_timeout_min».")
         self.log_level = log_level
@@ -610,6 +615,9 @@ class Orchestrator:
         self.seed_base = seed_base
         self.poll_interval = poll_interval_sec
         self.rent_retry = rent_retry_sec
+        # окно сбора цен перед первой арендой запуска (SPEC 8.2): 0 = окно выключено
+        self.scan_sec = float(scan_sec)
+        self.scan_step = float(scan_step_sec)
         self.drain_grace = drain_grace_sec
         self.task_timeout = task_timeout_sec
         self.render_estimate = render_estimate_sec
@@ -652,6 +660,14 @@ class Orchestrator:
         self._excluded_machines: frozenset = frozenset(int(m) for m in (excluded_machines or ()))
         self._excluded_logged = False
         self._next_rent = 0.0
+        # окно сбора цен: только до первой аренды запуска; предложения копятся по ID
+        self._scan_started: Optional[float] = None
+        self._scan_end = 0.0
+        self._scan_next = 0.0
+        self._scan_steps = 0
+        self._scan_failed = 0
+        self._scan_pool: dict = {}
+        self._scan_done = False
         self._budget_blocked = False
         self._cards_rented = 0
         self._destroyed = 0
@@ -1114,6 +1130,7 @@ class Orchestrator:
                 # по метке запуска (как kill-cards) и закрывает их записи бюджета
                 log.error("Получен сигнал остановки: новые поиски и аренды не запускаются, "
                           "арендованные карты уничтожаются.")
+                self._scan_abort("сигнал остановки")
                 break
             now = self.clock()
             deadline_hit = (now - self._t0) >= self._deadline_sec
@@ -1122,6 +1139,7 @@ class Orchestrator:
                 self.deadline_reached = True
                 log.warning("Достигнут срок job (%d мин): новые клипы не берём, дозаливаем начатое.",
                             self.job_deadline_min)
+                self._scan_abort("срок job")
             if not self.budget_exceeded and self.budget.is_exceeded(now):
                 self.budget_exceeded = True
                 log.error("Бюджет исчерпан: снимаем все карты, новые не арендуем.")
@@ -1160,11 +1178,73 @@ class Orchestrator:
         need = math.ceil(remaining * avg / (time_left * 0.8))
         return max(1, min(self.max_cards, need, remaining))
 
+    # --- окно сбора цен (SPEC 8.2, v0.6) ---------------------------------------
+    def _scan_wanted(self) -> bool:
+        return (not self.pilot and not self._scan_done and self._cards_rented == 0
+                and self.scan_sec > 0)
+
+    def _scan_open(self, now: float) -> None:
+        self._scan_started = now
+        self._scan_next = now
+        self._scan_end = now + self.scan_sec
+        log.info("Окно сбора цен открыто: %d с, шаг опроса %d с, до первой аренды.",
+                 int(self.scan_sec), int(self.scan_step))
+
+    def _scan_step_if_due(self, now: float) -> None:
+        if now < self._scan_next:
+            return
+        self._scan_steps += 1
+        step_no = self._scan_steps
+        # график без накопления дрейфа: следующий шаг через scan_step от запланированного времени
+        self._scan_next = max(self._scan_next + self.scan_step, now)
+        try:
+            offers = self.vast.search_offers(self.offer_filter)
+        except VastError as exc:
+            self._scan_failed += 1
+            log.warning("Окно сбора цен, шаг %d: поиск не удался: %s", step_no, exc)
+            return
+        for o in offers:
+            self._scan_pool[o.offer_id] = o  # дедупликация по ID предложения: последний снимок побеждает
+        cheapest = min((o.price_per_hr for o in offers), default=None)
+        log.info("Окно сбора цен, шаг %d (через %.0f с): найдено %d, минимальная цена %s, "
+                 "накоплено уникальных %d.",
+                 step_no, now - self._scan_started, len(offers),
+                 f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет",
+                 len(self._scan_pool))
+
+    def _scan_close(self, now: float) -> list:
+        self._scan_done = True
+        pool = sorted(self._scan_pool.values(), key=lambda o: o.price_per_hr)
+        self._scan_pool = {}
+        cheapest = pool[0].price_per_hr if pool else None
+        log.info("Окно сбора цен закрыто: %.0f с, шагов %d (неуспешных %d), уникальных предложений %d, "
+                 "минимальная цена %s.",
+                 now - self._scan_started, self._scan_steps, self._scan_failed, len(pool),
+                 f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет")
+        return pool
+
+    def _scan_abort(self, reason: str) -> None:
+        if self._scan_started is None or self._scan_done:
+            return
+        self._scan_done = True
+        self._scan_pool = {}
+        log.error("Окно сбора цен прервано (%s): до первой аренды не дошло, карта в этом окне не арендуется.",
+                  reason)
+
     def _maybe_rent(self, now: float) -> None:
         if self._budget_blocked or now < self._next_rent:
             return
+        offers = None  # список окна передаётся только первой аренде запуска
+        if self._scan_wanted():
+            if self._scan_started is None:
+                self._scan_open(now)
+            if now < self._scan_end:
+                self._scan_step_if_due(now)
+                return
+            offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
-            res = self._rent_one(now)
+            res = self._rent_one(now, offers)
+            offers = None  # остальные аренды этого же прохода идут обычным поиском (без паузы)
             if res == "stop":
                 return
             if res == "retry":
@@ -1184,14 +1264,16 @@ class Orchestrator:
                     "машины %s, предложений в этом поиске %d.",
                     ", ".join(str(i) for i in ids), len(listed))
 
-    def _rent_one(self, now: float) -> str:
+    def _rent_one(self, now: float, offers: Optional[list] = None) -> str:
         if self._stop.is_set():
             return "stop"
-        try:
-            offers = self.vast.search_offers(self.offer_filter)
-        except VastError as exc:
-            log.warning("Поиск предложений Vast не удался: %s", exc)
-            return "retry"
+        from_scan = offers is not None  # список окна сбора цен уже получен, поиска не делаем
+        if offers is None:
+            try:
+                offers = self.vast.search_offers(self.offer_filter)
+            except VastError as exc:
+                log.warning("Поиск предложений Vast не удался: %s", exc)
+                return "retry"
         # постоянный список плохих машин (SPEC 8.2): отсеивается до аренды, по ID машины
         listed = [o for o in offers if o.machine_id in self._excluded_machines]
         if listed:
@@ -1257,6 +1339,11 @@ class Orchestrator:
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
         log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
                  _card_name(slot), offer.offer_id, mode, offer.price_per_hr)
+        if from_scan:
+            log.info("Окно сбора цен: выбрано предложение %d, dph_total %.4f USD/ч, "
+                     "загрузка интернета %.1f Мбит/с; от старта окна до аренды %.0f с.",
+                     offer.offer_id, offer.dph_total, offer.inet_down_mbps,
+                     self.clock() - self._scan_started)
         log.info("%s создана, ждём загрузку образа.", _card_name(slot, cap=True))
         if self._artifact is not None:  # meta.json без ключей и токенов (SPEC 10.4)
             self._artifact.card_meta(slot, {

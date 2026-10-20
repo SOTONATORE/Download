@@ -481,6 +481,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             heartbeat_interval_sec=cfg.heartbeat_interval_sec,
             monitor_interval_sec=cfg.monitor_interval_sec,
             min_inet_mbps=cfg.min_inet_mbps,
+            # окно сбора цен перед первой арендой (SPEC 8.2): значения из конфига
+            scan_sec=cfg.scan_sec,
+            scan_step_sec=cfg.scan_step_sec,
             # файл heartbeat для наблюдателя (этап 7, SPEC 8.3 а); по умолчанию не пишется
             heartbeat_path=getattr(args, "heartbeat_path", None),
             filename_template=cfg.filename_template,
