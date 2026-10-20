@@ -446,7 +446,18 @@ class ReleaseUploader:
         if name == LINKS_FILENAME:
             raise GeminiInputError(f"{LINKS_FILENAME} загружается в итоговый релиз, не в служебный.")
         tag = self._open_run_release("service")
-        self.store.upload_asset(tag, path)
+        self._upload_service_asset(tag, path)
+
+    def _upload_service_asset(self, tag: str, path: str) -> None:
+        """Загрузка служебного файла. Ответ 422 «already exists» сразу после создания служебного релиза
+        считается нормой: релиз уже есть, поэтому файл грузится повторно один раз. Если и повтор падает, ошибка идёт дальше."""
+        try:
+            self.store.upload_asset(tag, path)
+        except GeminiRuntimeError as exc:
+            if not _is_already_exists(exc):
+                raise
+            self._log(f"Служебный релиз {tag}: загрузка {os.path.basename(path)} ответила «already exists», повтор.")
+            self.store.upload_asset(tag, path)
 
     def upload_service_file(self, path: str) -> None:
         """prompts.json -> служебный релиз; generated_links.txt -> итоговый релиз (SPEC 9.4, 9.7).

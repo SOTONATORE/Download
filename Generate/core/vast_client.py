@@ -206,6 +206,46 @@ def debug_body_for_log(raw: str, secret: str = "") -> str:
     return json.dumps(redact_value(remove_instance_fields(parsed), secret), ensure_ascii=False)
 
 
+# Поля ответа Vast, которые пишутся в отладочный журнал (приватность, 20.10.2026). Белый список:
+# всё, чего нет в нём (username, email, phone, billing_*, paypal/wise, huggingface_*, discord_id,
+# rights, sid, password*, tfa_*, oauth_* и любые новые поля), в журнал не попадает.
+# Адрес и порты карты сюда не входят: SPEC 0.1 (п. 11) и remove_instance_fields запрещают их в журнале.
+LOG_RESPONSE_FIELDS = frozenset({
+    "success", "id", "credit", "balance", "actual_status", "cur_state", "intended_status",
+    "is_bid", "dph_total",
+})
+
+
+def _keep_log_fields(obj: Any) -> Any:
+    """Копия JSON-объекта только с полями LOG_RESPONSE_FIELDS на любой глубине.
+    Скалярные элементы списков отбрасываются (в списке строк может оказаться что угодно)."""
+    if isinstance(obj, dict):
+        out: dict = {}
+        for k, v in obj.items():
+            if str(k) in LOG_RESPONSE_FIELDS:
+                out[k] = _keep_log_fields(v)
+            elif isinstance(v, (dict, list)):
+                # контейнер (например, список предложений) сохраняется, если в нём есть нужные поля;
+                # его имя и прочие скалярные поля отбрасываются
+                kept = _keep_log_fields(v)
+                if kept:
+                    out[k] = kept
+        return out
+    if isinstance(obj, list):
+        return [_keep_log_fields(x) for x in obj if isinstance(x, (dict, list))]
+    return obj
+
+
+def response_summary_for_log(raw: str, secret: str = "") -> Optional[str]:
+    """Безопасная сводка тела ответа для журнала: JSON только с полями LOG_RESPONSE_FIELDS.
+    Возвращает None, если тело не разобралось как JSON (тогда в журнал пишется только длина и код)."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return json.dumps(redact_value(_keep_log_fields(parsed), secret), ensure_ascii=False)
+
+
 def _without_env_field(obj: Any) -> Any:
     """Копия тела запроса без поля env на любой глубине (этап 9а, решение владельца 18.10.2026).
     В env лежат значения токена воркера и HF_TOKEN, поэтому в лог поле не попадает совсем, даже замаскированным.
@@ -402,13 +442,20 @@ class VastClient:
 
     def _debug_response(self, req_no: int, elapsed: float, *, status: Optional[int] = None,
                         text: str = "", failure: Optional[str] = None) -> None:
-        """Строка ответа: код HTTP, время в секундах и тело целиком (без обрезки).
+        """Строка ответа: код HTTP, время в секундах, длина тела и только поля из LOG_RESPONSE_FIELDS.
+        Тело целиком в журнал не пишется. Если тело не JSON, пишутся только его длина и код.
         При сбое (таймаут, сеть) вместо кода выводится причина; текст исключения не выводится."""
         if failure is not None:
             log.info("Ответ Vast #%d: %s, за %.3f с, тела нет", req_no, failure, elapsed)
             return
-        log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело: %s",
-                 req_no, status, elapsed, debug_body_for_log(text, self._api_key))
+        size = len(text.encode("utf-8"))
+        summary = response_summary_for_log(text, self._api_key)
+        if summary is None:
+            log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело %d байт, не JSON",
+                     req_no, status, elapsed, size)
+            return
+        log.info("Ответ Vast #%d: HTTP %s, за %.3f с, тело %d байт, поля: %s",
+                 req_no, status, elapsed, size, summary)
 
     def _request(
         self,

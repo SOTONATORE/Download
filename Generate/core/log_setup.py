@@ -105,6 +105,8 @@ _MASK = "***"
 _EXTRA_SHAPES = (
     (re.compile(r"github_pat_[A-Za-z0-9_]{10,}"), False),
     (re.compile(r"ghp_[A-Za-z0-9]{10,}"), False),
+    # адрес почты (вида *@*) маскируется во всех логах как страховка: приватность, 20.10.2026
+    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), False),
 )
 _VALUE_SHAPES = tuple(_SECRET_PATTERNS) + _EXTRA_SHAPES
 
