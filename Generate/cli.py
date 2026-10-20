@@ -464,6 +464,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             profile=cfg.model_profile,
             release_tag=args.release_tag,
             offer_filter=offer_filter,
+            # надбавка к ставке bid из конфига (bid_margin, как MARGIN в vast_stable_run.sh)
+            bid_margin=cfg.bid_margin,
             excluded_machines=excluded_machines,
             docker_image=cfg.docker_image,
             disk_gb=cfg.disk_gb,
@@ -484,6 +486,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             # окно сбора цен перед первой арендой (SPEC 8.2): значения из конфига
             scan_sec=cfg.scan_sec,
             scan_step_sec=cfg.scan_step_sec,
+            # лимит запросов аренды за запуск (9е-3, max_rent_tries из конфига)
+            max_rent_tries=cfg.max_rent_tries,
+            # фильтр стабильности (этап 9е-2, как PARSE_RANK в vast_stable_run.sh): порог и разброс из конфига
+            stable_min_price=cfg.min_price_per_hour,
+            stable_max_spread=cfg.stable_max_spread,
             # файл heartbeat для наблюдателя (этап 7, SPEC 8.3 а); по умолчанию не пишется
             heartbeat_path=getattr(args, "heartbeat_path", None),
             filename_template=cfg.filename_template,

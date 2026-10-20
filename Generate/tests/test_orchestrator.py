@@ -467,7 +467,7 @@ def test_budget_blocks_renting_when_unaffordable(tmp_path, monkeypatch):
 def test_budget_exceeded_mid_run_stops_everything(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.9)],
-              budget_limit_usd=0.5, task_timeout_sec=1e9,
+              budget_limit_usd=0.5, task_timeout_sec=1e9, offer_filter=vc.OfferFilter(max_price=1.0),
               worker_kw={"render_sec": 1e9})
     rig.worker.plan[1] = ["hang"] * 5
     summary = rig.run()
@@ -804,7 +804,7 @@ def test_bid_not_confirmed_by_vast_recomputes_budget_from_dph_total(tmp_path, mo
     rig.orc.run()
 
     assert "карта " in caplog.text and "запрошен bid, Vast вернул is_bid=None; бюджет считается по dph_total." in caplog.text
-    assert rig.vast.created[0]["bid_price"] == 0.2          # bid был отправлен при аренде
+    assert rig.vast.created[0]["bid_price"] == 0.23         # bid = min_bid 0.2 + bid_margin 0.03
     rows = rig.orc.budget.summary(rig.clock.now)["breakdown"]
     assert rows[0]["dph"] == pytest.approx(0.5)
 
@@ -1596,7 +1596,10 @@ def test_failed_or_done_clip_is_not_requeued_by_fail_clip(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("max_cards", [1, 3, 101])
 def test_slots_start_at_one_and_generation_counts_replacements(tmp_path, monkeypatch, max_cards):
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), max_cards=max_cards, budget_limit_usd=100000.0)
+    # разные предложения на каждую аренду: предложение в этом запуске не выбирается повторно (9е-3)
+    offers = [make_offer(i, 10 + i) for i in range(1, max_cards + 3)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), max_cards=max_cards, budget_limit_usd=100000.0,
+              offers=offers, max_rent_tries=max_cards + 2)
     for _ in range(max_cards):
         assert rig.orc._rent_one(rig.clock.now) == "ok"
     assert sorted(rig.orc._slots) == list(range(1, max_cards + 1))
@@ -1612,7 +1615,7 @@ def test_slots_start_at_one_and_generation_counts_replacements(tmp_path, monkeyp
 
 def test_card_name_in_logs_is_slot_and_generation(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11), make_offer(2, 22)])
     assert rig.orc._rent_one(rig.clock.now) == "ok"
     assert "Арендована карта 1 поколение 1 (экземпляр 101)" in caplog.text
     rig.orc._retire(rig.orc._slots[1], "тест")
@@ -1725,18 +1728,67 @@ def test_zero_dph_warning_text_follows_rental_mode(tmp_path, monkeypatch, caplog
     assert len(warn) == 1
     assert expected in warn[0] and forbidden not in warn[0]
     assert ("bid" in warn[0]) is interruptible
-    assert rig.vast.created[0]["bid_price"] == (0.3 if interruptible else None)
+    assert rig.vast.created[0]["bid_price"] == (0.33 if interruptible else None)
 
 
-@pytest.mark.parametrize(("interruptible", "price", "bid_sent"), [(True, 0.2, 0.2), (False, 0.45, None)])
-def test_budget_price_follows_rental_mode(tmp_path, monkeypatch, interruptible, price, bid_sent):
+@pytest.mark.parametrize(("interruptible", "price", "expected_bid"), [(True, 0.2, 0.23), (False, 0.45, None)])
+def test_budget_price_follows_rental_mode(tmp_path, monkeypatch, interruptible, price, expected_bid):
     offer = make_offer(1, 11, price=price)
     offer.is_interruptible = interruptible
     rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[offer])
     assert rig.orc._rent_one(rig.clock.now) == "ok"
     rec = rig.orc.budget._records[0]
-    assert rec.dph == pytest.approx(price)                # учёт по цене режима (bid или dph_total)
-    assert rig.vast.created[0]["bid_price"] == bid_sent   # поле price уходит только при bid
+    sent = expected_bid if interruptible else price
+    assert rec.dph == pytest.approx(sent)                       # учёт по цене режима: ставка bid или dph_total
+    assert rig.vast.created[0]["bid_price"] == expected_bid     # поле price уходит только при bid
+
+# ---------------------------------------------------------------------------
+# Ставка bid и лимит max_price_per_hour (этап 9е-1; как vast_stable_run.sh: PRICE = round(BID + MARGIN, 3))
+# ---------------------------------------------------------------------------
+
+def test_bid_is_min_bid_plus_margin(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.2)])
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert rig.vast.created[0]["bid_price"] == 0.23
+
+
+def test_bid_is_rounded_to_three_decimals_as_in_script(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.2345)])
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    # round(float('0.2345') + float('0.03'), 3) == 0.264: та же формула, что PRICE в vast_stable_run.sh
+    assert rig.vast.created[0]["bid_price"] == 0.264
+
+
+def test_bid_margin_comes_from_constructor_parameter(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.2)], bid_margin=0.05)
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    assert rig.vast.created[0]["bid_price"] == 0.25
+
+
+def test_bid_above_max_price_is_skipped_before_request(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.54)])
+    assert rig.orc._rent_one(rig.clock.now) == "retry"
+    assert rig.vast.created == []                               # запрос аренды не отправлен
+    assert "Предложение 1 пропущено" in caplog.text
+    assert "0.570" in caplog.text and "0.55" in caplog.text     # ставка и лимит в строке лога
+
+
+def test_skipped_offer_falls_through_to_next_affordable_offer(tmp_path, monkeypatch):
+    offers = [make_offer(1, 11, price=0.54), make_offer(2, 22, price=0.3)]
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    assert rig.orc._rent_one(rig.clock.now, offers=offers) == "ok"
+    assert len(rig.vast.created) == 1
+    assert rig.vast.created[0]["bid_price"] == 0.33             # взято второе предложение: 0.3 + 0.03
+
+
+def test_budget_records_the_bid_that_was_sent(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.2)])
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    sent = rig.vast.created[0]["bid_price"]
+    assert sent == 0.23
+    assert rig.orc.budget._records[0].dph == pytest.approx(sent)
+    assert rig.orc._slots[1].price == pytest.approx(sent)
 
 
 def test_bad_host_is_excluded_for_this_run_only_and_no_file_is_written(tmp_path, monkeypatch):

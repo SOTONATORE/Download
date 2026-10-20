@@ -84,6 +84,44 @@ LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
+BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
+
+# Фильтр стабильности предложений (этап 9е-2; как PARSE_RANK в vast_stable_run.sh).
+STABLE_WINDOW = 15            # последние N проб min_bid на один ключ (offer_id, machine_id)
+STABLE_MIN_SAMPLES = 5        # меньше проб: предложение не допускается
+STABLE_MIN_PRICE_DEFAULT = 0.35
+STABLE_MAX_SPREAD_DEFAULT = 0.05
+
+
+def record_scan_samples(hist: dict, offers) -> None:
+    """Добавляет пробу min_bid каждого предложения в историю по ключу (offer_id, machine_id).
+    На ключ хранится не больше STABLE_WINDOW последних проб (deque с ограничением): память ограничена."""
+    for o in offers:
+        key = (o.offer_id, o.machine_id)
+        dq = hist.get(key)
+        if dq is None:
+            dq = hist[key] = deque(maxlen=STABLE_WINDOW)
+        dq.append((float(o.price_per_hr), o))
+
+
+def rank_stable_offers(hist: dict, min_price: float, max_spread: float) -> list:
+    """Стабильные предложения по истории, по возрастанию min_bid. Допускается предложение, у которого
+    одновременно: проб не меньше STABLE_MIN_SAMPLES; (max - min) / min по последним STABLE_WINDOW пробам
+    не больше max_spread; последняя проба min_bid не меньше min_price."""
+    rows = []
+    for dq in hist.values():
+        if len(dq) < STABLE_MIN_SAMPLES:
+            continue
+        vals = [b for b, _ in list(dq)[-STABLE_WINDOW:]]
+        last_bid, last_offer = dq[-1]
+        if last_bid < min_price:
+            continue
+        lo = min(vals)
+        if (max(vals) - lo) / lo > max_spread:
+            continue
+        rows.append(last_offer)
+    rows.sort(key=lambda o: o.price_per_hr)
+    return rows
 READY_REASON = "воркер не готов"
 ACCEPT_REASON = "задача не принята"
 SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
@@ -102,6 +140,8 @@ START_FAILURE_MARKERS = ("failed to", "unresolvable", "error", "failed to create
 # Статусы Vast, которые после начала старта (loading или created) означают неудачный старт (SPEC 8.2)
 STOPPED_AFTER_START_STATUSES = ("offline", "exited")
 START_FAILURE_REASON = "старт карты не удался"
+# снятие карты при перебитии ставки (9е-3): Vast остановил прерываемую карту; машина и bad_hosts.txt не трогаются
+OUTBID_REASON = "ставка bid перебита, Vast остановил карту"
 # Сборка воркера (SPEC 8.4): номер коммита, 7-64 символа 0-9 и a-f
 WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
 WORKER_ARCHIVE_URL = "https://codeload.github.com/SOTONATORE/Download/tar.gz/{sha}"
@@ -497,6 +537,7 @@ class Orchestrator:
         silent_host_timeout_min: int = 20,
         worker_idle_timeout_min: int = 2,
         offer_filter: Optional[OfferFilter] = None,
+        bid_margin: float = BID_MARGIN_DEFAULT,
         excluded_machines: Optional[frozenset] = None,
         docker_image: str = "",
         disk_gb: int = 100,
@@ -515,8 +556,11 @@ class Orchestrator:
         seed_base: int = 0,
         poll_interval_sec: float = 10.0,
         rent_retry_sec: float = 30.0,
+        max_rent_tries: int = 5,
         scan_sec: float = 0.0,
         scan_step_sec: float = 20.0,
+        stable_min_price: float = STABLE_MIN_PRICE_DEFAULT,
+        stable_max_spread: float = STABLE_MAX_SPREAD_DEFAULT,
         drain_grace_sec: float = 900.0,
         task_timeout_sec: float = 1200.0,
         render_estimate_sec: float = 120.0,
@@ -562,6 +606,8 @@ class Orchestrator:
         if scan_sec < 0 or scan_step_sec <= 0:
             raise gp.GeminiInputError("Окно сбора цен: scan_sec не может быть отрицательным, "
                                       "scan_step_sec должен быть больше нуля.")
+        if int(max_rent_tries) < 1:
+            raise gp.GeminiInputError("Лимит запросов аренды (max_rent_tries) должен быть не меньше 1.")
         if stage_max_min < stall_timeout_min:
             raise gp.GeminiInputError("«stage_max_min» не может быть меньше «stall_timeout_min».")
         self.log_level = log_level
@@ -595,6 +641,7 @@ class Orchestrator:
         self._deadline_sec = job_deadline_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
         self.offer_filter = offer_filter or OfferFilter()
+        self.bid_margin = float(bid_margin)  # надбавка к min_bid для ставки прерываемой аренды (SPEC 8.2)
         self.docker_image = docker_image
         self.disk_gb = disk_gb
         self.limit_clips = limit_clips
@@ -615,9 +662,14 @@ class Orchestrator:
         self.seed_base = seed_base
         self.poll_interval = poll_interval_sec
         self.rent_retry = rent_retry_sec
+        # лимит запросов аренды за запуск (9е-3): считается каждый запрос, успешный и неудачный
+        self.max_rent_tries = int(max_rent_tries)
         # окно сбора цен перед первой арендой запуска (SPEC 8.2): 0 = окно выключено
         self.scan_sec = float(scan_sec)
         self.scan_step = float(scan_step_sec)
+        # фильтр стабильности (этап 9е-2): порог последней пробы и допустимый разброс, из конфига
+        self.stable_min_price = float(stable_min_price)
+        self.stable_max_spread = float(stable_max_spread)
         self.drain_grace = drain_grace_sec
         self.task_timeout = task_timeout_sec
         self.render_estimate = render_estimate_sec
@@ -655,6 +707,11 @@ class Orchestrator:
         self._durations: list = []
         self._bad_machines: set = set()
         self._bad_offers: set = set()
+        # предложения, по которым отправлен запрос аренды (успешный или нет): в этом запуске не выбираются снова (9е-3)
+        self._used_offers: set = set()
+        self._rent_requests = 0          # запросов аренды отправлено за запуск
+        self._rent_exhausted = False     # лимит max_rent_tries исчерпан: новых аренд нет, запуск завершается
+        self._next_wait = 0.0            # пауза до следующего поиска, сек; выставляет _rent_one перед возвратом retry
         # постоянный список плохих машин (bad_hosts.txt, SPEC 8.2): живёт между запусками,
         # в отличие от _bad_machines; в лог пишется одна строка на запуск
         self._excluded_machines: frozenset = frozenset(int(m) for m in (excluded_machines or ()))
@@ -666,7 +723,8 @@ class Orchestrator:
         self._scan_next = 0.0
         self._scan_steps = 0
         self._scan_failed = 0
-        self._scan_pool: dict = {}
+        self._scan_hist: dict = {}  # пробы min_bid по ключу (offer_id, machine_id), до STABLE_WINDOW на ключ
+        self._scan_waiting = False  # окно закрыто, стабильных предложений пока нет: ждём и опрашиваем снова
         self._scan_done = False
         self._budget_blocked = False
         self._cards_rented = 0
@@ -941,7 +999,7 @@ class Orchestrator:
                 if state == "ok":
                     slot = next(iter(self._slots.values()))
                     rent_at = slot.created
-                elif state in ("budget", "stop"):
+                elif state in ("budget", "stop", "exhausted"):
                     result = state
                     break
                 elif self.clock() - t_start >= self._silent_sec:
@@ -1163,6 +1221,8 @@ class Orchestrator:
                 if not self._queue and inflight == 0:
                     break
                 self._maybe_rent(now)
+                if self._rent_exhausted and not self._slots:
+                    break  # лимит запросов аренды исчерпан, активных карт нет: завершаем (rent_error)
                 if self._budget_blocked and not self._slots:
                     log.error("Бюджет не позволяет арендовать карту, активных карт нет: завершаем.")
                     break
@@ -1190,9 +1250,10 @@ class Orchestrator:
         log.info("Окно сбора цен открыто: %d с, шаг опроса %d с, до первой аренды.",
                  int(self.scan_sec), int(self.scan_step))
 
-    def _scan_step_if_due(self, now: float) -> None:
+    def _scan_step_if_due(self, now: float) -> bool:
+        """True — если шаг опроса выполнен и пробы записаны."""
         if now < self._scan_next:
-            return
+            return False
         self._scan_steps += 1
         step_no = self._scan_steps
         # график без накопления дрейфа: следующий шаг через scan_step от запланированного времени
@@ -1202,22 +1263,25 @@ class Orchestrator:
         except VastError as exc:
             self._scan_failed += 1
             log.warning("Окно сбора цен, шаг %d: поиск не удался: %s", step_no, exc)
-            return
-        for o in offers:
-            self._scan_pool[o.offer_id] = o  # дедупликация по ID предложения: последний снимок побеждает
+            return False
+        record_scan_samples(self._scan_hist, offers)
         cheapest = min((o.price_per_hr for o in offers), default=None)
         log.info("Окно сбора цен, шаг %d (через %.0f с): найдено %d, минимальная цена %s, "
                  "накоплено уникальных %d.",
                  step_no, now - self._scan_started, len(offers),
                  f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет",
-                 len(self._scan_pool))
+                 len(self._scan_hist))
+        return True
+
+    def _stable_ranking(self) -> list:
+        return rank_stable_offers(self._scan_hist, self.stable_min_price, self.stable_max_spread)
 
     def _scan_close(self, now: float) -> list:
         self._scan_done = True
-        pool = sorted(self._scan_pool.values(), key=lambda o: o.price_per_hr)
-        self._scan_pool = {}
+        pool = self._stable_ranking()
+        self._scan_hist = {}
         cheapest = pool[0].price_per_hr if pool else None
-        log.info("Окно сбора цен закрыто: %.0f с, шагов %d (неуспешных %d), уникальных предложений %d, "
+        log.info("Окно сбора цен закрыто: %.0f с, шагов %d (неуспешных %d), стабильных предложений %d, "
                  "минимальная цена %s.",
                  now - self._scan_started, self._scan_steps, self._scan_failed, len(pool),
                  f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет")
@@ -1227,12 +1291,12 @@ class Orchestrator:
         if self._scan_started is None or self._scan_done:
             return
         self._scan_done = True
-        self._scan_pool = {}
+        self._scan_hist = {}
         log.error("Окно сбора цен прервано (%s): до первой аренды не дошло, карта в этом окне не арендуется.",
                   reason)
 
     def _maybe_rent(self, now: float) -> None:
-        if self._budget_blocked or now < self._next_rent:
+        if self._budget_blocked or self._rent_exhausted or now < self._next_rent:
             return
         offers = None  # список окна передаётся только первой аренде запуска
         if self._scan_wanted():
@@ -1241,14 +1305,22 @@ class Orchestrator:
             if now < self._scan_end:
                 self._scan_step_if_due(now)
                 return
+            # окно закрыто: если стабильных предложений нет, ждём scan_step_sec и проверяем снова, не останавливаясь
+            if self._scan_waiting and not self._scan_step_if_due(now):
+                return
+            if not self._stable_ranking():
+                self._scan_waiting = True
+                log.warning("Стабильных предложений нет (проб по %d предложениям), жду %d с и проверю снова.",
+                            len(self._scan_hist), int(self.scan_step))
+                return
             offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
             res = self._rent_one(now, offers)
             offers = None  # остальные аренды этого же прохода идут обычным поиском (без паузы)
-            if res == "stop":
+            if res in ("stop", "exhausted"):
                 return
             if res == "retry":
-                self._next_rent = now + self.rent_retry
+                self._next_rent = now + self._next_wait
                 return
             if res == "budget":
                 self._budget_blocked = True
@@ -1267,30 +1339,55 @@ class Orchestrator:
     def _rent_one(self, now: float, offers: Optional[list] = None) -> str:
         if self._stop.is_set():
             return "stop"
+        if self._rent_requests >= self.max_rent_tries:
+            if not self._rent_exhausted:
+                log.error("Исчерпан лимит запросов аренды max_rent_tries (%d): новые запросы не отправляются, "
+                          "запуск завершается ошибкой аренды (rent_error).", self.max_rent_tries)
+            self._rent_exhausted = True
+            return "exhausted"
         from_scan = offers is not None  # список окна сбора цен уже получен, поиска не делаем
         if offers is None:
             try:
                 offers = self.vast.search_offers(self.offer_filter)
             except VastError as exc:
                 log.warning("Поиск предложений Vast не удался: %s", exc)
+                self._next_wait = self.rent_retry
                 return "retry"
         # постоянный список плохих машин (SPEC 8.2): отсеивается до аренды, по ID машины
         listed = [o for o in offers if o.machine_id in self._excluded_machines]
         if listed:
             self._note_excluded(listed)
             offers = [o for o in offers if o.machine_id not in self._excluded_machines]
-        offers = [o for o in offers if o.offer_id not in self._bad_offers
+        offers = [o for o in offers if o.offer_id not in self._bad_offers and o.offer_id not in self._used_offers
                   and not (o.machine_id and o.machine_id in self._bad_machines)]
         if not offers:
+            # нет подходящего непробованного предложения: ждём scan_step_sec и ищем снова (9е-3)
+            self._next_wait = self.scan_step
             log.warning("Подходящих предложений Vast нет, повтор позже.")
             return "retry"
         est = self.rent_estimate
-        affordable = [o for o in offers if self.budget.can_afford(o.price_per_hr, est, now)]
+        # цена по режиму аренды: бюджет и запрос аренды считаются по одной и той же цене (SPEC 8.2)
+        priced = [(o, self._rental_price(o)) for o in offers]
+        affordable = [(o, p) for o, p in priced if self.budget.can_afford(p, est, now)]
         if not affordable:
             log.warning("Бюджета не хватает ни на одно предложение (остаток %.4f USD).",
                         self.budget.remaining_budget(now))
             return "budget"
-        offer = affordable[0]
+        # лимит max_price_per_hour проверяется до запроса аренды: ставка bid выше лимита — предложение пропускается
+        limit = self.offer_filter.max_price
+        within = []
+        for o, p in affordable:
+            if o.is_interruptible and p > limit:
+                log.warning("Предложение %d пропущено: ставка bid %.3f USD/ч выше лимита "
+                            "max_price_per_hour %.2f USD/ч; аренда не отправлена.", o.offer_id, p, limit)
+                continue
+            within.append((o, p))
+        if not within:
+            self._next_wait = self.scan_step  # ни одно предложение не в лимите цены: ждём scan_step_sec (9е-3)
+            log.warning("Ни одно подходящее предложение не укладывается в лимит max_price_per_hour "
+                        "%.2f USD/ч, повтор позже.", limit)
+            return "retry"
+        offer, price = within[0]
         if self._stop.is_set():  # сигнал пришёл во время поиска: новая аренда не начинается
             return "stop"
         if self.pilot:
@@ -1314,31 +1411,35 @@ class Orchestrator:
             hf_token = os.environ.get("HF_TOKEN", "").strip()
             if hf_token:
                 env["HF_TOKEN"] = hf_token
-        # цена бюджета по режиму аренды (SPEC 8.2): прерываемая — ставка bid (поле «price»), обычная —
-        # dph_total предложения; поле «price» для обычной аренды не отправляется
-        bid_price = offer.price_per_hr if offer.is_interruptible else None
+        # поле «price» уходит только при прерываемой аренде: ставка bid (та же цена, что в бюджете)
+        bid_price = price if offer.is_interruptible else None
+        # запрос аренды считается до отправки; предложение больше не выбирается в этом запуске (9е-3)
+        self._rent_requests += 1
+        self._used_offers.add(offer.offer_id)
         try:
             inst_id = self.vast.create_instance(
                 offer.offer_id, self.docker_image, self.disk_gb, env_vars=env, label=self.label,
                 bid_price=bid_price, onstart=self.pilot_start_cmd if self.pilot else self._onstart)
         except VastError as exc:
+            # ошибка API при аренде: повтор, как и раньше, через rent_retry_sec и со следующим предложением
             self._bad_offers.add(offer.offer_id)
+            self._next_wait = self.rent_retry
             log.warning("Не удалось создать карту по предложению %d: %s", offer.offer_id, exc)
             return "retry"
-        self.budget.track_instance_start(inst_id, offer.price_per_hr, now)
+        self.budget.track_instance_start(inst_id, price, now)
         # слоты нумеруются с 1 (карта 1, карта 2, …) до max_cards; поколение слота растёт с 1
         index = next(i for i in range(1, self.max_cards + 1) if i not in self._slots)
         gen = self._gens.get(index, 0) + 1
         self._gens[index] = gen
         slot = _CardSlot(index, gen, inst_id, offer.machine_id,
-                         offer.price_per_hr, now, offer_id=offer.offer_id,
+                         price, now, offer_id=offer.offer_id,
                          bid_requested=offer.is_interruptible,
                          dph_search=offer.dph_total)
         self._slots[index] = slot
         self._cards_rented += 1
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
         log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
-                 _card_name(slot), offer.offer_id, mode, offer.price_per_hr)
+                 _card_name(slot), offer.offer_id, mode, price)
         if from_scan:
             log.info("Окно сбора цен: выбрано предложение %d, dph_total %.4f USD/ч, "
                      "загрузка интернета %.1f Мбит/с; от старта окна до аренды %.0f с.",
@@ -1349,8 +1450,18 @@ class Orchestrator:
             self._artifact.card_meta(slot, {
                 "slot": slot.index, "generation": slot.generation, "instance_id": inst_id,
                 "machine_id": offer.machine_id, "offer_id": offer.offer_id,
-                "price_per_hr": offer.price_per_hr, "mode": mode, "created_utc": _utc_now()})
+                "price_per_hr": price, "mode": mode, "created_utc": _utc_now()})
         return "ok"
+
+    def _rental_price(self, offer) -> float:
+        """Цена карты для бюджета и запроса аренды (SPEC 8.2).
+
+        Прерываемая аренда: ставка bid = min_bid предложения + bid_margin, округлённая до 3 знаков,
+        как PRICE в vast_stable_run.sh (round(BID + MARGIN, 3)). Обычная аренда: dph_total предложения.
+        """
+        if not offer.is_interruptible:
+            return offer.price_per_hr
+        return round(float(offer.price_per_hr) + self.bid_margin, 3)
 
     def _retire(self, slot: _CardSlot, reason: str, *, bad: bool = False) -> None:
         log.warning("%s снимается: %s.", _card_name(slot, cap=True), reason)
@@ -1524,6 +1635,10 @@ class Orchestrator:
                     slot.saw_loading = True
                 if info.actual_status == "created":
                     slot.saw_created = True
+                # перебитие ставки (9е-3, как в vast_stable_run.sh): карта снимается, предложение исключается на запуск
+                if self._is_outbid(info):
+                    self._retire_outbid(slot)
+                    return
                 # признаки неудачного старта судятся только после начала старта (loading или created)
                 if slot.started and self._check_start_failure(slot, prev_status, info):
                     return
@@ -1683,6 +1798,19 @@ class Orchestrator:
             go.atomic_write_json(self.heartbeat_path, record)
         except OSError as exc:
             log.warning("Не удалось записать файл heartbeat: %s.", type(exc).__name__)
+
+    @staticmethod
+    def _is_outbid(info) -> bool:
+        """Перебитие ставки (9е-3): is_bid true и карта остановлена (cur_state или intended_status), как в vast_stable_run.sh."""
+        raw = info.raw if isinstance(info.raw, dict) else {}
+        return info.is_bid is True and (raw.get("cur_state") == "stopped" or info.intended_status == "stopped")
+
+    def _retire_outbid(self, slot: _CardSlot) -> None:
+        """Снятие карты при перебитии ставки (9е-3): предложение исключается на этот запуск; хост не исключается,
+        bad_hosts.txt не пишется. Клип возвращается в очередь без записи попытки (bad=False): вина не в клипе."""
+        if slot.offer_id:
+            self._bad_offers.add(slot.offer_id)
+        self._retire(slot, OUTBID_REASON)
 
     def _retire_bad(self, slot: _CardSlot, reason: str) -> None:
         """Снятие карты по правилам 8.2 (мониторинг, готовность, принятие задачи): хост и предложение

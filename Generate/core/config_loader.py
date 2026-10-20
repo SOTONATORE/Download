@@ -113,6 +113,7 @@ class Config:
     scan_sec: int = _rule(ge=1)
     scan_step_sec: int = _rule(ge=1)
     stable_max_spread: float = _rule(ge=0)
+    max_rent_tries: int = _rule(ge=1)
     bid_margin: float = _rule(ge=0)
     speed_check_at_pct: int = _rule(ge=1, le=100)
     speed_min_mbps: float = _rule(gt=0)
@@ -221,6 +222,10 @@ def _cross_checks(v: Mapping[str, Any]) -> list[str]:
     # общий срок этапа не короче срока зависания
     if v["stage_max_min"] < v["stall_timeout_min"]:
         problems.append("«stage_max_min» не может быть меньше «stall_timeout_min»")
+    # за окно сбора цен должно набираться хотя бы 5 проб на предложение (минимум фильтра стабильности)
+    if v["scan_sec"] < 5 * v["scan_step_sec"]:
+        problems.append(f"«scan_sec» ({v['scan_sec']}) не может быть меньше 5 × «scan_step_sec» "
+                        f"({v['scan_step_sec']}): за окно не наберётся 5 проб на предложение")
     return problems
 
 

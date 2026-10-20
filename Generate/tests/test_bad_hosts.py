@@ -190,11 +190,12 @@ def test_drop_is_logged_once_per_run_not_per_offer(tmp_path, caplog):
     caplog.set_level(logging.INFO)
     vast = FakeVast([make_offer(1, SEED_ID), make_offer(2, SEED_ID), make_offer(3, 22)])
     orc = make_orchestrator(tmp_path, vast, excluded={SEED_ID})
-    orc._rent_one(NOW)
-    orc._rent_one(NOW + 60)
+    assert orc._rent_one(NOW) == "ok"
+    # предложение 3 уже арендовано в этом запуске (9е-3): повторной аренды нет
+    assert orc._rent_one(NOW + 60) == "retry"
     lines = [r for r in caplog.records if "bad_hosts.txt" in r.getMessage()]
     assert len(lines) == 1                  # лог один на запуск, а не на предложение
-    assert vast.rented_offers == [3, 3]     # оба вызова арендуют предложение 3, 58482 не арендован
+    assert vast.rented_offers == [3]        # предложение 3 арендовано один раз, 58482 не арендован
 
 
 def test_in_run_bad_machines_still_excluded_with_permanent_list(tmp_path):
