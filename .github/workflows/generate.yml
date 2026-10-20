@@ -66,11 +66,11 @@ on:
       min_reliability:
         description: "Минимальная надёжность хоста (0-1)"
         type: string
-        default: "0.95"
+        default: "0.90"
       min_inet_mbps:
         description: "Минимальная скорость интернета карты (Мбит/с)"
         type: string
-        default: "800"
+        default: "500"
       max_inet_price_per_tb:
         description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
         type: string
