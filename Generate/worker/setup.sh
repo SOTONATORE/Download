@@ -120,7 +120,7 @@ fi
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
 # stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
-python /workspace/Generate/worker/server.py >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
+python "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
 
