@@ -271,8 +271,8 @@ def test_run_default_offer_filter(capsys, run_env, missing_file):
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
     assert f.max_price == 0.55
-    assert f.min_reliability == 0.95
-    assert f.min_inet_mbps == 800.0
+    assert f.min_reliability == 0.90
+    assert f.min_inet_mbps == 500.0
     assert f.max_inet_price_per_tb == 4.1
 
 

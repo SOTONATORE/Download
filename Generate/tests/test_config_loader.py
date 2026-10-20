@@ -487,7 +487,7 @@ def test_speed_min_must_not_exceed_min_inet():
 def test_speed_min_equal_to_min_inet_is_allowed():
     raw = _base()
     raw["speed_min_mbps"] = raw["min_inet_mbps"]
-    assert cl.parse_config(raw).speed_min_mbps == 800.0
+    assert cl.parse_config(raw).speed_min_mbps == 500.0
 
 
 def test_stage_max_must_not_be_less_than_stall_timeout():
