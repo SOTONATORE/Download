@@ -1601,24 +1601,27 @@ class Orchestrator:
     # --- шаг по карте ---------------------------------------------------------
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
+        # статус у Vast запрашивается один раз на опрос в любом состоянии карты (9е-3). Перебитие ставки
+        # проверяется раньше любой логики состояний: перебитая карта не принимается за плохой хост
+        info, lookup_exc = self._lookup_status(slot)
+        if info is not None and self._is_outbid(info):
+            self._retire_outbid(slot)
+            return
         if slot.state == "booting":
             # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
             reason = self._monitor(slot).check()
             if reason:
                 self._retire_bad(slot, reason)
                 return
-            info = None
-            try:
-                info = self.vast.get_instance(slot.instance_id)
-            except VastInstanceNotFound as exc:
+            if isinstance(lookup_exc, VastInstanceNotFound):
                 # подряд идущие «не найдена» считаются отдельно (SPEC 8.3); остальные ошибки ниже, как раньше
                 slot.not_found += 1
-                log.warning("Не удалось получить статус %s: %s", _card_name(slot), exc)
+                log.warning("Не удалось получить статус %s: %s", _card_name(slot), lookup_exc)
                 if slot.not_found >= NOT_FOUND_LIMIT:
                     self._retire_not_found(slot)
                     return
-            except VastError as exc:
-                log.warning("Не удалось получить статус %s: %s", _card_name(slot), exc)
+            elif lookup_exc is not None:
+                log.warning("Не удалось получить статус %s: %s", _card_name(slot), lookup_exc)
             if info is not None:
                 slot.not_found = 0
                 if not slot.cost_checked:
@@ -1635,10 +1638,6 @@ class Orchestrator:
                     slot.saw_loading = True
                 if info.actual_status == "created":
                     slot.saw_created = True
-                # перебитие ставки (9е-3, как в vast_stable_run.sh): карта снимается, предложение исключается на запуск
-                if self._is_outbid(info):
-                    self._retire_outbid(slot)
-                    return
                 # признаки неудачного старта судятся только после начала старта (loading или created)
                 if slot.started and self._check_start_failure(slot, prev_status, info):
                     return
@@ -1799,6 +1798,13 @@ class Orchestrator:
         except OSError as exc:
             log.warning("Не удалось записать файл heartbeat: %s.", type(exc).__name__)
 
+    def _lookup_status(self, slot: _CardSlot) -> tuple:
+        """Статус карты у Vast: (info, None) или (None, ошибка API). Ошибку разбирает вызывающий."""
+        try:
+            return self.vast.get_instance(slot.instance_id), None
+        except VastError as exc:
+            return None, exc
+
     @staticmethod
     def _is_outbid(info) -> bool:
         """Перебитие ставки (9е-3): is_bid true и карта остановлена (cur_state или intended_status), как в vast_stable_run.sh."""
@@ -1810,6 +1816,8 @@ class Orchestrator:
         bad_hosts.txt не пишется. Клип возвращается в очередь без записи попытки (bad=False): вина не в клипе."""
         if slot.offer_id:
             self._bad_offers.add(slot.offer_id)
+        log.warning("%s: ставка bid перебита, предложение %s исключено на этот запуск; bad_hosts.txt не меняется.",
+                    _card_name(slot, cap=True), slot.offer_id)
         self._retire(slot, OUTBID_REASON)
 
     def _retire_bad(self, slot: _CardSlot, reason: str) -> None:

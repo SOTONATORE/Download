@@ -22,13 +22,13 @@ try:
     from Generate.core import orchestrator as orch
     from Generate.core import vast_client as vc
     from Generate.core.gemini_prompts import GeminiInputError
-    from Generate.tests.test_orchestrator import FakeVast, Rig, make_offer
+    from Generate.tests.test_orchestrator import CARD_IP, CARD_PORT, FakeVast, Rig, make_offer
 except ImportError:  # pragma: no cover
     from core import config_loader as cl  # type: ignore
     from core import orchestrator as orch  # type: ignore
     from core import vast_client as vc  # type: ignore
     from core.gemini_prompts import GeminiInputError  # type: ignore
-    from tests.test_orchestrator import FakeVast, Rig, make_offer  # type: ignore
+    from tests.test_orchestrator import CARD_IP, CARD_PORT, FakeVast, Rig, make_offer  # type: ignore
 
 
 class _SpyVast(FakeVast):
@@ -210,3 +210,117 @@ def test_wait_without_eligible_offer_uses_scan_step_sec(tmp_path, monkeypatch, c
     waits = [r for r in caplog.records if "Подходящих предложений Vast нет" in r.getMessage()]
     assert len(waits) == len(vast.searches)                # одна строка журнала на каждое ожидание
     assert vast.attempts == [] and summary.completed == 0
+
+
+# ---------------------------------------------------------------------------
+# f. Перебитие ставки в любом состоянии аренды (исправление 9е-3): не только booting
+# ---------------------------------------------------------------------------
+
+class _ReplyVast(FakeVast):
+    """get_instance отдаёт ответ, заданный тестом: состояние карты и is_bid."""
+
+    def __init__(self, events, reply) -> None:
+        super().__init__([], events)
+        self.reply = reply
+
+    def get_instance(self, instance_id):
+        return self.reply(instance_id)
+
+
+def _vast_info(instance_id=500, *, is_bid=True, cur_state="running", intended="running", actual="running"):
+    raw = {"id": instance_id, "is_bid": is_bid, "cur_state": cur_state, "intended_status": intended}
+    return vc.InstanceInfo(instance_id=instance_id, actual_status=actual, intended_status=intended,
+                           public_ip=CARD_IP, direct_port=CARD_PORT, dph=0.2, is_bid=is_bid, raw=raw)
+
+
+def _rented_card(rig, *, state, instance_id=500, machine_id=11, offer_id=1):
+    """Карта, арендованная как прерываемая (bid), в заданном состоянии."""
+    slot = orch._CardSlot(1, 1, instance_id, machine_id, 0.3, rig.clock.now, offer_id=offer_id)
+    slot.state = state
+    slot.contacted = True
+    slot.accepted = True
+    slot.bid_requested = True
+    slot.url = f"http://{CARD_IP}:{CARD_PORT}"
+    rig.orc._slots[1] = slot
+    rig.orc.budget.track_instance_start(instance_id, 0.3, rig.clock.now)
+    return slot
+
+
+def _spy_outbid(orc) -> list:
+    """Записывает каждый вызов _retire_outbid (номер экземпляра); сам вызов выполняется."""
+    calls: list = []
+    original = orc._retire_outbid
+
+    def spy(slot):
+        calls.append(slot.instance_id)
+        return original(slot)
+
+    orc._retire_outbid = spy
+    return calls
+
+
+def test_outbid_on_ready_card_retires_and_excludes_offer(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    vast = _use_vast(rig, _ReplyVast(rig.events, lambda iid: _vast_info(
+        iid, cur_state="stopped", intended="stopped", actual="exited")))
+    slot = _rented_card(rig, state="ready")
+    calls = _spy_outbid(rig.orc)
+
+    rig.orc._step_slot(slot, rig.clock.now, False)
+
+    assert calls == [500]                                  # _retire_outbid вызван
+    assert rig.orc._slots.get(1) is None                   # карта снята
+    assert 1 in rig.orc._bad_offers                        # предложение исключено на этот запуск
+    assert 11 not in rig.orc._bad_machines                 # машина не исключается
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []     # bad_hosts.txt не создаётся
+    assert vast.destroyed == [500]
+    assert "ставка bid перебита" in caplog.text and "предложение 1" in caplog.text
+
+
+def test_outbid_while_rendering_requeues_clip_through_requeue_free(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(3,))
+    vast = _use_vast(rig, _ReplyVast(rig.events, lambda iid: _vast_info(
+        iid, cur_state="running", intended="stopped", actual="running")))
+    slot = _rented_card(rig, state="ready")                # рендеринг: готова и с назначенным клипом
+    slot.task = orch._Task(3, "t1", rig.clock.now - 5.0)
+    rig.orc._attempts[3] = 1
+
+    rig.orc._step_slot(slot, rig.clock.now, False)
+
+    assert rig.orc._slots.get(1) is None and slot.task is None
+    assert list(rig.orc._queue) == [3]                     # клип снова в очереди для другой карты
+    assert rig.orc._attempts.get(3, 0) == 0                # попытка не засчитана (как _requeue_free)
+    assert 3 not in rig.orc._failed and 3 not in rig.orc._done
+    assert rig.worker.posted == []                         # без отправки на воркер в этом опросе
+    assert 1 in rig.orc._bad_offers
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []
+    assert vast.destroyed == [500]
+
+
+def test_stopped_card_without_bid_flag_is_not_outbid(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    _use_vast(rig, _ReplyVast(rig.events, lambda iid: _vast_info(
+        iid, is_bid=False, cur_state="stopped", intended="stopped", actual="exited")))
+    slot = _rented_card(rig, state="ready")
+    calls = _spy_outbid(rig.orc)
+
+    rig.orc._step_slot(slot, rig.clock.now, False)
+
+    assert calls == []                                     # без is_bid true перебития нет
+    assert 1 not in rig.orc._bad_offers
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []
+
+
+def test_outbid_while_booting_still_retires_without_bad_host(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    _use_vast(rig, _ReplyVast(rig.events, lambda iid: _vast_info(
+        iid, cur_state="stopped", intended="stopped", actual="exited")))
+    slot = _rented_card(rig, state="booting")
+
+    rig.orc._step_slot(slot, rig.clock.now, False)
+
+    assert rig.orc._slots.get(1) is None
+    assert 1 in rig.orc._bad_offers
+    assert 11 not in rig.orc._bad_machines                 # не «карта остановлена хостом» (bad=True)
+    assert list(tmp_path.rglob("bad_hosts.txt")) == []
