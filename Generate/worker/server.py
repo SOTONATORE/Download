@@ -65,6 +65,10 @@ LOG_NEXT_HEADER = "X-Log-Next"
 # Файл готовности (SPEC 8.1): setup.sh создаёт его, когда ComfyUI отвечает; до этого /health даёт ok=false
 READY_FLAG_ENV = "WORKER_READY_FLAG"
 DEFAULT_READY_FLAG = "/workspace/worker_ready"
+# Причина отказа загрузки весов (fix 2): setup.sh пишет файл «<флаг готовности>.failed», сервер его читает.
+# Поле reason появляется в /health только при таком отказе; в тексте причины нет путей и адресов.
+FAILED_FLAG_SUFFIX = ".failed"
+WEIGHTS_FAILED_REASON = "weights_failed"
 # Лог setup.sh и aria2 (onstart перенаправляет туда вывод bootstrap.sh): хвост идёт в буфер GET /logs (SPEC 8.1)
 BOOTSTRAP_LOG_ENV = "WORKER_BOOTSTRAP_LOG"
 DEFAULT_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
@@ -928,8 +932,12 @@ def _make_handler(app: "WorkerApp") -> type:
             except (ComfyError, AttributeError, TypeError, ValueError) as exc:
                 log.error("Проверка состояния ComfyUI не пройдена: %s.", type(exc).__name__)
             # до файла готовности ok всегда false: веса и ComfyUI ещё не проверены setup.sh (SPEC 8.1)
-            self._json(200, {"ok": bool(ok and app.is_ready()), "gpu": gpu, "vram_free": vram_free,
-                             "busy": app.manager.busy()})
+            body = {"ok": bool(ok and app.is_ready()), "gpu": gpu, "vram_free": vram_free,
+                    "busy": app.manager.busy()}
+            reason = app.failure_reason()
+            if reason:  # только при отказе весов: при обычном ожидании ответ прежний (SPEC 8.1)
+                body["reason"] = reason
+            self._json(200, body)
 
         def _get_logs(self) -> None:
             """GET /logs[?since=N][&tail=N]: буфер логов текстом, одна запись на строку (только с токеном).
@@ -1100,6 +1108,7 @@ class WorkerApp:
                 comfy_log_path, _LineSink(self.logbuf, header=_comfy_header), mask_secrets)
         # Файл готовности: без пути /health не ждёт файла (тесты, прямой запуск); в main() путь всегда задан
         self.ready_flag: Optional[Path] = Path(ready_flag) if ready_flag else None
+        self.failed_flag: Optional[Path] = Path(str(ready_flag) + FAILED_FLAG_SUFFIX) if ready_flag else None
         # Лог setup.sh и aria2: хвост с начала файла, маска и срез query-частей адресов (SPEC 8.1, 0.1)
         self.bootstrap_reader: Optional[ComfyOutputReader] = None
         if bootstrap_log_path:
@@ -1120,6 +1129,13 @@ class WorkerApp:
     def is_ready(self) -> bool:
         """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""
         return self.ready_flag is None or self.ready_flag.exists()
+
+    def failure_reason(self) -> str:
+        """Причина, по которой воркер не готов и сервер ждёт (fix 2): «weights_failed» или пусто.
+        Пусто, если готовность уже есть или файла причины нет (обычная загрузка, ожидание ComfyUI)."""
+        if self.failed_flag is None or self.is_ready():
+            return ""
+        return WEIGHTS_FAILED_REASON if self.failed_flag.exists() else ""
 
     @property
     def port(self) -> int:

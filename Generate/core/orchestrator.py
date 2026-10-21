@@ -124,6 +124,9 @@ def rank_stable_offers(hist: dict, min_price: float, max_spread: float) -> list:
     rows.sort(key=lambda o: o.price_per_hr)
     return rows
 READY_REASON = "воркер не готов"
+# fix 3: причина от воркера (GET /health, поле reason) и текст снятия карты при отказе весов
+WEIGHTS_FAILED_REASON = "weights_failed"
+WEIGHTS_FAILED_RETIRE = "загрузка весов не удалась"
 ACCEPT_REASON = "задача не принята"
 SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
 PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
@@ -231,6 +234,8 @@ class _CardSlot:
     weights_reason: Optional[str] = None  # причина из разбора логов весов, ждёт снятия карты
     probe_result: str = ""              # последний результат /health: HTTP-код или тип ошибки (для строки состояния)
     probe_answered: bool = False      # последний /health получил HTTP-ответ (не ошибку связи)
+    health_reason: str = ""           # поле reason из последнего /health («weights_failed» или пусто)
+    weights_wait_since: Optional[float] = None  # воркер отвечает, строк весов нет: с какого момента ждём весы
     wait_log_at: float = -1e9         # время последней строки состояния ожидания (раз в минуту)
 
     @property
@@ -310,9 +315,9 @@ def _worker_onstart(worker_build: str) -> str:
     log = WORKER_BOOTSTRAP_LOG
     tgz = "/tmp/worker-src.tar.gz"
     # Шаги идут по порядку; при сбое rc не равен 0, следующие шаги пропускаются, а в лог пишется итог.
-    return (f"touch {log}; "
+    return (f"touch {log}; rc=$?; "
             f"echo '[onstart] старт, сборка {worker_build}' >> {log}; "
-            f"mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" >> {log}; "
+            f"if [ $rc -eq 0 ]; then mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" >> {log}; fi; "
             f"if [ $rc -eq 0 ]; then curl -fsSL --retry 3 -o {tgz} {url} 2>> {log}; rc=$?; "
             f"echo \"[onstart] шаг curl: код $rc\" >> {log}; fi; "
             f"if [ $rc -eq 0 ]; then tar -xzf {tgz} --strip-components=1 -C {src} 2>> {log}; rc=$?; "
@@ -320,7 +325,7 @@ def _worker_onstart(worker_build: str) -> str:
             f"rm -f {tgz}; "
             f"if [ $rc -eq 0 ]; then (REPO_DIR={src}/Generate nohup bash {src}/Generate/worker/bootstrap.sh "
             f">> {log} 2>&1 &); rc=$?; echo \"[onstart] шаг запуск bootstrap (в фоне): код $rc\" >> {log}; fi; "
-            f"echo \"[onstart] итог: код $rc\" >> {log}")
+            f"echo \"[onstart] итог: код $rc\" >> {log}; exit $rc")
 
 
 def _port_keys_text(info: InstanceInfo) -> str:
@@ -1735,12 +1740,15 @@ class Orchestrator:
         except httpx.HTTPError as exc:
             slot.probe_result = type(exc).__name__
             slot.probe_answered = False
+            slot.health_reason = ""
             log.warning("%s: проверка /health: запрос не дошёл (%s).", name, type(exc).__name__)
             return False
         data = self._json(resp)
         slot.probe_result = f"код {resp.status_code}"
         slot.probe_answered = True
         ok = resp.status_code == 200 and data.get("ok") is True
+        reason = data.get("reason")
+        slot.health_reason = reason if (resp.status_code == 200 and isinstance(reason, str)) else ""
         body = _one_line(self._mask_remote(resp.text))  # /health короткий: пишется целиком
         log.info("%s: проверка /health: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
                  body or "пусто", self.clock() - start, "готов" if ok else "не готов")
@@ -1768,8 +1776,25 @@ class Orchestrator:
 
         Таймер запускается, когда загрузка весов завершена, или когда строк загрузки нет вовсе
         (тогда таймер идёт от первого адреса карты с public IP). True: карта снята.
+        fix 3: при отказе весов (reason weights_failed) карта снимается сразу. Пока воркер отвечает
+        без отказа и строк загрузки нет, ожидание весов не идёт по таймеру готовности, а ограничено
+        лимитом этапа весов (stage_max_min). Нет ответа (ConnectError) — прежние правила без изменений.
         """
         mon = self._monitor(slot)
+        if slot.health_reason == WEIGHTS_FAILED_REASON:
+            log.error("%s: загрузка весов не удалась (воркер сообщил причину). Карта снимается, "
+                      "хост исключён из этого запуска.", _card_name(slot, cap=True))
+            self._retire_bad(slot, WEIGHTS_FAILED_RETIRE)
+            return True
+        if slot.probe_answered and not mon.seen_start and not mon.stage_done:
+            if slot.weights_wait_since is None:
+                slot.weights_wait_since = now
+            if now - slot.weights_wait_since < self._stage_max_sec:
+                return False
+            log.error("%s: загрузка весов без строк в GET /logs дольше %d мин. Карта снимается, хост "
+                      "исключён из этого запуска.", _card_name(slot, cap=True), int(self._stage_max_sec // 60))
+            self._retire_bad(slot, READY_REASON)
+            return True
         if slot.ready_wait_since is None and (mon.stage_done or not mon.seen_start):
             slot.ready_wait_since = now
             if not mon.seen_start:

@@ -21,6 +21,8 @@ COMFY_POLL_SEC=2
 
 # Файл готовности для GET /health сервера воркера (SPEC 8.1): создаётся после ответа ComfyUI.
 WORKER_READY_FLAG="${WORKER_READY_FLAG:-/workspace/worker_ready}"
+# Файл причины для GET /health: создаётся, если веса не загрузились (строка «weights_failed»). Имя = флаг + «.failed».
+WORKER_FAILED_FLAG="${WORKER_READY_FLAG}.failed"
 
 # Лог setup.sh и aria2 (SPEC 8.1): stderr сервера воркера (трассировки падения) пишется сюда.
 WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"
@@ -35,6 +37,8 @@ SERVER_PID=""
 MODEL_FILES_TOTAL=5
 MODEL_FILE_INDEX=0
 MODEL_PATHS=()
+# 1, если какая-либо загрузка весов не удалась: сервер воркера остаётся запущен, ComfyUI не ждём
+WEIGHTS_FAILED=0
 
 log() {
     echo "[setup] $*"
@@ -52,7 +56,8 @@ stop_processes() {
 
 trap stop_processes SIGTERM SIGINT
 
-# Любой выход из скрипта (нет весов, ComfyUI не готов): сервер воркера не остаётся без setup.
+# Любой выход из скрипта (ComfyUI не готов, сбой запуска): сервер воркера не остаётся без setup.
+# При отказе весов скрипт сюда не выходит: сервер продолжает отвечать на /health (см. ниже).
 stop_server_on_exit() {
     if [ -n "${SERVER_PID}" ] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
@@ -72,6 +77,12 @@ download_model() {
 
     MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
     local tag="[${MODEL_FILE_INDEX}/${MODEL_FILES_TOTAL}]"
+
+    # после первого отказа остальные файлы не качаем: карта всё равно будет снята
+    if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
+        log "${tag} Пропущено, предыдущая загрузка весов не удалась: ${subdir}/${name}"
+        return 1
+    fi
 
     MODEL_PATHS+=("${path}")
     mkdir -p "${target_dir}"
@@ -97,8 +108,9 @@ download_model() {
     rc=$?
 
     if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
-        log "${tag} ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код ${rc})."
-        exit 1
+        log "${tag} ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код aria2 ${rc})."
+        WEIGHTS_FAILED=1
+        return 1
     fi
     local size
     size=$(stat -c %s "${path}" 2>/dev/null || echo "?")
@@ -108,7 +120,7 @@ download_model() {
 log "Запуск контейнера воркера. Уровень логов: ${GEN_LOG_LEVEL:-INFO}."
 
 # Флаг от прошлого запуска не должен открыть /health до готовности (SPEC 8.1)
-rm -f "${WORKER_READY_FLAG}"
+rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}"
 log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
 
 # --- 1. Проверка токена и инструментов ---
@@ -126,7 +138,7 @@ fi
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
 # stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
-python "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
+python3 "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
 
@@ -136,6 +148,17 @@ download_model "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.
 download_model "vae" "ltx-2.5-video-vae-bf16.safetensors"
 download_model "vae" "ltx-2.5-audio-vae-bf16.safetensors"
 download_model "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+# --- 3б. Отказ загрузки весов: сервер остаётся, GET /health отвечает ok=false и reason=weights_failed ---
+if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
+    if ! printf 'weights_failed\n' > "${WORKER_FAILED_FLAG}"; then
+        log "ОШИБКА: не удалось записать файл причины отказа."
+    fi
+    log "ОШИБКА: веса модели не загружены. Сервер воркера остаётся запущен, файл готовности не создан, ожидание ComfyUI пропущено."
+    wait "${SERVER_PID}"
+    EXIT_CODE=$?
+    log "Сервер воркера завершился (код ${EXIT_CODE})."
+    exit "${EXIT_CODE}"
+fi
 log "Все файлы модели LTX-2.5 на месте."
 
 # --- 4. Ожидание ComfyUI образа на порту 18188 ---
