@@ -147,6 +147,21 @@ def _parse_rental_type(value: str) -> Optional[str]:
     raise argparse.ArgumentTypeError("допустимы значения: interruptible, on-demand")
 
 
+def _parse_scan_sec(value: str) -> Optional[int]:
+    """Вход --scan-sec: целое число секунд больше 0. Пустая строка = не задано (берётся из конфига).
+
+    Нечисловое или неположительное значение — ошибка аргументов (код 2), до первого вызова Vast.
+    Введённое значение в сообщении не печатаем. Правило «не меньше 5 × scan_step_sec»
+    проверяет config_loader уже на итоговом значении (после накладывания входов).
+    """
+    text = (value or "").strip()
+    if text == "":
+        return None
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise argparse.ArgumentTypeError("допустимо только целое число секунд больше 0")
+    return int(text)
+
+
 # Сигналы остановки (SPEC 8.3 (в)): отмена запуска или SIGTERM переводят конвейер в режим уборки.
 STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
@@ -308,7 +323,8 @@ def _resolve_docker_image(docker_image: str) -> str:
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет конфигурацию, SRT и наличие missing.txt (без разбора missing)."""
-    _cfg, code = _load_cfg(args.config)
+    # --scan-sec проверяется здесь же, до любого вызова Vast (предстартовая проверка workflow)
+    _cfg, code = _load_cfg(args.config, {"scan_sec": getattr(args, "scan_sec", None)})
     if code is not None:
         return code
 
@@ -390,6 +406,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         "verified": None if args.verified is None else int(args.verified),
         # режим аренды: None (не задан) не переопределяет config.default.yaml
         "rental_type": args.rental_type,
+        # окно сбора цен, с: None (не задано) не переопределяет config.default.yaml
+        "scan_sec": getattr(args, "scan_sec", None),
     }
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
@@ -982,6 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
     # функции берутся из модуля при каждом вызове (удобно подменять в тестах)
     check_p = sub.add_parser("check", parents=[common],
                              help="проверить конфигурацию и входные файлы")
+    check_p.add_argument("--scan-sec", type=_parse_scan_sec, default=None,
+                         help="окно сбора цен, с (целое > 0); пусто = из конфига")
     check_p.set_defaults(func=lambda a: cmd_check(a))
 
     # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
@@ -1029,6 +1049,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
     run_p.add_argument("--silent-host-timeout-min", type=int, default=None,
                        help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
+    run_p.add_argument("--scan-sec", type=_parse_scan_sec, default=None,
+                       help="окно сбора цен перед первой арендой, с (целое > 0); пусто = из конфига")
     run_p.add_argument("--rental-type", type=_parse_rental_type, default=None,
                        help="режим аренды карт: interruptible или on-demand (пусто = из конфига)")
     run_p.add_argument("--verified", type=_parse_verified, default=None,
