@@ -68,7 +68,9 @@ diag() {
     # Хвост лога только при повторном запуске: в логе уже есть строки прошлого bootstrap
     if [ "${2:-}" = "start" ] && [ -f "${BOOTSTRAP_LOG}" ] && grep -q '^\[bootstrap\] ' "${BOOTSTRAP_LOG}" 2>/dev/null; then
         say "  хвост ${BOOTSTRAP_LOG}, последние 50 строк (лог уже был, повторный запуск):"
-        tail -n 50 "${BOOTSTRAP_LOG}" 2>/dev/null | sed 's/^/    /'
+        tail -n 50 "${BOOTSTRAP_LOG}" 2>/dev/null | while IFS= read -r tail_line; do
+            say "    ${tail_line}"
+        done
     fi
 
     say "  программы (путь или «нет»):"
