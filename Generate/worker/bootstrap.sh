@@ -27,12 +27,26 @@ COMFY_SEARCH_DEPTH="${COMFY_SEARCH_DEPTH:-6}"
 COMFY_SEARCH_TIMEOUT="${COMFY_SEARCH_TIMEOUT:-60}"
 BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"
 
-say() {
-    printf '[bootstrap] %s\n' "$*"
+# Одна функция записи для всех сообщений шагов. Строка уходит в stdout и в BOOTSTRAP_LOG.
+# onstart запускает скрипт с «>> лог 2>&1», то есть stdout уже и есть файл лога: тогда второй записи нет,
+# иначе каждая строка попала бы в файл дважды. Аргументы — только тексты шагов, значения переменных окружения
+# сюда не передаются (WORKER_TOKEN и HF_TOKEN не печатаются).
+log() {
+    local line="[bootstrap] $*"
+    if [ -n "${BOOTSTRAP_LOG}" ] && ! [ /proc/self/fd/1 -ef "${BOOTSTRAP_LOG}" ]; then
+        printf '%s\n' "${line}" | tee -a "${BOOTSTRAP_LOG}"
+    else
+        printf '%s\n' "${line}"
+    fi
 }
 
+say() {
+    log "$@"
+}
+
+# Ошибки тоже идут в stdout (раньше в stderr): иначе при разборе stdout контейнера они терялись бы.
 say_err() {
-    printf '[bootstrap] %s\n' "$*" >&2
+    log "$@"
 }
 
 # Диагностика в лог. Вызывается с аргументом «start» перед первым шагом и с причиной в каждой ветке ошибки.

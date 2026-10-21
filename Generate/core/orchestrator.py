@@ -83,6 +83,7 @@ LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка ло
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
 WAIT_LOG_INTERVAL_SEC = 60.0  # строка состояния ожидания воркера: не чаще раза в минуту
+VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
 BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
@@ -243,6 +244,8 @@ class _CardSlot:
     health_reason: str = ""           # поле reason из последнего /health («weights_failed» или пусто)
     weights_wait_since: Optional[float] = None  # воркер отвечает, строк весов нет: с какого момента ждём весы
     wait_log_at: float = -1e9         # время последней строки состояния ожидания (раз в минуту)
+    vast_silence_at: Optional[float] = None  # время последней периодической попытки логов Vast (молчание)
+    vast_silence_busy: bool = False   # попытка логов Vast идёт сейчас (повторный вход пропускается)
 
     @property
     def started(self) -> bool:
@@ -901,6 +904,29 @@ class Orchestrator:
             except Exception as exc:  # выгрузка логов не должна ронять конвейер
                 log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
 
+    def _pull_silent_vast_logs(self, now: float) -> None:
+        """Логи Vast у карты, пока /health не ответил ok (этапы booting и «без ответа»): не чаще раза в 10 с.
+
+        Одна попытка за тик, без внутренних повторов. Каждая успешная выгрузка перезаписывает vast_logs.txt
+        свежим снимком. Остановка: карта перешла в ready (ответ ok) или снята (пропала из _slots).
+        Повторный вход, пока предыдущая выгрузка не закончилась, пропускается. Сбой не выходит из цикла.
+        """
+        if self._artifact is None:
+            return
+        for slot in list(self._slots.values()):
+            if slot.state != "booting" or slot.vast_silence_busy:
+                continue
+            if slot.vast_silence_at is not None and now - slot.vast_silence_at < VAST_SILENCE_INTERVAL_SEC:
+                continue
+            slot.vast_silence_at = now  # время фиксируется и при сбое: следующая попытка не раньше чем через 10 с
+            slot.vast_silence_busy = True
+            try:
+                self._fetch_vast_logs(slot, attempts=1)
+            except Exception as exc:  # логи не должны ронять конвейер
+                log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
+            finally:
+                slot.vast_silence_busy = False
+
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
 
@@ -1263,6 +1289,7 @@ class Orchestrator:
             for slot in list(self._slots.values()):
                 self._step_slot(slot, now, stopping)
             self._pull_due_logs(now)
+            self._pull_silent_vast_logs(now)
             self._heartbeat(now)
 
             inflight = self._inflight()
@@ -1551,21 +1578,27 @@ class Orchestrator:
         self._slots.pop(slot.index, None)
 
     def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC) -> None:
-        """Логи карты запрашиваются до уничтожения; без адреса воркера запрос невозможен.
+        """Логи карты запрашиваются до уничтожения: логи воркера (при известном адресе) и логи Vast.
 
-        Любая ошибка здесь гасится: уничтожение карты от логов не зависит.
+        Логи Vast берутся, если логов воркера нет (адреса нет, либо GET /logs не удался). Оба пути пробуются
+        независимо: сбой одного не пропускает другой. Любая ошибка гасится: уничтожение карты от логов не зависит.
         """
-        try:
-            if slot.url:
-                self._pull_card_logs(slot, final=True, timeout=timeout)
-            else:
-                log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
-                # без адреса воркер не ответит: логи контейнера берутся через Vast (SPEC 8.4)
+        worker_logs = False
+        if slot.url:
+            try:
+                worker_logs = self._pull_card_logs(slot, final=True, timeout=timeout)
+            except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
+                log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+        else:
+            log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
+        if not worker_logs:
+            # воркер не отдал логи: логи контейнера берутся через Vast (SPEC 8.4)
+            try:
                 self._fetch_vast_logs(slot)
-        except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
-            log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+            except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
+                log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
 
-    def _fetch_vast_logs(self, slot: _CardSlot) -> bool:
+    def _fetch_vast_logs(self, slot: _CardSlot, *, attempts: Optional[int] = None) -> bool:
         """Логи контейнера карты через Vast: PUT request_logs, затем загрузка result_url (SPEC 8.4).
 
         Вызывается только на путях снятия, где логов воркера нет: нет адреса, молчание хоста, таймаут готовности.
@@ -1577,7 +1610,7 @@ class Orchestrator:
         if self._artifact is None:
             log.info("%s: каталог артефакта не задан, логи Vast не запрашиваются.", _card_name(slot, cap=True))
             return False
-        attempts = self._vast_logs_attempts
+        attempts = self._vast_logs_attempts if attempts is None else attempts  # периодический путь: 1 попытка
         raw_path = None
         try:
             fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
