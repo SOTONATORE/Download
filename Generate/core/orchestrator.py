@@ -295,19 +295,32 @@ def _valid_worker_build(value) -> bool:
 def _worker_onstart(worker_build: str) -> str:
     """Команда onstart карты воркера (SPEC 8.1, вариант A).
 
-    Номер коммита проверяется до сборки текста. Архив коммита скачивается с codeload.github.com и
-    распаковывается в WORKER_SRC_DIR без верхней папки (Generate окажется в WORKER_SRC_DIR/Generate).
-    bootstrap.sh запускается в фоне, вывод уходит в WORKER_BOOTSTRAP_LOG. REPO_DIR передаётся явно,
-    чтобы bootstrap не скачивал тот же архив второй раз. В тексте команды нет токенов и секретов:
-    они приходят в окружении карты (WORKER_TOKEN, HF_TOKEN).
+    Номер коммита проверяется до сборки текста. Архив коммита скачивается с codeload.github.com во временный
+    файл и распаковывается в WORKER_SRC_DIR без верхней папки (Generate окажется в WORKER_SRC_DIR/Generate).
+    bootstrap.sh запускается в фоне, вывод дописывается в WORKER_BOOTSTRAP_LOG. REPO_DIR передаётся явно,
+    чтобы bootstrap не скачивал тот же архив второй раз. Лог создаётся в начале (touch), и каждый шаг
+    (mkdir, curl, tar, запуск bootstrap) пишет в него свой код возврата. В лог попадает только номер
+    коммита, URL архива не пишется. В тексте команды нет токенов и секретов: они приходят в окружении
+    карты (WORKER_TOKEN, HF_TOKEN).
     """
     if not _valid_worker_build(worker_build):
         raise gp.GeminiInputError("Номер сборки воркера (--worker-build) должен быть из 7-64 символов 0-9 и a-f.")
     url = WORKER_ARCHIVE_URL.format(sha=worker_build)
     src = WORKER_SRC_DIR
-    return (f"mkdir -p {src} && curl -fsSL --retry 3 {url} | tar -xz --strip-components=1 -C {src} && "
-            f"(REPO_DIR={src}/Generate nohup bash {src}/Generate/worker/bootstrap.sh "
-            f"> {WORKER_BOOTSTRAP_LOG} 2>&1 &)")
+    log = WORKER_BOOTSTRAP_LOG
+    tgz = "/tmp/worker-src.tar.gz"
+    # Шаги идут по порядку; при сбое rc не равен 0, следующие шаги пропускаются, а в лог пишется итог.
+    return (f"touch {log}; "
+            f"echo '[onstart] старт, сборка {worker_build}' >> {log}; "
+            f"mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" >> {log}; "
+            f"if [ $rc -eq 0 ]; then curl -fsSL --retry 3 -o {tgz} {url} 2>> {log}; rc=$?; "
+            f"echo \"[onstart] шаг curl: код $rc\" >> {log}; fi; "
+            f"if [ $rc -eq 0 ]; then tar -xzf {tgz} --strip-components=1 -C {src} 2>> {log}; rc=$?; "
+            f"echo \"[onstart] шаг tar: код $rc\" >> {log}; fi; "
+            f"rm -f {tgz}; "
+            f"if [ $rc -eq 0 ]; then (REPO_DIR={src}/Generate nohup bash {src}/Generate/worker/bootstrap.sh "
+            f">> {log} 2>&1 &); rc=$?; echo \"[onstart] шаг запуск bootstrap (в фоне): код $rc\" >> {log}; fi; "
+            f"echo \"[onstart] итог: код $rc\" >> {log}")
 
 
 def _port_keys_text(info: InstanceInfo) -> str:

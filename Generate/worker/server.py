@@ -42,7 +42,9 @@ log = logging.getLogger("Generate.worker.server")
 DEFAULT_PORT = 8000
 DEFAULT_IDLE_TIMEOUT_MIN = 2
 DEFAULT_MAX_UNACKED = 3
-DEFAULT_OUTPUT_DIR = "/workspace/ComfyUI/output"
+# Папка вывода ComfyUI: bootstrap.sh находит ComfyUI и передаёт путь в COMFY_OUTPUT_DIR (поиск один, в bootstrap).
+# Этот дефолт нужен только без переменных окружения и строится от COMFY_DIR (тоже от bootstrap).
+DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or "/workspace/ComfyUI", "output")
 MAX_BODY_BYTES = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"

@@ -3,8 +3,12 @@
 
 set -u
 
-# Папка ComfyUI задаётся bootstrap.sh (COMFY_DIR); по умолчанию /workspace/ComfyUI.
-COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
+# Папка ComfyUI приходит от bootstrap.sh (COMFY_DIR: найденный там путь, шаг 4). Жёсткого пути и поиска здесь нет.
+COMFY_DIR="${COMFY_DIR:-}"
+if [ -z "${COMFY_DIR}" ]; then
+    echo "[setup] ОШИБКА: COMFY_DIR не задан. Путь ComfyUI выдаёт bootstrap.sh (шаг 4)."
+    exit 1
+fi
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
