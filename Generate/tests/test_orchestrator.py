@@ -2012,14 +2012,22 @@ def test_stage_limit_retires_booting_card(tmp_path, monkeypatch, caplog):
     assert "этап загрузки весов превысил лимит" in caplog.text
 
 
-def test_worker_not_ready_within_timeout_retires_card(tmp_path, monkeypatch, caplog):
+def test_worker_ok_false_without_logs_retires_after_stage_cap(tmp_path, monkeypatch, caplog):
+    """/health отвечает ok: false и строк загрузки нет: карта живёт до stage_max_min, а не до
+    worker_ready_timeout_min (fix 3). Шаг опроса 10 с, таймер весов стартует с первого опроса."""
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), worker_ready_timeout_min=10, silent_host_timeout_min=60)
+    stage_max_min = 20  # config.default.yaml: stage_max_min: 20 (то же значение по умолчанию в Orchestrator)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), worker_ready_timeout_min=10,
+              silent_host_timeout_min=60, stage_max_min=stage_max_min)
     rig.worker.health_reply = (200, '{"ok": false}')
     slot = _booting_slot(rig, instance_id=500, machine_id=11)
-    _poll(rig, slot, 70)                      # ~11.7 мин при шаге 10 с
+    _poll(rig, slot, 70)                      # ~11.7 мин при шаге 10 с: лимит ещё не вышел
+    assert rig.orc._slots.get(1) is slot
+    assert 11 not in rig.orc._bad_machines
+    # далее до stage_max_min + 1 мин запаса; всего (20 * 60 + 60) / 10 = 126 шагов
+    _poll(rig, slot, (stage_max_min * 60 + 60) // 10 - 70)
     assert rig.orc._slots.get(1) is None
-    assert "воркер не готов" in caplog.text
+    assert f"загрузка весов без строк в GET /logs дольше {stage_max_min} мин" in caplog.text
     assert 11 in rig.orc._bad_machines
 
 

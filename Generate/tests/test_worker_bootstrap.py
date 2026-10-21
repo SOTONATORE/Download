@@ -185,7 +185,8 @@ def _setup_env(tmp_path: Path, bin_dir: Path, comfy: Path, *, extra: dict | None
 
 
 def _stub_tools(tmp_path: Path, *, curl_rc: int = 0) -> tuple:
-    """Заглушки aria2c (создаёт файлы моделей), curl (ответ ComfyUI), python (сервер воркера сразу завершается)."""
+    """Заглушки aria2c (создаёт файлы моделей), curl (ответ ComfyUI), python и python3 (сервер воркера
+    сразу завершается). setup.sh запускает сервер через python3, поэтому нужны обе заглушки."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     argv_log = tmp_path / "argv.txt"
@@ -207,6 +208,7 @@ with open(os.path.join(opts["dir"], opts["out"]), "wb") as fh:
     _write_exec(bin_dir / "ffmpeg", "#!/bin/sh\nexit 0\n")
     _write_exec(bin_dir / "curl", f"#!/bin/sh\necho \"$@\" >> '{curl_log}'\nexit {curl_rc}\n")
     _write_exec(bin_dir / "python", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка: завершается сразу
+    _write_exec(bin_dir / "python3", "#!/bin/sh\nexit 0\n")  # то же для python3 (setup.sh: python3 server.py)
     return bin_dir, argv_log, curl_log
 
 
