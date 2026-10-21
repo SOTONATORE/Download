@@ -62,6 +62,7 @@ PATH_ASKS = "/api/v0/asks/{id}/"             # PUT: аренда предлож�
 PATH_INSTANCES = "/api/v1/instances/"        # GET: список экземпляров, постраничный (v1)
 PATH_INSTANCE = "/api/v0/instances/{id}/"    # GET, DELETE: один экземпляр
 PATH_USER = "/api/v0/users/current/"         # GET: кредит аккаунта (поле credit)
+PATH_REQUEST_LOGS = "/api/v0/instances/request_logs/{id}"  # PUT: запрос логов контейнера, ответ с result_url (SPEC 8.4)
 
 # Поля цены сетевого трафика предложения Vast.
 # UNVERIFIED: имена и единица взяты из официального vast-cli (github.com/vast-ai/vast-cli, vast.py):
@@ -314,6 +315,14 @@ class VastRuntimeError(VastError):
     exit_code = 3
 
 
+class VastStatusError(VastRuntimeError):
+    """Ответ Vast с кодом HTTP, отличным от 200. Код нужен для повторов и для строки журнала (без тела)."""
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class VastInstanceNotFound(VastRuntimeError):
     """Ответ API не содержит экземпляр с запрошенным ID (SPEC 8.2, 8.3). Код выхода наследуется: 3."""
 
@@ -553,8 +562,8 @@ class VastClient:
                     f"Путь клиента нужно перевести на актуальную версию API. Ответ: {snippet}"
                 )
             log.warning("Vast вернул HTTP %s: %s %s", code, method, path)
-            raise VastRuntimeError(
-                f"Vast API вернул HTTP {code}: {method} {path}. Ответ: {snippet}"
+            raise VastStatusError(
+                f"Vast API вернул HTTP {code}: {method} {path}. Ответ: {snippet}", status=code
             )
         try:
             return resp.json()
@@ -795,6 +804,34 @@ class VastClient:
             raise VastRuntimeError(f"Vast отклонил удаление экземпляра {instance_id}")
         log.info("Экземпляр Vast %d уничтожен", instance_id)
         return True
+
+    def request_logs(self, instance_id: int, *, tail: int = 2000, daemon_logs: bool = False) -> str:
+        """PUT request_logs: запрос логов экземпляра. Возвращает result_url (подписанная ссылка на файл).
+
+        Адрес возвращается только вызывающему коду: клиент его не логирует. daemon_logs=True просит логи
+        демона вместо логов контейнера (в теле строка «true»). Пауза между повторами и их число задаёт оркестратор.
+        """
+        body = {"tail": int(tail), "daemon_logs": "true" if daemon_logs else "false"}
+        data = self._request("PUT", PATH_REQUEST_LOGS.format(id=int(instance_id)), json=body)
+        url = data.get("result_url") if isinstance(data, dict) else None
+        if not isinstance(url, str) or not url.strip():
+            raise VastRuntimeError("Vast не вернул адрес логов экземпляра (result_url)")
+        return url.strip()
+
+    def download_logs(self, url: str, dest: str) -> int:
+        """GET по подписанной ссылке result_url в файл dest. Возвращает HTTP-код; файл пишется только при 200.
+
+        Заголовок Authorization не отправляется: ключ Vast не уходит на адрес хранилища. Сетевой сбой даёт
+        VastRuntimeError без адреса в тексте (исключение httpx не цитируется). Код ответа логируется вызывающим.
+        """
+        try:
+            resp = self._client.get(url, timeout=self._timeout)
+        except httpx.HTTPError as exc:
+            raise VastRuntimeError(f"Сетевая ошибка при загрузке логов ({type(exc).__name__})") from None
+        if resp.status_code == 200:
+            with open(dest, "wb") as fh:
+                fh.write(resp.content)
+        return resp.status_code
 
     @staticmethod
     def _list_params(after_token: Optional[str], limit: int) -> dict:

@@ -40,7 +40,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
-    from .log_setup import _MASK, mask_remote_text, set_known_secrets
+    from .log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets
     from .missing import parse_missing
     from .naming import clip_filename
     from .release_adapter import (  # noqa: F401
@@ -48,14 +48,14 @@ try:  # пакетный и «плоский» импорт (как в оста�
     )
     from .vast_client import (  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
-        VastError, VastInstanceNotFound, remove_instance_fields,
+        VastError, VastInstanceNotFound, VastRuntimeError, remove_instance_fields,
     )
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
-    from log_setup import _MASK, mask_remote_text, set_known_secrets  # type: ignore
+    from log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover
     )
     from vast_client import (  # type: ignore  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
-        VastError, VastInstanceNotFound, remove_instance_fields,
+        VastError, VastInstanceNotFound, VastRuntimeError, remove_instance_fields,
     )
 
 log = logging.getLogger("Generate.orchestrator")
@@ -151,6 +151,12 @@ WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
 WORKER_ARCHIVE_URL = "https://codeload.github.com/SOTONATORE/Download/tar.gz/{sha}"
 WORKER_SRC_DIR = "/workspace/src"
 WORKER_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
+# Логи контейнера карты через Vast (request_logs, SPEC 8.4): строк запрашивается, и сколько сохраняется
+# из большого файла (первые HEAD и последние TAIL строк, между ними строка-пометка с числом пропущенных).
+VAST_LOGS_TAIL_LINES = 2000
+VAST_LOG_HEAD_LINES = 200
+VAST_LOG_TAIL_LINES = 2000
+VAST_LOGS_FILE = "vast_logs.txt"
 
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
@@ -265,6 +271,19 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def limit_log_lines(text: str, head: int = VAST_LOG_HEAD_LINES, tail: int = VAST_LOG_TAIL_LINES) -> str:
+    """Если строк больше head + tail: первые head строк, пометка с числом пропущенных и последние tail строк.
+
+    Меньший или равный по объёму текст возвращается без изменений. Пометка не содержит данных с карты.
+    """
+    lines = text.splitlines()
+    if len(lines) <= head + tail:
+        return text
+    dropped = len(lines) - head - tail
+    marker = f"[пропущено строк в середине: {dropped}]"
+    return "\n".join(lines[:head] + [marker] + lines[-tail:]) + "\n"
+
+
 def _mapped_port(info: InstanceInfo, port: int) -> Optional[int]:
     """Внешний порт Vast, проброшенный на внутренний port (поле ports экземпляра); None, если проброса нет."""
     ports = info.raw.get("ports")
@@ -315,17 +334,19 @@ def _worker_onstart(worker_build: str) -> str:
     log = WORKER_BOOTSTRAP_LOG
     tgz = "/tmp/worker-src.tar.gz"
     # Шаги идут по порядку; при сбое rc не равен 0, следующие шаги пропускаются, а в лог пишется итог.
+    # Строки шагов [onstart] идут и в файл лога, и в stdout карты (tee -a): если Vast сохраняет вывод контейнера,
+    # они попадают в request_logs. Строки шагов не содержат URL архива и секретов; вывод bootstrap.sh идёт в файл.
     return (f"touch {log}; rc=$?; "
-            f"echo '[onstart] старт, сборка {worker_build}' >> {log}; "
-            f"if [ $rc -eq 0 ]; then mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" >> {log}; fi; "
+            f"echo '[onstart] старт, сборка {worker_build}' | tee -a {log}; "
+            f"if [ $rc -eq 0 ]; then mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" | tee -a {log}; fi; "
             f"if [ $rc -eq 0 ]; then curl -fsSL --retry 3 -o {tgz} {url} 2>> {log}; rc=$?; "
-            f"echo \"[onstart] шаг curl: код $rc\" >> {log}; fi; "
+            f"echo \"[onstart] шаг curl: код $rc\" | tee -a {log}; fi; "
             f"if [ $rc -eq 0 ]; then tar -xzf {tgz} --strip-components=1 -C {src} 2>> {log}; rc=$?; "
-            f"echo \"[onstart] шаг tar: код $rc\" >> {log}; fi; "
+            f"echo \"[onstart] шаг tar: код $rc\" | tee -a {log}; fi; "
             f"rm -f {tgz}; "
             f"if [ $rc -eq 0 ]; then (REPO_DIR={src}/Generate nohup bash {src}/Generate/worker/bootstrap.sh "
-            f">> {log} 2>&1 &); rc=$?; echo \"[onstart] шаг запуск bootstrap (в фоне): код $rc\" >> {log}; fi; "
-            f"echo \"[onstart] итог: код $rc\" >> {log}; exit $rc")
+            f">> {log} 2>&1 &); rc=$?; echo \"[onstart] шаг запуск bootstrap (в фоне): код $rc\" | tee -a {log}; fi; "
+            f"echo \"[onstart] итог: код $rc\" | tee -a {log}; exit $rc")
 
 
 def _port_keys_text(info: InstanceInfo) -> str:
@@ -423,6 +444,10 @@ class RunArtifact:
 
     def card_status(self, slot, text: str) -> None:
         self._append(self.card_dir(slot) / "status.txt", f"{_utc_now()} {text}")
+
+    def card_vast_logs(self, slot, text: str) -> None:
+        """Логи контейнера карты, полученные через Vast (отдельный файл рядом с worker_log.txt)."""
+        self._write(self.card_dir(slot) / VAST_LOGS_FILE, text)
 
     def card_meta(self, slot, data: dict) -> None:
         self._write(self.card_dir(slot) / "meta.json", json.dumps(data, ensure_ascii=False, indent=2))
@@ -607,6 +632,8 @@ class Orchestrator:
         min_inet_mbps: float = 800.0,
         heartbeat_path=None,
         artifact_dir=None,
+        vast_logs_attempts: int = 5,
+        vast_logs_pause_sec: float = 30.0,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -662,6 +689,11 @@ class Orchestrator:
         self._weights_source_noted = False
         self._deadline_sec = job_deadline_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
+        # логи Vast при снятии карты без логов воркера (SPEC 8.4): число попыток и пауза из конфига
+        if int(vast_logs_attempts) < 1 or float(vast_logs_pause_sec) < 0:
+            raise gp.GeminiInputError("Попытки логов Vast должны быть не меньше 1, пауза не отрицательной.")
+        self._vast_logs_attempts = int(vast_logs_attempts)
+        self._vast_logs_pause = float(vast_logs_pause_sec)
         self.offer_filter = offer_filter or OfferFilter()
         self.bid_margin = float(bid_margin)  # надбавка к min_bid для ставки прерываемой аренды (SPEC 8.2)
         self.docker_image = docker_image
@@ -1528,8 +1560,69 @@ class Orchestrator:
                 self._pull_card_logs(slot, final=True, timeout=timeout)
             else:
                 log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
+                # без адреса воркер не ответит: логи контейнера берутся через Vast (SPEC 8.4)
+                self._fetch_vast_logs(slot)
         except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
             log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+
+    def _fetch_vast_logs(self, slot: _CardSlot) -> bool:
+        """Логи контейнера карты через Vast: PUT request_logs, затем загрузка result_url (SPEC 8.4).
+
+        Вызывается только на путях снятия, где логов воркера нет: нет адреса, молчание хоста, таймаут готовности.
+        Повтор при HTTP 4xx/5xx (в том числе AccessDenied: ссылка может быть не готова сразу): пауза
+        _vast_logs_pause, затем новый запрос. Число попыток задаёт конфиг. Адрес result_url не пишется ни в журнал,
+        ни в файл; в журнал идут код ответа и размер. Файл пишется замаскированным и с ограничением строк.
+        Любая ошибка гасится: снятие карты от логов не зависит.
+        """
+        if self._artifact is None:
+            log.info("%s: каталог артефакта не задан, логи Vast не запрашиваются.", _card_name(slot, cap=True))
+            return False
+        attempts = self._vast_logs_attempts
+        raw_path = None
+        try:
+            fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
+            os.close(fd)
+            for attempt in range(1, attempts + 1):
+                code, size = self._vast_logs_attempt(slot, raw_path)
+                if code == 200:
+                    log.info("%s: логи Vast получены, %d байт, код %s.", _card_name(slot, cap=True), size, code)
+                    with open(raw_path, "rb") as fh:
+                        raw = fh.read()
+                    text = mask_fetched_text(self._mask_remote(raw.decode("utf-8", errors="replace")))
+                    self._artifact.card_vast_logs(slot, limit_log_lines(text))
+                    return True
+                log.warning("%s: логи Vast, попытка %d из %d, код %s.",
+                            _card_name(slot, cap=True), attempt, attempts, code if code is not None else "нет")
+                if attempt < attempts and self._vast_logs_pause > 0:
+                    self._sleep(self._vast_logs_pause)
+            log.warning("%s: логи Vast не получены после %d попыток.", _card_name(slot, cap=True), attempts)
+            return False
+        except Exception as exc:  # логи не должны мешать снятию карты
+            log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
+            return False
+        finally:
+            if raw_path:
+                try:
+                    os.unlink(raw_path)  # сырой ответ с логами удаляется сразу после разбора
+                except OSError:
+                    pass
+
+    def _vast_logs_attempt(self, slot: _CardSlot, raw_path: str) -> tuple:
+        """Одна попытка: запрос result_url и загрузка в raw_path. Возвращает (код HTTP или None, размер байт).
+
+        Сетевой сбой и ошибка разбора ответа дают None. Исключения, не из VastRuntimeError, уходят наружу.
+        """
+        try:
+            url = self.vast.request_logs(slot.instance_id, tail=VAST_LOGS_TAIL_LINES, daemon_logs=False)
+        except VastRuntimeError as exc:
+            return getattr(exc, "status", None), 0
+        try:
+            code = self.vast.download_logs(url, raw_path)
+        except VastRuntimeError:
+            return None, 0
+        finally:
+            url = None  # адрес не держится дольше нужного
+        return code, (os.path.getsize(raw_path) if code == 200 else 0)
 
     def _check_start_failure(self, slot: _CardSlot, prev_status: str, info: InstanceInfo) -> bool:
         """Неудачный старт карты (SPEC 8.2). Возвращает True, если карта снята.
@@ -1685,6 +1778,7 @@ class Orchestrator:
         if not slot.contacted and age >= self._silent_sec:
             log.error("%s: healthcheck не прошёл за %d мин (таймаут).",
                       _card_name(slot, cap=True), int(self._silent_sec // 60))
+            self._fetch_vast_logs(slot)  # воркер молчит: логи контейнера через Vast (SPEC 8.4)
             self._retire(slot, f"хост не вышел на связь за {int(self._silent_sec // 60)} мин", bad=True)
             return
         if slot.net_fail >= MAX_NET_FAILS:
@@ -1807,6 +1901,7 @@ class Orchestrator:
             return False
         log.error("%s: воркер не готов за %d мин: /health не ответил ok=true. Карта снимается, "
                   "хост исключён из этого запуска.", _card_name(slot, cap=True), int(self._ready_sec // 60))
+        self._fetch_vast_logs(slot)  # воркер не отдал готовность: логи контейнера через Vast (SPEC 8.4)
         self._retire_bad(slot, READY_REASON)
         return True
 

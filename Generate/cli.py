@@ -483,6 +483,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             heartbeat_interval_sec=cfg.heartbeat_interval_sec,
             monitor_interval_sec=cfg.monitor_interval_sec,
             min_inet_mbps=cfg.min_inet_mbps,
+            # логи карты через Vast при снятии без логов воркера (SPEC 8.4): из конфига
+            vast_logs_attempts=cfg.vast_logs_attempts,
+            vast_logs_pause_sec=cfg.vast_logs_pause_sec,
             # окно сбора цен перед первой арендой (SPEC 8.2): значения из конфига
             scan_sec=cfg.scan_sec,
             scan_step_sec=cfg.scan_step_sec,

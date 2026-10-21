@@ -103,6 +103,9 @@ class Config:
     docker_image: str = _rule(pattern=r"\S+", hint="непустая строка без пробелов")
     disk_gb: int = _rule(ge=1)
     worker_idle_timeout_min: int = _rule(ge=1)
+    # логи карты через Vast при снятии без логов воркера (SPEC 8.4): попытки и пауза между ними, с
+    vast_logs_attempts: int = _rule(ge=1)
+    vast_logs_pause_sec: float = _rule(ge=0)
 
     # --- выдача и запуск ---
     release_asset_limit: int = _rule(ge=1)

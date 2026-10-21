@@ -206,6 +206,31 @@ def mask_remote_text(text: str) -> str:
     return mask_text(text)
 
 
+# Адреса и ссылки в логах, которые приходят с карты через Vast (см. mask_fetched_text). Отдельно от
+# mask_remote_text: тот же текст журнала и _mask_remote не меняется. Маска одна: _MASK.
+_IPV4_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+_IPV4_RE = re.compile(r"(?<![\w.])" + _IPV4_OCTET + r"(?:\." + _IPV4_OCTET + r"){3}(?![\w.]*\d)")
+# host:port, где host — IPv4 или имя с хотя бы одной буквой (чтобы не задевать «12:30» в тексте времени)
+_HOST_PORT_RE = re.compile(
+    r"(?<![\w.\-])(?:" + _IPV4_OCTET + r"(?:\." + _IPV4_OCTET + r"){3}"
+    r"|(?=[\w.\-]*[A-Za-z])[A-Za-z0-9][\w.\-]*)"
+    r":\d{2,5}(?!\d)")
+# любой адрес со строкой запроса: там бывают токены и подписи (result_url, X-Amz-Signature и т. п.)
+_URL_QUERY_RE = re.compile(r"https?://[^\s'\"<>]*\?[^\s'\"<>]*")
+
+
+def mask_fetched_text(text: str) -> str:
+    """Маска текста логов, полученного от Vast (карта, журнал запуска): общая маска, затем адреса и ссылки.
+
+    Порядок: mask_remote_text (токены, Bearer, ключи по форме, пары с секретными именами), затем URL со
+    строкой запроса целиком, затем пары host:port, затем одиночные IPv4. Пустой или обычный текст не меняется.
+    """
+    text = mask_remote_text(text)
+    text = _URL_QUERY_RE.sub(_MASK, text)
+    text = _HOST_PORT_RE.sub(_MASK, text)
+    return _IPV4_RE.sub(_MASK, text)
+
+
 class MaskFilter(logging.Filter):
     """Маскирует текст записи до того, как её запишет обработчик. Трейсбек не пишется (мог бы содержать секреты)."""
 
