@@ -97,6 +97,11 @@ on:
         description: "Таймаут первого ответа хоста, минут"
         type: number
         default: 20
+      scan_sec:
+        description: "Seconds to collect offer prices before the first rental"
+        type: number
+        required: false
+        default: 300
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -142,8 +147,10 @@ jobs:
         env:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          SCAN_SEC: ${{ inputs.scan_sec }}
         run: |
-          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH"
+          # пустой SCAN_SEC (не задан) не переопределяет config.default.yaml; число проверяется здесь, до аренды
+          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" --scan-sec "$SCAN_SEC"
 
       # Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс, который запускается до шага run и
       # читает файл heartbeat, пишущийся оркестратором. При тишине уничтожает карты запуска.
@@ -191,6 +198,7 @@ jobs:
           WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
+          SCAN_SEC: ${{ inputs.scan_sec }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           # Два обработчика журнала (SPEC 10, Generate/core/log_setup.py). Консоль (окно шага) пишет только INFO:
@@ -223,6 +231,7 @@ jobs:
             --rental-type "$RENTAL_TYPE"
             --disk-gb "$DISK_GB"
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
+            --scan-sec "$SCAN_SEC"
             --repo "$REPO"
             --run-id "$RUN_ID"
             --worker-build "$WORKER_BUILD"
