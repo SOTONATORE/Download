@@ -1317,6 +1317,11 @@ class Orchestrator:
                     log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.", PILOT_HTTP_PORT,
                              "нет ответа" if last_code is None else last_code, now - rent_at)
                     break
+                # SSH-диагностика: один вызов на итерацию, сбой не должен останавливать пилот
+                try:
+                    self._pull_ssh_diag(now)
+                except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
+                    log.warning("PILOT: SSH-диагностика прервана, исключение %s.", type(exc).__name__)
                 try:
                     info = self.vast.get_instance(slot.instance_id)
                 except VastError as exc:  # VastInstanceNotFound тоже сюда: опрос повторяется
