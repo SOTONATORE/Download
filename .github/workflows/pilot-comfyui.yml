@@ -7,14 +7,6 @@ name: Pilot ComfyUI
 on:
   workflow_dispatch:
     inputs:
-      docker_image:
-        description: "Образ ComfyUI (UNVERIFIED). Пусто = переменная репозитория PILOT_IMAGE"
-        type: string
-        default: ""
-      pilot_start_cmd:
-        description: "Команда старта ComfyUI в контейнере (UNVERIFIED). Пусто = не передавать, образ стартует сам"
-        type: string
-        default: ""
       budget_limit_usd:
         description: "Жёсткий потолок бюджета на запуск (USD)"
         type: string
@@ -110,9 +102,6 @@ jobs:
         env:
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
-          DOCKER_IMAGE_INPUT: ${{ inputs.docker_image }}
-          DOCKER_IMAGE_VAR: ${{ vars.PILOT_IMAGE }}
-          PILOT_START_CMD: ${{ inputs.pilot_start_cmd }}
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
           GPU_NAME: ${{ inputs.gpu_name }}
@@ -129,12 +118,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           GEN_LOG_LEVEL: "DEBUG"
         run: |
-          # образ: вход, иначе переменная репозитория PILOT_IMAGE; без образа не начинаем (Vast не тронут)
-          DOCKER_IMAGE="${DOCKER_IMAGE_INPUT:-$DOCKER_IMAGE_VAR}"
-          if [ -z "${DOCKER_IMAGE// /}" ]; then
-            echo "Ошибка: не задан образ ComfyUI (вход docker_image или переменная PILOT_IMAGE)." >&2
-            exit 2
-          fi
+          # Стоковый образ (plan stage 5, option A); код воркера приходит через onstart
+          DOCKER_IMAGE="vastai/comfy:v0.41.0-cuda-13.2-py312"
           # каталог артефакта пилота (SPEC 10.4): run/debug.log; загружается шагом «Upload pilot artifact»
           PILOT_ART_DIR="$RUNNER_TEMP/pilot-artifact"
           args=(
@@ -154,7 +139,6 @@ jobs:
             --run-id "$RUN_ID"
             --docker-image "$DOCKER_IMAGE"
             --pilot
-            --pilot-start-cmd "$PILOT_START_CMD"
             --artifact-dir "$PILOT_ART_DIR"
             --debug-logs
           )
