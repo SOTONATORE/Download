@@ -96,6 +96,8 @@ SSH_DIAG_EVERY_TICK_LAST = ("comfy_health",)  # каждый тик, после�
 SSH_DIAG_EXTRA_EVERY = 5  # каждый пятый тик выполняются и дополнительные проверки
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
+# Boot-time seed для /etc/portal.yaml образа vastai/comfy; label строго ComfyUI, его проверяет exit_portal.sh.
+PILOT_PORTAL_CONFIG = "localhost:18188:18188:/:ComfyUI"
 BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
 
 # Фильтр стабильности предложений (этап 9е-2; как PARSE_RANK в vast_stable_run.sh).
@@ -1805,6 +1807,7 @@ class Orchestrator:
                 "GEN_LOG_LEVEL": self.log_level,
                 # образ vastai/comfy без аргументов не стартует ComfyUI на 18188: те же аргументы, что у воркера
                 "COMFYUI_ARGS": COMFYUI_ARGS,
+                "PORTAL_CONFIG": PILOT_PORTAL_CONFIG,
                 f"-p {PILOT_HTTP_PORT}:{PILOT_HTTP_PORT}": "1",
             }
         else:
