@@ -246,6 +246,8 @@ class _CardSlot:
     wait_log_at: float = -1e9         # время последней строки состояния ожидания (раз в минуту)
     vast_silence_at: Optional[float] = None  # время последней периодической попытки логов Vast (молчание)
     vast_silence_busy: bool = False   # попытка логов Vast идёт сейчас (повторный вход пропускается)
+    vast_logs_url: Optional[str] = None  # result_url после PUT request_logs; только в памяти, не логируется и не пишется
+    vast_logs_phase: str = "idle"     # "idle": нужен запрос; "pending": запрошено, загрузка на следующем тике
 
     @property
     def started(self) -> bool:
@@ -907,25 +909,87 @@ class Orchestrator:
     def _pull_silent_vast_logs(self, now: float) -> None:
         """Логи Vast у карты, пока /health не ответил ok (этапы booting и «без ответа»): не чаще раза в 10 с.
 
-        Одна попытка за тик, без внутренних повторов. Каждая успешная выгрузка перезаписывает vast_logs.txt
-        свежим снимком. Остановка: карта перешла в ready (ответ ok) или снята (пропала из _slots).
-        Повторный вход, пока предыдущая выгрузка не закончилась, пропускается. Сбой не выходит из цикла.
+        Два шага в разных тиках: тик с фазой idle делает PUT request_logs и запоминает result_url (фаза pending),
+        следующий тик (не раньше чем через 10 с) загружает этот URL. Сразу после PUT файл на сервере может быть
+        ещё не готов (403), поэтому загрузка не выполняется в том же тике. Успешная загрузка (200) перезаписывает
+        vast_logs.txt свежим снимком. Любой код ответа загрузки сбрасывает URL и возвращает фазу idle; следующий PUT
+        будет на более позднем тике. Сбой PUT остаётся в idle. Повторов и пауз внутри тика нет.
+        Остановка: карта перешла из booting (ответ ok) или снята (пропала из _slots); URL сбрасывается.
+        Повторный вход, пока предыдущий тик не закончился, пропускается. Сбой не выходит из цикла.
         """
         if self._artifact is None:
             return
         for slot in list(self._slots.values()):
-            if slot.state != "booting" or slot.vast_silence_busy:
+            if slot.state != "booting":
+                self._clear_silent_vast_logs(slot)  # остановка: URL из памяти не держится дольше нужного
+                continue
+            if slot.vast_silence_busy:
                 continue
             if slot.vast_silence_at is not None and now - slot.vast_silence_at < VAST_SILENCE_INTERVAL_SEC:
                 continue
-            slot.vast_silence_at = now  # время фиксируется и при сбое: следующая попытка не раньше чем через 10 с
+            slot.vast_silence_at = now  # время фиксируется и при сбое: следующий шаг не раньше чем через 10 с
             slot.vast_silence_busy = True
             try:
-                self._fetch_vast_logs(slot, attempts=1)
+                if slot.vast_logs_phase == "pending" and slot.vast_logs_url:
+                    self._silent_vast_download(slot)
+                else:
+                    self._silent_vast_request(slot)
             except Exception as exc:  # логи не должны ронять конвейер
+                self._clear_silent_vast_logs(slot)
                 log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
             finally:
                 slot.vast_silence_busy = False
+
+    @staticmethod
+    def _clear_silent_vast_logs(slot: _CardSlot) -> None:
+        """Сброс периодической выгрузки: URL забывается, фаза возвращается в idle."""
+        slot.vast_logs_url = None
+        slot.vast_logs_phase = "idle"
+
+    def _silent_vast_request(self, slot: _CardSlot) -> None:
+        """Тик фазы idle: PUT request_logs. При успехе URL запоминается, фаза становится pending. Загрузки нет."""
+        try:
+            url = self.vast.request_logs(slot.instance_id, tail=VAST_LOGS_TAIL_LINES, daemon_logs=False)
+        except VastRuntimeError as exc:
+            log.warning("%s: запрос логов Vast не принят, код %s, повтор на следующем тике.",
+                        _card_name(slot, cap=True), getattr(exc, "status", None) or "нет")
+            return
+        slot.vast_logs_url = url
+        slot.vast_logs_phase = "pending"
+
+    def _silent_vast_download(self, slot: _CardSlot) -> None:
+        """Тик фазы pending: загрузка запомненного URL. Любой исход возвращает фазу idle и сбрасывает URL."""
+        url = slot.vast_logs_url
+        self._clear_silent_vast_logs(slot)  # сброс до загрузки: исход любой, в том числе сбой
+        raw_path = None
+        try:
+            fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
+            os.close(fd)
+            try:
+                code = self.vast.download_logs(url, raw_path)
+            except VastRuntimeError:
+                code = None
+            url = None
+            size = os.path.getsize(raw_path)
+            if code == 200:
+                log.info("%s: логи Vast получены, %d байт, код %s.", _card_name(slot, cap=True), size, code)
+                with open(raw_path, "rb") as fh:
+                    raw = fh.read()
+                text = mask_fetched_text(self._mask_remote(raw.decode("utf-8", errors="replace")))
+                self._artifact.card_vast_logs(slot, limit_log_lines(text))
+            elif code == 403:
+                log.warning("%s: логи Vast ещё не готовы, код 403, %d байт; повтор на более позднем тике.",
+                            _card_name(slot, cap=True), size)
+            else:
+                log.warning("%s: логи Vast, код %s, %d байт; повтор на более позднем тике.",
+                            _card_name(slot, cap=True), code if code is not None else "нет", size)
+        finally:
+            url = None
+            if raw_path:
+                try:
+                    os.unlink(raw_path)  # сырой ответ с логами удаляется сразу после разбора
+                except OSError:
+                    pass
 
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
@@ -1575,6 +1639,7 @@ class Orchestrator:
                         "финальной уборке.", _card_name(slot), slot.machine_id, exc)
         else:
             self._destroyed += 1
+        self._clear_silent_vast_logs(slot)  # снятая карта больше не опрашивается периодикой: URL сбрасывается
         self._slots.pop(slot.index, None)
 
     def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC) -> None:

@@ -53,7 +53,7 @@ class ReentrantVast(FakeLogsVast):
     def download_logs(self, url, dest):
         if not self._nested_done and self.orc is not None:
             self._nested_done = True
-            self.orc._pull_silent_vast_logs(10.0)  # выгрузка ещё идёт: вход должен быть пропущен
+            self.orc._pull_silent_vast_logs(20.0)  # выгрузка ещё идёт; 20 с — интервал уже прошёл, пропускает busy
         return super().download_logs(url, dest)
 
 
@@ -96,7 +96,9 @@ def test_silence_fetches_about_every_ten_seconds(tmp_path, monkeypatch):
     orc._slots = {slot.index: slot}
     for t in range(0, 36):                 # шаг шага цикла: 1 с, часы подставные
         orc._pull_silent_vast_logs(float(t))
-    assert [r for r in vast.requests] == [(77, orch.VAST_LOGS_TAIL_LINES, False)] * 4  # t = 0, 10, 20, 30
+    # t = 0: PUT; t = 10: загрузка; t = 20: PUT; t = 30: загрузка (два шага в разных тиках)
+    assert [r for r in vast.requests] == [(77, orch.VAST_LOGS_TAIL_LINES, False)] * 2
+    assert len(vast.downloads) == 2
     assert slot.vast_silence_busy is False
 
 
@@ -107,7 +109,8 @@ def test_silence_tick_is_one_attempt_without_retry_or_pause(tmp_path, monkeypatc
     orc = _bare_orc(tmp_path, vast, attempts=5, pause=30.0, sleeps=sleeps)
     slot = _slot()
     orc._slots = {slot.index: slot}
-    orc._pull_silent_vast_logs(0.0)
+    orc._pull_silent_vast_logs(0.0)              # PUT
+    orc._pull_silent_vast_logs(10.0)             # загрузка: одна попытка
     assert len(vast.downloads) == 1
     assert sleeps == []
     assert not _card_file(tmp_path).exists()     # неудача файл не трогает
@@ -120,10 +123,12 @@ def test_no_second_fetch_while_one_is_in_progress(tmp_path, monkeypatch):
     vast.orc = orc
     slot = _slot()
     orc._slots = {slot.index: slot}
-    orc._pull_silent_vast_logs(0.0)
-    assert len(vast.requests) == 1               # вложенный вход пропущен
+    orc._pull_silent_vast_logs(0.0)              # PUT
+    orc._pull_silent_vast_logs(10.0)             # загрузка; внутри неё вложенный вход на 20 с
+    assert len(vast.downloads) == 1              # вложенный вход пропущен (busy), второй загрузки нет
+    assert len(vast.requests) == 1
     assert slot.vast_silence_busy is False       # флаг снят после выгрузки
-    orc._pull_silent_vast_logs(10.0)             # следующий тик уже разрешён
+    orc._pull_silent_vast_logs(20.0)             # следующий тик уже разрешён: PUT
     assert len(vast.requests) == 2
 
 
@@ -162,10 +167,12 @@ def test_artifact_is_overwritten_by_latest_snapshot_and_masked(tmp_path, monkeyp
     orc = _bare_orc(tmp_path, vast)
     slot = _slot()
     orc._slots = {slot.index: slot}
-    orc._pull_silent_vast_logs(0.0)
+    orc._pull_silent_vast_logs(0.0)              # PUT
+    orc._pull_silent_vast_logs(10.0)             # загрузка старого снимка
     assert "old snapshot" in _card_file(tmp_path).read_text(encoding="utf-8")
     vast.body = f"new snapshot addr {CARD_IP}:{CARD_PORT} {RESULT_URL}\n".encode("utf-8")
-    orc._pull_silent_vast_logs(10.0)
+    orc._pull_silent_vast_logs(20.0)             # PUT
+    orc._pull_silent_vast_logs(30.0)             # загрузка нового снимка
     text = _card_file(tmp_path).read_text(encoding="utf-8")
     assert "new snapshot" in text and "old snapshot" not in text   # перезапись, не дописывание
     for needle in (CARD_IP, str(CARD_PORT), RESULT_URL, URL_CANARY, "result.example.test"):
