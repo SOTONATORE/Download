@@ -118,6 +118,54 @@ def test_probe_refused_chain_gives_connect_refused():
     assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "connect_refused")
 
 
+def test_probe_refused_only_in_context_gives_connect_refused():
+    # отказ лежит только в __context__ (raise внутри except, без «from»), __cause__ пуст
+    def handler(request):
+        try:
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        except ConnectionRefusedError:
+            raise httpx.ConnectError("соединение не установлено")
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "connect_refused")
+
+
+def test_probe_chain_without_refused_gives_unknown():
+    # в цепочке есть OSError, но не ECONNREFUSED: ответ должен остаться unknown
+    def handler(request):
+        try:
+            raise OSError(errno.EHOSTUNREACH, "unreach")
+        except OSError as inner:
+            raise httpx.ConnectError("соединение не установлено") from inner
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "unknown")
+
+
+def test_chain_walk_stops_on_cycle():
+    # цикл в __cause__/__context__ не должен зациклить обход
+    a = httpx.ConnectError("соединение не установлено")
+    b = RuntimeError("служебное")
+    a.__cause__ = b
+    b.__context__ = a
+    assert orch._pilot_error_class(a) == "unknown"
+    assert len(orch._pilot_chain(a)) == 2
+
+
+def test_pilot_chain_types_real_closed_localhost_port_structure():
+    # ВРЕМЕННО: показывает структуру цепочки настоящей ошибки; адреса и порты в результате не должны быть
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    orc = _probe_orc()
+    with pytest.raises(httpx.HTTPError) as info:
+        orc._http.get(f"http://127.0.0.1:{port}/")
+    types = orch._pilot_chain_types(info.value)
+    assert types, "цепочка пуста"
+    assert any("ConnectError" in t or "OSError" in t or "ConnectionRefusedError" in t for t in types), types
+    for t in types:
+        assert "127.0.0.1" not in t and ":" not in t, types
+
+
 def test_probe_real_closed_localhost_port_gives_connect_refused():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

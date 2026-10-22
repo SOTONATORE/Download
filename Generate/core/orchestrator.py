@@ -333,19 +333,63 @@ def _pilot_verdict(code: Optional[int]) -> Optional[str]:
     return None
 
 
+PILOT_CHAIN_MAX_LINKS = 10  # предел обхода цепочки исключений (включая сам exc)
+
+
+def _pilot_chain(exc: BaseException) -> list[BaseException]:
+    """Звенья цепочки исключения: сам exc, затем __cause__ и __context__ каждого звена (в ширину).
+
+    Обход останавливается на None и уже посещённом звене (учёт по id, цикл не зациклится), не длиннее
+    PILOT_CHAIN_MAX_LINKS звеньев. Оба вида связи нужны: при «raise X from Y» есть __cause__, при raise
+    внутри except — только __context__.
+    """
+    links: list[BaseException] = []
+    visited: set[int] = set()
+    queue: deque[Optional[BaseException]] = deque([exc])
+    while queue and len(links) < PILOT_CHAIN_MAX_LINKS:
+        cur = queue.popleft()
+        if cur is None or id(cur) in visited:
+            continue
+        visited.add(id(cur))
+        links.append(cur)
+        queue.append(cur.__cause__)
+        queue.append(cur.__context__)
+    return links
+
+
+def _pilot_is_refused_link(link: BaseException) -> bool:
+    """Звено означает отказ соединения: ConnectionRefusedError, OSError с ECONNREFUSED, либо обёртка
+    ConnectError с фиксированной фразой «Connection refused» (без адреса: строка только сравнивается)."""
+    if isinstance(link, ConnectionRefusedError):
+        return True
+    if isinstance(link, OSError) and link.errno == errno.ECONNREFUSED:
+        return True
+    return type(link).__name__ == "ConnectError" and "connection refused" in str(link).lower()
+
+
 def _pilot_error_class(exc: BaseException) -> str:
-    """Класс ошибки HTTP-пробы пилота: connect_timeout (любой таймаут httpx), connect_refused (ECONNREFUSED
-    в цепочке причин), иначе unknown. Текст исключения не используется: он может содержать адрес."""
+    """Класс ошибки HTTP-пробы пилота: connect_timeout (любой таймаут httpx), connect_refused (отказ
+    соединения в цепочке, см. _pilot_chain), иначе unknown. Текст исключения не логируется и не возвращается:
+    он может содержать адрес."""
     if isinstance(exc, httpx.TimeoutException):
         return "connect_timeout"
-    cur: Optional[BaseException] = exc
-    for _ in range(6):
-        if cur is None:
-            break
-        if isinstance(cur, ConnectionRefusedError) or getattr(cur, "errno", None) == errno.ECONNREFUSED:
-            return "connect_refused"
-        cur = cur.__cause__
+    if any(_pilot_is_refused_link(link) for link in _pilot_chain(exc)):
+        return "connect_refused"
     return "unknown"
+
+
+def _pilot_chain_types(exc: BaseException) -> list[str]:
+    """ВРЕМЕННАЯ диагностика для теста: имена классов звеньев цепочки и errno у OSError.
+
+    Адреса, порты и текст сообщений не попадают в результат. В продакшн-логах не используется.
+    """
+    out: list[str] = []
+    for link in _pilot_chain(exc):
+        name = type(link).__name__
+        if isinstance(link, OSError) and isinstance(link.errno, int):
+            name += f"(errno={link.errno})"
+        out.append(name)
+    return out
 
 
 def _valid_worker_build(value) -> bool:
