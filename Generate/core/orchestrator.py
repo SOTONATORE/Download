@@ -1317,11 +1317,6 @@ class Orchestrator:
                     log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.", PILOT_HTTP_PORT,
                              "нет ответа" if last_code is None else last_code, now - rent_at)
                     break
-                # SSH-диагностика: один вызов на итерацию, сбой не должен останавливать пилот
-                try:
-                    self._pull_ssh_diag(now)
-                except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
-                    log.warning("PILOT: SSH-диагностика прервана, исключение %s.", type(exc).__name__)
                 try:
                     info = self.vast.get_instance(slot.instance_id)
                 except VastError as exc:  # VastInstanceNotFound тоже сюда: опрос повторяется
@@ -1329,6 +1324,9 @@ class Orchestrator:
                                 slot.instance_id, type(exc).__name__)
                     info = None
                 if info is not None:
+                    if info.ssh_host and info.ssh_port:  # адрес SSH для диагностики: только в памяти (SPEC 0.1)
+                        slot.ssh_host = info.ssh_host
+                        slot.ssh_port = info.ssh_port
                     if info.actual_status != slot.vast_status:
                         slot.vast_status = info.actual_status
                         log.info("Карта %d: состояние Vast «%s».", slot.instance_id,
@@ -1336,6 +1334,12 @@ class Orchestrator:
                     if info.actual_status in STOPPED_AFTER_START_STATUSES or info.intended_status == "stopped":
                         result = "card_stopped"
                         break
+                    # SSH-диагностика после обновления статуса: видит текущий статус карты, до проверки порта.
+                    # один вызов на итерацию, сбой не должен останавливать пилот
+                    try:
+                        self._pull_ssh_diag(now)
+                    except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
+                        log.warning("PILOT: SSH-диагностика прервана, исключение %s.", type(exc).__name__)
                     if running_at is None and info.actual_status == "running":
                         running_at = self.clock()
                         log.info("PILOT-МАРКЕР running: карта %d через %.0f с после аренды.",
