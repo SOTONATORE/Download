@@ -77,6 +77,7 @@ PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри образа vastai/co
 PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI для проверки готовности
 PILOT_AUTH_CODES = frozenset({401, 403})  # ComfyUI отвечает, но просит токен: отдельный результат auth_required
 PILOT_PROBE_TIMEOUT_SEC = 5.0
+PILOT_NOT_FOUND_LIMIT = 3  # подряд ответов «экземпляр не найден» (VastInstanceNotFound), после которых пилот завершается
 MAX_NET_FAILS = 6         # подряд сбоев связи с воркером до снятия карты
 EXIT_OK = 0
 EXIT_PARTIAL = 3
@@ -1286,6 +1287,9 @@ class Orchestrator:
         slot: Optional[_CardSlot] = None
         last_code: Optional[int] = None
         keys_logged = False
+        not_found_streak = 0          # подряд идущие VastInstanceNotFound при обновлении статуса
+        dumped_first = False          # instance.json пилота: первый успешный ответ Vast
+        dumped_running = False        # instance.json пилота: первый ответ со статусом running
         try:
             # аренда: повторы как в основном пути, пока не истёк срок молчания
             while slot is None:
@@ -1319,11 +1323,23 @@ class Orchestrator:
                     break
                 try:
                     info = self.vast.get_instance(slot.instance_id)
-                except VastError as exc:  # VastInstanceNotFound тоже сюда: опрос повторяется
+                    not_found_streak = 0  # успешный ответ обнуляет счётчик «не найдена»
+                except VastError as exc:  # VastInstanceNotFound тоже сюда: опрос повторяется, пока не 3 подряд
+                    not_found_streak = not_found_streak + 1 if isinstance(exc, VastInstanceNotFound) else 0
                     log.warning("PILOT: не удалось получить статус карты %d: %s",
                                 slot.instance_id, type(exc).__name__)
+                    if not_found_streak >= PILOT_NOT_FOUND_LIMIT:
+                        result = "instance_gone"
+                        log.error("PILOT: карта не найдена в Vast (%d раза подряд), пилот завершается.",
+                                  PILOT_NOT_FOUND_LIMIT)
+                        break
                     info = None
                 if info is not None:
+                    running_now = info.actual_status == "running"
+                    if not dumped_first or (running_now and not dumped_running):
+                        dumped_first = True
+                        dumped_running = dumped_running or running_now
+                        self._pilot_dump_instance(slot, info)
                     if info.ssh_host and info.ssh_port:  # адрес SSH для диагностики: только в памяти (SPEC 0.1)
                         slot.ssh_host = info.ssh_host
                         slot.ssh_port = info.ssh_port
@@ -1334,12 +1350,13 @@ class Orchestrator:
                     if info.actual_status in STOPPED_AFTER_START_STATUSES or info.intended_status == "stopped":
                         result = "card_stopped"
                         break
-                    # SSH-диагностика после обновления статуса: видит текущий статус карты, до проверки порта.
-                    # один вызов на итерацию, сбой не должен останавливать пилот
-                    try:
-                        self._pull_ssh_diag(now)
-                    except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
-                        log.warning("PILOT: SSH-диагностика прервана, исключение %s.", type(exc).__name__)
+                    # SSH-диагностика после обновления статуса: только когда карта running (до этого адрес может быть
+                    # неверным), до проверки порта. Один вызов на итерацию, сбой не должен останавливать пилот
+                    if info.actual_status == "running":
+                        try:
+                            self._pull_ssh_diag(now)
+                        except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
+                            log.warning("PILOT: SSH-диагностика прервана, исключение %s.", type(exc).__name__)
                     if running_at is None and info.actual_status == "running":
                         running_at = self.clock()
                         log.info("PILOT-МАРКЕР running: карта %d через %.0f с после аренды.",
@@ -1393,6 +1410,22 @@ class Orchestrator:
         self._log_budget()
         self._finish_pilot_artifact(summary, verdict, result)
         return summary
+
+    def _pilot_dump_instance(self, slot: _CardSlot, info: InstanceInfo) -> None:
+        """instance.json карты пилота через тот же маскирующий писатель card_instance, что и основной путь;
+        в run/debug.log одна строка: есть ли в ответе Vast поля SSH. Значения адреса и порта не выводятся (SPEC 0.1)."""
+        if self._artifact is None:
+            return
+        raw = dict(getattr(info, "raw", None) or {})
+        try:
+            self._artifact.card_instance(slot, raw)
+        except Exception as exc:  # запись артефакта не должна останавливать пилот
+            log.warning("PILOT: instance.json карты не записан: %s.", type(exc).__name__)
+
+        def present(key: str) -> str:
+            return "есть" if raw.get(key) not in (None, "") else "нет"
+
+        log.info("PILOT: поля SSH в ответе Vast: ssh_host=%s, ssh_port=%s", present("ssh_host"), present("ssh_port"))
 
     def _finish_pilot_artifact(self, summary: RunSummary, verdict: str, result: str) -> None:
         """Артефакт пилота (SPEC 10.4, этап 7в): run/summary.md и FILES.txt тем же путём, что у основного запуска.
