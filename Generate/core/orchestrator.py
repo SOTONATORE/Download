@@ -43,6 +43,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets
     from .missing import parse_missing
     from .naming import clip_filename
+    from . import ssh_probe
     from .release_adapter import (  # noqa: F401
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
@@ -58,6 +59,7 @@ except ImportError:  # pragma: no cover
     from log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
+    import ssh_probe  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
         LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
@@ -84,6 +86,11 @@ LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
 WAIT_LOG_INTERVAL_SEC = 60.0  # строка состояния ожидания воркера: не чаще раза в минуту
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
+SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
+SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
+SSH_DIAG_BASE_COMMANDS = ("ping", "worker_health", "bootstrap_tail")  # каждый тик
+SSH_DIAG_EXTRA_COMMANDS = ("workspace_list", "processes", "listening", "gpu", "comfy_health")
+SSH_DIAG_EXTRA_EVERY = 5  # каждый пятый тик выполняются и дополнительные проверки
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
 BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
@@ -158,6 +165,7 @@ VAST_LOGS_TAIL_LINES = 2000
 VAST_LOG_HEAD_LINES = 200
 VAST_LOG_TAIL_LINES = 2000
 VAST_LOGS_FILE = "vast_logs.txt"
+SSH_DIAG_FILE = "ssh_diag.log"  # SSH-диагностика карты, дописывается по тикам (в артефакте запуска)
 
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
@@ -248,6 +256,10 @@ class _CardSlot:
     vast_silence_busy: bool = False   # попытка логов Vast идёт сейчас (повторный вход пропускается)
     vast_logs_url: Optional[str] = None  # result_url после PUT request_logs; только в памяти, не логируется и не пишется
     vast_logs_phase: str = "idle"     # "idle": нужен запрос; "pending": запрошено, загрузка на следующем тике
+    ssh_host: Optional[str] = None    # адрес SSH из JSON экземпляра Vast; только в памяти, нигде не пишется и не логируется
+    ssh_port: Optional[int] = None    # порт SSH; только в памяти, как ssh_host; сбрасывается при снятии карты
+    ssh_diag_at: float = 0.0          # время последнего тика SSH-диагностики
+    ssh_diag_tick: int = 0            # число выполненных тиков SSH-диагностики
 
     @property
     def started(self) -> bool:
@@ -453,6 +465,10 @@ class RunArtifact:
     def card_vast_logs(self, slot, text: str) -> None:
         """Логи контейнера карты, полученные через Vast (отдельный файл рядом с worker_log.txt)."""
         self._write(self.card_dir(slot) / VAST_LOGS_FILE, text)
+
+    def card_ssh_diag(self, slot, text: str) -> None:
+        """Блок SSH-диагностики одного тика; дописывается в конец файла (маска на каждой строке, как у журнала карты)."""
+        self._append(self.card_dir(slot) / SSH_DIAG_FILE, text)
 
     def card_meta(self, slot, data: dict) -> None:
         self._write(self.card_dir(slot) / "meta.json", json.dumps(data, ensure_ascii=False, indent=2))
@@ -991,6 +1007,71 @@ class Orchestrator:
                 except OSError:
                     pass
 
+    def _pull_ssh_diag(self, now: float) -> None:
+        """SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в SSH_DIAG_INTERVAL_SEC.
+
+        Тик выполняет проверки модуля ssh_probe по одной команде: ping, worker_health, bootstrap_tail; каждый
+        пятый тик ещё пять. Вывод каждой проверки дописывается в cards/<слот>/ssh_diag.log целиком, после маски.
+        Адрес и порт передаются только аргументами run_probe и нигде не пишутся (SPEC 0.1, F01). Ключ берётся из
+        VAST_SSH_KEY один раз на вызов. Сбой проверки не останавливает цикл шагов. Готовая карта пропускается;
+        снятая карта уже без адреса (сброшен в _retire) и из _slots удалена.
+        """
+        if self._artifact is None:
+            return
+        due = [slot for slot in list(self._slots.values())
+               if slot.state != "ready" and slot.ssh_host and slot.ssh_port and self._ssh_diag_due(slot, now)]
+        if not due:
+            return
+        key = os.environ.get("VAST_SSH_KEY", "")
+        if not key:
+            log.warning("SSH-диагностика пропущена: ключ не задан")  # сам ключ и его длина не выводятся
+            for slot in due:
+                slot.ssh_diag_at = now  # строка одна на интервал, а не на каждый опрос
+            return
+        for slot in due:
+            try:
+                self._ssh_diag_tick(slot, now, key)
+            except Exception as exc:  # сбой записи или разбора не останавливает шаги карт
+                log.warning("%s: SSH-диагностика прервана, исключение %s.",
+                            _card_name(slot, cap=True), type(exc).__name__)
+
+    @staticmethod
+    def _ssh_diag_due(slot: _CardSlot, now: float) -> bool:
+        """Первый тик выполняется сразу; дальше не раньше чем через SSH_DIAG_INTERVAL_SEC."""
+        if slot.ssh_diag_tick == 0 and slot.ssh_diag_at == 0.0:
+            return True
+        return now - slot.ssh_diag_at >= SSH_DIAG_INTERVAL_SEC
+
+    def _ssh_diag_tick(self, slot: _CardSlot, now: float, key: str) -> None:
+        """Один тик: проверки по очереди, блок в ssh_diag.log, одна строка в основной журнал."""
+        tick = slot.ssh_diag_tick + 1
+        # счётчик и время фиксируются до проверок: сбой на середине не даёт повторного захода в том же интервале
+        slot.ssh_diag_tick = tick
+        slot.ssh_diag_at = now
+        names = list(SSH_DIAG_BASE_COMMANDS)
+        if tick % SSH_DIAG_EXTRA_EVERY == 0:
+            names += list(SSH_DIAG_EXTRA_COMMANDS)
+        blocks = [f"=== {_utc_now()} tick {tick} ==="]
+        ping_class = "exception"
+        for name in names:
+            try:
+                result = ssh_probe.run_probe(slot.ssh_host, slot.ssh_port, key, name,
+                                             timeout_sec=SSH_DIAG_TIMEOUT_SEC)
+                failure = result.failure_class
+                output = self._mask_remote(result.output)
+            except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
+                failure = "exception"
+                output = ""
+                log.warning("%s: SSH-проверка %s прервана, исключение %s.",
+                            _card_name(slot, cap=True), name, type(exc).__name__)
+            if name == "ping":
+                ping_class = failure
+            blocks.append(f"--- {name} ({failure}) ---")
+            if output:
+                blocks.append(output)
+        self._artifact.card_ssh_diag(slot, "\n".join(blocks))
+        log.info("%s: SSH-диагностика, тик %d, ping=%s", _card_name(slot), tick, ping_class)
+
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
 
@@ -1354,6 +1435,7 @@ class Orchestrator:
                 self._step_slot(slot, now, stopping)
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
+            self._pull_ssh_diag(now)
             self._heartbeat(now)
 
             inflight = self._inflight()
@@ -1640,6 +1722,8 @@ class Orchestrator:
         else:
             self._destroyed += 1
         self._clear_silent_vast_logs(slot)  # снятая карта больше не опрашивается периодикой: URL сбрасывается
+        slot.ssh_host = None  # снятая карта не опрашивается SSH-диагностикой: адрес и порт забываются
+        slot.ssh_port = None
         self._slots.pop(slot.index, None)
 
     def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC) -> None:
@@ -1821,6 +1905,10 @@ class Orchestrator:
         if info is not None and self._is_outbid(info):
             self._retire_outbid(slot)
             return
+        if info is not None and info.ssh_host and info.ssh_port:
+            # адрес SSH для диагностики: только в памяти карты (SPEC 0.1, F01); в файлы и журнал не пишется
+            slot.ssh_host = info.ssh_host
+            slot.ssh_port = info.ssh_port
         if slot.state == "booting":
             # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
             reason = self._monitor(slot).check()

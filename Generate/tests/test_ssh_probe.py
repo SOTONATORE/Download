@@ -202,7 +202,7 @@ def test_canaries_absent_from_result_when_ssh_stderr_echoes_them(caplog):
     )
     caplog.set_level(logging.DEBUG)
     with patch.object(sp.subprocess, "run", return_value=_completed(255, "", echoed)):
-        result = sp.run_probe(CANARY_HOST, CANARY_PORT, KEY_TEXT, "ping")
+        result = sp.run_probe(CANARY_HOST, CANARY_PORT, CANARY_KEY, "ping")
 
     assert result.failure_class == "connect_refused"
     _assert_no_canary(result.output, repr(result))
@@ -213,7 +213,7 @@ def test_canaries_absent_from_result_when_ssh_stderr_echoes_them(caplog):
 def test_canaries_absent_from_output_of_successful_command():
     stdout = f"ok {CANARY_HOST} {CANARY_PORT} {CANARY_KEY}\n"
     with patch.object(sp.subprocess, "run", return_value=_completed(0, stdout)):
-        result = sp.run_probe(CANARY_HOST, CANARY_PORT, KEY_TEXT, "ping")
+        result = sp.run_probe(CANARY_HOST, CANARY_PORT, CANARY_KEY, "ping")
     _assert_no_canary(result.output, repr(result))
 
 
