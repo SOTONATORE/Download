@@ -34,7 +34,7 @@ on:
       max_price_per_hour:
         description: "Максимальная цена аренды ($/ч)"
         type: string
-        default: "0.55"
+        default: "1.0"
       min_reliability:
         description: "Минимальная надёжность хоста (0-1)"
         type: string
@@ -60,7 +60,7 @@ on:
         options:
           - "interruptible"
           - "on-demand"
-        default: "interruptible"
+        default: "on-demand"
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
@@ -109,6 +109,7 @@ jobs:
       - name: Run pilot
         env:
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
           DOCKER_IMAGE_INPUT: ${{ inputs.docker_image }}
           DOCKER_IMAGE_VAR: ${{ vars.PILOT_IMAGE }}
           PILOT_START_CMD: ${{ inputs.pilot_start_cmd }}
@@ -158,6 +159,8 @@ jobs:
             --debug-logs
           )
           # Фильтр маскирует значения секретов до записи в лог (SPEC 0.1). Ключи Gemini и GH сюда не передаются.
+          # Фильтр маскирует только однострочные значения (построчная замена). Тело ключа VAST_SSH_KEY наш код
+          # не печатает; маска по нему здесь не задана, так как многострочный ключ построчным фильтром не покрывается.
           mask_code='
           import os, sys
           vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY",)} - {""}, key=len, reverse=True)
