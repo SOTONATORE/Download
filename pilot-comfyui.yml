@@ -1,0 +1,217 @@
+name: Pilot ComfyUI
+
+# Пилот инфраструктуры Vast без нашего воркера (см. Generate/PILOT_REPORT.md). Копия generate.yml с отличиями:
+# образ — фиксированный стоковый vastai/comfy:v0.41.0-cuda-13.2-py312 (не вход); входы пилота перечислены ниже, окно сбора цен задаёт scan_sec; шаги docker_build (GHCR, тег = SHA)
+# убраны; метка карт pilot-<run_id>; весы не грузятся (HF_TOKEN не передаётся); Release и Gemini не трогаются.
+# SPEC 0.1: только ручной запуск. Никаких push / pull_request.
+on:
+  workflow_dispatch:
+    inputs:
+      budget_limit_usd:
+        description: "Жёсткий потолок бюджета на запуск (USD)"
+        type: string
+        default: "2.0"
+      min_balance_usd:
+        description: "Минимальный баланс Vast.ai для старта (USD)"
+        type: string
+        default: "2.0"
+      gpu_name:
+        description: "Модель видеокарты на Vast.ai"
+        type: string
+        default: "RTX 5090"
+      min_price_per_hour:
+        description: "Минимальная цена аренды ($/ч)"
+        type: string
+        default: "0.35"
+      max_price_per_hour:
+        description: "Максимальная цена аренды ($/ч)"
+        type: string
+        default: "1.0"
+      min_reliability:
+        description: "Минимальная надёжность хоста (0-1)"
+        type: string
+        default: "0.95"
+      min_inet_mbps:
+        description: "Минимальная скорость интернета карты (Мбит/с)"
+        type: string
+        default: "800"
+      max_inet_price_per_tb:
+        description: "Максимальная цена трафика карты (USD за ТБ)"
+        type: string
+        default: "4.1"
+      verified:
+        description: "Только проверенные хосты Vast: 1 = да, 0 = нет"
+        type: choice
+        options:
+          - "1"
+          - "0"
+        default: "1"
+      rental_type:
+        description: "Режим аренды карт Vast: interruptible или on-demand"
+        type: choice
+        options:
+          - "interruptible"
+          - "on-demand"
+        default: "on-demand"
+      disk_gb:
+        description: "Размер диска карты Vast.ai, ГБ"
+        type: number
+        default: 100
+      silent_host_timeout_min:
+        description: "Таймаут до ответа ComfyUI на порту 18188, минут"
+        type: number
+        default: 20
+      scan_sec:
+        description: "Секунды сбора цен перед первой арендой (пилот). Не меньше 5 × scan_step_sec (по умолчанию 100)"
+        type: number
+        required: false
+        default: 120
+
+# отдельная группа: пилот не блокирует и не отменяет боевой generate; запущенный не отменять
+concurrency:
+  group: pilot-comfyui
+  cancel-in-progress: false
+
+permissions:
+  contents: read    # Release не пишем: пилот его не трогает
+  actions: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash   # bash -e -o pipefail
+    env:
+      RUN_LOG: /tmp/pilot-run.log
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r Generate/requirements-dev.txt
+
+      # Шаги preflight/GHCR (docker login, check --docker-image --worker-build) из generate.yml отключены:
+      # пилот не использует образ воркера и тег = SHA коммита.
+
+      - name: Run pilot
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
+          BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
+          MIN_BALANCE: ${{ inputs.min_balance_usd }}
+          GPU_NAME: ${{ inputs.gpu_name }}
+          MIN_PRICE: ${{ inputs.min_price_per_hour }}
+          MAX_PRICE: ${{ inputs.max_price_per_hour }}
+          MIN_RELIABILITY: ${{ inputs.min_reliability }}
+          MIN_INET: ${{ inputs.min_inet_mbps }}
+          MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
+          VERIFIED: ${{ inputs.verified }}
+          RENTAL_TYPE: ${{ inputs.rental_type }}
+          DISK_GB: ${{ inputs.disk_gb }}
+          SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
+          SCAN_SEC: ${{ inputs.scan_sec }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GEN_LOG_LEVEL: "DEBUG"
+        run: |
+          # Стоковый образ (plan stage 5, option A); код воркера приходит через onstart
+          DOCKER_IMAGE="vastai/comfy:v0.41.0-cuda-13.2-py312"
+          # каталог артефакта пилота (SPEC 10.4): run/debug.log; загружается шагом «Upload pilot artifact»
+          PILOT_ART_DIR="$RUNNER_TEMP/pilot-artifact"
+          args=(
+            --budget-limit "$BUDGET_LIMIT"
+            --min-balance-usd "$MIN_BALANCE"
+            --gpu-name "$GPU_NAME"
+            --min-price-per-hour "$MIN_PRICE"
+            --max-price-per-hour "$MAX_PRICE"
+            --min-reliability "$MIN_RELIABILITY"
+            --min-inet-mbps "$MIN_INET"
+            --max-inet-price-per-tb "$MAX_INET_PRICE"
+            --verified "$VERIFIED"
+            --rental-type "$RENTAL_TYPE"
+            --disk-gb "$DISK_GB"
+            --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
+            --scan-sec "$SCAN_SEC"
+            --repo "$REPO"
+            --run-id "$RUN_ID"
+            --docker-image "$DOCKER_IMAGE"
+            --pilot
+            --artifact-dir "$PILOT_ART_DIR"
+            --debug-logs
+          )
+          # Фильтр маскирует значения секретов до записи в лог (SPEC 0.1). Ключи Gemini и GH сюда не передаются.
+          # Фильтр маскирует только однострочные значения (построчная замена). Тело ключа VAST_SSH_KEY наш код
+          # не печатает; маска по нему здесь не задана, так как многострочный ключ построчным фильтром не покрывается.
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY",)} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          {
+            echo '## Итоги пилота ComfyUI'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rc=0
+          python -m Generate.cli run "${args[@]}" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG" || rc=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      # Выполняется всегда. Метка карт пилота: pilot-<run_id> (та же, что у карт запуска).
+      - name: Kill rented cards
+        if: always()
+        timeout-minutes: 5
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY",)} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          python -m Generate.cli kill-cards --label "pilot-$RUN_ID" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG"
+
+      # Шаг finalize-release из generate.yml не включён: пилот не пишет в Release.
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-run-log-${{ github.run_id }}
+          path: ${{ env.RUN_LOG }}
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Артефакт пилота (SPEC 10.4): каталог --artifact-dir шага «Run pilot». Загружается при любом исходе.
+      - name: Upload pilot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-artifact-${{ github.run_id }}
+          path: ${{ runner.temp }}/pilot-artifact
+          retention-days: 30
+          if-no-files-found: warn
