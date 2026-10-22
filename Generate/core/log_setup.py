@@ -219,16 +219,59 @@ _HOST_PORT_RE = re.compile(
 _URL_QUERY_RE = re.compile(r"https?://[^\s'\"<>]*\?[^\s'\"<>]*")
 
 
-def mask_fetched_text(text: str) -> str:
-    """Маска текста логов, полученного от Vast (карта, журнал запуска): общая маска, затем адреса и ссылки.
-
-    Порядок: mask_remote_text (токены, Bearer, ключи по форме, пары с секретными именами), затем URL со
-    строкой запроса целиком, затем пары host:port, затем одиночные IPv4. Пустой или обычный текст не меняется.
-    """
+def _mask_fetched_all(text: str) -> str:
+    """Общая маска текста с карты без исключений по портам (поведение до правила портов)."""
     text = mask_remote_text(text)
     text = _URL_QUERY_RE.sub(_MASK, text)
     text = _HOST_PORT_RE.sub(_MASK, text)
     return _IPV4_RE.sub(_MASK, text)
+
+
+# Порты собственных процессов карты (SPEC 0.1, правило портов): 8000 — воркер, 18188 — ComfyUI.
+# Видимы в журнале и артефактах, только если стоят после адреса локального прослушивания (вывод ss, netstat).
+INTERNAL_PORTS = frozenset({"8000", "18188"})
+_LISTEN_HOSTS = r"(?:0\.0\.0\.0|127\.0\.0\.1|localhost|\*|\[::\]|\[::1\])"
+_KEEP_PORT_RE = re.compile(r"(?<![\w.\-])" + _LISTEN_HOSTS + r":(?:8000|18188)(?!\d)")
+# метки удержания сохраняемых фрагментов на время общей маски (символы приватной области Unicode)
+_HOLD_OPEN = "\ue000"
+_HOLD_CLOSE = "\ue001"
+_HOLD_RE = re.compile(_HOLD_OPEN + r"(\d+)" + _HOLD_CLOSE)
+
+
+def mask_fetched_text(text: str, *, keep_internal_ports: bool = False) -> str:
+    """Маскирование текста логов, полученного от Vast (карта, журнал запуска): общая маска, затем адреса и ссылки.
+
+    Порядок: mask_remote_text (токены, Bearer, ключи по форме, пары с секретными именами), затем URL со
+    строкой запроса целиком, затем пары host:port, затем одиночные IPv4. Пустой или обычный текст не меняется.
+
+    keep_internal_ports=True (правило портов, SPEC 0.1): фрагменты 0.0.0.0:8000, 127.0.0.1:18188 и подобные
+    (адрес локального прослушивания с портом воркера или ComfyUI) не маскируются. Остальные порты и адреса
+    маскируются как прежде. По умолчанию False: для остальных вызывающих поведение не меняется.
+    """
+    if not keep_internal_ports:
+        return _mask_fetched_all(text)
+    held: list = []
+
+    def _hold(match: "re.Match[str]") -> str:
+        held.append(match.group(0))
+        return f"{_HOLD_OPEN}{len(held) - 1}{_HOLD_CLOSE}"
+
+    text = _KEEP_PORT_RE.sub(_hold, text)
+    text = _mask_fetched_all(text)
+    return _HOLD_RE.sub(lambda m: held[int(m.group(1))], text)
+
+
+def mask_external(text: str, external_values) -> str:
+    """Литеральная маска внешних адресов карты Vast (SPEC 0.1, правило портов).
+
+    external_values: публичный IP, значения HostPort, ssh-адрес и ssh-порт карты. Передаёт вызывающий код;
+    модуль окружение не читает. Каждое значение заменяется на «***» там, где стоит отдельно: число не внутри
+    большего числа, адрес не внутри большего адреса. Пустые и None пропускаются; длинные значения первыми.
+    """
+    values = {str(v).strip() for v in external_values if v is not None}
+    for value in sorted((v for v in values if v), key=len, reverse=True):
+        text = re.sub(r"(?<![\d.])" + re.escape(value) + r"(?!\d)", _MASK, text)
+    return text
 
 
 class MaskFilter(logging.Filter):

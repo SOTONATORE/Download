@@ -5,6 +5,7 @@
 time.sleep в этом файле запрещён фикстурой: путь диагностики не должен ждать.
 """
 import logging
+import subprocess
 import time
 
 import pytest
@@ -207,3 +208,62 @@ def test_no_sleep_across_full_path_with_errors(tmp_path, monkeypatch, caplog):
     orc._slots[1] = _slot()
     _run(orc, monkeypatch, fake, [0.0, 30.0, 60.0, 90.0, 120.0])  # autouse-фикстура поднимет на любой time.sleep
     assert len(fake.calls) == 20
+
+
+# ---------------------------------------------------------------------------
+# Правило портов (SPEC 0.1): внутренние порты видны, внешние адреса маскируются
+# ---------------------------------------------------------------------------
+
+EXT_IP = "198.51.100.44"  # внешний адрес карты (документационный диапазон)
+EXT_PORT = "47123"        # внешний HostPort
+
+
+def _fake_ssh(stdout):
+    """Заглушка subprocess.run для настоящего run_probe: ssh не запускается, вывод задан."""
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+    return fake_run
+
+
+def test_diag_log_keeps_internal_ports_and_masks_other_ports(tmp_path, monkeypatch):
+    stdout = ("LISTEN 0 4096 0.0.0.0:8000 0.0.0.0:*\n"
+              "LISTEN 0 4096 0.0.0.0:18188 0.0.0.0:*\n"
+              "LISTEN 0 4096 0.0.0.0:41234 0.0.0.0:*\n")
+    monkeypatch.setattr(orch.ssh_probe.subprocess, "run", _fake_ssh(stdout))
+    orc = _bare_orc(tmp_path)
+    orc._slots[1] = _slot()
+    orc._pull_ssh_diag(0.0)  # реальный run_probe: маска на пути ssh_probe, без подмены проверок
+    text = _diag_file(tmp_path).read_text(encoding="utf-8")
+    assert "0.0.0.0:8000" in text
+    assert "0.0.0.0:18188" in text
+    assert "41234" not in text
+    _assert_no_canary(text)
+
+
+def test_diag_log_masks_external_literals_in_output_and_logs(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    stdout = f"bound to {EXT_IP} on port {EXT_PORT}\n"
+    monkeypatch.setattr(orch.ssh_probe.subprocess, "run", _fake_ssh(stdout))
+    orc = _bare_orc(tmp_path)
+    slot = _slot()
+    slot.ext_values = (EXT_IP, EXT_PORT)  # публичный IP и HostPort, как их передаёт _step_slot
+    orc._slots[1] = slot
+    orc._pull_ssh_diag(0.0)
+    text = _diag_file(tmp_path).read_text(encoding="utf-8")
+    messages = [r.getMessage() for r in caplog.records]
+    for marker in (EXT_IP, EXT_PORT):
+        assert marker not in text
+        assert all(marker not in m for m in messages)
+
+
+def test_empty_key_message_once_per_interval(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("VAST_SSH_KEY", "")
+    fake = FakeProbe()
+    orc = _bare_orc(tmp_path)
+    orc._slots[1] = _slot()
+    # 0 — строка; 10, 29, 45, 59 — в интервале, строк нет; 30 и 60 — новый интервал, строка
+    _run(orc, monkeypatch, fake, [0.0, 10.0, 29.0, 30.0, 45.0, 59.0, 60.0])
+    assert fake.calls == []
+    assert _ssh_messages(caplog) == ["SSH-диагностика пропущена: ключ не задан"] * 3
+

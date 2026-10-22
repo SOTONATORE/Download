@@ -40,12 +40,12 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
-    from .log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets
+    from .log_setup import _MASK, INTERNAL_PORTS, mask_external, mask_fetched_text, mask_remote_text, set_known_secrets
     from .missing import parse_missing
     from .naming import clip_filename
     from . import ssh_probe
     from .release_adapter import (  # noqa: F401
-        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
+        CARD_DIAGNOSTIC_FILES, LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
     from .vast_client import (  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
@@ -56,12 +56,12 @@ except ImportError:  # pragma: no cover
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
-    from log_setup import _MASK, mask_fetched_text, mask_remote_text, set_known_secrets  # type: ignore
+    from log_setup import _MASK, INTERNAL_PORTS, mask_external, mask_fetched_text, mask_remote_text, set_known_secrets  # type: ignore
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
-        LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
+        CARD_DIAGNOSTIC_FILES, LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
     )
     from vast_client import (  # type: ignore  # noqa: F401
         WORKER_HTTP_PORT, GpuOffer, InstanceInfo, OfferFilter, VastClient, VastDestroyError,
@@ -258,7 +258,8 @@ class _CardSlot:
     vast_logs_phase: str = "idle"     # "idle": нужен запрос; "pending": запрошено, загрузка на следующем тике
     ssh_host: Optional[str] = None    # адрес SSH из JSON экземпляра Vast; только в памяти, нигде не пишется и не логируется
     ssh_port: Optional[int] = None    # порт SSH; только в памяти, как ssh_host; сбрасывается при снятии карты
-    ssh_diag_at: float = 0.0          # время последнего тика SSH-диагностики
+    ssh_diag_at: Optional[float] = None  # время последнего тика SSH-диагностики; None: тиков ещё не было
+    ext_values: tuple = ()            # внешние адреса карты (публичный IP, HostPort); только в памяти, маска ssh_diag.log
     ssh_diag_tick: int = 0            # число выполненных тиков SSH-диагностики
 
     @property
@@ -380,6 +381,47 @@ def _port_keys_text(info: InstanceInfo) -> str:
     return ", ".join(keys) if keys else "пусто"
 
 
+def _ports_mapping(raw: dict) -> Optional[dict]:
+    """Поле ports экземпляра как словарь; None, если поля нет или оно не разобралось."""
+    ports = raw.get("ports")
+    if isinstance(ports, str):
+        try:
+            ports = json.loads(ports)
+        except ValueError:
+            return None
+    return ports if isinstance(ports, dict) else None
+
+
+def _external_values(info: InstanceInfo) -> tuple:
+    """Внешние адреса карты Vast: публичный IP и все HostPort из поля ports (SPEC 0.1, правило портов).
+
+    Значения только в памяти: передаются mask_external при записи ssh_diag.log; не выводятся и не пишутся.
+    """
+    raw = getattr(info, "raw", None) or {}
+    values = []
+    ip = raw.get("public_ipaddr")
+    if ip:
+        values.append(str(ip))
+    ports = _ports_mapping(raw) or {}
+    for mapped in ports.values():
+        if isinstance(mapped, list):
+            for entry in mapped:
+                if isinstance(entry, dict) and entry.get("HostPort"):
+                    values.append(str(entry["HostPort"]))
+    return tuple(values)
+
+
+def _internal_ports_view(raw: dict) -> Optional[dict]:
+    """Поле ports для instance.json: только внутренние порты 8000 и 18188, значения заменены на «***».
+
+    Ключи в виде Vast (8000/tcp, 18188/tcp); отсутствующие не добавляются. None, если поля ports нет.
+    """
+    ports = _ports_mapping(raw)
+    if ports is None:
+        return None
+    return {f"{port}/tcp": _MASK for port in sorted(INTERNAL_PORTS) if f"{port}/tcp" in ports}
+
+
 def _card_name(slot, *, cap: bool = False) -> str:
     """Имя карты в логах (SPEC 8.2): «карта <слот> поколение <поколение>», номер экземпляра Vast в скобках."""
     name = f"карта {slot.index} поколение {slot.generation} (экземпляр {slot.instance_id})"
@@ -474,9 +516,14 @@ class RunArtifact:
         self._write(self.card_dir(slot) / "meta.json", json.dumps(data, ensure_ascii=False, indent=2))
 
     def card_instance(self, slot, raw: dict) -> None:
-        # единственный писатель instance.json: поля адреса, портов, ssh и env удаляются до записи (этап 9а)
+        # единственный писатель instance.json: поля адреса, ssh и env удаляются до записи (этап 9а);
+        # поле ports сохраняется только с внутренними портами 8000 и 18188, значения «***» (SPEC 0.1)
+        data = remove_instance_fields(raw)
+        view = _internal_ports_view(raw)
+        if view is not None:
+            data["ports"] = view
         self._write(self.card_dir(slot) / "instance.json",
-                    json.dumps(remove_instance_fields(raw), ensure_ascii=False, indent=2, default=str))
+                    json.dumps(data, ensure_ascii=False, indent=2, default=str))
 
     def service_copy(self, src: str, name: str) -> None:
         shutil.copyfile(src, self.root / SERVICE_DIR / name)
@@ -493,18 +540,30 @@ class RunArtifact:
                 rows.append(f"{p.relative_to(self.root).as_posix()}\t{p.stat().st_size}")
         self._write(self.root / FILES_LIST_NAME, "\n".join(rows) + "\n")
 
-    def make_bundle(self, dest: str) -> None:
-        """Архив каталога. Файл, в котором остался адрес карты, в архив не попадает; одна строка в журнал на файл (этап 9а)."""
+    def make_bundle(self, dest: str, *, for_release: bool = False) -> None:
+        """Архив каталога. Файл, в котором остался адрес карты, в архив не попадает; одна строка в журнал на файл (этап 9а).
+
+        for_release=True (SPEC 0.1, правило портов): архив для GitHub Release. Диагностика карт (ssh_diag.log,
+        vast_logs.txt, worker_log.txt, instance.json) в него не входит; в каталоге артефакта она остаётся.
+        """
         needles = sorted(self._addresses, key=len, reverse=True)
         with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in sorted(self.root.rglob("*")):
                 if not p.is_file():
                     continue
                 name = p.relative_to(self.root).as_posix()
+                if for_release and _is_card_diagnostic(name):
+                    continue
                 if needles and _file_has_any(p, needles):
                     log.warning("Файл %s не включён в архив: в нём есть адрес карты.", name)
                     continue
                 zf.write(p, name)
+
+
+def _is_card_diagnostic(name: str) -> bool:
+    """Файл диагностики карты по пути внутри артефакта: cards/<слот>/<имя из CARD_DIAGNOSTIC_FILES>."""
+    parts = name.split("/")
+    return len(parts) >= 3 and parts[0] == "cards" and parts[-1] in CARD_DIAGNOSTIC_FILES
 
 
 class RunPublisher:
@@ -587,6 +646,8 @@ class RunPublisher:
 
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
+
+    _ssh_key_warned_at: Optional[float] = None  # время последней строки «ключ не задан» (A2b: не чаще раза в интервал)
 
     def __init__(
         self,
@@ -1018,15 +1079,19 @@ class Orchestrator:
         """
         if self._artifact is None:
             return
+        # интервал проверяется раньше ключа (A2b): без due-карт ни строки, ни чтения окружения
         due = [slot for slot in list(self._slots.values())
                if slot.state != "ready" and slot.ssh_host and slot.ssh_port and self._ssh_diag_due(slot, now)]
         if not due:
             return
         key = os.environ.get("VAST_SSH_KEY", "")
         if not key:
-            log.warning("SSH-диагностика пропущена: ключ не задан")  # сам ключ и его длина не выводятся
+            last = self._ssh_key_warned_at
+            if last is None or now - last >= SSH_DIAG_INTERVAL_SEC:
+                log.warning("SSH-диагностика пропущена: ключ не задан")  # сам ключ и его длина не выводятся
+                self._ssh_key_warned_at = now
             for slot in due:
-                slot.ssh_diag_at = now  # строка одна на интервал, а не на каждый опрос
+                slot.ssh_diag_at = now  # карта не попадает в due до следующего интервала
             return
         for slot in due:
             try:
@@ -1037,8 +1102,12 @@ class Orchestrator:
 
     @staticmethod
     def _ssh_diag_due(slot: _CardSlot, now: float) -> bool:
-        """Первый тик выполняется сразу; дальше не раньше чем через SSH_DIAG_INTERVAL_SEC."""
-        if slot.ssh_diag_tick == 0 and slot.ssh_diag_at == 0.0:
+        """Первый тик выполняется сразу; дальше не раньше чем через SSH_DIAG_INTERVAL_SEC.
+
+        None — тиков не было (A2b: раньше 0.0 использовался и как «не было», и как время, поэтому при now=0.0
+        первая карта считалась незапущенной и на каждом опросе).
+        """
+        if slot.ssh_diag_at is None:
             return True
         return now - slot.ssh_diag_at >= SSH_DIAG_INTERVAL_SEC
 
@@ -1058,7 +1127,9 @@ class Orchestrator:
                 result = ssh_probe.run_probe(slot.ssh_host, slot.ssh_port, key, name,
                                              timeout_sec=SSH_DIAG_TIMEOUT_SEC)
                 failure = result.failure_class
-                output = self._mask_remote(result.output)
+                # внешние адреса карты (IP, HostPort, ssh-адрес и порт) маскируются литерально, даже если попали в вывод
+                output = mask_external(self._mask_remote(result.output),
+                                       (*slot.ext_values, slot.ssh_host, slot.ssh_port))
             except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
                 failure = "exception"
                 output = ""
@@ -1187,7 +1258,7 @@ class Orchestrator:
                     self._artifact.service_copy(str(self.prompts_path), PROMPTS_FILENAME)
                 self._artifact.write_files_list()
                 bundle_path = os.path.join(self._tmp, LOG_BUNDLE_NAME)
-                self._artifact.make_bundle(bundle_path)
+                self._artifact.make_bundle(bundle_path, for_release=True)
             pub.finish(prompts_path=str(self.prompts_path), report_path=report_path,
                        bundle_path=bundle_path)
             if pub.failures:  # E4: частичный итог, каждая ошибка уже записана одной строкой
@@ -1909,6 +1980,8 @@ class Orchestrator:
             # адрес SSH для диагностики: только в памяти карты (SPEC 0.1, F01); в файлы и журнал не пишется
             slot.ssh_host = info.ssh_host
             slot.ssh_port = info.ssh_port
+        if info is not None:
+            slot.ext_values = _external_values(info)  # внешние значения для маски ssh_diag.log, только в памяти
         if slot.state == "booting":
             # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
             reason = self._monitor(slot).check()

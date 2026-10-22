@@ -71,7 +71,7 @@ def _scrub(text: str, host: str, port: int, key_text: str, key_path: str) -> str
         if literal:
             text = text.replace(literal, _MASK)
     text = re.sub(r"(?<!\d)" + re.escape(str(port)) + r"(?!\d)", _MASK, text)
-    return mask_fetched_text(text)
+    return mask_fetched_text(text, keep_internal_ports=True)  # 8000 и 18188 видимы (SPEC 0.1, правило портов)
 
 
 def _classify(returncode: int, stderr_text: str) -> str:

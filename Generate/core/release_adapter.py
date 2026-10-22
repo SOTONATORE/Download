@@ -30,6 +30,9 @@ except ImportError:
 PROMPTS_FILENAME = "prompts.json"
 LINKS_FILENAME = "generated_links.txt"
 SERVICE_FILES = frozenset({PROMPTS_FILENAME, LINKS_FILENAME})
+# Диагностика карт (SPEC 0.1, правило портов): ssh_diag.log, vast_logs.txt, worker_log.txt, instance.json.
+# В GitHub Release не выкладываются; остаются только в артефакте запуска.
+CARD_DIAGNOSTIC_FILES = frozenset({"ssh_diag.log", "vast_logs.txt", "worker_log.txt", "instance.json"})
 
 DEFAULT_ASSET_LIMIT = 900
 HASH_PREFIX_LEN = 12
@@ -445,6 +448,8 @@ class ReleaseUploader:
             raise GeminiInputError(f"Клип не относится к служебному релизу: {name}")
         if name == LINKS_FILENAME:
             raise GeminiInputError(f"{LINKS_FILENAME} загружается в итоговый релиз, не в служебный.")
+        if name in CARD_DIAGNOSTIC_FILES:
+            raise GeminiInputError(f"Диагностика карты не выкладывается в релиз: {name}")
         tag = self._open_run_release("service")
         self._upload_service_asset(tag, path)
 
