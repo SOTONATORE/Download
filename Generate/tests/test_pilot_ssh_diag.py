@@ -4,9 +4,14 @@
 Настоящей SSH-пробы нет: run_probe подменён на функцию, которая возвращает успешный результат и запоминает
 аргументы адреса. Канареечные значения заведомо фальшивые: адрес из диапазона документации; в ассертах не печатаются.
 """
+import errno
 import logging
+import socket
 import sys
 from pathlib import Path
+
+import httpx
+import pytest
 
 try:
     from Generate.core import orchestrator as orch
@@ -76,3 +81,68 @@ def test_pilot_loop_calls_ssh_diag_while_card_runs(tmp_path, monkeypatch, caplog
     assert "PILOT-ИТОГ: результат=ok" in caplog.text
     assert summary.completed == 1
     assert summary.exit_code == orch.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Проба порта 18188: класс ошибки вместо «код None». Офлайн; адреса в ассертах не печатаются.
+# ---------------------------------------------------------------------------
+
+def _probe_orc(transport=None):
+    """Оркестратор без конструктора: нужен только клиент HTTP для _probe_pilot."""
+    orc = orch.Orchestrator.__new__(orch.Orchestrator)
+    orc._http = httpx.Client(transport=transport) if transport is not None else httpx.Client(timeout=2, trust_env=False)
+    return orc
+
+
+def test_probe_status_is_returned_not_classified():
+    def handler(request):
+        return httpx.Response(503, text="тело ответа не логируется")
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (503, None)
+
+
+def test_probe_timeout_gives_connect_timeout():
+    def handler(request):
+        raise httpx.ConnectTimeout("таймаут")
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "connect_timeout")
+
+
+def test_probe_refused_chain_gives_connect_refused():
+    def handler(request):
+        try:
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        except ConnectionRefusedError as inner:
+            raise httpx.ConnectError("соединение не установлено") from inner
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "connect_refused")
+
+
+def test_probe_real_closed_localhost_port_gives_connect_refused():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()  # порт свободен и закрыт: соединение получает отказ ОС
+    orc = _probe_orc()
+    assert orc._probe_pilot(f"http://127.0.0.1:{port}") == (None, "connect_refused")
+
+
+def test_probe_other_failure_gives_unknown():
+    def handler(request):
+        raise httpx.RemoteProtocolError("разрыв")
+    orc = _probe_orc(httpx.MockTransport(handler))
+    assert orc._probe_pilot("http://192.0.2.9:31888") == (None, "unknown")
+
+
+@pytest.mark.parametrize("probe_result, expected", [
+    ((None, "connect_refused"), "пока не отвечает (ошибка connect_refused)"),
+    ((None, "connect_timeout"), "пока не отвечает (ошибка connect_timeout)"),
+    ((503, None), "пока не отвечает (код 503)"),
+])
+def test_pilot_log_line_shows_class_or_status(tmp_path, monkeypatch, caplog, probe_result, expected):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(orch.Orchestrator, "_probe_pilot", lambda self, base: probe_result)
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast).run()  # ответа нет до таймаута пилота
+    assert f"PILOT: порт 18188 {expected}" in caplog.text
+    assert "код None" not in caplog.text

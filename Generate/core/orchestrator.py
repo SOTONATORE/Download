@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -90,7 +91,8 @@ VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без отве�
 SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
 SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
 SSH_DIAG_BASE_COMMANDS = ("ping", "worker_health", "bootstrap_tail")  # каждый тик
-SSH_DIAG_EXTRA_COMMANDS = ("workspace_list", "processes", "listening", "gpu", "comfy_health")
+SSH_DIAG_EXTRA_COMMANDS = ("workspace_list", "processes", "listening", "gpu")  # каждый пятый тик
+SSH_DIAG_EVERY_TICK_LAST = ("comfy_health",)  # каждый тик, последним в блоке (порядок блоков как раньше)
 SSH_DIAG_EXTRA_EVERY = 5  # каждый пятый тик выполняются и дополнительные проверки
 # Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
@@ -329,6 +331,21 @@ def _pilot_verdict(code: Optional[int]) -> Optional[str]:
     if code in PILOT_AUTH_CODES:
         return "auth_required"
     return None
+
+
+def _pilot_error_class(exc: BaseException) -> str:
+    """Класс ошибки HTTP-пробы пилота: connect_timeout (любой таймаут httpx), connect_refused (ECONNREFUSED
+    в цепочке причин), иначе unknown. Текст исключения не используется: он может содержать адрес."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "connect_timeout"
+    cur: Optional[BaseException] = exc
+    for _ in range(6):
+        if cur is None:
+            break
+        if isinstance(cur, ConnectionRefusedError) or getattr(cur, "errno", None) == errno.ECONNREFUSED:
+            return "connect_refused"
+        cur = cur.__cause__
+    return "unknown"
 
 
 def _valid_worker_build(value) -> bool:
@@ -1072,8 +1089,9 @@ class Orchestrator:
     def _pull_ssh_diag(self, now: float) -> None:
         """SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в SSH_DIAG_INTERVAL_SEC.
 
-        Тик выполняет проверки модуля ssh_probe по одной команде: ping, worker_health, bootstrap_tail; каждый
-        пятый тик ещё пять. Вывод каждой проверки дописывается в cards/<слот>/ssh_diag.log целиком, после маски.
+        Тик выполняет проверки модуля ssh_probe по одной команде: ping, worker_health, bootstrap_tail, comfy_health;
+        каждый пятый тик ещё четыре (workspace_list, processes, listening, gpu). Вывод каждой проверки дописывается
+        в cards/<слот>/ssh_diag.log целиком, после маски.
         Адрес и порт передаются только аргументами run_probe и нигде не пишутся (SPEC 0.1, F01). Ключ берётся из
         VAST_SSH_KEY один раз на вызов. Сбой проверки не останавливает цикл шагов. Готовая карта пропускается;
         снятая карта уже без адреса (сброшен в _retire) и из _slots удалена.
@@ -1121,6 +1139,7 @@ class Orchestrator:
         names = list(SSH_DIAG_BASE_COMMANDS)
         if tick % SSH_DIAG_EXTRA_EVERY == 0:
             names += list(SSH_DIAG_EXTRA_COMMANDS)
+        names += list(SSH_DIAG_EVERY_TICK_LAST)
         blocks = [f"=== {_utc_now()} tick {tick} ==="]
         ping_class = "exception"
         for name in names:
@@ -1371,7 +1390,7 @@ class Orchestrator:
                                           PILOT_HTTP_PORT, _port_keys_text(info))
                         else:
                             self._remember_card_address(info.public_ip, port)
-                            code = self._probe_pilot(f"http://{info.public_ip}:{port}")
+                            code, probe_err = self._probe_pilot(f"http://{info.public_ip}:{port}")
                             last_code = code
                             verdict = _pilot_verdict(code)
                             if verdict is not None:
@@ -1380,7 +1399,8 @@ class Orchestrator:
                                 log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.",
                                          PILOT_HTTP_PORT, code, port_at - rent_at)
                                 break
-                            log.debug("PILOT: порт %d пока не отвечает (код %s).", PILOT_HTTP_PORT, code)
+                            detail = f"код {code}" if code is not None else f"ошибка {probe_err}"
+                            log.debug("PILOT: порт %d пока не отвечает (%s).", PILOT_HTTP_PORT, detail)
                 self._sleep(self.poll_interval)
         finally:
             # уборка по метке pilot-<run_id>: та же функция, что у основного пути; карты гасятся всегда
@@ -1465,13 +1485,17 @@ class Orchestrator:
         ]
         return "\n".join(lines) + "\n"
 
-    def _probe_pilot(self, base: str) -> Optional[int]:
-        """GET PILOT_PROBE_PATH на порту ComfyUI. Возвращает код HTTP или None, если ответа нет."""
+    def _probe_pilot(self, base: str) -> tuple[Optional[int], Optional[str]]:
+        """GET PILOT_PROBE_PATH на порту ComfyUI. Возвращает (код HTTP, None) или (None, класс ошибки).
+
+        Класс ошибки — из словаря ssh_probe (connect_refused, connect_timeout, unknown). Текст исключения
+        не возвращается: в нём может быть адрес. Тело ответа не читается и не логируется.
+        """
         try:
             resp = self._http.get(base + PILOT_PROBE_PATH, timeout=PILOT_PROBE_TIMEOUT_SEC)
-        except httpx.HTTPError:
-            return None
-        return resp.status_code
+        except httpx.HTTPError as exc:
+            return None, _pilot_error_class(exc)
+        return resp.status_code, None
 
     # --- промпты -------------------------------------------------------------
     def _read_state(self) -> dict:

@@ -19,8 +19,10 @@ CANARY_HOST = "203.0.113.7"
 CANARY_PORT = 2222
 CANARY_KEY = "CANARY-KEY-12345"
 BASE = ("ping", "worker_health", "bootstrap_tail")
-EXTRA = ("workspace_list", "processes", "listening", "gpu", "comfy_health")
-ALL = BASE + EXTRA
+EXTRA = ("workspace_list", "processes", "listening", "gpu")  # каждый пятый тик
+COMFY = "comfy_health"  # каждый тик, последним в блоке
+EVERY_TICK = BASE + (COMFY,)
+ALL = BASE + EXTRA + (COMFY,)  # тик 5
 
 
 class FakeProbe:
@@ -116,8 +118,8 @@ def test_cadence_runs_at_zero_and_thirty_only(tmp_path, monkeypatch, caplog):
     orc._slots[1] = slot
     _run(orc, monkeypatch, fake, [0.0, 10.0, 20.0, 30.0])
     assert slot.ssh_diag_tick == 2
-    assert len(fake.calls) == 6  # два тика по три проверки
-    assert tuple(c[3] for c in fake.calls) == BASE + BASE
+    assert len(fake.calls) == 8  # два тика по четыре проверки
+    assert tuple(c[3] for c in fake.calls) == EVERY_TICK * 2
 
 
 def test_tick_one_runs_base_and_tick_five_runs_all(tmp_path, monkeypatch):
@@ -128,8 +130,8 @@ def test_tick_one_runs_base_and_tick_five_runs_all(tmp_path, monkeypatch):
     _run(orc, monkeypatch, fake, [0.0, 30.0, 60.0, 90.0, 120.0])
     assert slot.ssh_diag_tick == 5
     names = [c[3] for c in fake.calls]
-    assert tuple(names[:3]) == BASE  # тик 1
-    assert tuple(names[12:]) == ALL  # тик 5: базовые и дополнительные
+    assert tuple(names[:4]) == EVERY_TICK  # тик 1
+    assert tuple(names[16:]) == ALL  # тик 5: базовые, дополнительные и comfy_health
     text = _diag_file(tmp_path).read_text(encoding="utf-8")
     assert "tick 5 ===" in text
     assert "--- gpu (ok) ---" in text
@@ -167,7 +169,7 @@ def test_runtime_error_does_not_stop_loop(tmp_path, monkeypatch, caplog):
     orc = _bare_orc(tmp_path)
     orc._slots[1] = _slot()
     _run(orc, monkeypatch, fake, [0.0])
-    assert tuple(c[3] for c in fake.calls) == BASE  # ping упал, остальные проверки шли
+    assert tuple(c[3] for c in fake.calls) == EVERY_TICK  # ping упал, остальные проверки шли
     messages = _ssh_messages(caplog)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("RuntimeError" in w for w in warnings)
@@ -207,7 +209,7 @@ def test_no_sleep_across_full_path_with_errors(tmp_path, monkeypatch, caplog):
     orc = _bare_orc(tmp_path)
     orc._slots[1] = _slot()
     _run(orc, monkeypatch, fake, [0.0, 30.0, 60.0, 90.0, 120.0])  # autouse-фикстура поднимет на любой time.sleep
-    assert len(fake.calls) == 20
+    assert len(fake.calls) == 24  # четыре тика по четыре и пятый по восемь
 
 
 # ---------------------------------------------------------------------------
@@ -267,3 +269,26 @@ def test_empty_key_message_once_per_interval(tmp_path, monkeypatch, caplog):
     assert fake.calls == []
     assert _ssh_messages(caplog) == ["SSH-диагностика пропущена: ключ не задан"] * 3
 
+
+def test_comfy_health_runs_on_tick_one_and_two(tmp_path, monkeypatch):
+    fake = FakeProbe()
+    orc = _bare_orc(tmp_path)
+    slot = _slot()
+    orc._slots[1] = slot
+    _run(orc, monkeypatch, fake, [0.0, 30.0])
+    names = [c[3] for c in fake.calls]
+    assert slot.ssh_diag_tick == 2
+    assert names == list(EVERY_TICK) * 2
+    assert names.count(COMFY) == 2
+
+
+def test_heavy_commands_run_only_on_tick_five(tmp_path, monkeypatch):
+    fake = FakeProbe()
+    orc = _bare_orc(tmp_path)
+    orc._slots[1] = _slot()
+    _run(orc, monkeypatch, fake, [0.0, 30.0, 60.0, 90.0, 120.0])
+    names = [c[3] for c in fake.calls]
+    assert names[:16] == list(EVERY_TICK) * 4  # тики 1–4: без тяжёлых проверок
+    for heavy in EXTRA:
+        assert names.count(heavy) == 1  # только на тике 5
+    assert names.count(COMFY) == 5  # comfy_health на каждом из пяти тиков
