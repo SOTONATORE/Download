@@ -1735,6 +1735,8 @@ class Orchestrator:
             # пилот: ни токена воркера, ни HF_TOKEN (загрузка весов отключена); открыт только порт ComfyUI
             env = {
                 "GEN_LOG_LEVEL": self.log_level,
+                # образ vastai/comfy без аргументов не стартует ComfyUI на 18188: те же аргументы, что у воркера
+                "COMFYUI_ARGS": COMFYUI_ARGS,
                 f"-p {PILOT_HTTP_PORT}:{PILOT_HTTP_PORT}": "1",
             }
         else:

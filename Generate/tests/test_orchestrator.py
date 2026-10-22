@@ -1490,11 +1490,30 @@ def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatc
     env = vast.created[0]["env"]
     forbidden = {"WORKER_TOKEN", "HF_TOKEN", "GEN_" + "GEMINI_API_KEY", "GH_TOKEN"}
     assert not (forbidden & set(env))
-    assert not any(k.startswith(("COMFYUI_", "PORTAL_CONFIG", "OPEN_BUTTON_")) for k in env)
+    assert not any(k.startswith(("PORTAL_CONFIG", "OPEN_BUTTON_")) for k in env)
+    assert [k for k in env if k.startswith("COMFYUI_")] == ["COMFYUI_ARGS"]
     assert not any("8000" in k for k in env)          # -p 8000:8000 не добавляется
     assert "-p 18188:18188" in env                    # внутренний порт пилота
-    assert set(env) <= {"GEN_LOG_LEVEL", "-p 18188:18188"}
+    assert set(env) <= {"GEN_LOG_LEVEL", "COMFYUI_ARGS", "-p 18188:18188"}
     _no_secrets(json.dumps(env))
+
+
+def test_pilot_passes_exact_comfyui_args(tmp_path, monkeypatch):
+    """Пилот передаёт COMFYUI_ARGS с точным значением: без них образ не поднимает ComfyUI на 18188."""
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast).run()
+    env = vast.created[0]["env"]
+    assert env["COMFYUI_ARGS"] == "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
+
+
+def test_generation_env_comfyui_args_unchanged(tmp_path, monkeypatch):
+    """Генерация не меняется пилотом: env карты воркера содержит то же значение COMFYUI_ARGS, что и раньше,
+    и не получает пилотских ключей (GEN_LOG_LEVEL и -p 18188 только у пилота)."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    rig.run()
+    env = rig.vast.created[0]["env"]
+    assert env["COMFYUI_ARGS"] == "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
+    assert "-p 18188:18188" not in env
 
 
 def test_pilot_writes_artifact_layout_and_notes_skipped_files(tmp_path, monkeypatch, caplog):
