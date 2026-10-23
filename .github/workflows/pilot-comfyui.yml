@@ -118,8 +118,11 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           GEN_LOG_LEVEL: "DEBUG"
         run: |
-          # Стоковый образ (plan stage 5, option A); код воркера приходит через onstart
+          # Стоковый образ (plan stage 5, option A); onstart пилота скачивает Generate/worker/pilot_start.sh при коммите
+          # GITHUB_SHA и запускает его с bash; вывод на карте пишется в /opt/pilot/onstart.log (см. cli.pilot_onstart_cmd)
           DOCKER_IMAGE="vastai/comfy:v0.41.0-cuda-13.2-py312"
+          # текст onstart пилота собирает код (SHA и репозиторий проверяются там); токенов в нём нет
+          PILOT_START_CMD="$(python -c 'import sys; from Generate.cli import pilot_onstart_cmd; print(pilot_onstart_cmd(sys.argv[1], sys.argv[2]))' "$GITHUB_SHA" "$REPO")"
           # каталог артефакта пилота (SPEC 10.4): run/debug.log; загружается шагом «Upload pilot artifact»
           PILOT_ART_DIR="$RUNNER_TEMP/pilot-artifact"
           args=(
@@ -139,6 +142,7 @@ jobs:
             --run-id "$RUN_ID"
             --docker-image "$DOCKER_IMAGE"
             --pilot
+            --pilot-start-cmd "$PILOT_START_CMD"
             --artifact-dir "$PILOT_ART_DIR"
             --debug-logs
           )
