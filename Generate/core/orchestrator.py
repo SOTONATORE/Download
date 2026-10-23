@@ -380,20 +380,6 @@ def _pilot_error_class(exc: BaseException) -> str:
     return "unknown"
 
 
-def _pilot_chain_types(exc: BaseException) -> list[str]:
-    """ВРЕМЕННАЯ диагностика для теста: имена классов звеньев цепочки и errno у OSError.
-
-    Адреса, порты и текст сообщений не попадают в результат. В продакшн-логах не используется.
-    """
-    out: list[str] = []
-    for link in _pilot_chain(exc):
-        name = type(link).__name__
-        if isinstance(link, OSError) and isinstance(link.errno, int):
-            name += f"(errno={link.errno})"
-        out.append(name)
-    return out
-
-
 def _valid_worker_build(value) -> bool:
     return isinstance(value, str) and WORKER_BUILD_RE.fullmatch(value) is not None
 

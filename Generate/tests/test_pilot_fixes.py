@@ -6,8 +6,12 @@
 """
 import json
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 try:
     from Generate.core import log_setup as ls
@@ -174,3 +178,27 @@ def test_pilot_instance_json_is_masked_and_ssh_presence_is_logged(tmp_path, monk
     assert CANARY_HOST not in debug_text
     assert str(CANARY_PORT) not in debug_text
     assert CANARY_KEY not in debug_text
+
+
+# ---------------------------------------------------------------- pilot_start.sh (этап 1.4)
+
+PILOT_START = Path(__file__).resolve().parents[1] / "worker" / "pilot_start.sh"
+
+
+def test_pilot_start_has_no_workspace_slash_path():
+    text = PILOT_START.read_text(encoding="utf-8")
+    # /opt/workspace-internal/ComfyUI содержит «/workspace», но не «/workspace/»: проверка по форме со слешем
+    assert "/workspace/" not in text
+
+
+def test_pilot_start_reports_every_failure_step():
+    text = PILOT_START.read_text(encoding="utf-8")
+    for marker in ("FAILED: venv", "FAILED: clone", "FAILED: args", "FAILED: exited", "FAILED: timeout"):
+        assert marker in text, marker
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="нужен bash")
+def test_pilot_start_passes_bash_syntax_check():
+    res = subprocess.run([shutil.which("bash"), "-n", str(PILOT_START)],
+                         capture_output=True, text=True, timeout=30)
+    assert res.returncode == 0, res.stderr

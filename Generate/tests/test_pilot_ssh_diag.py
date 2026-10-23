@@ -150,22 +150,6 @@ def test_chain_walk_stops_on_cycle():
     assert len(orch._pilot_chain(a)) == 2
 
 
-def test_pilot_chain_types_real_closed_localhost_port_structure():
-    # ВРЕМЕННО: показывает структуру цепочки настоящей ошибки; адреса и порты в результате не должны быть
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    orc = _probe_orc()
-    with pytest.raises(httpx.HTTPError) as info:
-        orc._http.get(f"http://127.0.0.1:{port}/")
-    types = orch._pilot_chain_types(info.value)
-    assert types, "цепочка пуста"
-    assert any("ConnectError" in t or "OSError" in t or "ConnectionRefusedError" in t for t in types), types
-    for t in types:
-        assert "127.0.0.1" not in t and ":" not in t, types
-
-
 def test_probe_real_closed_localhost_port_gives_connect_refused():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))

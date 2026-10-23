@@ -372,6 +372,33 @@ def _pilot_mode(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "pilot", False))
 
 
+# onstart пилота: карта скачивает pilot_start.sh из коммита, который тестируется, и запускает его с bash
+PILOT_START_PATH = "Generate/worker/pilot_start.sh"
+PILOT_ONSTART_LOG = "/opt/pilot/onstart.log"
+_PILOT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_PILOT_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def pilot_onstart_cmd(sha: str, repo: str) -> str:
+    """Текст onstart пилота для --pilot-start-cmd (workflow подставляет GITHUB_SHA и REPO).
+
+    Скрипт скачивается по raw-адресу коммита и запускается в фоне (setsid nohup bash). Вывод скачивания и скрипта
+    дописывается в PILOT_ONSTART_LOG на карте. COMFYUI_ARGS в команду не попадает: он приходит в окружении карты.
+    Токенов и секретов в тексте нет. Приватный репозиторий не поддерживается: токен здесь не передаётся.
+    Некорректные sha или repo вызывают ValueError до аренды.
+    """
+    if not isinstance(sha, str) or _PILOT_SHA_RE.fullmatch(sha) is None:
+        raise ValueError("коммит пилота (SHA): нужны 40 символов 0-9 и a-f")
+    if not isinstance(repo, str) or _PILOT_REPO_RE.fullmatch(repo) is None:
+        raise ValueError("репозиторий пилота: нужен вид владелец/имя")
+    url = f"https://raw.githubusercontent.com/{repo}/{sha}/{PILOT_START_PATH}"
+    return (
+        f"mkdir -p /opt/pilot && curl -fsSL --max-time 60 {url} -o /opt/pilot/pilot_start.sh"
+        f" >> {PILOT_ONSTART_LOG} 2>&1"
+        f" && setsid nohup bash /opt/pilot/pilot_start.sh >> {PILOT_ONSTART_LOG} 2>&1 </dev/null &"
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Основной запуск генерации (этапы 4-9)."""
     # None = вход не задан, образ берётся из конфига (стоковый образ, SPEC 8.4, вариант A)

@@ -1080,3 +1080,32 @@ def test_watch_does_not_print_key_or_heartbeat_content(capsys, kill_env, tmp_pat
     assert code == 3
     assert canary not in cap.out + cap.err
     assert "203.0.113.5" not in cap.out + cap.err
+
+
+# ---------------------------------------------------------------- onstart пилота (этап 1.2)
+
+PILOT_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_pilot_onstart_fetches_script_at_sha_and_logs_on_rental():
+    cmd = cli.pilot_onstart_cmd(PILOT_SHA, "SOTONATORE/Download")
+    assert cmd.strip()
+    assert f"https://raw.githubusercontent.com/SOTONATORE/Download/{PILOT_SHA}/Generate/worker/pilot_start.sh" in cmd
+    assert "bash /opt/pilot/pilot_start.sh" in cmd
+    assert f">> {cli.PILOT_ONSTART_LOG} 2>&1" in cmd
+    assert cmd.count(cli.PILOT_ONSTART_LOG) == 2
+    # COMFYUI_ARGS приходит через окружение карты, токенов в команде нет
+    assert "COMFYUI_ARGS" not in cmd
+    assert "token" not in cmd.lower()
+
+
+@pytest.mark.parametrize("sha", ["", "main", "0" * 39, "0" * 41, "G" * 40, "A" * 40, "$GITHUB_SHA"])
+def test_pilot_onstart_refuses_bad_sha(sha):
+    with pytest.raises(ValueError):
+        cli.pilot_onstart_cmd(sha, "SOTONATORE/Download")
+
+
+@pytest.mark.parametrize("repo", ["", "Download", "a/b/c", "a/b;rm", "owner/repo name"])
+def test_pilot_onstart_refuses_bad_repo(repo):
+    with pytest.raises(ValueError):
+        cli.pilot_onstart_cmd(PILOT_SHA, repo)
