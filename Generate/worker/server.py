@@ -1251,7 +1251,7 @@ def main() -> int:
     except ValueError as exc:
         log.error("Некорректная настройка воркера: %s", exc)
         return 2
-    # ComfyUI образа слушает 18188 (COMFYUI_ARGS в env карты, SPEC 8.5)
+    # ComfyUI на порту 18188 (COMFYUI_ARGS в env карты, SPEC 8.5)
     comfy = ComfyClient(os.environ.get("COMFY_URL", "http://127.0.0.1:18188"))
     app = WorkerApp(token, comfy, port=port, idle_timeout_seconds=idle_min * 60.0,
                     workflow=workflow, bindings=bindings,

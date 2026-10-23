@@ -265,7 +265,7 @@ fi
 # COMFY_DIR здесь уже найденный путь: setup.sh и сервер берут его отсюда и сами не ищут.
 export COMFY_DIR
 export COMFY_OUTPUT_DIR="${COMFY_OUTPUT_DIR:-${COMFY_DIR}/output}"
-export COMFY_URL="${COMFY_URL:-http://127.0.0.1:18188}"  # ComfyUI образа, порт из COMFYUI_ARGS (SPEC 8.5)
+export COMFY_URL="${COMFY_URL:-http://127.0.0.1:18188}"  # ComfyUI в карте, порт из COMFYUI_ARGS (SPEC 8.5)
 export WORKER_HTTP_PORT="${WORKER_HTTP_PORT:-8000}"
 export WORKER_WORKFLOW_PATH="${WORKER_WORKFLOW_PATH:-${REPO_DIR}/model_profiles/workflows/ltx25.json}"
 export WORKER_BINDINGS_PATH="${WORKER_BINDINGS_PATH:-${REPO_DIR}/model_profiles/workflows/ltx25_bindings.json}"

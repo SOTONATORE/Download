@@ -14,7 +14,7 @@ export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
-# ComfyUI не запускается этим скриптом: его запускает образ vastai/comfy на порту 18188 (COMFYUI_ARGS, SPEC 8.5).
+# ComfyUI этим скриптом не запускается: порт 18188 задаётся COMFYUI_ARGS в env карты (SPEC 8.5). Стоковый путь образа через supervisor на Vast в ssh-режиме не работает.
 COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
 COMFY_TIMEOUT_SEC=180
 COMFY_POLL_SEC=2
@@ -161,8 +161,8 @@ if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
 fi
 log "Все файлы модели LTX-2.5 на месте."
 
-# --- 4. Ожидание ComfyUI образа на порту 18188 ---
-# Строка для разбора времени: все ли веса на месте в момент, когда ComfyUI образа уже может быть запущен.
+# --- 4. Ожидание ComfyUI на порту 18188 ---
+# Строка для разбора времени: все ли веса на месте в момент, когда ComfyUI уже может быть запущен.
 # Открытый вопрос (SPEC 8.5): поднимается ли ComfyUI раньше весов и видит ли он их. Первый прогон покажет.
 PRESENT=0
 for model_path in "${MODEL_PATHS[@]}"; do

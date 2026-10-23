@@ -73,8 +73,8 @@ log = logging.getLogger("Generate.orchestrator")
 
 MAX_ATTEMPTS = 3          # попыток рендера одного клипа
 # Пилот ComfyUI (pilot-comfyui.yml): проверка инфраструктуры Vast без воркера (Generate/PILOT_REPORT.md).
-PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри образа vastai/comfy (supervisor); внешний порт выдаёт Vast
-# команды старта по умолчанию нет: образ сам запускает ComfyUI. onstart уходит только при непустом --pilot-start-cmd
+PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри карты пилота; внешний порт выдаёт Vast
+# команды старта по умолчанию нет. Стоковый путь образа на Vast не работает (SPEC 8.5), пилот запускает ComfyUI напрямую; onstart пилота будет pilot_start.sh (запланировано). onstart уходит только при непустом --pilot-start-cmd
 PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI для проверки готовности
 PILOT_AUTH_CODES = frozenset({401, 403})  # ComfyUI отвечает, но просит токен: отдельный результат auth_required
 PILOT_PROBE_TIMEOUT_SEC = 5.0
@@ -94,9 +94,9 @@ SSH_DIAG_BASE_COMMANDS = ("ping", "worker_health", "bootstrap_tail")  # кажд
 SSH_DIAG_EXTRA_COMMANDS = ("workspace_list", "processes", "listening", "gpu")  # каждый пятый тик
 SSH_DIAG_EVERY_TICK_LAST = ("comfy_health",)  # каждый тик, последним в блоке (порядок блоков как раньше)
 SSH_DIAG_EXTRA_EVERY = 5  # каждый пятый тик выполняются и дополнительные проверки
-# Аргументы ComfyUI образа воркера (SPEC 8.5). Порт 18188 — порт ComfyUI образа; наружу карта публикует только 8000.
+# Аргументы ComfyUI воркера (SPEC 8.5). Порт 18188 — порт ComfyUI в карте; наружу карта публикует только 8000.
 COMFYUI_ARGS = "--disable-auto-launch --disable-xformers --port 18188 --enable-cors-header"
-# Boot-time seed для /etc/portal.yaml образа vastai/comfy; label строго ComfyUI, его проверяет exit_portal.sh.
+# PORTAL_CONFIG пилотного env (оставлено намеренно). Стоковый путь образа через /etc/portal.yaml на Vast не работает; label строго ComfyUI, его проверяет exit_portal.sh образа.
 PILOT_PORTAL_CONFIG = "localhost:18188:18188:/:ComfyUI"
 BID_MARGIN_DEFAULT = 0.03  # надбавка к ставке bid по умолчанию; то же значение, что bid_margin в config.default.yaml
 
@@ -1805,7 +1805,7 @@ class Orchestrator:
             # пилот: ни токена воркера, ни HF_TOKEN (загрузка весов отключена); открыт только порт ComfyUI
             env = {
                 "GEN_LOG_LEVEL": self.log_level,
-                # образ vastai/comfy без аргументов не стартует ComfyUI на 18188: те же аргументы, что у воркера
+                # стоковый путь образа vastai/comfy на Vast не поднимает ComfyUI на 18188 (SPEC 8.5): те же аргументы, что у воркера
                 "COMFYUI_ARGS": COMFYUI_ARGS,
                 "PORTAL_CONFIG": PILOT_PORTAL_CONFIG,
                 f"-p {PILOT_HTTP_PORT}:{PILOT_HTTP_PORT}": "1",
