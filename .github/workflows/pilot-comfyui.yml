@@ -194,21 +194,25 @@ jobs:
 
       # Шаг finalize-release из generate.yml не включён: пилот не пишет в Release.
 
-      - name: Upload run log
+      # Один файл для скачивания: pilot-<run_id>. Лог запуска кладётся в каталог артефакта (pilot-run.log, рядом с run/,
+      # cards/, service/); onstart.log карты уже лежит в cards/<карта>/ (шаг «Run pilot»). Выполняется при любом исходе.
+      - name: Collect pilot output
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pilot-run-log-${{ github.run_id }}
-          path: ${{ env.RUN_LOG }}
-          retention-days: 30
-          if-no-files-found: warn
+        run: |
+          dir="$RUNNER_TEMP/pilot-artifact"
+          mkdir -p "$dir"
+          if [ -f "$RUN_LOG" ]; then
+            cp "$RUN_LOG" "$dir/pilot-run.log"
+          else
+            echo "WARNING: лог запуска $RUN_LOG не найден, в артефакт он не попадёт"
+          fi
 
-      # Артефакт пилота (SPEC 10.4): каталог --artifact-dir шага «Run pilot». Загружается при любом исходе.
+      # Артефакт пилота (SPEC 10.4): каталог --artifact-dir шага «Run pilot» с лог запуска. Загружается при любом исходе.
       - name: Upload pilot artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-artifact-${{ github.run_id }}
+          name: pilot-${{ github.run_id }}
           path: ${{ runner.temp }}/pilot-artifact
           retention-days: 30
           if-no-files-found: warn
