@@ -6,6 +6,7 @@ Vast — заглушка, время — фальшивые часы (sleep д�
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
@@ -1361,9 +1362,38 @@ class PilotVast(FakeVast):
                                public_ip="10.0.0.1" if up else None, dph=0.0, is_bid=True, raw=raw)
 
 
-def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilot_start_cmd="", **kw):
-    """Оркестратор в пилотном режиме; /system_stats отвечает кодом status, адреса проб пишутся в probe_urls."""
+PILOT_TUNNEL_PORT = 45678  # локальный порт фиктивного туннеля: тесты пилота ssh не запускают
+
+
+class FakeTunnel:
+    """Подмена ssh_probe.open_tunnel: считает открытия и закрытия, ssh не запускает.
+
+    opened: (адрес, порт SSH, удалённый порт) — в ассертах не печатаются. closed: число закрытий.
+    """
+
+    def __init__(self) -> None:
+        self.opened: list = []
+        self.closed = 0
+
+    def __call__(self, host, port, key_text, remote_port, ready_timeout_sec=30.0):
+        self.opened.append((host, port, remote_port))
+        return self._open()
+
+    @contextlib.contextmanager
+    def _open(self):
+        try:
+            yield PILOT_TUNNEL_PORT
+        finally:
+            self.closed += 1
+
+
+def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilot_start_cmd="", tunnel=None, **kw):
+    """Оркестратор в пилотном режиме; /system_stats отвечает кодом status, адреса проб пишутся в probe_urls.
+
+    Туннель к карте подменён: tunnel (FakeTunnel) или новый FakeTunnel по умолчанию.
+    """
     urls = probe_urls if probe_urls is not None else []
+    monkeypatch.setattr(orch.ssh_probe, "open_tunnel", tunnel if tunnel is not None else FakeTunnel())
 
     def handler(request: httpx.Request) -> httpx.Response:
         urls.append(str(request.url))
@@ -1386,13 +1416,16 @@ def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilo
 PILOT_PORTS_OK = {"18188/tcp": [{"HostIp": "0.0.0.0", "HostPort": "31888"}]}
 
 
-def test_pilot_probe_goes_to_external_port_of_18188(tmp_path, monkeypatch, caplog):
+def test_pilot_probe_goes_through_tunnel_to_loopback(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     urls: list = []
+    tunnel = FakeTunnel()
     vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
-    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls).run()
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls, tunnel=tunnel).run()
     assert urls, "проба не выполнялась"
-    assert all(u.endswith(":31888/system_stats") for u in urls)
+    assert all(u == f"http://127.0.0.1:{PILOT_TUNNEL_PORT}/system_stats" for u in urls)
+    assert tunnel.opened and all(t[2] == 18188 for t in tunnel.opened)  # туннель на внутренний порт 18188
+    assert tunnel.closed == len(tunnel.opened)
     assert not any(":8188/" in u for u in urls)
     assert summary.exit_code == orch.EXIT_OK
     assert "PILOT-ИТОГ: результат=ok" in caplog.text
@@ -1421,6 +1454,21 @@ def test_other_code_until_timeout_gives_not_ready(tmp_path, monkeypatch, caplog)
     assert "HTTP 500" in caplog.text
     assert summary.failed == 1
     assert summary.exit_code == orch.EXIT_PARTIAL
+
+
+def test_pilot_marker_check_never_builds_url_from_external_port(tmp_path, monkeypatch, caplog):
+    """Маркер ComfyUI: туннель к 127.0.0.1 карты, URL из внешнего порта Vast не строится; туннель закрывается."""
+    caplog.set_level(logging.INFO)
+    urls: list = []
+    tunnel = FakeTunnel()
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls, tunnel=tunnel, status=500).run()
+    assert tunnel.opened, "туннель не открывался"
+    assert urls and all(u.startswith("http://127.0.0.1:") for u in urls)
+    assert not any("31888" in u for u in urls)
+    assert tunnel.closed == len(tunnel.opened)  # туннель закрыт после каждой пробы, в том числе неудачной
+    assert "PILOT-ИТОГ: результат=not_ready" in caplog.text
+    assert "PILOT-МАРКЕР порт 18188: HTTP 500" in caplog.text
 
 
 def test_missing_18188_key_logs_key_names_without_values(tmp_path, monkeypatch, caplog):

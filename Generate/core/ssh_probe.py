@@ -15,8 +15,10 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import socket
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -100,6 +102,29 @@ def _write_key(key_text: str) -> str:
     return path
 
 
+def _check_target(host: str, port: int) -> None:
+    """Адрес и порт SSH: ValueError до любого подключения. Общая проверка для команд и туннеля."""
+    if not isinstance(host, str) or not host.strip() or any(c.isspace() for c in host):
+        raise ValueError("Некорректный адрес для проверки.")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("Некорректный порт для проверки.")
+
+
+def _ssh_options(port: int, key_path: str) -> list[str]:
+    """Общие параметры ssh (порт, ключ, опции) для команд и для туннеля. Одно место для опций подключения."""
+    # Проверка ключа хостов отключена: адреса Vast меняются при каждой аренде. Риск принят владельцем.
+    return [
+        "-p", str(port),
+        "-i", key_path,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ]
+
+
 def run_probe(host: str, port: int, key_text: Optional[str], command_name: str,
               timeout_sec: int = 20) -> ProbeResult:
     """Выполняет одну команду из COMMANDS на карте по SSH и возвращает замаскированный результат.
@@ -109,27 +134,16 @@ def run_probe(host: str, port: int, key_text: Optional[str], command_name: str,
     """
     if command_name not in COMMANDS:
         raise ValueError("Неизвестное имя команды проверки.")
-    if not isinstance(host, str) or not host.strip() or any(c.isspace() for c in host):
-        raise ValueError("Некорректный адрес для проверки.")
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-        raise ValueError("Некорректный порт для проверки.")
+    _check_target(host, port)
     if key_text is None or not key_text.strip():
         return ProbeResult(ok=False, returncode=None, output="", failure_class="key_missing", output_length=0)
 
     key_path: Optional[str] = None
     try:
         key_path = _write_key(key_text)
-        # Проверка ключа хостов отключена: адреса Vast меняются при каждой аренде. Риск принят владельцем.
         args = [
             "ssh",
-            "-p", str(port),
-            "-i", key_path,
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
+            *_ssh_options(port, key_path),
             f"root@{host}",
             COMMANDS[command_name],
         ]
@@ -167,6 +181,124 @@ def run_probe(host: str, port: int, key_text: Optional[str], command_name: str,
             output_length=len(output),
         )
     finally:
+        if key_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(key_path)
+
+
+# --- туннель к loopback карты (проба ComfyUI пилота, SPEC 8.5) ---------------------------------------
+TUNNEL_POLL_SEC = 0.5  # шаг ожидания локального порта туннеля
+
+
+class TunnelError(Exception):
+    """Туннель не открылся. Несёт только класс отказа из FAILURE_CLASSES: без адреса, порта и текста ssh."""
+
+    def __init__(self, failure_class: str) -> None:
+        super().__init__(failure_class)
+        self.failure_class = failure_class
+
+
+def _free_local_port() -> int:
+    """Свободный порт на 127.0.0.1 (узкое окно гонки допустимо: ssh с ExitOnForwardFailure сам откажет)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _exit_class(proc: subprocess.Popen) -> str:
+    """Класс отказа ssh, который завершился до готовности туннеля. Текст stderr не выводится."""
+    rc = proc.returncode
+    err = proc.stderr.read() if proc.stderr is not None else ""
+    if rc in (None, 0):
+        return "unknown"
+    return _classify(rc, err or "")
+
+
+def _wait_ready(proc: subprocess.Popen, local_port: int, timeout_sec: float) -> None:
+    """Ждёт, пока локальный порт туннеля примет соединение. Ошибка: ssh завершился или истёк срок."""
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        if proc.poll() is not None:
+            raise TunnelError(_exit_class(proc))
+        try:
+            with socket.create_connection(("127.0.0.1", local_port), timeout=1.0):
+                return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise TunnelError("connect_timeout")
+        time.sleep(TUNNEL_POLL_SEC)
+
+
+def _stop_tunnel(proc: subprocess.Popen) -> None:
+    """Останавливает ssh: сначала terminate, потом kill. Ошибки остановки не пробрасываются."""
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+    if proc.stderr is not None:
+        with contextlib.suppress(OSError):
+            proc.stderr.close()
+
+
+@contextlib.contextmanager
+def open_tunnel(host: str, port: int, key_text: Optional[str], remote_port: int,
+                ready_timeout_sec: float = 30.0):
+    """Туннель с локального 127.0.0.1 на 127.0.0.1:<remote_port> карты; отдаёт локальный порт.
+
+    Ключ, адрес и порт SSH — те же, что у run_probe (одни и те же параметры ssh, _ssh_options). Дополнительно:
+    -N, -L, ExitOnForwardFailure, ServerAliveInterval 15 и ServerAliveCountMax 3. Ключ пишется во временный файл
+    и удаляется, ssh останавливается при выходе из блока, в том числе при ошибке. Порт ожидается не дольше
+    ready_timeout_sec. При сбое поднимается TunnelError с классом отказа; пустой или неверный адрес дают
+    TunnelError("unknown") до запуска ssh (карта может ещё не сообщить адрес SSH).
+    """
+    try:
+        _check_target(host, port)
+    except ValueError:
+        raise TunnelError("unknown") from None
+    if key_text is None or not key_text.strip():
+        raise TunnelError("key_missing")
+    if isinstance(remote_port, bool) or not isinstance(remote_port, int) or not 1 <= remote_port <= 65535:
+        raise ValueError("Некорректный порт для туннеля.")
+    key_path: Optional[str] = None
+    proc: Optional[subprocess.Popen] = None
+    try:
+        try:
+            key_path = _write_key(key_text)
+            local_port = _free_local_port()
+        except OSError:
+            raise TunnelError("unknown") from None
+        args = [
+            "ssh",
+            "-N",
+            *_ssh_options(port, key_path),
+            "-L", f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
+            f"root@{host}",
+        ]
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            raise TunnelError("unknown") from None
+        _wait_ready(proc, local_port, ready_timeout_sec)
+        yield local_port
+    finally:
+        if proc is not None:
+            _stop_tunnel(proc)
         if key_path is not None:
             with contextlib.suppress(OSError):
                 os.unlink(key_path)

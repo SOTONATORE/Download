@@ -78,6 +78,7 @@ PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри карты пилот�
 PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI для проверки готовности
 PILOT_AUTH_CODES = frozenset({401, 403})  # ComfyUI отвечает, но просит токен: отдельный результат auth_required
 PILOT_PROBE_TIMEOUT_SEC = 5.0
+PILOT_TUNNEL_READY_SEC = 30.0  # ожидание локального порта SSH-туннеля к ComfyUI карты (пилот, SPEC 8.5)
 PILOT_NOT_FOUND_LIMIT = 3  # подряд ответов «экземпляр не найден» (VastInstanceNotFound), после которых пилот завершается
 MAX_NET_FAILS = 6         # подряд сбоев связи с воркером до снятия карты
 EXIT_OK = 0
@@ -1422,7 +1423,7 @@ class Orchestrator:
                                           PILOT_HTTP_PORT, _port_keys_text(info))
                         else:
                             self._remember_card_address(info.public_ip, port)
-                            code, probe_err = self._probe_pilot(f"http://{info.public_ip}:{port}")
+                            code, probe_err = self._probe_pilot_tunnel(slot)
                             last_code = code
                             verdict = _pilot_verdict(code)
                             if verdict is not None:
@@ -1528,6 +1529,21 @@ class Orchestrator:
         except httpx.HTTPError as exc:
             return None, _pilot_error_class(exc)
         return resp.status_code, None
+
+    def _probe_pilot_tunnel(self, slot) -> tuple[Optional[int], Optional[str]]:
+        """Проба /system_stats через SSH-туннель к 127.0.0.1 карты: ComfyUI слушает только loopback (SPEC 8.5).
+
+        Ключ и адрес SSH берутся так же, как у SSH-диагностики (VAST_SSH_KEY, адрес и порт слота). Туннель живёт
+        только на время одной пробы и закрывается при любом исходе. Внешний порт Vast сюда не передаётся.
+        Возвращает то же, что _probe_pilot; локальный порт туннеля и адрес карты в результат и в журнал не попадают.
+        """
+        key = os.environ.get("VAST_SSH_KEY", "")
+        try:
+            with ssh_probe.open_tunnel(slot.ssh_host, slot.ssh_port, key, PILOT_HTTP_PORT,
+                                       ready_timeout_sec=PILOT_TUNNEL_READY_SEC) as local_port:
+                return self._probe_pilot(f"http://127.0.0.1:{local_port}")
+        except ssh_probe.TunnelError as exc:
+            return None, exc.failure_class
 
     # --- промпты -------------------------------------------------------------
     def _read_state(self) -> dict:
