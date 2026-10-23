@@ -125,7 +125,7 @@
 | `Generate/core/orchestrator.py` | 805 | строка `-p …` в пилотном env теперь `-p 18188:18188` (через константу, сам текст строки не менялся) |
 | `Generate/cli.py` | 492–493 | `--pilot-start-cmd`: пустое значение не передаётся дальше (`None`) |
 | `Generate/cli.py` | 668 | текст подсказки для `--pilot-start-cmd` |
-| `.github/workflows/pilot-comfyui.yml` | 15 | описание входа `pilot_start_cmd`: «пусто = не передавать, образ стартует сам» |
+| `Generate/cli.py` | 1062 | описание входа `pilot_start_cmd`: «пусто = не передавать, образ стартует сам» |
 | `.github/workflows/pilot-comfyui.yml` | 69 | описание `silent_host_timeout_min`: порт 18188 |
 | `Generate/tests/test_vast_client.py` | 274–290 | тест: без `onstart` поля в payload нет (None и пустая строка) |
 | `Generate/tests/test_orchestrator.py` | 1280–1437 | тесты пилота: проба на 18188, вердикты, ключ `ports`, пустой и непустой `onstart`, пилотный env |
