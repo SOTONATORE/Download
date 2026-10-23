@@ -202,3 +202,24 @@ def test_pilot_start_passes_bash_syntax_check():
     res = subprocess.run([shutil.which("bash"), "-n", str(PILOT_START)],
                          capture_output=True, text=True, timeout=30)
     assert res.returncode == 0, res.stderr
+
+
+# ---------------------------------------------------------------- пилот: логи Vast не запрашиваются
+
+def test_pilot_guard_never_sends_request_logs_on_destroy_paths(tmp_path, monkeypatch):
+    # оркестратор собран через конструктор (_pilot_orc): проверяется реальный флаг пилота
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    sent = []
+
+    def record_request_logs(*args, **kwargs):
+        sent.append(args)
+        return "https://result.example.test/logs/pilot.txt"
+
+    monkeypatch.setattr(vast, "request_logs", record_request_logs, raising=False)
+    orc = _pilot_orc(tmp_path, monkeypatch, vast=vast)
+    assert orc.pilot is True
+    slot = orch._CardSlot(index=1, generation=1, instance_id=77, machine_id=5, price=0.1, created=0.0)
+    slot.url = ""                                  # адреса воркера нет: путь уничтожения без логов воркера
+    assert orc._fetch_vast_logs(slot) is False     # пилот: request_logs не отправляется
+    orc._dump_before_destroy(slot)
+    assert sent == []

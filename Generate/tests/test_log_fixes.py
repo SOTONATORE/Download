@@ -62,6 +62,7 @@ def _bare_orc(tmp_path, vast, *, attempts=5, pause=30.0, sleeps=None, token=""):
     orc._token = token
     orc._card_addresses = set()
     orc.vast = vast
+    orc.pilot = False  # генерация: __init__ не вызывается, поэтому флаг задаётся явно
     orc._artifact = orch.RunArtifact(tmp_path / "artifact", orc._mask_remote)
     orc._vast_logs_attempts = attempts
     orc._vast_logs_pause = pause
