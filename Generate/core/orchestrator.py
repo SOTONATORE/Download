@@ -74,7 +74,7 @@ log = logging.getLogger("Generate.orchestrator")
 MAX_ATTEMPTS = 3          # попыток рендера одного клипа
 # Пилот ComfyUI (pilot-comfyui.yml): проверка инфраструктуры Vast без воркера (Generate/PILOT_REPORT.md).
 PILOT_HTTP_PORT = 18188   # порт ComfyUI внутри карты пилота; внешний порт выдаёт Vast
-# команды старта по умолчанию нет. Стоковый путь образа на Vast не работает (SPEC 8.5), пилот запускает ComfyUI напрямую; onstart пилота будет pilot_start.sh (запланировано). onstart уходит только при непустом --pilot-start-cmd
+# команды старта по умолчанию нет. Стоковый путь образа на Vast не работает (SPEC 8.5). Пилот запускает ComfyUI через onstart: pilot_start.sh из коммита (cli.pilot_onstart_cmd); onstart уходит только при непустом --pilot-start-cmd
 PILOT_PROBE_PATH = "/system_stats"   # эндпоинт ComfyUI для проверки готовности
 PILOT_AUTH_CODES = frozenset({401, 403})  # ComfyUI отвечает, но просит токен: отдельный результат auth_required
 PILOT_PROBE_TIMEOUT_SEC = 5.0
@@ -558,6 +558,10 @@ class RunArtifact:
     def card_vast_logs(self, slot, text: str) -> None:
         """Логи контейнера карты, полученные через Vast (отдельный файл рядом с worker_log.txt)."""
         self._write(self.card_dir(slot) / VAST_LOGS_FILE, text)
+
+    def card_onstart_log(self, slot, text: str) -> None:
+        """onstart.log карты пилота (копия с карты через SSH) рядом с остальными файлами карты."""
+        self._write(self.card_dir(slot) / "onstart.log", text)
 
     def card_ssh_diag(self, slot, text: str) -> None:
         """Блок SSH-диагностики одного тика; дописывается в конец файла (маска на каждой строке, как у журнала карты)."""
@@ -1338,7 +1342,6 @@ class Orchestrator:
         port_at: Optional[float] = None
         slot: Optional[_CardSlot] = None
         last_code: Optional[int] = None
-        keys_logged = False
         not_found_streak = 0          # подряд идущие VastInstanceNotFound при обновлении статуса
         dumped_first = False          # instance.json пилота: первый успешный ответ Vast
         dumped_running = False        # instance.json пилота: первый ответ со статусом running
@@ -1413,29 +1416,25 @@ class Orchestrator:
                         running_at = self.clock()
                         log.info("PILOT-МАРКЕР running: карта %d через %.0f с после аренды.",
                                  slot.instance_id, running_at - rent_at)
-                    if running_at is not None and info.public_ip:
-                        port = _mapped_port(info, PILOT_HTTP_PORT)
-                        if port is None:
-                            # ключа нет: в лог идут только имена ключей ports, значения не печатаем
-                            if not keys_logged:
-                                keys_logged = True
-                                log.error("PILOT: в поле ports нет ключа %d/tcp. Пришедшие ключи: %s.",
-                                          PILOT_HTTP_PORT, _port_keys_text(info))
-                        else:
-                            self._remember_card_address(info.public_ip, port)
-                            code, probe_err = self._probe_pilot_tunnel(slot)
-                            last_code = code
-                            verdict = _pilot_verdict(code)
-                            if verdict is not None:
-                                port_at = self.clock()
-                                result = verdict
-                                log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.",
-                                         PILOT_HTTP_PORT, code, port_at - rent_at)
-                                break
-                            detail = f"код {code}" if code is not None else f"ошибка {probe_err}"
-                            log.debug("PILOT: порт %d пока не отвечает (%s).", PILOT_HTTP_PORT, detail)
+                    # проба только через SSH-туннель: нужен адрес SSH карты; внешний порт Vast не используется (SPEC 8.5)
+                    if running_at is not None and slot.ssh_host and slot.ssh_port:
+                        self._remember_card_address(info.public_ip, None)
+                        code, probe_err = self._probe_pilot_tunnel(slot)
+                        last_code = code
+                        verdict = _pilot_verdict(code)
+                        if verdict is not None:
+                            port_at = self.clock()
+                            result = verdict
+                            log.info("PILOT-МАРКЕР порт %d: HTTP %s через %.0f с после аренды.",
+                                     PILOT_HTTP_PORT, code, port_at - rent_at)
+                            break
+                        detail = f"код {code}" if code is not None else f"ошибка {probe_err}"
+                        log.debug("PILOT: порт %d пока не отвечает (%s).", PILOT_HTTP_PORT, detail)
                 self._sleep(self.poll_interval)
         finally:
+            # onstart.log копируется до уборки: адрес SSH карты известен только пока карта жива
+            if slot is not None:
+                self._pull_pilot_onstart(slot)
             # уборка по метке pilot-<run_id>: та же функция, что у основного пути; карты гасятся всегда
             self._cleanup()
 
@@ -1544,6 +1543,27 @@ class Orchestrator:
                 return self._probe_pilot(f"http://127.0.0.1:{local_port}")
         except ssh_probe.TunnelError as exc:
             return None, exc.failure_class
+
+    def _pull_pilot_onstart(self, slot) -> None:
+        """Копия /opt/pilot/onstart.log карты пилота в папку карты артефакта (cards/slot<N>_generation<M>/onstart.log).
+
+        Команда фиксированная (ssh_probe.COMMANDS, onstart_log) и идёт тем же SSH-путём, что диагностика.
+        Сбой не блокирует запуск: одна строка WARNING с классом ошибки, без адреса и текста ssh.
+        """
+        if self._artifact is None:
+            return
+        if not (slot.ssh_host and slot.ssh_port):
+            log.warning("PILOT: onstart.log не скопирован: адрес SSH карты неизвестен.")
+            return
+        try:
+            res = ssh_probe.run_probe(slot.ssh_host, slot.ssh_port, os.environ.get("VAST_SSH_KEY", ""), "onstart_log")
+            if not res.ok:
+                log.warning("PILOT: onstart.log не скопирован: %s.", res.failure_class)
+                return
+            self._artifact.card_onstart_log(slot, res.output)
+            log.info("PILOT: onstart.log скопирован в артефакт, %d символов.", res.output_length)
+        except Exception as exc:  # копия лога не должна мешать уборке
+            log.warning("PILOT: onstart.log не скопирован: %s.", type(exc).__name__)
 
     # --- промпты -------------------------------------------------------------
     def _read_state(self) -> dict:
@@ -1804,13 +1824,13 @@ class Orchestrator:
         if self._stop.is_set():  # сигнал пришёл во время поиска: новая аренда не начинается
             return "stop"
         if self.pilot:
-            # пилот: ни токена воркера, ни HF_TOKEN (загрузка весов отключена); открыт только порт ComfyUI
+            # пилот: ни токена воркера, ни HF_TOKEN (загрузка весов отключена); порт наружу не публикуется,
+            # проба ComfyUI идёт через SSH-туннель к 127.0.0.1 карты (SPEC 8.5)
             env = {
                 "GEN_LOG_LEVEL": self.log_level,
                 # стоковый путь образа vastai/comfy на Vast не поднимает ComfyUI на 18188 (SPEC 8.5): те же аргументы, что у воркера
                 "COMFYUI_ARGS": COMFYUI_ARGS,
                 "PORTAL_CONFIG": PILOT_PORTAL_CONFIG,
-                f"-p {PILOT_HTTP_PORT}:{PILOT_HTTP_PORT}": "1",
             }
         else:
             env = {
@@ -1926,8 +1946,13 @@ class Orchestrator:
                 worker_logs = self._pull_card_logs(slot, final=True, timeout=timeout)
             except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
                 log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+        elif self.pilot:
+            # пилот: логов нет ни у воркера, ни через Vast; request_logs не отправляется
+            log.info("%s: логи не запрошены (пилот).", _card_name(slot, cap=True))
+            return
         else:
-            log.info("%s: адрес воркера неизвестен, логи не запрошены.", _card_name(slot, cap=True))
+            log.info("%s: адрес воркера неизвестен, логи воркера не запрошены; берутся логи Vast.",
+                     _card_name(slot, cap=True))
         if not worker_logs:
             # воркер не отдал логи: логи контейнера берутся через Vast (SPEC 8.4)
             try:
@@ -1944,6 +1969,8 @@ class Orchestrator:
         ни в файл; в журнал идут код ответа и размер. Файл пишется замаскированным и с ограничением строк.
         Любая ошибка гасится: снятие карты от логов не зависит.
         """
+        if self.pilot:  # пилот не запрашивает логи Vast (request_logs не отправляется)
+            return False
         if self._artifact is None:
             log.info("%s: каталог артефакта не задан, логи Vast не запрашиваются.", _card_name(slot, cap=True))
             return False

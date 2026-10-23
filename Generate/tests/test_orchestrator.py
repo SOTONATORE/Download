@@ -1358,8 +1358,11 @@ class PilotVast(FakeVast):
         status = self.steps[min(i, len(self.steps) - 1)]
         up = status == "running"
         raw = {} if self.ports is None else {"ports": self.ports}
+        # адрес SSH есть у запущенной карты: проба пилота идёт через туннель (SPEC 8.5), внешний порт не нужен
         return vc.InstanceInfo(instance_id=instance_id, actual_status=status, intended_status="running",
-                               public_ip="10.0.0.1" if up else None, dph=0.0, is_bid=True, raw=raw)
+                               public_ip="10.0.0.1" if up else None,
+                               ssh_host="ssh.invalid" if up else None, ssh_port=2222 if up else None,
+                               dph=0.0, is_bid=True, raw=raw)
 
 
 PILOT_TUNNEL_PORT = 45678  # локальный порт фиктивного туннеля: тесты пилота ssh не запускают
@@ -1471,16 +1474,83 @@ def test_pilot_marker_check_never_builds_url_from_external_port(tmp_path, monkey
     assert "PILOT-МАРКЕР порт 18188: HTTP 500" in caplog.text
 
 
-def test_missing_18188_key_logs_key_names_without_values(tmp_path, monkeypatch, caplog):
+def test_pilot_without_ssh_address_sends_no_probe(tmp_path, monkeypatch, caplog):
+    """Пилот проверяет ComfyUI только через SSH-туннель: без адреса SSH туннеля и пробы нет (внешний порт не нужен)."""
     caplog.set_level(logging.INFO)
     urls: list = []
-    vast = PilotVast([make_offer(1, 11)], [], ports={"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40001"}]})
-    _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls).run()
-    assert urls == []  # без ключа 18188/tcp пробы нет
-    assert "в поле ports нет ключа 18188/tcp" in caplog.text
-    assert "8000/tcp" in caplog.text
-    assert "40001" not in caplog.text
+    tunnel = FakeTunnel()
+
+    class NoSsh(PilotVast):
+        def get_instance(self, instance_id):
+            info = super().get_instance(instance_id)
+            info.ssh_host = None
+            info.ssh_port = None
+            return info
+
+    vast = NoSsh([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    _pilot_orc(tmp_path, monkeypatch, vast=vast, probe_urls=urls, tunnel=tunnel).run()
+    assert urls == [] and tunnel.opened == []
     assert "PILOT-ИТОГ: результат=not_ready" in caplog.text
+
+
+def test_pilot_without_worker_address_does_not_request_logs(tmp_path, monkeypatch, caplog):
+    """Пилот: адреса воркера нет, логи не запрашиваются ни у воркера, ни через Vast (request_logs не вызывается)."""
+    caplog.set_level(logging.INFO)
+    calls: list = []
+
+    class Spy(PilotVast):
+        def request_logs(self, instance_id, **kwargs):
+            calls.append("request_logs")
+            raise AssertionError("request_logs не должен вызываться в пилоте")
+
+        def download_logs(self, *args, **kwargs):
+            calls.append("download_logs")
+            raise AssertionError("download_logs не должен вызываться в пилоте")
+
+    vast = Spy([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    orc = _pilot_orc(tmp_path, monkeypatch, vast=vast)
+    slot = orch._CardSlot(index=1, generation=1, instance_id=77, machine_id=11, price=0.3, created=0.0)
+    orc._dump_before_destroy(slot)
+    assert calls == []
+    assert "логи не запрошены (пилот)" in caplog.text
+
+
+def test_pilot_copies_onstart_log_into_card_folder(tmp_path, monkeypatch, caplog):
+    """onstart.log карты пилота копируется в cards/slot1_generation1/onstart.log артефакта (один артефакт)."""
+    caplog.set_level(logging.INFO)
+    seen: list = []
+
+    def fake_probe(host, port, key_text, command_name, timeout_sec=20):
+        seen.append(command_name)
+        return orch.ssh_probe.ProbeResult(ok=True, returncode=0, output="[onstart] итог: код 0",
+                                          failure_class="ok", output_length=19)
+
+    monkeypatch.setattr(orch.ssh_probe, "run_probe", fake_probe)
+    art = tmp_path / "art"
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, artifact_dir=art).run()
+    assert "onstart_log" in seen
+    copied = art / "cards" / "slot1_generation1" / "onstart.log"
+    assert copied.read_text(encoding="utf-8").startswith("[onstart] итог")
+    assert "PILOT: onstart.log скопирован в артефакт" in caplog.text
+    assert summary.exit_code == orch.EXIT_OK
+
+
+def test_pilot_onstart_copy_failure_is_warning_and_run_continues(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+
+    def failing_probe(host, port, key_text, command_name, timeout_sec=20):
+        return orch.ssh_probe.ProbeResult(ok=False, returncode=1, output="", failure_class="command_failed",
+                                          output_length=0)
+
+    monkeypatch.setattr(orch.ssh_probe, "run_probe", failing_probe)
+    art = tmp_path / "art"
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    summary = _pilot_orc(tmp_path, monkeypatch, vast=vast, artifact_dir=art).run()
+    assert not (art / "cards" / "slot1_generation1" / "onstart.log").exists()
+    assert "PILOT: onstart.log не скопирован: command_failed" in caplog.text
+    assert "PILOT-ИТОГ: результат=ok" in caplog.text
+    assert summary.exit_code == orch.EXIT_OK
 
 
 @pytest.mark.parametrize(("code", "verdict"), [
@@ -1543,8 +1613,8 @@ def test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys(tmp_path, monkeypatc
     assert env["PORTAL_CONFIG"] == "localhost:18188:18188:/:ComfyUI"
     assert [k for k in env if k.startswith("COMFYUI_")] == ["COMFYUI_ARGS"]
     assert not any("8000" in k for k in env)          # -p 8000:8000 не добавляется
-    assert "-p 18188:18188" in env                    # внутренний порт пилота
-    assert set(env) <= {"GEN_LOG_LEVEL", "COMFYUI_ARGS", "PORTAL_CONFIG", "-p 18188:18188"}
+    assert not any(k.startswith("-p ") for k in env)  # порт 18188 не публикуется: проба идёт через SSH-туннель
+    assert set(env) <= {"GEN_LOG_LEVEL", "COMFYUI_ARGS", "PORTAL_CONFIG"}
     _no_secrets(json.dumps(env))
 
 
@@ -1558,7 +1628,7 @@ def test_pilot_passes_exact_comfyui_args(tmp_path, monkeypatch):
 
 def test_generation_env_comfyui_args_unchanged(tmp_path, monkeypatch):
     """Генерация не меняется пилотом: env карты воркера содержит то же значение COMFYUI_ARGS, что и раньше,
-    и не получает пилотских ключей (GEN_LOG_LEVEL и -p 18188 только у пилота)."""
+    и не получает пилотских ключей (GEN_LOG_LEVEL и COMFYUI_ARGS у пилота; порта пилота в env нет)."""
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     rig.run()
     env = rig.vast.created[0]["env"]

@@ -1086,7 +1086,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--pilot", action="store_true", default=False,
                        help="пилот ComfyUI: одна карта, без воркера, весов и Release; метка pilot-<run-id>")
     run_p.add_argument("--pilot-start-cmd", default="",
-                       help="команда старта ComfyUI в пилоте (UNVERIFIED); пусто = не передавать, образ стартует сам")
+                       help="команда старта ComfyUI в пилоте (UNVERIFIED); пусто = не передавать; пилот запускает pilot_start.sh из коммита")
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))

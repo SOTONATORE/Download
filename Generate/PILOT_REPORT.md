@@ -111,7 +111,7 @@
 
 ## 7. Изменения для vastai/comfy
 
-Разделы 1–6 описывают прежний путь с портом 8188. Для образа `vastai/comfy:v0.41.0-cuda-13.2-py312` (ComfyUI v0.41.0 в `/opt/workspace-internal/ComfyUI`, venv `/venv/main`) действует этот раздел: стоковый путь образа через supervisor на Vast в ssh-режиме не работает (нужны запись в `/etc/portal.yaml` и `/workspace`, а в ssh-режиме `/workspace` не создаётся). Пилот запускает ComfyUI напрямую: `python main.py $COMFYUI_ARGS` из `/opt/workspace-internal/ComfyUI` (если каталога нет, клон v0.41.0); ComfyUI слушает порт **18188**, внешний порт выдаёт Vast. Пилот не передаёт токены. Боевой путь `generate` не меняется.
+Разделы 1–6 описывают прежний путь с портом 8188. Для образа `vastai/comfy:v0.41.0-cuda-13.2-py312` (ComfyUI v0.41.0 в `/opt/workspace-internal/ComfyUI`, venv `/venv/main`) действует этот раздел: стоковый путь образа через supervisor на Vast в ssh-режиме не работает (нужны запись в `/etc/portal.yaml` и `/workspace`, а в ssh-режиме `/workspace` не создаётся). Пилот запускает ComfyUI напрямую: `python main.py $COMFYUI_ARGS` из `/opt/workspace-internal/ComfyUI` (если каталога нет, клон v0.41.0); ComfyUI слушает порт **18188** только на loopback карты; наружу порт не публикуется, проба идёт через SSH-туннель к `127.0.0.1`. Пилот не передаёт токены. Боевой путь `generate` не меняется.
 
 ### 7.1. Изменённые строки (номера в текущих файлах)
 
@@ -121,22 +121,25 @@
 | `Generate/core/orchestrator.py` | 69–71 | константа команды старта с путём `main.py` удалена; `PILOT_PROBE_PATH` сохранён; добавлен `PILOT_AUTH_CODES = {401, 403}` |
 | `Generate/core/orchestrator.py` | 227–249 | новые функции `_pilot_verdict` (код пробы → ok / auth_required / ждать) и `_port_keys_text` (только имена ключей `ports`) |
 | `Generate/core/orchestrator.py` | 330–331 | пустая `pilot_start_cmd` становится `None`; значения по умолчанию из кода больше нет |
-| `Generate/core/orchestrator.py` | 527–641 | `_run_pilot`: проба на 18188 по внешнему порту из `ports`, вердикты, маркеры, итог `PILOT-ИТОГ` |
-| `Generate/core/orchestrator.py` | 805 | строка `-p …` в пилотном env теперь `-p 18188:18188` (через константу, сам текст строки не менялся) |
+| `Generate/core/orchestrator.py` | ~1326–1465 | `_run_pilot`: проба на 18188 через SSH-туннель (без внешнего порта), вердикты, маркеры, копия `onstart.log` до уборки, итог `PILOT-ИТОГ` |
+| `Generate/core/orchestrator.py` | ~1917–1935 | `_dump_before_destroy`: у пилота `request_logs` не отправляется, строка `логи не запрошены (пилот)`; `_fetch_vast_logs` у пилота не выполняется |
+| `Generate/core/orchestrator.py` | ~1808–1816 | пилотный env без `-p 18188:18188`: порт не публикуется; `-p` строки у генерации не менялись |
 | `Generate/cli.py` | 492–493 | `--pilot-start-cmd`: пустое значение не передаётся дальше (`None`) |
 | `Generate/cli.py` | 668 | текст подсказки для `--pilot-start-cmd` |
-| `Generate/cli.py` | 1062 | описание входа `pilot_start_cmd`: «пусто = не передавать, образ стартует сам» |
+| `Generate/cli.py` | 1088–1089 | описание входа `pilot_start_cmd`: «пусто = не передавать; пилот запускает pilot_start.sh из коммита» (только текст подсказки) |
+| `Generate/core/ssh_probe.py` | COMMANDS | новая фиксированная команда `onstart_log` (`cat /opt/pilot/onstart.log`) для копии в артефакт |
+| `.github/workflows/pilot-comfyui.yml` | шаги «Collect pilot output», «Upload pilot artifact» | один артефакт `pilot-<run_id>`; лог запуска копируется в каталог артефакта как `pilot-run.log`; шаг «Upload run log» и артефакт `pilot-run-log-<run_id>` удалены |
 | `.github/workflows/pilot-comfyui.yml` | 69 | описание `silent_host_timeout_min`: порт 18188 |
 | `Generate/tests/test_vast_client.py` | 274–290 | тест: без `onstart` поля в payload нет (None и пустая строка) |
 | `Generate/tests/test_orchestrator.py` | 1280–1437 | тесты пилота: проба на 18188, вердикты, ключ `ports`, пустой и непустой `onstart`, пилотный env |
 
 Входы `docker_image` и `pilot_start_cmd` в `pilot-comfyui.yml` уже имели значение по умолчанию `""` (строки 13 и 17), поэтому их значения не менялись. Блок `env` шага `Run pilot` не менялся: `HF_TOKEN`, `GEN_GEMINI_API_KEY`, `GH_TOKEN` и `WORKER_TOKEN` в пилот не передаются.
 
-Пилотный env после изменений: `GEN_LOG_LEVEL`, `COMFYUI_ARGS` (те же аргументы, что у воркера), `PORTAL_CONFIG=localhost:18188:18188:/:ComfyUI` (оставлено намеренно) и `-p 18188:18188`. Ключей `OPEN_BUTTON_*` и `-p 8000:8000` в нём нет. Для пилота onstart будет запускать `Generate/worker/pilot_start.sh` (запланировано, файла пока нет). До этого `onstart` попадает в payload только при непустом `--pilot-start-cmd`.
+Пилотный env: `GEN_LOG_LEVEL`, `COMFYUI_ARGS` (те же аргументы, что у воркера) и `PORTAL_CONFIG=localhost:18188:18188:/:ComfyUI` (оставлено намеренно). Порта в пилотном env нет: ни `-p 18188:18188`, ни `-p 8000:8000` не публикуются. Ключей `OPEN_BUTTON_*` и токенов в нём нет. Onstart пилота запускает `Generate/worker/pilot_start.sh` из коммита (`cli.pilot_onstart_cmd`); вывод на карте пишется в `/opt/pilot/onstart.log`.
 
 ### 7.2. Результаты пробы и маркеры
 
-Проба: `GET /system_stats` по адресу `http://<public_ipaddr>:<внешний порт из ports["18188/tcp"][0].HostPort>`.
+Проба: `GET /system_stats` через SSH-туннель: локальный порт туннеля → `127.0.0.1:18188` карты (`_probe_pilot_tunnel`). Проба начинается, когда карта `running` и известен адрес SSH; ключ `18188/tcp` в `ports` не нужен.
 
 | Результат | Условие | Маркер в логе | Итог |
 |---|---|---|---|
@@ -144,17 +147,17 @@
 | `auth_required` | HTTP 401 или 403: ComfyUI отвечает, нужен токен | `PILOT-МАРКЕР порт 18188: HTTP 401 (или 403) через N с после аренды.` | `PILOT-ИТОГ: результат=auth_required; …`, код 0, не провал и не успех |
 | `not_ready` | любой другой код или сетевая ошибка до таймаута | `PILOT-МАРКЕР порт 18188: HTTP <последний код или нет ответа> через N с после аренды.` (при таймауте) | `PILOT-ИТОГ: результат=not_ready; причина=timeout; …`, код 3 |
 
-Остальные маркеры: `PILOT-МАРКЕР running: карта <id> через N с после аренды.`; при отсутствии ключа `18188/tcp` в `ports` — `PILOT: в поле ports нет ключа 18188/tcp. Пришедшие ключи: <имена>.` (ERROR, значения не выводятся). Строка итога содержит `аренда→running=N с; аренда→ответ=N с; карт арендовано N, уничтожено N; уборка выполнена`.
+Остальные маркеры: `PILOT-МАРКЕР running: карта <id> через N с после аренды.`; копия onstart: при успехе `PILOT: onstart.log скопирован в артефакт, N символов.`, при ошибке `PILOT: onstart.log не скопирован: <класс ошибки>.` (WARNING, запуск не прерывается). Строка итога содержит `аренда→running=N с; аренда→ответ=N с; карт арендовано N, уничтожено N; уборка выполнена`.
 
 Причина `причина=…` печатается только для `not_ready`: `timeout`, `budget`, `stop`, `lifetime`, `card_stopped`. Решение, принятое без подтверждения: `auth_required` выдаёт код 0, потому что ComfyUI отвечает и инфраструктура работает. Если нужно считать его ошибкой, это одна строка в `_run_pilot`.
 
 ### 7.3. UNVERIFIED (проверяется только живым запуском)
 
-1. Формат ключа `18188/tcp` в поле `ports` ответа Vast. В коде ожидается тот же вид, что у `8000/tcp`: список из словаря с `HostPort`.
+1. Адрес SSH запущенной карты (`ssh_host`, `ssh_port`) в ответе Vast и открытие туннеля с раннера GitHub.
 2. Ответ `/system_stats` без токена: код 200, 401 или 403. Образ может требовать токен по-другому.
 3. Поведение Vast без `onstart`: точка входа образа в ssh-режиме не вызывается, `/workspace` не создаётся (проверено); стоковый путь через supervisor на Vast не работает. Старт ComfyUI пилота: см. раздел 7.1.
-4. Ключ `-p 18188:18188` в env для Vast: порт должен открыться в `ports`. Формат передачи `-p` взят из пилотного кода прежней версии и не проверен на этом образе.
-5. Доступность `public_ipaddr` и внешнего порта с раннера GitHub.
+4. Пилот без `-p 18188:18188`: ComfyUI должен слушать `127.0.0.1:18188` внутри карты. Это видно по `cards/slot1_generation1/onstart.log` и по маркеру `PILOT-МАРКЕР порт 18188`.
+5. Доступность SSH карты с раннера GitHub, то есть открытие туннеля и прохождение пробы.
 
 ### 7.4. Риски для generate.yml и как проверить без запуска
 
@@ -165,7 +168,7 @@
 - `grep -n "onstart" Generate/core/orchestrator.py Generate/core/vast_client.py`: `create_instance` должен содержать `if onstart:`.
 - Тесты `test_create_instance_without_onstart_has_no_onstart_key` и `test_pilot_empty_start_cmd_sends_no_onstart`: при пустой команде поля `onstart` нет в payload.
 - Тест `test_pilot_env_has_no_worker_hf_gemini_gh_or_comfy_keys`: в пилотном env нет `WORKER_TOKEN` и `HF_TOKEN`.
-- Тест `test_pilot_probe_goes_to_external_port_of_18188`: проба идёт на внешний порт 18188.
+- Тест `test_pilot_probe_goes_through_tunnel_to_loopback`: проба идёт через туннель к `127.0.0.1`. Тест `test_pilot_without_worker_address_does_not_request_logs`: пилот не вызывает `request_logs`. Тест `test_pilot_copies_onstart_log_into_card_folder`: копия `onstart.log` попадает в артефакт.
 - `grep -rn "PILOT_START_CMD" Generate/ --include=*.py` должен вернуть пустой результат: старая константа удалена из кода (упоминания в разделах 1–5 отчёта исторические).
 - Тесты не запускались. Для проверки синтаксиса выполнен только `py_compile` на изменённых файлах.
 

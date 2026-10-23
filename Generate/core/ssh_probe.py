@@ -37,6 +37,7 @@ COMMANDS: dict[str, str] = {
     "worker_health": "curl -sS -m 5 http://127.0.0.1:8000/health",
     "gpu": "nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,memory.used --format=csv,noheader",
     "comfy_health": "curl -sS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:18188/system_stats",
+    "onstart_log": "cat /opt/pilot/onstart.log",  # копия onstart пилота в артефакт (только пилот)
 }
 
 FAILURE_CLASSES = (
