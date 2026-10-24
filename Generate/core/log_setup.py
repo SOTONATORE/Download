@@ -177,6 +177,30 @@ def set_known_secrets(values) -> None:
     _KNOWN_SECRETS = tuple(sorted(cleaned, key=len, reverse=True))
 
 
+# Многострочный секрет (ключ SSH, F4): кроме всего значения маскируются его непустые строки длиной не меньше порога.
+# Короткие строки не маскируются: иначе они испортят обычный текст журнала.
+SSH_KEY_LINE_MIN_LEN = 20
+
+
+def secret_mask_values(value) -> list:
+    """Значения для маски из одного секрета: всё значение (если непустое) и его строки длиной >= 20 символов.
+
+    Пустое значение даёт пустой список: пустая строка заменила бы каждый символ журнала. Однострочное значение
+    даёт одно и то же дважды (целиком и как строка) — для set_known_secrets это безвредно.
+    """
+    if value is None:
+        return []
+    whole = str(value).strip()
+    if not whole:
+        return []
+    out = [whole]
+    for line in whole.splitlines():
+        line = line.strip()
+        if len(line) >= SSH_KEY_LINE_MIN_LEN:
+            out.append(line)
+    return out
+
+
 def mask_text_with_mode(text: str, mode: str) -> str:
     """Маскирует текст в режиме "A" или "B" (см. выше). Модуль не читает окружение.
 

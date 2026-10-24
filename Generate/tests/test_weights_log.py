@@ -516,6 +516,22 @@ def test_unparsed_progress_line_goes_to_log_in_full_once_per_form_and_decides_no
 
 
 
+def test_status_line_of_completing_pull_already_shows_speed():
+    """Выгрузка, которая набирает окно, пишет статус уже со скоростью (а не «окно не набрано»)."""
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1)])
+    clock.now = 1010.0
+    mon.feed([_aria(10, 1000, 1)])                          # замер 1: окно открыто
+    clock.now = 1050.0
+    mon.feed([_aria(50, 1000, 1)])                          # замер 2: 40 с, окно не набрано
+    clock.now = 1100.0
+    mon.feed([_aria(100, 1000, 1)])                         # замер 3: окно 90 с — набирает окно
+    last = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "окно не набрано" not in last
+    assert "скорость 8 Мбит/с" in last
+
+
 # --- запуск как скрипт ----------------------------------------------------------------
 
 def _run_all() -> int:

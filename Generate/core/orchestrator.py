@@ -42,7 +42,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
     from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
-                            mask_fetched_text, mask_remote_text, set_known_secrets)
+                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from .missing import parse_missing
     from .naming import clip_filename
     from . import ssh_probe
@@ -59,7 +59,7 @@ except ImportError:  # pragma: no cover
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
     from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
-                           mask_fetched_text, mask_remote_text, set_known_secrets)
+                           mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
@@ -174,6 +174,8 @@ VAST_LOGS_TAIL_LINES = 2000
 VAST_LOG_HEAD_LINES = 200
 VAST_LOG_TAIL_LINES = 2000
 VAST_LOGS_FILE = "vast_logs.txt"
+# пауза между попытками логов Vast идёт кусками не длиннее этого; между кусками пишется heartbeat (F2)
+VAST_LOGS_PAUSE_SLICE_SEC = 10.0
 SSH_DIAG_FILE = "ssh_diag.log"  # SSH-диагностика карты, дописывается по тикам (в артефакте запуска)
 
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
@@ -889,7 +891,9 @@ class Orchestrator:
         self._headers = {"X-Worker-Token": self._token}
         # значения секретов известны: маска журнала и текста с карты получает их явно, из окружения модуль не читает
         # (решение владельца 18.10.2026, риск F11; этап 9а). Вызов один раз на запуск.
-        set_known_secrets([self._token, os.environ.get("HF_TOKEN", "")])
+        # F4: многострочный ключ VAST_SSH_KEY — всё значение и его длинные строки (пустое значение не передаётся)
+        set_known_secrets([self._token, os.environ.get("HF_TOKEN", "")]
+                          + secret_mask_values(os.environ.get("VAST_SSH_KEY", "")))
         # адреса карт (IP и IP:порт), которые маскируются в тексте с карты и не попадают в архив (этап 9а)
         self._card_addresses: set = set()
         self._owns_http = http_client is None
@@ -2022,6 +2026,7 @@ class Orchestrator:
         try:
             fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
             os.close(fd)
+            self._write_heartbeat()  # heartbeat до первой попытки (F2)
             for attempt in range(1, attempts + 1):
                 code, size = self._vast_logs_attempt(slot, raw_path)
                 if code == 200:
@@ -2034,7 +2039,8 @@ class Orchestrator:
                 log.warning("%s: логи Vast, попытка %d из %d, код %s.",
                             _card_name(slot, cap=True), attempt, attempts, code if code is not None else "нет")
                 if attempt < attempts and self._vast_logs_pause > 0:
-                    self._sleep(self._vast_logs_pause)
+                    self._pause_with_heartbeat(self._vast_logs_pause)
+            self._write_heartbeat()  # heartbeat после последней попытки (F2)
             log.warning("%s: логи Vast не получены после %d попыток.", _card_name(slot, cap=True), attempts)
             return False
         except Exception as exc:  # логи не должны мешать снятию карты
@@ -2046,6 +2052,22 @@ class Orchestrator:
                     os.unlink(raw_path)  # сырой ответ с логами удаляется сразу после разбора
                 except OSError:
                     pass
+
+    def _pause_with_heartbeat(self, total: float) -> None:
+        """Пауза между попытками логов Vast (F2): та же общая длина, кусками не длиннее VAST_LOGS_PAUSE_SLICE_SEC.
+
+        Между кусками пишется файл heartbeat, чтобы 30-секундная пауза при 403 не выглядела для наблюдателя
+        (порог тишины 120 с) как молчание оркестратора. Пишется только файл: опрос карт идёт через _heartbeat,
+        который троттлится интервалом heartbeat_interval_sec и поэтому здесь не годится.
+        Принято: один HTTP-вызов со своим таймаутом (VastClient, 60 с) может задержать запись на время этого таймаута.
+        """
+        remaining = float(total)
+        self._write_heartbeat()
+        while remaining > 0:
+            step = min(VAST_LOGS_PAUSE_SLICE_SEC, remaining)
+            self._sleep(step)
+            remaining -= step
+            self._write_heartbeat()
 
     def _vast_logs_attempt(self, slot: _CardSlot, raw_path: str) -> tuple:
         """Одна попытка: запрос result_url и загрузка в raw_path. Возвращает (код HTTP или None, размер байт).
@@ -2443,7 +2465,7 @@ class Orchestrator:
 
     def _write_heartbeat(self) -> None:
         """Файл heartbeat для наблюдателя (этап 7). Без токенов и без адресов карт (SPEC 0.1)."""
-        if self.heartbeat_path is None:
+        if getattr(self, "heartbeat_path", None) is None:
             return
         record = {
             "utc": _utc_now(),

@@ -993,10 +993,17 @@ def test_watch_fresh_heartbeat_keeps_running_until_marker(watch):
     assert watch.clock.sleeps == 4           # продолжал работать, пока не появилась метка
 
 
-def test_watch_stale_heartbeat_kills_gen_run_and_exits_0(watch):
+def test_watch_stale_heartbeat_kills_gen_run_and_keeps_running_until_marker(watch):
     _write_hb(watch.hb, -200)                # запись старше порога 120 с
-    assert _run_watch(watch) == 0
-    assert watch.kills == ["123"]
+
+    def on_sleep(c):                         # после уборки наблюдатель продолжает работать (F3)
+        if c.sleeps == 3:
+            cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
+
+    watch.clock.on_sleep = on_sleep
+    assert _run_watch(watch) == 0            # выход только по метке конца запуска
+    assert watch.kills == ["123"]            # одна уборка на эпизод тишины
+    assert watch.clock.sleeps == 3
 
 
 def test_watch_heartbeat_lost_after_first_write_kills(watch):
@@ -1005,17 +1012,27 @@ def test_watch_heartbeat_lost_after_first_write_kills(watch):
     def on_sleep(c):
         if c.sleeps == 1:
             watch.hb.unlink()                # файл пропал после того, как появлялся
+        if c.sleeps == 4:
+            cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
 
     watch.clock.on_sleep = on_sleep
     assert _run_watch(watch) == 0
-    assert watch.kills == ["123"]
+    assert watch.kills == ["123"]            # пропажа файла: одна уборка, без повтора
 
 
-def test_watch_kill_failure_gives_3(watch):
+def test_watch_kill_failure_keeps_observer_running_and_exits_3_at_marker(watch):
+    """F3 + G11: неудачная уборка не завершает наблюдателя; при выходе по метке код 3 (уборка не удалась)."""
     watch.kill.code = cli.EXIT_RUNTIME
     _write_hb(watch.hb, -200)
+
+    def on_sleep(c):
+        if c.sleeps == 2:
+            cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
+
+    watch.clock.on_sleep = on_sleep
     assert _run_watch(watch) == 3
     assert watch.kills == ["123"]
+    assert watch.clock.sleeps == 2           # работал после уборки до метки
 
 
 def test_watch_marker_exits_0_without_kill_even_if_stale(watch):
@@ -1038,20 +1055,38 @@ def _write_real_hb(path, age_sec):
     path.write_text(json.dumps({"utc": when.strftime(cli.HEARTBEAT_UTC_FORMAT)}), encoding="utf-8")
 
 
-def test_watch_main_stale_kills_through_kill_cards(capsys, kill_env, tmp_path):
+def _stop_after_kill(monkeypatch, hb):
+    """F3: наблюдатель после уборки не выходит. Чтобы тест завершился, метку конца запуска ставит сама уборка."""
+    real_kill = cli._watch_kill
+
+    def kill_then_finish(run_id):
+        code = real_kill(run_id)
+        cli.finished_marker_path(hb).write_text("finished\n", encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(cli, "_watch_kill", kill_then_finish)
+
+
+# проверка каждую 1 с: реальный сон наблюдателя короткий (по умолчанию 30 с)
+WATCH_ARGS_FAST = ["--check-every-sec", "1"]
+
+
+def test_watch_main_stale_kills_through_kill_cards(capsys, kill_env, tmp_path, monkeypatch):
     hb = tmp_path / "heartbeat.json"
     _write_real_hb(hb, 300)
-    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
-    assert code == 0
+    _stop_after_kill(monkeypatch, hb)
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"] + WATCH_ARGS_FAST)
+    assert code == 0                         # уборка прошла: выход по метке с кодом 0
     assert kill_env.labels == ["gen-123"]
 
 
-def test_watch_main_real_kill_failure_gives_3(capsys, kill_env, tmp_path):
-    # G11: неудачная уборка не должна выглядеть как успех
+def test_watch_main_real_kill_failure_gives_3(capsys, kill_env, tmp_path, monkeypatch):
+    # G11: неудачная уборка не должна выглядеть как успех: код 3 при выходе по метке
     kill_env.error = cli.VastError("Не удалось уничтожить экземпляры Vast: [11]")
     hb = tmp_path / "heartbeat.json"
     _write_real_hb(hb, 300)
-    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
+    _stop_after_kill(monkeypatch, hb)
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"] + WATCH_ARGS_FAST)
     cap = capsys.readouterr()
     assert code == 3
     assert kill_env.labels == ["gen-123"]
@@ -1075,9 +1110,10 @@ def test_watch_does_not_print_key_or_heartbeat_content(capsys, kill_env, tmp_pat
     when = datetime.now(timezone.utc) - timedelta(seconds=300)
     hb.write_text(json.dumps({"utc": when.strftime(cli.HEARTBEAT_UTC_FORMAT), "note": canary,
                               "cards": [{"public_ipaddr": "203.0.113.5"}]}), encoding="utf-8")
-    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"])
+    _stop_after_kill(monkeypatch, hb)
+    code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"] + WATCH_ARGS_FAST)
     cap = capsys.readouterr()
-    assert code == 3
+    assert code == 3                         # уборка не удалась (G11), наблюдатель вышел по метке
     assert canary not in cap.out + cap.err
     assert "203.0.113.5" not in cap.out + cap.err
 

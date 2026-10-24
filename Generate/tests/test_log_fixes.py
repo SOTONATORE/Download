@@ -169,7 +169,8 @@ def test_access_denied_is_retried_with_pause_and_logs_each_code(tmp_path, monkey
     orc = _bare_orc(tmp_path, vast, attempts=5, pause=30.0, sleeps=sleeps)
     assert orc._fetch_vast_logs(_slot()) is True
     assert len(vast.downloads) == 3                 # две ошибки доступа, потом успех
-    assert sleeps == [30.0, 30.0]                   # пауза между попытками, не после успеха
+    # пауза между попытками: 30 с на каждую (две паузы), кусками по 10 с (F2); после успеха пауз нет
+    assert sleeps == [10.0] * 6 and sum(sleeps) == 60.0
     assert "попытка 1 из 5, код 403" in caplog.text and "попытка 2 из 5, код 403" in caplog.text
     assert _card_file(tmp_path).exists()
     assert RESULT_URL not in caplog.text and URL_CANARY not in caplog.text

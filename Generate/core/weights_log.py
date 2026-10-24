@@ -404,14 +404,15 @@ class WeightsMonitor:
                 self.last_change = now
                 self.log(f"Веса: файл {state.name}: {ev.pct}%, скорость {bytes_per_sec_to_mbps(ev.speed_bps):.0f} "
                          f"Мбит/с (только для журнала).")
-        if changed:
-            self.log(self._status_text(now))
+        # Замер учитывается ДО строки статуса: иначе на выгрузке, которая набирает окно, статус говорит «окно не набрано».
         if not self._pull_sampled:             # одна выгрузка — один замер окна, сколько бы строк в ней ни было
             self._pull_sampled = True
             if self.window_first is None:      # первый замер этапа открывает окно
                 self.window_first = now
                 self.window_first_bytes = self._agg_done()
             self.window_samples += 1
+        if changed:
+            self.log(self._status_text(now))
         self._update_percent()
         return self._check_speed(now)
 
