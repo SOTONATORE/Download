@@ -1,8 +1,8 @@
 """Офлайн-тесты разбора строк загрузки весов и правил (SPEC 8.2, этап 6б).
 
 Строки «[setup] ...» повторяют вывод `Generate/worker/setup.sh` (функция log() и download_model).
-Формат строк aria2 UNVERIFIED (см. докстринг core/weights_log.py): тесты фиксируют ожидаемый формат,
-а не подтверждённый вывод aria2.
+Строки aria2 повторяют прогон владельца (aria2c 1.37) с префиксом «[file=<имя>] », который ставит setup.sh.
+В фикстурах нет адресов с query-частью. Строки «[setup] ОШИБКА...» префикса не получают (setup.sh их не трогает).
 Функции без pytest: запускаются и pytest, и `python -m Generate.tests.test_weights_log`.
 """
 from __future__ import annotations
@@ -225,6 +225,116 @@ def test_unrecognised_progress_warns_once_and_gives_no_percent():
     # без распознанного прогресса остаётся только лимит этапа
     clock.now += 10_000
     assert mon.check() == "этап загрузки весов превысил лимит"
+
+
+# --- строки aria2 с префиксом [file=...] (этап 6б, параллельные загрузки) ----------------
+
+VAE_FILE = "ltx-2.5-video-vae-bf16.safetensors"          # имя без подкаталога, как в префиксе setup.sh
+VAE_NAME = "vae/" + VAE_FILE                             # имя с подкаталогом, как в строках «[setup]»
+
+# 8 строк: прогресс с ETA, без ETA, перенаправление, сводка, завершение файла, три формы ошибки.
+# Строки «[setup] ОШИБКА...» префикса [file=...] не получают: их печатает setup.sh без aria2-префикса.
+FIXTURE = [
+    f"[file={VAE_FILE}] [#6df3a8 488MiB/522MiB(93%) CN:3 DL:9.7MiB ETA:3s]",
+    f"[file={VAE_FILE}] [#6df3a8 519MiB/522MiB(99%) CN:1 DL:8.1MiB]",
+    f"[file={VAE_FILE}] 10/24 14:41:15 [NOTICE] CUID#9 - Redirecting to https://cdn.example.test/ltx/{VAE_FILE}",
+    f"[file={VAE_FILE}] *** Download Progress Summary as of 10/24 14:42:07 ***",
+    f"[file={VAE_FILE}] 10/24 14:42:07 [NOTICE] Download complete: /opt/worker/models/vae/{VAE_FILE}",
+    "[setup] [3/5] ОШИБКА: не удалось загрузить файл vae/x.safetensors (код 4).",
+    "[setup] [3/5] ОШИБКА: не удалось загрузить файл vae/x.safetensors (код aria2 3).",
+    "[setup] [3/5] ОШИБКА: не удалось загрузить файл vae/x.safetensors (код curl 22).",
+]
+
+
+def test_fixture_is_prefixed_and_has_no_query_strings():
+    assert len(FIXTURE) == 8
+    assert all("?" not in line for line in FIXTURE)
+    for line in FIXTURE[:5]:
+        assert line.startswith(f"[file={VAE_FILE}] "), line
+
+
+def test_fixture_progress_with_and_without_eta():
+    with_eta = wl.parse_line(FIXTURE[0])
+    no_eta = wl.parse_line(FIXTURE[1])
+    assert (with_eta.kind, with_eta.pct, with_eta.file) == ("progress", 93, VAE_FILE)
+    assert (no_eta.kind, no_eta.pct, no_eta.file) == ("progress", 99, VAE_FILE)
+    assert with_eta.done_bytes == 488 * MIB and with_eta.total_bytes == 522 * MIB
+    assert no_eta.done_bytes == 519 * MIB and no_eta.speed_bps == 8.1 * MIB
+
+
+def test_redirect_and_summary_are_ignored_and_complete_marks_file():
+    assert wl.parse_line(FIXTURE[2]).kind == "ignore"
+    assert wl.parse_line(FIXTURE[3]).kind == "ignore"
+    done = wl.parse_line(FIXTURE[4])
+    assert done.kind == "aria_done" and done.name == VAE_FILE
+
+    mon, clock, logs = _monitor(stall_sec=60.0, stage_max_sec=100_000.0)
+    mon.feed([_start(VAE_NAME, 3)])
+    clock.now += 5
+    mon.feed([FIXTURE[4]])
+    clock.now += 10_000
+    assert mon.check() is None          # файл завершён: зависать нечему
+    assert not any("%," in m for m in logs)
+
+
+def test_three_error_forms_give_the_same_error_event():
+    for line in FIXTURE[5:8]:
+        ev = wl.parse_line(line)
+        assert ev.kind == "error" and ev.name == "vae/x.safetensors", line
+        mon, clock, logs = _monitor()
+        mon.feed([_start("vae/x.safetensors", 3)])
+        assert mon.feed([line]) == "ошибка загрузки весов: vae/x.safetensors", line
+
+
+def test_two_parallel_files_only_the_stalled_one_is_reported():
+    mon, clock, logs = _monitor(stall_sec=180.0, stage_max_sec=10_000.0)
+    a_name = "diffusion_models/" + NAME
+    mon.feed([_start(a_name, 1), _start(VAE_NAME, 3)])
+    clock.now += 5
+    assert mon.feed([f"[file={NAME}] " + _progress(10, speed_mib=500)]) is None   # A: 10%, потом стоит
+    reason = None
+    pct_b = 10
+    for _ in range(30):                  # B идёт по 1% каждые 10 с, A не меняется
+        clock.now += 10
+        pct_b = min(99, pct_b + 1)
+        assert mon.feed([f"[file={VAE_FILE}] " + _progress(pct_b, speed_mib=500)]) is None
+        reason = mon.check()
+        if reason:
+            break
+    assert reason == wl.REASON_STALL
+    stall_logs = [m for m in logs if "не менялся" in m]
+    assert len(stall_logs) == 1
+    assert NAME in stall_logs[0] and VAE_FILE not in stall_logs[0]
+
+
+def test_unprefixed_progress_with_two_active_files_is_ignored():
+    mon, clock, logs = _monitor()
+    mon.feed([_start("vae/a.safetensors", 3), _start("vae/b.safetensors", 4)])
+    clock.now += 10
+    assert mon.feed([_progress(50)]) is None
+    assert not any("%," in m for m in logs)
+
+
+def test_kib_and_gib_parse_to_the_same_bytes_as_mib():
+    kib = wl.parse_line("[file=x.safetensors] [#a1b2c3 1536KiB/2048KiB(75%) CN:4 DL:512KiB]")
+    mib = wl.parse_line("[file=x.safetensors] [#a1b2c3 1.5MiB/2MiB(75%) CN:4 DL:0.5MiB]")
+    assert (kib.kind, kib.pct) == ("progress", 75)
+    assert kib.done_bytes == mib.done_bytes == 1.5 * MIB
+    assert kib.total_bytes == mib.total_bytes == 2 * MIB
+    assert kib.speed_bps == mib.speed_bps == 0.5 * MIB
+    gib = wl.parse_line("[file=x.safetensors] [#a1b2c3 1GiB/2GiB(50%) CN:4 DL:1GiB ETA:1m20s]")
+    mib2 = wl.parse_line("[file=x.safetensors] [#a1b2c3 1024MiB/2048MiB(50%) CN:4 DL:1024MiB]")
+    assert gib.done_bytes == mib2.done_bytes == 1024 * MIB
+    assert gib.total_bytes == mib2.total_bytes == 2048 * MIB
+    assert gib.speed_bps == mib2.speed_bps == 1024 * MIB
+
+
+def test_query_part_of_an_address_is_dropped_before_parsing():
+    # адрес собран в коде теста, в фикстурах query-строк нет
+    url = "https://cdn.example.test/ltx/f.bin" + "?" + "X-Amz-Signature=placeholder"
+    ev = wl.parse_line(f"[file=f.bin] 10/24 14:41:15 [NOTICE] CUID#9 - Redirecting to {url}")
+    assert ev.kind == "ignore"
+    assert wl._drop_query(url) == "https://cdn.example.test/ltx/f.bin"
 
 
 # --- запуск как скрипт ----------------------------------------------------------------

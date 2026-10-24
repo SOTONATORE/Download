@@ -126,9 +126,11 @@ download_model() {
         # У curl нет контрольного файла aria2: на время загрузки ставим свой «.aria2», чтобы прерванный файл
         # не принимался за готовый. Заголовок Authorization читается из process substitution (токен не в argv).
         : > "${path}.aria2"
+        # Вывод curl (ошибки) идёт в bootstrap.log с префиксом «[file=<имя>] » (sed -u: построчно).
         curl -sS -L --fail --retry 3 -C - -o "${path}" \
-            -H @<(printf 'Authorization: Bearer %s\n' "${HF_TOKEN}") "${url}"
-        rc=$?
+            -H @<(printf 'Authorization: Bearer %s\n' "${HF_TOKEN}") "${url}" 2>&1 \
+            | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"
+        rc="${PIPESTATUS[0]}"
         if [ "${rc}" -eq 0 ]; then
             rm -f "${path}.aria2"
         fi
@@ -140,11 +142,14 @@ download_model() {
         # Заголовок Authorization идёт во входном файле aria2 (process substitution): токен не
         # попадает в аргументы процесса и не пишется на диск (SPEC 0.1, п. 3). Проверено локально
         # aria2c 1.37 на заглушке сервера; на живой карте UNVERIFIED.
+        # Каждая строка вывода aria2c получает префикс «[file=<имя>] » (sed -u: построчно), строки идут
+        # в bootstrap.log. Так параллельные загрузки различимы в мониторе (core/weights_log.py).
         aria2c \
             -x 16 -s 16 -k 1M -c --summary-interval=10 \
             -i <(printf '%s\n' "${url}" "  header=Authorization: Bearer ${HF_TOKEN}" \
-                 "  dir=${target_dir}" "  out=${name}")
-        rc=$?
+                 "  dir=${target_dir}" "  out=${name}") 2>&1 \
+            | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"
+        rc="${PIPESTATUS[0]}"
     fi
 
     if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
