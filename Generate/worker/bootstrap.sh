@@ -307,6 +307,8 @@ fi
 # Значения по умолчанию совпадают с Dockerfile (ветка option B, в резерве). Переменные из onstart имеют приоритет.
 # COMFY_DIR здесь уже найденный путь: setup.sh и сервер берут его отсюда и сами не ищут.
 export COMFY_DIR
+# setup.sh перезапускает ComfyUI один раз после последней загрузки весов: ему нужны эти пути (шаг 4б)
+export COMFY_LOG_FILE COMFY_PID_FILE COMFY_PYTHON
 export COMFY_OUTPUT_DIR="${COMFY_OUTPUT_DIR:-${COMFY_DIR}/output}"
 export COMFY_URL="${COMFY_URL:-http://127.0.0.1:18188}"  # ComfyUI в карте, порт из COMFYUI_ARGS (SPEC 8.5)
 export WORKER_HTTP_PORT="${WORKER_HTTP_PORT:-8000}"

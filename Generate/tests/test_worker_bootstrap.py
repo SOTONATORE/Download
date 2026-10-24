@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -300,7 +302,10 @@ def _has_8188_start(code: str) -> bool:
 def test_setup_does_not_start_comfyui_on_8188():
     code = _setup_code()
     assert not _has_8188_start(code)
-    assert "main.py" not in code
+    # main.py запускается ровно один раз: в перезапуске ComfyUI (restart_comfy), не при старте setup.sh
+    assert code.count("main.py") == 1
+    assert '"${COMFY_PYTHON}" main.py' in code
+    assert code.index("restart_comfy() {") < code.index("main.py")
     assert "--listen" not in code
     assert "18188/system_stats" in code
 
@@ -333,7 +338,7 @@ def test_setup_does_not_invent_template_comfy_log_path():
 def test_setup_starts_server_before_weights_download():
     text = SETUP.read_text(encoding="utf-8")
     server = text.index("worker/server.py")
-    first_download = text.index('download_model "diffusion_models"')
+    first_download = text.index('start_download "diffusion_models"')
     assert server < first_download
 
 
@@ -352,9 +357,111 @@ def test_setup_ready_flag_is_cleared_first_and_created_after_readiness():
     assert cleared < touched and readiness_ok < touched
 
 
-def test_setup_has_no_leftover_comfy_pid():
+def test_setup_comfy_pid_is_used_only_by_restart():
+    """PID ComfyUI setup.sh трогает только в перезапуске (restart_comfy), больше нигде."""
     code = _setup_code()
-    assert "COMFY_PID" not in code
+    body = code[code.index("restart_comfy() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "COMFY_PID_FILE" in body
+    assert code.count("COMFY_PID_FILE") == body.count("COMFY_PID_FILE")
+
+
+# --- setup.sh: параллельная загрузка и загрузчик (Fix 1, Fix 4) ---
+
+_MODEL_FILES = 5
+
+
+def _parallel_aria2_stub(tmp_path: Path, sleep_sec: float) -> tuple:
+    """Заглушка aria2c: пишет время старта и конца каждой загрузки, спит sleep_sec и создаёт файл модели.
+    curl отвечает «ComfyUI работает»; python3 (сервер воркера) сразу завершается."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    times_log = tmp_path / "dl_times.txt"
+    _write_exec(bin_dir / "aria2c", f"""#!{sys.executable}
+import os, sys, time
+args = sys.argv[1:]
+src = args[args.index("-i") + 1]
+lines = [l for l in open(src, encoding="utf-8").read().splitlines() if l.strip()]
+opts = dict(l.strip().split("=", 1) for l in lines[1:])
+name = opts["out"]
+def mark(kind):
+    with open({str(times_log)!r}, "a", encoding="utf-8") as fh:
+        fh.write(kind + " " + name + " " + repr(time.time()) + "\\n")
+mark("start")
+time.sleep({sleep_sec!r})
+os.makedirs(opts["dir"], exist_ok=True)
+with open(os.path.join(opts["dir"], name), "wb") as fh:
+    fh.write(b"0123456789abcdef")
+mark("end")
+""")
+    _write_exec(bin_dir / "curl", "#!/bin/sh\nexit 0\n")
+    _write_exec(bin_dir / "python3", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка
+    return bin_dir, times_log
+
+
+def test_setup_downloads_run_in_parallel(tmp_path):
+    """Fix 1: все пять загрузок стартуют до того, как завершилась первая. По 2 с на файл весь этап
+    занимает меньше 3.5 с (последовательно вышло бы около 10 с)."""
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    bin_dir, times_log = _parallel_aria2_stub(tmp_path, sleep_sec=2.0)
+    env = _setup_env(tmp_path, bin_dir, comfy)
+    proc = subprocess.run(["/bin/bash", str(SETUP)], env=env, capture_output=True, text=True,
+                          timeout=120, cwd=str(tmp_path))
+    assert proc.returncode == 0, _output(proc)
+    rows = [line.split() for line in times_log.read_text(encoding="utf-8").splitlines()]
+    starts = [float(r[2]) for r in rows if r[0] == "start"]
+    ends = [float(r[2]) for r in rows if r[0] == "end"]
+    assert len(starts) == _MODEL_FILES and len(ends) == _MODEL_FILES
+    assert max(starts) < min(ends), "загрузки шли не одновременно"
+    assert max(ends) - min(starts) < 3.5, f"этап загрузки занял {max(ends) - min(starts):.1f} с"
+
+
+def test_setup_falls_back_to_curl_when_aria2_and_apt_unavailable(tmp_path):
+    """Fix 4: aria2c нет, apt-get падает. Одна строка про curl, файлы качаются через curl,
+    токен не попадает в аргументы curl (заголовок идёт из process substitution)."""
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl_argv = tmp_path / "curl_argv.txt"
+    _write_exec(bin_dir / "apt-get", "#!/bin/sh\nexit 1\n")
+    _write_exec(bin_dir / "curl", f"""#!/bin/sh
+echo "$@" >> '{curl_argv}'
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+case "$out" in
+    /dev/null|"") exit 0 ;;
+esac
+printf '0123456789abcdef' > "$out"
+exit 0
+""")
+    _write_exec(bin_dir / "python3", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка
+    # PATH: заглушки, затем все утилиты системы, кроме aria2c
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for system_dir in ("/usr/bin", "/bin"):
+        for entry in os.listdir(system_dir):
+            if entry != "aria2c" and not os.path.lexists(tools / entry):
+                os.symlink(os.path.join(system_dir, entry), tools / entry)
+    env = _setup_env(tmp_path, bin_dir, comfy)
+    env["PATH"] = f"{bin_dir}:{tools}"
+    proc = subprocess.run(["/bin/bash", str(SETUP)], env=env, capture_output=True, text=True,
+                          timeout=120, cwd=str(tmp_path))
+    out = _output(proc)
+    assert proc.returncode == 0, out
+    assert out.count("[setup] aria2c недоступен, загрузка через curl") == 1
+    models = comfy / "models"
+    files = [p for p in models.rglob("*.safetensors")]
+    assert len(files) == _MODEL_FILES
+    assert all(p.read_bytes() == b"0123456789abcdef" for p in files)
+    assert not any((p.parent / (p.name + ".aria2")).exists() for p in files)
+    assert CANARY not in curl_argv.read_text(encoding="utf-8")
+    assert (tmp_path / "worker_ready").exists()
 
 # --- конфиг: образ стокового Vast (вариант A) ---
 

@@ -591,7 +591,9 @@ def test_setup_sh_is_valid_bash_and_does_not_start_comfyui():
     script = WORKER_DIR / "setup.sh"
     text = script.read_text(encoding="utf-8")
     code = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
-    assert "main.py" not in code
+    # Запуск ComfyUI в setup.sh один: перезапуск после загрузки весов (restart_comfy). Старт на 8188 запрещён.
+    assert code.count("main.py") == 1
+    assert '"${COMFY_PYTHON}" main.py' in code
     assert "--port 8188" not in code
     bash = shutil.which("bash")
     if bash is None:
