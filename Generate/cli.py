@@ -731,8 +731,8 @@ def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check
         работать. Повторная уборка возможна только после свежего heartbeat и новой тишины (F3);
       - первого файла ещё нет: ждём не дольше first_limit_sec; по истечении выход с кодом 3,
         уборка не запускается (карт до первой записи нет).
-    Выход по метке конца запуска: код 3, если хоть одна уборка не удалась (G11), иначе 0. Выход по первому-лимиту —
-    код 3. Цикл не завершается после уборки; остановка процесса — шаг «Stop heartbeat observer».
+    Выход по метке конца запуска: всегда код 0, в том числе после неудачной уборки (неудача видна строкой ERROR
+    в журнале наблюдателя). Выход по первому-лимиту — код 3. Цикл не завершается после уборки; остановка процесса — шаг «Stop heartbeat observer».
     Ключ Vast, адреса и содержимое файла не печатаются.
     """
     run_kill = kill if kill is not None else _watch_kill
@@ -741,12 +741,10 @@ def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check
     seen = False
     # F3: уборка уже сделана на текущем эпизоде тишины. Сбрасывается только свежим heartbeat.
     stalled = False
-    # G11 сохранён: если хоть одна уборка не удалась, наблюдатель при выходе по метке даёт код 3
-    kill_failed = False
     while True:
         if marker.exists():
             log.info("Метка конца запуска найдена: наблюдатель завершается, карты не трогаются.")
-            return EXIT_RUNTIME if kill_failed else EXIT_OK
+            return EXIT_OK
         beat = _read_heartbeat_utc(heartbeat)
         if beat is not None:
             seen = True
@@ -759,12 +757,12 @@ def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check
             elif not stalled:
                 log.error("heartbeat не обновлялся %d с (порог %d с): уничтожаем карты запуска.",
                           int(silence), max_silence_sec)
-                kill_failed = run_kill(run_id) != EXIT_OK or kill_failed
+                run_kill(run_id)
                 stalled = True
         elif seen:
             if not stalled:
                 log.error("Файл heartbeat пропал или не читается: уничтожаем карты запуска.")
-                kill_failed = run_kill(run_id) != EXIT_OK or kill_failed
+                run_kill(run_id)
                 stalled = True
         else:
             waited = clock() - started
@@ -780,8 +778,8 @@ def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check
 def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
     """Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс шага run в generate.yml.
 
-    Коды выхода: 0 — метка конца запуска, уборок не было или все прошли; 3 — метка конца запуска, а уборка
-    не удалась, либо первый файл heartbeat не появился за WATCH_FIRST_HEARTBEAT_LIMIT_SEC; 2 — неверные аргументы.
+    Коды выхода: 0 — метка конца запуска (неудачная уборка видна в журнале наблюдателя как ERROR); 3 — первый
+    файл heartbeat не появился за WATCH_FIRST_HEARTBEAT_LIMIT_SEC; 2 — неверные аргументы.
     Уборка по тишине сама наблюдателя не завершает (F3).
     """
     if not args.run_id:

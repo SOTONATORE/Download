@@ -298,6 +298,7 @@ class FakeWorker:
 class Rig:
     def __init__(self, tmp_path, monkeypatch, *, missing=(1, 2), offers=None,
                  worker_kw=None, preload=None, token=TOKEN, **orch_kw) -> None:
+        nums = orch_kw.pop("nums", range(1, 6))  # номера сегментов SRT (по умолчанию 1..5)
         self.events: list = []
         self.clock = FakeClock()
         self.work_dir = tmp_path / "work"
@@ -320,7 +321,7 @@ class Rig:
                   worker_token=token, poll_interval_sec=10.0, work_dir=self.work_dir,
                   worker_build=VALID_BUILD)
         kw.update(orch_kw)
-        segs = [types.SimpleNamespace(num=n) for n in range(1, 6)]
+        segs = [types.SimpleNamespace(num=n) for n in nums]
         self.orc = orch.Orchestrator(
             segs, tmp_path / "missing.txt", None, None, self.store, self.vast, object(),
             self.prompts_path, http_client=self.http, clock=self.clock, sleep=self.clock.sleep, **kw)
@@ -570,6 +571,58 @@ def test_task_fails_after_three_attempts(tmp_path, monkeypatch):
     prompts = json.loads(rig.prompts_path.read_text(encoding="utf-8"))["prompts"]
     assert prompts["1"]["render_status"] == "failed"
     assert rig.vast.label_destroyed == [LABEL]
+
+
+OOM_TEXT = "Allocation on device 0 would exceed allowed memory. (out of memory) (узел 5)"
+
+
+def test_ordinary_render_error_still_retries_and_run_goes_on(tmp_path, monkeypatch, caplog):
+    """P1: обычная ошибка рендера (не out of memory) повторяется как раньше; запуск идёт дальше."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1)
+    rig.worker.plan[1] = ["error"]
+    summary = rig.run()
+    assert sorted(rig.worker.posted) == [1, 1, 2]      # клип 1 отправлен дважды, клип 2 один раз
+    assert (summary.completed, summary.failed) == (2, 0)
+    assert summary.exit_code == 0
+    assert "нехватка видеопамяти" not in caplog.text
+
+
+def test_out_of_memory_stops_run_without_retry_or_new_card(tmp_path, monkeypatch, caplog):
+    """P1: out of memory на клипе — без повтора и без новой карты; запуск останавливается штатным путём."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1, worker_kw={"error_text": OOM_TEXT})
+    rig.worker.plan[1] = ["error"]
+    summary = rig.run()
+
+    assert rig.worker.posted == [1]                    # клип 1 не повторён, клип 2 не отправлен
+    assert summary.cards_rented == 1                   # новая карта не арендована
+    assert (summary.completed, summary.failed, summary.pending) == (0, 1, 1)
+    assert summary.exit_code == 3                      # ненулевой итог; cli отдаёт EXIT_RUNTIME
+    assert rig.store.clip_uploads() == []
+    assert rig.vast.label_destroyed == [LABEL]         # уборка по метке, как при обычном финише
+    prompts = json.loads(rig.prompts_path.read_text(encoding="utf-8"))["prompts"]
+    assert prompts["1"]["render_status"] == "failed"
+    assert prompts["2"].get("render_status") != "done"  # клип 2 не отправлен и не отмечен готовым
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.ERROR and "видеопамят" in r.getMessage()]
+    assert len(errors) == 1                            # ровно одна строка ERROR на запуск
+    assert errors[0].startswith("клип 1 (в запуске 1 из 2): нехватка видеопамяти на карте (out of memory)")
+    assert "запуск остановлен, новые карты не арендуются" in errors[0]
+    assert errors[0].endswith("Причина: сбой " + OOM_TEXT)  # текст ошибки воркера целиком, без адресов
+    assert "видеопамять по /health" in caplog.text     # строка с видеопамятью карты пишется в файл
+
+
+def test_run_labels_show_missing_number_and_run_position(tmp_path, monkeypatch, caplog):
+    """P2: в запуске из трёх клипов 7, 8, 9 строки начала и готовности несут номер из missing.txt и место в запуске."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(7, 8, 9), nums=(7, 8, 9), max_cards=1)
+    summary = rig.run()
+    assert (summary.completed, summary.total_needed) == (3, 3)
+    assert "клип 7 (в запуске 1 из 3): начало" in caplog.text
+    assert "клип 7 (в запуске 1 из 3): готов" in caplog.text
+    assert "клип 9 (в запуске 3 из 3): готов" in caplog.text
+    assert "готово 3 из 3 клипов (100%)" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -940,6 +940,7 @@ def _clip_orc(tmp_path, total):
 
     orc = _bare_log_orc()
     orc._total_needed = total
+    orc._run_pos = {n: n for n in range(1, total + 1)}  # P2: в этом тесте номер клипа совпадает с местом в запуске
     orc._queue = deque()
     orc._prompts = {str(n): {"prompt": f"промпт {n}", "num_frames": 5} for n in range(1, total + 1)}
     orc._attempts, orc._done, orc._failed, orc._durations = {}, set(), set(), []
@@ -978,10 +979,33 @@ def test_clip_lines_start_done_progress_in_order(tmp_path, caplog):
     _run_clip(orc, slot, 1, now=0.0)
     _run_clip(orc, slot, 2, now=20.0)
     assert _console_lines(caplog) == [
-        "клип 1 из 3: начало", "клип 1 из 3: готов", "готово 1 из 3 клипов (33%)",
-        "клип 2 из 3: начало", "клип 2 из 3: готов", "готово 2 из 3 клипов (66%)",
+        "клип 1 (в запуске 1 из 3): начало", "клип 1 (в запуске 1 из 3): готов", "готово 1 из 3 клипов (33%)",
+        "клип 2 (в запуске 2 из 3): начало", "клип 2 (в запуске 2 из 3): готов", "готово 2 из 3 клипов (66%)",
     ]
     assert len(orc._done) == 2  # тот же счётчик, что у итоговой строки (summary.completed)
+
+
+def test_clip_label_shows_missing_number_and_run_position(tmp_path, caplog):
+    """P2: в запуске из трёх клипов 7, 8, 9 метка несёт номер из missing.txt и место в запуске отдельно."""
+    caplog.set_level(logging.INFO)
+    orc = _clip_orc(tmp_path, total=3)
+    orc._prompts = {str(n): {"prompt": f"промпт {n}", "num_frames": 5} for n in (7, 8, 9)}
+    orc._run_pos = {7: 1, 8: 2, 9: 3}
+    slot = _card(1)
+    orc._slots[1] = slot
+    _run_clip(orc, slot, 7, now=0.0)
+    _run_clip(orc, slot, 8, now=20.0)
+    _run_clip(orc, slot, 9, now=40.0)
+    assert _console_lines(caplog) == [
+        "клип 7 (в запуске 1 из 3): начало", "клип 7 (в запуске 1 из 3): готов", "готово 1 из 3 клипов (33%)",
+        "клип 8 (в запуске 2 из 3): начало", "клип 8 (в запуске 2 из 3): готов", "готово 2 из 3 клипов (66%)",
+        "клип 9 (в запуске 3 из 3): начало", "клип 9 (в запуске 3 из 3): готов", "готово 3 из 3 клипов (100%)",
+    ]
+    orc._done.discard(8)  # проверка строки ошибки: клип 8 снова считается неудачным, а не готовым
+    orc._attempts[8] = orch.MAX_ATTEMPTS
+    orc._fail_clip(8, "таймаут рендера")
+    assert [l for l in _console_lines(caplog) if "ошибка" in l] == [
+        "клип 8 (в запуске 2 из 3): ошибка: таймаут рендера"]
 
 
 def test_failed_clip_prints_error_line_once(tmp_path, caplog):
@@ -993,7 +1017,7 @@ def test_failed_clip_prints_error_line_once(tmp_path, caplog):
     orc._attempts[3] = 1
     orc._fail_clip(3, "таймаут рендера")  # есть ещё попытки: клип возвращается в очередь
     lines = _console_lines(caplog)
-    assert [l for l in lines if "ошибка" in l] == ["клип 2 из 3: ошибка: таймаут рендера"]
+    assert [l for l in lines if "ошибка" in l] == ["клип 2 (в запуске 2 из 3): ошибка: таймаут рендера"]
     assert 2 in orc._failed and 3 not in orc._failed and 3 in orc._queue
 
 

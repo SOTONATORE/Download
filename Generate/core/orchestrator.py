@@ -150,6 +150,13 @@ PORTAL_NOT_IMPLEMENTED = "проверка через портал не реал
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
+# Нехватка видеопамяти при рендере: фраза из текста ComfyUI, которую воркер передаёт в ошибке задачи (worker/comfy_client.py)
+OUT_OF_MEMORY_TEXT = "out of memory"
+
+
+def _is_out_of_memory(text: str) -> bool:
+    return OUT_OF_MEMORY_TEXT in text.lower()
+
 
 # Маркеры ошибки в тексте статуса Vast (SPEC 8.2, неудачный старт), одна константа.
 # «failed to create», «OCI runtime», «CDI», «shim» основаны на наблюдаемой ошибке (карта 55771098,
@@ -245,6 +252,7 @@ class _CardSlot:
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
     offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
     saw_loading: bool = False         # Vast хотя бы раз показал «loading»: старт начался (SPEC 8.2)
+    vram_free: int = 0                # свободная видеопамять (байты) из /health при готовности; для строки об out of memory
     saw_created: bool = False         # Vast показал «created»: старт начался (SPEC 8.2)
     bid_requested: bool = False       # карта арендована как прерываемая (ставка bid, SPEC 8.2)
     dph_search: float = 0.0           # dph_total из поиска: запасная цена, если bid не подтверждён
@@ -939,6 +947,8 @@ class Orchestrator:
         self._destroyed = 0
         self.deadline_reached = False
         self.budget_exceeded = False
+        self._oom_stopped = False         # нехватка видеопамяти на клипе: запуск останавливается (P1)
+        self._run_pos: dict = {}          # номер клипа из missing.txt -> место в списке этого запуска (P2)
         self.cleanup_ok = True
         self.run_id = str(run_id).strip()
         self._publisher: Optional[RunPublisher] = None
@@ -1292,6 +1302,7 @@ class Orchestrator:
         needed = [n for n in missing if n not in done]
         summary = RunSummary(total_needed=len(needed), skipped_done=len(missing) - len(needed))
         self._total_needed = len(needed)  # тот же счётчик, что у итоговой строки (summary.total_needed)
+        self._run_pos = {n: i for i, n in enumerate(needed, 1)}  # P2: место клипа в списке этого запуска
         # E1: missing.txt и prompts.json до любых трат; ошибка загрузки останавливает запуск (код 2)
         self._publisher.start(self.missing_path, self.prompts_path)
         if not needed:
@@ -1681,10 +1692,14 @@ class Orchestrator:
                 log.error("Бюджет исчерпан: снимаем все карты, новые не арендуем.")
                 for slot in list(self._slots.values()):
                     self._retire(slot, "бюджет исчерпан")
-            stopping = deadline_hit or self.budget_exceeded
+            if self._oom_stopped and drain_since is None:
+                drain_since = now  # нехватка видеопамяти: как срок job, начатое дозаливаем, новых клипов нет
+            stopping = deadline_hit or self.budget_exceeded or self._oom_stopped
 
             for slot in list(self._slots.values()):
                 self._step_slot(slot, now, stopping)
+            # нехватка видеопамяти на этом обходе: аренды и новые клипы в этом же обходе не нужны
+            stopping = stopping or self._oom_stopped
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
             self._pull_ssh_diag(now)
@@ -2283,6 +2298,7 @@ class Orchestrator:
             self._poll_task(slot, now)
         if self._slots.get(slot.index) is not slot or slot.task is not None:
             return
+        stopping = stopping or self._oom_stopped  # нехватка видеопамяти уже на этом шаге: новые клипы не берутся
         if not stopping and self._queue:
             if not slot.accepted and self._accept_timed_out(slot, now):
                 return
@@ -2333,6 +2349,9 @@ class Orchestrator:
         data = self._json(resp)
         slot.probe_result = f"код {resp.status_code}"
         slot.probe_answered = True
+        vram = data.get("vram_free")  # видеопамять карты при готовности (worker/server.py, GET /health)
+        slot.vram_free = vram if (resp.status_code == 200 and isinstance(vram, int)
+                                  and not isinstance(vram, bool)) else 0
         ok = resp.status_code == 200 and data.get("ok") is True
         reason = data.get("reason")
         slot.health_reason = reason if (resp.status_code == 200 and isinstance(reason, str)) else ""
@@ -2539,7 +2558,7 @@ class Orchestrator:
             return  # готовый или назначенный клип не возвращается в очередь
         used = self._attempts.get(num, 0)
         if used >= MAX_ATTEMPTS:
-            log.error("клип %d из %d: ошибка: %s", num, self._total_needed, reason, extra=KEY_EVENT_EXTRA)
+            log.error("%s: ошибка: %s", self._clip_label(num), reason, extra=KEY_EVENT_EXTRA)
             self._failed.add(num)
             self._mark(num, "failed")
         else:
@@ -2547,6 +2566,35 @@ class Orchestrator:
                         num, used, MAX_ATTEMPTS, reason)
             if num not in self._queue:
                 self._queue.append(num)
+
+    def _clip_label(self, num: int) -> str:
+        """Метка клипа в строках начала, готовности и ошибки (P2): номер из missing.txt и место в этом запуске."""
+        pos = self.__dict__.get("_run_pos", {}).get(num)
+        if pos is None:
+            return f"клип {num}"
+        return f"клип {num} (в запуске {pos} из {self._total_needed})"
+
+    def _stop_on_out_of_memory(self, slot: _CardSlot, num: int, err: str) -> None:
+        """Нехватка видеопамяти при рендере (решение владельца): не повтор и не новая карта, а остановка запуска.
+
+        Клип сразу окончательно неудачен, без повтора на любой карте. Дальше тот же путь, что у срока job:
+        новые клипы не берутся и карты не арендуются, начатые дозаливаются, затем уборка по метке,
+        закрытие бюджета, отчёт и выгрузка. Строка ERROR одна на запуск; повторные случаи идут только в файл.
+        """
+        self._failed.add(num)
+        self._mark(num, "failed")
+        if self._oom_stopped:
+            log.info("%s: нехватка видеопамяти (out of memory), запуск уже остановлен.", self._clip_label(num),
+                     extra=CONSOLE_SKIP_EXTRA)
+            return
+        self._oom_stopped = True
+        log.error("%s: нехватка видеопамяти на карте (out of memory) при рендере; запуск остановлен, "
+                  "новые карты не арендуются. Причина: %s", self._clip_label(num), _one_line(err),
+                  extra=KEY_EVENT_EXTRA)
+        vram = slot.vram_free
+        vram_text = f"{vram / 1024 ** 3:.2f} ГиБ свободно" if vram > 0 else "в /health не сообщалась"
+        log.info("%s: видеопамять по /health при готовности карты: %s.", _card_name(slot, cap=True), vram_text,
+                 extra=CONSOLE_SKIP_EXTRA)
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
         num = self._queue.popleft()
@@ -2591,7 +2639,7 @@ class Orchestrator:
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         log.info("Клип %d отправлен: %s (попытка %d, промпт %d симв., sha256 %s).",
                  num, _card_name(slot), self._attempts[num], len(prompt), digest)
-        log.info("клип %d из %d: начало", num, self._total_needed, extra=KEY_EVENT_EXTRA)
+        log.info("%s: начало", self._clip_label(num), extra=KEY_EVENT_EXTRA)
 
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
@@ -2618,6 +2666,9 @@ class Orchestrator:
         elif status in _FAILED_STATUSES:
             slot.task = None
             err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
+            if _is_out_of_memory(err):
+                self._stop_on_out_of_memory(slot, task.num, err)
+                return
             self._fail_clip(task.num, f"воркер сообщил об ошибке: {err}")
 
     def _download(self, slot: _CardSlot, tid: str, path: str) -> None:
@@ -2660,7 +2711,7 @@ class Orchestrator:
                  task.num, _card_name(slot), duration)
         total = self._total_needed
         done = len(self._done)
-        log.info("клип %d из %d: готов", task.num, total, extra=KEY_EVENT_EXTRA)
+        log.info("%s: готов", self._clip_label(task.num), extra=KEY_EVENT_EXTRA)
         log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
                  extra=KEY_EVENT_EXTRA)
         try:

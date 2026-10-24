@@ -1020,8 +1020,8 @@ def test_watch_heartbeat_lost_after_first_write_kills(watch):
     assert watch.kills == ["123"]            # пропажа файла: одна уборка, без повтора
 
 
-def test_watch_kill_failure_keeps_observer_running_and_exits_3_at_marker(watch):
-    """F3 + G11: неудачная уборка не завершает наблюдателя; при выходе по метке код 3 (уборка не удалась)."""
+def test_watch_kill_failure_keeps_observer_running_and_exits_0_at_marker(watch):
+    """F3 + без G11: неудачная уборка не завершает наблюдателя; при выходе по метке код всегда 0."""
     watch.kill.code = cli.EXIT_RUNTIME
     _write_hb(watch.hb, -200)
 
@@ -1030,7 +1030,7 @@ def test_watch_kill_failure_keeps_observer_running_and_exits_3_at_marker(watch):
             cli.finished_marker_path(watch.hb).write_text("finished\n", encoding="utf-8")
 
     watch.clock.on_sleep = on_sleep
-    assert _run_watch(watch) == 3
+    assert _run_watch(watch) == 0
     assert watch.kills == ["123"]
     assert watch.clock.sleeps == 2           # работал после уборки до метки
 
@@ -1080,15 +1080,15 @@ def test_watch_main_stale_kills_through_kill_cards(capsys, kill_env, tmp_path, m
     assert kill_env.labels == ["gen-123"]
 
 
-def test_watch_main_real_kill_failure_gives_3(capsys, kill_env, tmp_path, monkeypatch):
-    # G11: неудачная уборка не должна выглядеть как успех: код 3 при выходе по метке
+def test_watch_main_real_kill_failure_gives_0_and_error_line(capsys, kill_env, tmp_path, monkeypatch):
+    # без G11: неудачная уборка не меняет код выхода по метке (0); причина остаётся строкой ERROR в журнале
     kill_env.error = cli.VastError("Не удалось уничтожить экземпляры Vast: [11]")
     hb = tmp_path / "heartbeat.json"
     _write_real_hb(hb, 300)
     _stop_after_kill(monkeypatch, hb)
     code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"] + WATCH_ARGS_FAST)
     cap = capsys.readouterr()
-    assert code == 3
+    assert code == 0
     assert kill_env.labels == ["gen-123"]
     assert "Traceback" not in cap.err
     assert "не удалось" in cap.err.lower()
@@ -1113,7 +1113,7 @@ def test_watch_does_not_print_key_or_heartbeat_content(capsys, kill_env, tmp_pat
     _stop_after_kill(monkeypatch, hb)
     code = cli.main(["watch-heartbeat", "--heartbeat-path", str(hb), "--run-id", "123"] + WATCH_ARGS_FAST)
     cap = capsys.readouterr()
-    assert code == 3                         # уборка не удалась (G11), наблюдатель вышел по метке
+    assert code == 0                         # уборка не удалась, наблюдатель вышел по метке с кодом 0 (без G11)
     assert canary not in cap.out + cap.err
     assert "203.0.113.5" not in cap.out + cap.err
 
