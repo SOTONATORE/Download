@@ -52,6 +52,7 @@ _REJECT_LABELS = (
     ("network", "сеть"),
     ("vram", "VRAM"),
     ("gpu_name", "имя GPU"),
+    ("disk", "диск меньше запрошенного"),
     ("inet_price", "цена трафика выше максимума"),
     ("inet_price_unknown", "цена трафика не разобрана"),
 )
@@ -72,6 +73,10 @@ PATH_REQUEST_LOGS = "/api/v0/instances/request_logs/{id}"  # PUT: запрос �
 # «цена трафика не разобрана» (fail-closed).
 INET_UP_COST_FIELD = "inet_up_cost"        # UNVERIFIED в ответе API; USD за ГБ по vast-cli
 INET_DOWN_COST_FIELD = "inet_down_cost"    # UNVERIFIED в ответе API; USD за ГБ по vast-cli
+# Размер диска предложения и карты, ГБ. UNVERIFIED: имя не найдено ни в репозитории, ни в записанном ответе Vast;
+# взято как «disk_space» по имени фильтра vast-cli. Поле нет или не читается: предложение не отбрасывается
+# по диску при поиске, а размер диска карты проверяется после аренды (оркестратор, _check_disk).
+DISK_SPACE_FIELD = "disk_space"
 # Текст статуса экземпляра (ошибка рантайма при неудачном старте, SPEC 8.2).
 # UNVERIFIED: имя поля не найдено ни в репозитории, ни в производственном логе; официальный
 # vast.py недоступен (403 политики egress, 13.10.2026). Поля нет или значение не строка:
@@ -98,6 +103,16 @@ _BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
 _PAIR_RE = re.compile(
     r"""(?i)(?:(?=[\"'])|(?<![\w.\-]))([\"']?[\w.\-]*(?:token|key|secret|password|authorization|auth|hmac|crisp)[\w.\-]*[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&}\]]+)"""
 )
+
+
+def _console_extra() -> dict:
+    """Флаг «ключевое событие» для консоли (строка итога поиска). Импорт внутри функции: log_setup сам импортирует
+    этот модуль, и импорт на уровне модуля дал бы цикл."""
+    try:
+        from .log_setup import KEY_EVENT_EXTRA as extra
+    except ImportError:  # pragma: no cover
+        from log_setup import KEY_EVENT_EXTRA as extra  # type: ignore
+    return extra
 
 
 def is_sensitive_name(name: str) -> bool:
@@ -353,6 +368,8 @@ class OfferFilter:
     verified: bool = False
     # Потолок цены трафика, USD за ТБ. Проверка клиентская, в обе стороны (см. INET_*_FIELD).
     max_inet_price_per_tb: float = 4.1
+    # Минимальный размер диска, ГБ (обычно disk_gb запуска); 0 = не проверять. Поле диска не прочитано — не отбрасывает.
+    min_disk_gb: float = 0.0
 
 
 @dataclass
@@ -372,6 +389,8 @@ class GpuOffer:
     # dph_total из поиска (цена обычной аренды): запасной расчёт бюджета, если Vast не ответил ставкой bid.
     # 0.0 = поля нет или не читается: оркестратор берёт такую цену только при значении больше нуля (SPEC 8.2).
     dph_total: float = 0.0
+    # размер диска предложения, ГБ (см. DISK_SPACE_FIELD); None = поля нет или не читается
+    disk_gb: Optional[float] = None
 
 
 @dataclass
@@ -389,6 +408,8 @@ class InstanceInfo:
     status_msg: str = ""      # текст статуса (см. STATUS_MSG_FIELD); "" если поля нет
     # is_bid из ответа экземпляра: True для прерываемой аренды; None, если поля нет (UNVERIFIED в API)
     is_bid: Optional[bool] = None
+    # размер диска карты, ГБ (см. DISK_SPACE_FIELD); None = поля нет или не читается
+    disk_gb: Optional[float] = None
     raw: dict = field(default_factory=dict, repr=False)
 
 
@@ -646,6 +667,7 @@ class VastClient:
             inet_up_price_per_tb=_per_tb_or_none(b.get(INET_UP_COST_FIELD)),
             inet_down_price_per_tb=_per_tb_or_none(b.get(INET_DOWN_COST_FIELD)),
             dph_total=_to_float(b.get("dph_total")),
+            disk_gb=_to_price_or_none(b.get(DISK_SPACE_FIELD)),
         )
 
     def search_offers(self, filters: OfferFilter) -> list[GpuOffer]:
@@ -679,7 +701,7 @@ class VastClient:
         result.sort(key=lambda o: o.price_per_hr)
         parts = ", ".join(f"{label} {rejected[key]}" for key, label in _REJECT_LABELS)
         log.info("Поиск предложений Vast: получено %d, отброшено: %s; подходит %d.",
-                 len(bundles), parts, len(result))
+                 len(bundles), parts, len(result), extra=_console_extra())
         return result
 
     @staticmethod
@@ -709,6 +731,9 @@ class VastClient:
             return "vram", None
         if filters.gpu_name and offer.gpu_name != filters.gpu_name:
             return "gpu_name", None
+        # диск предложения меньше запрошенного; поле не прочитано — предложение не отбрасывается (см. DISK_SPACE_FIELD)
+        if filters.min_disk_gb > 0 and offer.disk_gb is not None and offer.disk_gb < filters.min_disk_gb:
+            return "disk", None
         # Цена трафика в обе стороны. Нечитаемая цена отбрасывается (fail-closed): предложение
         # без цены нельзя признать подходящим. Серверного фильтра по полю нет: имя в живом ответе
         # не подтверждено (UNVERIFIED).
@@ -786,6 +811,7 @@ class VastClient:
             # не строка (или поля нет) значит текста нет: иначе в проверку попал бы repr объекта
             status_msg=raw_msg if isinstance(raw_msg, str) else "",
             is_bid=d.get("is_bid") if isinstance(d.get("is_bid"), bool) else None,
+            disk_gb=_to_price_or_none(d.get(DISK_SPACE_FIELD)),
             raw=d,
         )
 

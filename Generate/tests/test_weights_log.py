@@ -40,7 +40,7 @@ def _monitor(clock=None, logs=None, consoles=None, **kw):
     clock = clock or Clock()
     logs = logs if logs is not None else []
     consoles = consoles if consoles is not None else []
-    params = dict(speed_check_pct=10, speed_min_mbps=400.0, progress_step_pct=10,
+    params = dict(speed_check_pct=10, speed_min_mbps=wl.speed_threshold_mbps(800.0), progress_step_pct=10,
                   stall_sec=180.0, stage_max_sec=1200.0)
     params.update(kw)
     mon = wl.WeightsMonitor(
@@ -339,7 +339,7 @@ def test_average_and_remaining_use_fixed_timestamps():
     status_1050 = [m for m in logs if m.startswith("Веса: этап:")][-1]
     assert "окно не набрано" in status_1050
     assert "осталось: оценка недоступна" in status_1050
-    assert "средняя 8 Мбит/с" in status_1050                # 50 МиБ / 50 с = 1 МиБ/с ≈ 8 Мбит/с
+    assert "средняя оценка недоступна" in status_1050       # 50 с < 90 с: среднюю не печатаем
     clock.now = 1100.0
     mon.feed([_aria(100, 1000, 1)])                         # замер 3: окно 90 с, полное
     status_1100 = [m for m in logs if m.startswith("Веса: этап:")][-1]
@@ -357,7 +357,7 @@ def test_average_is_never_negative_and_remaining_needs_total():
     mon.feed([_aria(20, 1000, 1)])
     status = [m for m in logs if m.startswith("Веса: этап:")][-1]
     assert "итог неизвестен" in status and "осталось: оценка недоступна" in status
-    assert "средняя 8 Мбит/с" in status                     # 20 МиБ / 20 с
+    assert "средняя оценка недоступна" in status             # 20 с < 90 с
     assert "-" not in status.split("средняя")[1].split(",")[0]
 
 
@@ -459,6 +459,60 @@ def test_query_part_of_an_address_is_dropped_before_parsing():
     ev = wl.parse_line(f"[file=f.bin] 10/24 14:41:15 [NOTICE] CUID#9 - Redirecting to {url}")
     assert ev.kind == "ignore"
     assert wl._drop_query(url) == "https://cdn.example.test/ltx/f.bin"
+
+
+# --- выгрузка как замер; средняя только после окна; нераспознанные строки в журнал (C5) -----------
+
+def test_average_is_not_printed_before_90_seconds_and_is_after_them():
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1)])
+    clock.now = 1005.0
+    mon.feed([_aria(2, 1000, 1)])                       # 2 МиБ за 5 с: прежняя формула дала бы ~3 Мбит/с
+    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса: этап:")][-1]
+    clock.now = 1089.0
+    mon.feed([_aria(178, 1000, 1)])                     # 89 с от начала этапа: всё ещё до окна
+    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса: этап:")][-1]
+    clock.now = 1090.0
+    mon.feed([_aria(180, 1000, 1)])                     # 90 с: 180 МиБ / 90 с = 2 МиБ/с ≈ 17 Мбит/с
+    status = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "средняя 17 Мбит/с" in status
+    assert "оценка недоступна" not in status.split("средняя")[1].split(",")[0]
+
+
+def test_one_pull_with_many_lines_is_one_sample_and_causes_no_start_burst():
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1)])
+    clock.now = 1010.0
+    burst = [_aria(mib, 1000, 1) for mib in range(1, 501)]   # 500 строк одного ответа GET /logs
+    assert mon.feed(burst) is None
+    assert mon.window_samples == 1                           # одна выгрузка — один замер, а не 500
+    assert mon.window_first == 1010.0
+    assert mon.window_first_bytes == 500 * MIB               # окно открыто с уже накопленного: всплеска скорости нет
+    assert len([m for m in logs if m.startswith("Веса: файл")]) == 1   # в журнал — последнее значение файла
+    clock.now = 1020.0
+    assert mon.feed([_aria(501, 1000, 1)]) is None
+    assert mon.window_samples == 2
+    assert mon.check() is None                               # окно не набрано: решения нет
+
+
+def test_unparsed_progress_line_goes_to_log_in_full_once_per_form_and_decides_nothing():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 10
+    url = "https://cdn.example.test/ltx/f.bin?X-Amz-Signature=placeholder"
+    assert mon.feed([f"[#2089b0 1.2XiB/21GiB(5%) CN:16 DL:450MiB ETA:40s] {url}"]) is None
+    clock.now += 200
+    assert mon.feed(["[#2089b0 1.3XiB/21GiB(6%) CN:16 DL:450MiB ETA:40s]"]) is None   # та же форма: в журнал не пишется
+    forms = [m for m in logs if "полный текст для разбора формата" in m]
+    assert len(forms) == 1, forms
+    assert "[#2089b0 1.2XiB/21GiB(5%) CN:16 DL:450MiB ETA:40s]" in forms[0]
+    assert "<адрес>" in forms[0]
+    assert "placeholder" not in forms[0] and "https://" not in forms[0] and "?" not in forms[0]
+    assert mon.check() is None                               # ни скорости, ни зависания по ней
+    assert [kind for kind, _ in consoles] == ["start"]
+    assert mon.unrecognised == 2
 
 
 

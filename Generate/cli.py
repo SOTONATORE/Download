@@ -481,6 +481,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         max_inet_price_per_tb=cfg.max_inet_price_per_tb,
         interruptible=cfg.interruptible,
         verified=cfg.verified,
+        # диск предложения не меньше запрошенного (disk_gb входа); пилот этим фильтром не ограничивается
+        min_disk_gb=0.0 if _pilot_mode(args) else float(cfg.disk_gb),
     )
 
     stop = threading.Event()
@@ -519,7 +521,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             worker_idle_timeout_min=cfg.worker_idle_timeout_min,
             # мониторинг весов и готовности (SPEC 8.2): пороги из конфига, без литералов в оркестраторе
             speed_check_at_pct=cfg.speed_check_at_pct,
-            speed_min_mbps=cfg.speed_min_mbps,
             progress_step_pct=cfg.progress_step_pct,
             stall_timeout_min=cfg.stall_timeout_min,
             stage_max_min=cfg.stage_max_min,

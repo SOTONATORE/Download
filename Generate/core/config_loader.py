@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import difflib
+import math
 import re
 import typing
 from dataclasses import MISSING, dataclass, field, fields
@@ -28,8 +29,10 @@ import yaml
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .gemini_prompts import GeminiInputError
+    from .weights_log import speed_threshold_mbps
 except ImportError:  # pragma: no cover
     from gemini_prompts import GeminiInputError  # type: ignore
+    from weights_log import speed_threshold_mbps  # type: ignore
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN",
@@ -119,7 +122,6 @@ class Config:
     max_rent_tries: int = _rule(ge=1)
     bid_margin: float = _rule(ge=0)
     speed_check_at_pct: int = _rule(ge=1, le=100)
-    speed_min_mbps: float = _rule(gt=0)
     progress_step_pct: int = _rule(ge=1, le=50)
     stall_timeout_min: int = _rule(ge=1)
     stage_max_min: int = _rule(ge=1)
@@ -219,9 +221,11 @@ def _cross_checks(v: Mapping[str, Any]) -> list[str]:
     # на запуск должно хватать всего бюджета: кредит (min_balance_usd) не меньше потолка расходов
     if v["min_balance_usd"] < v["budget_limit_usd"]:
         problems.append("«min_balance_usd» не может быть меньше «budget_limit_usd»")
-    # скорость на срезе не выше потолка сети, по которому отбираются предложения
-    if v["speed_min_mbps"] > v["min_inet_mbps"]:
-        problems.append("«speed_min_mbps» не может быть больше «min_inet_mbps»")
+    # порог скорости весов = половина входа min_inet_mbps, округлённая вниз (не из конфига): не меньше 1 Мбит/с.
+    # Верхняя граница к min_inet_mbps больше не нужна: порог всегда не больше входа.
+    if not math.isfinite(v["min_inet_mbps"]) or speed_threshold_mbps(v["min_inet_mbps"]) < 1:
+        problems.append("«min_inet_mbps»: порог скорости весов (половина, округлённая вниз) должен быть "
+                        "конечным и не меньше 1 Мбит/с")
     # общий срок этапа не короче срока зависания
     if v["stage_max_min"] < v["stall_timeout_min"]:
         problems.append("«stage_max_min» не может быть меньше «stall_timeout_min»")

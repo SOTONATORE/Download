@@ -249,6 +249,7 @@ class _CardSlot:
     mode_mismatch: bool = False       # Vast не подтвердил bid (is_bid не True): бюджет по dph_total
     not_found: int = 0                # подряд идущих ответов «экземпляр не найден» (NOT_FOUND_LIMIT, SPEC 8.3)
     cost_checked: bool = False        # цена по ответу Vast уже учтена или признана недоступной (SPEC 8.2)
+    disk_checked: bool = False        # размер диска карты после аренды уже проверен (одна строка на карту)
     monitor: Optional[object] = None  # монитор загрузки весов (core/weights_log.py), создаётся по требованию
     ready_at: float = 0.0             # момент перехода в ready (срок принятия первой задачи, SPEC 8.2)
     accepted: bool = False            # воркер принял хотя бы одну задачу (POST /task)
@@ -764,9 +765,6 @@ class Orchestrator:
         pilot_start_cmd: str = "",
         worker_build: Optional[str] = None,
         speed_check_at_pct: int = 10,
-        # ВНИМАНИЕ: порог 400 Мбит/с задан для одного файла; правило сравнивает АГРЕГАТ всех файлов за окно.
-        # Значение проверить по реальной линии (замер агрегатной скорости на арендованной карте); здесь не менять.
-        speed_min_mbps: float = 400.0,
         progress_step_pct: int = 10,
         stall_timeout_min: int = 3,
         stage_max_min: int = 20,
@@ -795,8 +793,12 @@ class Orchestrator:
         # пороги мониторинга (SPEC 8.2): значения приходят из конфига; здесь только проверка знаков
         sec_values = (stall_timeout_min, stage_max_min, worker_ready_timeout_min, task_accept_timeout_min,
                       heartbeat_interval_sec, monitor_interval_sec)
-        if min(sec_values) < 1 or speed_min_mbps <= 0 or speed_check_at_pct < 1 or progress_step_pct < 1:
+        if min(sec_values) < 1 or speed_check_at_pct < 1 or progress_step_pct < 1:
             raise gp.GeminiInputError("Пороги мониторинга весов и готовности должны быть положительными.")
+        # порог скорости весов = половина входа min_inet_mbps, округлённая вниз; меньше 1 Мбит/с — ошибка входа
+        if not math.isfinite(float(min_inet_mbps)) or wl.speed_threshold_mbps(min_inet_mbps) < 1:
+            raise gp.GeminiInputError("Порог скорости весов (половина min_inet_mbps, округлённая вниз) "
+                                      "должен быть не меньше 1 Мбит/с.")
         if scan_sec < 0 or scan_step_sec <= 0:
             raise gp.GeminiInputError("Окно сбора цен: scan_sec не может быть отрицательным, "
                                       "scan_step_sec должен быть больше нуля.")
@@ -819,9 +821,10 @@ class Orchestrator:
         self.worker_idle_timeout_min = worker_idle_timeout_min
         # пороги мониторинга (SPEC 8.2, 8.3 а); значения из конфига
         self.speed_check_at_pct = int(speed_check_at_pct)
-        self.speed_min_mbps = float(speed_min_mbps)
+        # порог правила скорости: половина min_inet_mbps входа запуска (не из конфига), см. weights_log
+        self.speed_min_mbps = float(wl.speed_threshold_mbps(min_inet_mbps))
         self.progress_step_pct = int(progress_step_pct)
-        self.min_inet_mbps = float(min_inet_mbps)   # ожидаемая скорость; правило скорости берёт speed_min_mbps
+        self.min_inet_mbps = float(min_inet_mbps)   # ожидаемая скорость; порог правила скорости — её половина
         self.monitor_interval_sec = int(monitor_interval_sec)  # в 6б не используется: снимки делает воркер (SPEC 10)
         self._stall_sec = stall_timeout_min * 60.0
         self._stage_max_sec = stage_max_min * 60.0
@@ -1721,7 +1724,7 @@ class Orchestrator:
         self._scan_next = now
         self._scan_end = now + self.scan_sec
         log.info("Окно сбора цен открыто: %d с, шаг опроса %d с, до первой аренды.",
-                 int(self.scan_sec), int(self.scan_step))
+                 int(self.scan_sec), int(self.scan_step), extra=KEY_EVENT_EXTRA)
 
     def _scan_step_if_due(self, now: float) -> bool:
         """True — если шаг опроса выполнен и пробы записаны."""
@@ -1743,7 +1746,7 @@ class Orchestrator:
                  "накоплено уникальных %d.",
                  step_no, now - self._scan_started, len(offers),
                  f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет",
-                 len(self._scan_hist))
+                 len(self._scan_hist), extra=KEY_EVENT_EXTRA)
         return True
 
     def _stable_ranking(self) -> list:
@@ -1757,7 +1760,7 @@ class Orchestrator:
         log.info("Окно сбора цен закрыто: %.0f с, шагов %d (неуспешных %d), стабильных предложений %d, "
                  "минимальная цена %s.",
                  now - self._scan_started, self._scan_steps, self._scan_failed, len(pool),
-                 f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет")
+                 f"{cheapest:.4f} USD/ч" if cheapest is not None else "нет", extra=KEY_EVENT_EXTRA)
         return pool
 
     def _scan_abort(self, reason: str) -> None:
@@ -1920,7 +1923,7 @@ class Orchestrator:
             log.info("Окно сбора цен: выбрано предложение %d, dph_total %.4f USD/ч, "
                      "загрузка интернета %.1f Мбит/с; от старта окна до аренды %.0f с.",
                      offer.offer_id, offer.dph_total, offer.inet_down_mbps,
-                     self.clock() - self._scan_started)
+                     self.clock() - self._scan_started, extra=KEY_EVENT_EXTRA)
         log.info("%s создана, ждём загрузку образа.", _card_name(slot, cap=True))
         if self._artifact is not None:  # meta.json без ключей и токенов (SPEC 10.4)
             self._artifact.card_meta(slot, {
@@ -2109,6 +2112,26 @@ class Orchestrator:
             self._bad_offers.add(slot.offer_id)
         self._retire(slot, NOT_FOUND_REASON, bad=True)
 
+    def _check_disk(self, slot: _CardSlot, info: InstanceInfo) -> bool:
+        """Размер диска карты после аренды (C2): одна строка в файл на карту; меньше запрошенного — снятие.
+
+        True, если карта снята. Поле размера в ответе не прочитано: строка в файл, карта не снимается.
+        Пилот не проверяется (его путь не меняется).
+        """
+        slot.disk_checked = True
+        if self.pilot:
+            return False
+        actual = info.disk_gb
+        if actual is None:
+            log.info("%s: размер диска в ответе Vast не прочитан (запрошено %s ГБ).",
+                     _card_name(slot, cap=True), self.disk_gb)
+            return False
+        log.info("%s: диск карты %g ГБ (запрошено %s ГБ).", _card_name(slot, cap=True), actual, self.disk_gb)
+        if actual >= self.disk_gb:
+            return False
+        self._retire(slot, f"диск карты меньше запрошенного: {actual:g} ГБ из {self.disk_gb}", bad=True)
+        return True
+
     def _check_rental_mode(self, slot: _CardSlot, info: InstanceInfo) -> None:
         """Проверка режима после аренды (SPEC 8.2): карта арендована как bid, но Vast не подтвердил is_bid.
 
@@ -2188,6 +2211,8 @@ class Orchestrator:
                 if not slot.cost_checked:
                     self._check_rental_mode(slot, info)
                     self._adopt_vast_price(slot, info)
+                if not slot.disk_checked and self._check_disk(slot, info):
+                    return
                 prev_status = slot.vast_status
                 # строка только при смене состояния Vast (загрузка, запуск), не на каждый опрос
                 if info.actual_status != slot.vast_status:

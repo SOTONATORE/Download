@@ -404,7 +404,7 @@ def test_max_inet_price_per_tb_bounds_and_type(value, fragment):
 
 NEW_KEYS_DEFAULTS = {
     "scan_sec": 300, "scan_step_sec": 20, "stable_max_spread": 0.05, "bid_margin": 0.03,
-    "speed_check_at_pct": 10, "speed_min_mbps": 400.0, "progress_step_pct": 10,
+    "speed_check_at_pct": 10, "progress_step_pct": 10,
     "stall_timeout_min": 3, "stage_max_min": 20, "worker_ready_timeout_min": 10,
     "task_accept_timeout_min": 3, "heartbeat_interval_sec": 10, "monitor_interval_sec": 10,
 }
@@ -423,7 +423,6 @@ def test_new_keys_defaults_and_types_from_file():
         assert getattr(cfg, key) == value, key
     assert isinstance(cfg.stable_max_spread, float)
     assert isinstance(cfg.bid_margin, float)
-    assert isinstance(cfg.speed_min_mbps, float)
     assert isinstance(cfg.scan_sec, int)
     assert isinstance(cfg.speed_check_at_pct, int)
 
@@ -435,7 +434,6 @@ def test_new_keys_defaults_and_types_from_file():
     ("bid_margin", -0.01, "«bid_margin»: должно быть не меньше 0"),
     ("speed_check_at_pct", 0, "«speed_check_at_pct»: должно быть не меньше 1"),
     ("speed_check_at_pct", 101, "«speed_check_at_pct»: должно быть не больше 100"),
-    ("speed_min_mbps", 0, "«speed_min_mbps»: должно быть больше 0"),
     ("progress_step_pct", 0, "«progress_step_pct»: должно быть не меньше 1"),
     ("progress_step_pct", 51, "«progress_step_pct»: должно быть не больше 50"),
     ("stall_timeout_min", 0, "«stall_timeout_min»: должно быть не меньше 1"),
@@ -455,7 +453,7 @@ def test_new_keys_out_of_bounds_are_rejected(key, value, fragment):
 @pytest.mark.parametrize("key, value", [
     ("speed_check_at_pct", 1), ("speed_check_at_pct", 100),
     ("progress_step_pct", 1), ("progress_step_pct", 50),
-    ("stable_max_spread", 0), ("bid_margin", 0), ("speed_min_mbps", 0.5),
+    ("stable_max_spread", 0), ("bid_margin", 0),
 ])
 def test_new_keys_accept_bound_edges(key, value):
     raw = _base()
@@ -469,7 +467,6 @@ def test_new_keys_accept_bound_edges(key, value):
     ("progress_step_pct", "10", "целое число"),
     ("stable_max_spread", True, "число"),
     ("bid_margin", "0.03", "число"),
-    ("speed_min_mbps", "400", "число"),
     ("heartbeat_interval_sec", None, "не может быть пустым"),
 ])
 def test_new_keys_type_errors(key, value, fragment):
@@ -478,16 +475,29 @@ def test_new_keys_type_errors(key, value, fragment):
     _assert_rejected(raw, f"«{key}»", fragment)
 
 
-def test_speed_min_must_not_exceed_min_inet():
-    raw = _base()
-    raw["speed_min_mbps"] = 900
-    _assert_rejected(raw, "«speed_min_mbps» не может быть больше «min_inet_mbps»")
+@pytest.mark.parametrize("min_inet, threshold", [
+    (800, 400),        # 800 -> 400
+    (249.8, 124),      # 249.8 / 2 = 124.9 -> 124 (вниз)
+    (654.5, 327),      # 654.5 / 2 = 327.25 -> 327
+    (124.9, 62),       # по формуле: 124.9 / 2 = 62.45 -> 62 (в задании указано 124, это расходится с формулой)
+])
+def test_speed_threshold_is_half_of_min_inet_rounded_down(min_inet, threshold):
+    assert cl.speed_threshold_mbps(min_inet) == threshold
 
 
-def test_speed_min_equal_to_min_inet_is_allowed():
+@pytest.mark.parametrize("min_inet", [0.5, 1.9, 0])
+def test_threshold_below_one_mbps_is_input_error(min_inet):
     raw = _base()
-    raw["speed_min_mbps"] = raw["min_inet_mbps"]
-    assert cl.parse_config(raw).speed_min_mbps == 500.0
+    raw["min_inet_mbps"] = min_inet
+    _assert_rejected(raw, "«min_inet_mbps»", "порог скорости весов", "не меньше 1 Мбит/с")
+
+
+def test_speed_threshold_comes_from_min_inet_and_speed_key_is_gone():
+    raw = _base()
+    raw["min_inet_mbps"] = 800
+    assert cl.speed_threshold_mbps(cl.parse_config(raw).min_inet_mbps) == 400
+    _assert_rejected(dict(raw, speed_min_mbps=400), "неизвестный ключ «speed_min_mbps»")
+    assert "speed_min_mbps" not in cl.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
 
 
 def test_stage_max_must_not_be_less_than_stall_timeout():
@@ -504,9 +514,9 @@ def test_stage_max_equal_to_stall_timeout_is_allowed():
 
 def test_both_new_relations_are_reported_together():
     raw = _base()
-    raw["speed_min_mbps"] = 900
+    raw["min_inet_mbps"] = 0.5
     raw["stage_max_min"], raw["stall_timeout_min"] = 2, 3
-    err = _assert_rejected(raw, "«speed_min_mbps»", "«stage_max_min»")
+    err = _assert_rejected(raw, "«min_inet_mbps»", "«stage_max_min»")
     assert "проблем: 2" in str(err)
 
 

@@ -7,18 +7,24 @@ download_model: имя файла без подкаталога). Загрузк
 Все регулярные выражения собраны в этом модуле.
 
 Правила (каждое возвращает причину снятия карты, сама карта снимается оркестратором):
-  а. скорость всего этапа за окно измерения ниже speed_min_mbps (агрегат, не по файлу);
+  а. скорость всего этапа за окно измерения ниже порога speed_min_mbps (агрегат, не по файлу; порог — половина
+     min_inet_mbps входа запуска, см. speed_threshold_mbps);
   б. прогресс конкретного файла не меняется дольше stall_timeout_min, пока файл загружается;
   в. этап (от первой строки файла до строки «все файлы на месте») дольше stage_max_min;
   е. строка «ОШИБКА: не удалось загрузить файл» (лимит повторов исчерпан).
 
 Правила а и б решают только по окну измерения: окно считается набранным, когда с первого замера
 этапа прошло не меньше MIN_WINDOW_SEC секунд и замеров не меньше MIN_SAMPLES. До этого решения нет.
-Средняя скорость и оставшееся время (только при полном окне) для журнала; console получает только
+Замер — выгрузка (один ответ GET /logs, одна отметка времени), а не строка: по каждому файлу берётся
+последняя строка прогресса выгрузки; начало окна и замеры строятся по выгрузкам.
+Средняя скорость для журнала печатается только когда с начала этапа прошло не меньше MIN_WINDOW_SEC,
+раньше — «оценка недоступна». Оставшееся время — только при полном окне. Console получает только
 проценты шагами 10% и только при известном общем размере (см. _update_percent).
 
 Строки с «[#» и «%», которые не разобрал регэксп, не участвуют ни в скорости, ни в зависании:
-считаются и предупреждаются один раз на этап. Строки без «[#» не участвуют вовсе.
+считаются и предупреждаются один раз на этап, а полный текст (без адресов и query-частей) пишется в журнал
+по одному разу на каждую форму строки, чтобы следующий прогон показал реальный формат. Строки без «[#»
+не участвуют вовсе.
 
 Строки без префикса [file=...] (прежний формат, другие источники) разбираются как раньше: прогресс
 относится к единственному активному файлу, при нескольких активных файлах такие строки пропускаются.
@@ -31,13 +37,14 @@ download_model: имя файла без подкаталога). Загрузк
 
 Статус: строки setup.sh сверены с исходником. Формат строк aria2 сверен с реальным прогоном владельца
 (aria2c 1.37, файл 522 МиБ): прогресс «[#gid done/total(pct%) CN:n DL:speed( ETA:t)?]», строки «FILE:»,
-«Redirecting», «Download complete», таблица «Download Results» и сводка. Порог скорости (speed_min_mbps,
-400 Мбит/с) задан для одного файла и НЕ проверен на реальной линии по агрегату; владелец проверяет его
-замером агрегатной скорости на арендованной карте (SPEC 13.1). Порог зависания (stall_timeout_min)
+«Redirecting», «Download complete», таблица «Download Results» и сводка. Порог скорости (speed_min_mbps)
+берётся как половина min_inet_mbps входа запуска (speed_threshold_mbps) и НЕ проверен на реальной линии по
+агрегату; владелец проверяет его замером агрегатной скорости на арендованной карте (SPEC 13.1). Порог зависания (stall_timeout_min)
 и наибольший файл LTX владелец проверяет по первому прогону (SPEC 13.1, п. 5).
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
@@ -73,6 +80,10 @@ ARIA_MARK = "[#"
 
 # адрес с query-частью: «https://host/path?...» -> «https://host/path»
 _QUERY_RE = re.compile(r"(https?://[^\s?]*)\?\S*")
+# адрес целиком (полный текст нераспознанной строки для журнала не содержит адресов)
+_URL_RE = re.compile(r"https?://\S+")
+# события файла: строки прогресса, накопленные в выгрузке, применяются перед ними (см. feed)
+_FLUSH_KINDS = frozenset({"start", "skip", "done", "error", "stage_done", "aria_done"})
 
 _UNIT = {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
 MIB = 1024 ** 2
@@ -97,6 +108,21 @@ def bytes_per_sec_to_mbps(bytes_per_sec: float) -> float:
     return bytes_per_sec / BYTES_PER_MBIT
 
 
+def speed_threshold_mbps(min_inet_mbps: float) -> int:
+    """Порог правила скорости, Мбит/с: половина min_inet_mbps входа запуска, округлённая вниз до целого.
+
+    Вход — workflow MIN_INET или --min-inet-mbps (cfg.min_inet_mbps), а не значение из конфига.
+    Меньше 1 Мбит/с — ошибка входа: проверяется в config_loader (GeminiInputError).
+    """
+    return math.floor(float(min_inet_mbps) / 2.0)
+
+
+def _form_key(text: str) -> str:
+    """Форма строки для однократной записи в журнал: адрес, идентификатор «#gid» и числа не учитываются."""
+    shape = re.sub(r"#[0-9a-f]+", "#gid", text.replace("<адрес>", "").strip())
+    return re.sub(r"\d+(?:\.\d+)?", "N", shape)
+
+
 def _key(name: str) -> str:
     """Ключ состояния файла: имя без подкаталога («vae/x.safetensors» -> «x.safetensors»)."""
     return name.rsplit("/", 1)[-1]
@@ -117,6 +143,7 @@ class Event:
     file: str = ""                  # имя из префикса «[file=...]» (строки aria2 и curl), иначе пусто
     index: int = 0                  # номер файла «[i/N]» из строк setup.sh (0 — строки без номера)
     count: int = 0                  # N из «[i/N]»
+    text: str = ""                  # только для aria_unknown: строка без query-частей и адресов (для журнала формы)
 
 
 def _drop_query(text: str) -> str:
@@ -173,9 +200,11 @@ def parse_line(line: str) -> Event:
     """Классифицирует строку лога. Неизвестные строки получают kind «other» (их не трогаем)."""
     text = _drop_query(line.strip())
     m = FILE_PREFIX_RE.match(text)
-    if m:
-        return replace(_classify(text[m.end():]), file=m.group("file"))
-    return _classify(text)
+    ev = replace(_classify(text[m.end():]), file=m.group("file")) if m else _classify(text)
+    if ev.kind == "aria_unknown":
+        # полный текст для журнала формы: query-части уже убраны, адреса целиком заменяются
+        ev = replace(ev, text=_URL_RE.sub("<адрес>", text))
+    return ev
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +240,8 @@ class WeightsMonitor:
     # speed_check_pct принимается для совместимости конфигурации и правилом скорости больше не используется:
     # срез по проценту заменён окном измерения.
     speed_check_pct: int
-    speed_min_mbps: float             # ВНИМАНИЕ: 400 Мбит/с выбрано для ОДНОГО файла; проверить по агрегату
-                                      # на реальной линии (замер на арендованной карте, SPEC 13.1)
+    speed_min_mbps: float             # порог: половина min_inet_mbps входа (speed_threshold_mbps), агрегат всех файлов;
+                                      # проверить на реальной линии (замер на арендованной карте, SPEC 13.1)
     progress_step_pct: int
     stall_sec: float
     stage_max_sec: float
@@ -231,21 +260,40 @@ class WeightsMonitor:
     stage_count: int = 0                         # N из «[i/N]»
     window_first: Optional[float] = None         # время первого замера этапа
     window_first_bytes: float = 0.0              # сумма байт всех файлов в момент первого замера
-    window_samples: int = 0                      # замеров (строк прогресса) с первого
+    window_samples: int = 0                      # замеров (выгрузок с прогрессом, не строк) с первого
     window_note_logged: bool = False
     reason_sent: bool = False                    # причину снятия уже отдали: повторов нет
     console_step: int = 0                        # последний напечатанный шаг процентов
     start_noted: bool = False
     unrecognised: int = 0                        # строк «[#» с «%», которые не разобрались
     _unknown_warned: bool = False
+    _pending: dict = field(default_factory=dict)      # строки прогресса выгрузки: файл -> (состояние, событие), последняя
+    _pull_sampled: bool = False                       # в текущей выгрузке замер уже учтён (одна выгрузка — один замер)
+    _unknown_forms: set = field(default_factory=set)  # формы нераспознанных строк, уже записанных в журнал
 
     def feed(self, lines) -> Optional[str]:
-        """Обрабатывает строки по порядку. Возвращает причину снятия (первую) или None."""
+        """Обрабатывает одну выгрузку (ответ GET /logs) по порядку. Возвращает причину снятия (первую) или None.
+
+        Вся выгрузка имеет одну отметку времени. Строки прогресса копятся по файлам, и из каждого файла
+        остаётся последняя; они применяются перед событиями файла (начало, завершение, ошибка) и в конце выгрузки.
+        """
+        now = self.clock()
+        self._pull_sampled = False
         for line in lines:
-            reason = self._feed_one(line)
+            ev = parse_line(line)
+            if ev.kind == "progress":
+                state = self._target(ev)
+                if state is not None:
+                    self._pending[state.name] = (state, ev)
+                continue
+            if ev.kind in _FLUSH_KINDS:
+                reason = self._flush(now)
+                if reason:
+                    return reason
+            reason = self._feed_one(ev, now)
             if reason:
                 return reason
-        return None
+        return self._flush(now)
 
     def _console(self, kind: str, pct: int = 0) -> None:
         if self.console is not None:
@@ -258,9 +306,7 @@ class WeightsMonitor:
         self.reason_sent = True
         return text
 
-    def _feed_one(self, line: str) -> Optional[str]:
-        ev = parse_line(line)
-        now = self.clock()
+    def _feed_one(self, ev: Event, now: float) -> Optional[str]:
         if ev.kind in ("start", "skip", "done", "error") and not self.seen_start:
             self.seen_start = True
             self.stage_started = now
@@ -317,15 +363,17 @@ class WeightsMonitor:
             return None
         if ev.kind == "aria_unknown":
             self.unrecognised += 1
+            form = _form_key(ev.text)
+            if form not in self._unknown_forms:
+                self._unknown_forms.add(form)
+                self.log(f"Веса: строка с прогрессом не разобрана, полный текст для разбора формата: {ev.text}")
             if not self._unknown_warned:
                 self._unknown_warned = True
                 self.log(f"{UNRECOGNISED_WARNING[0].upper()}{UNRECOGNISED_WARNING[1:]}: эти строки не "
                          f"используются для скорости и зависания; действуют лимит этапа (stage_max_min) "
                          f"и снятие по ошибке файла.", True)
             return None
-        if ev.kind == "progress":
-            return self._progress(ev, now)
-        return None
+        return None  # строки прогресса применяет _flush (см. feed)
 
     def _target(self, ev: Event) -> Optional[_FileState]:
         """Файл, к которому относится строка прогресса."""
@@ -337,25 +385,33 @@ class WeightsMonitor:
             return None
         return next(iter(self.active.values()))
 
-    def _progress(self, ev: Event, now: float) -> Optional[str]:
-        state = self._target(ev)
-        if state is None:
+    def _flush(self, now: float) -> Optional[str]:
+        """Применяет накопленные строки прогресса: по одному значению на файл и один замер на выгрузку."""
+        if not self._pending:
             return None
-        state.recognised += 1
-        state.done_bytes = ev.done_bytes
-        state.total_bytes = ev.total_bytes
-        state.last_speed_bps = ev.speed_bps
-        if self.window_first is None:          # первый замер этапа открывает окно
-            self.window_first = now
-            self.window_first_bytes = self._agg_done()
-        self.window_samples += 1
-        if ev.pct != state.last_pct:           # тот же процент: ни записи, ни сдвига таймера файла
-            state.last_pct = ev.pct
-            state.last_progress = now
-            self.last_change = now
-            self.log(f"Веса: файл {state.name}: {ev.pct}%, скорость {bytes_per_sec_to_mbps(ev.speed_bps):.0f} "
-                     f"Мбит/с (только для журнала).")
+        items = list(self._pending.values())
+        self._pending = {}
+        changed = False
+        for state, ev in items:
+            state.recognised += 1
+            state.done_bytes = ev.done_bytes
+            state.total_bytes = ev.total_bytes
+            state.last_speed_bps = ev.speed_bps
+            if ev.pct != state.last_pct:       # тот же процент: ни записи, ни сдвига таймера файла
+                changed = True
+                state.last_pct = ev.pct
+                state.last_progress = now
+                self.last_change = now
+                self.log(f"Веса: файл {state.name}: {ev.pct}%, скорость {bytes_per_sec_to_mbps(ev.speed_bps):.0f} "
+                         f"Мбит/с (только для журнала).")
+        if changed:
             self.log(self._status_text(now))
+        if not self._pull_sampled:             # одна выгрузка — один замер окна, сколько бы строк в ней ни было
+            self._pull_sampled = True
+            if self.window_first is None:      # первый замер этапа открывает окно
+                self.window_first = now
+                self.window_first_bytes = self._agg_done()
+            self.window_samples += 1
         self._update_percent()
         return self._check_speed(now)
 
@@ -399,7 +455,10 @@ class WeightsMonitor:
         done = self._agg_done()
         total = self._agg_total()
         elapsed = max(0.0, now - self.stage_started)
-        avg_bps = done / elapsed if elapsed > 0 else 0.0
+        if elapsed >= self.min_window_sec:
+            avg_text = f"{bytes_per_sec_to_mbps(done / elapsed):.0f} Мбит/с"
+        else:                                  # раньше окна средняя не печатается: иначе стартовый всплеск
+            avg_text = ESTIMATE_UNAVAILABLE
         full = self._window_full(now)
         speed = self._window_speed(now) if full else None
         if total:
@@ -417,7 +476,7 @@ class WeightsMonitor:
         else:
             left_text = f"осталось: {ESTIMATE_UNAVAILABLE}"
         return (f"Веса: этап: {pct_text}, {size_text}, {speed_text}, "
-                f"средняя {bytes_per_sec_to_mbps(avg_bps):.0f} Мбит/с, {left_text}.")
+                f"средняя {avg_text}, {left_text}.")
 
     def _update_percent(self) -> None:
         """Шаги процентов для консоли: по одной строке на каждый 10%-шаг, только при известном итоге."""

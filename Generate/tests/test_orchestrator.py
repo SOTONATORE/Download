@@ -2532,3 +2532,56 @@ def test_canary_absent_from_status_meta_prompts_and_links(tmp_path, monkeypatch,
     for name, text in (("status.txt", status), ("meta.json", meta),
                        ("prompts.json", prompts), ("generated_links.txt", links)):
         assert canary not in text, f"канарейка найдена в {name}"
+
+
+# --- C1: порог скорости из входа запуска; C2: диск карты после аренды; C4: флаг консоли окна сбора цен ---
+
+def test_speed_threshold_of_run_comes_from_min_inet_input(tmp_path, monkeypatch):
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), min_inet_mbps=249.8)
+    assert rig.orc.speed_min_mbps == 124.0
+
+
+def test_speed_threshold_below_one_mbps_fails_at_orchestrator_input(tmp_path, monkeypatch):
+    with pytest.raises(orch.gp.GeminiInputError):
+        Rig(tmp_path, monkeypatch, missing=(1,), min_inet_mbps=0.5)
+
+
+def _disk_info(instance_id, disk_gb):
+    return vc.InstanceInfo(instance_id=instance_id, actual_status="loading", intended_status="running",
+                           dph=0.0, disk_gb=disk_gb)
+
+
+def test_card_with_smaller_disk_after_rent_is_retired_with_disk_reason(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), disk_gb=100)
+    slot = _booting_slot(rig)
+    monkeypatch.setattr(rig.vast, "get_instance", lambda instance_id: _disk_info(instance_id, 65.0))
+    rig.orc._step_slot(slot, rig.clock.now, False)
+    assert rig.orc._slots.get(1) is None
+    assert "диск карты меньше запрошенного: 65 ГБ из 100" in caplog.text
+    assert 11 in rig.orc._bad_machines                       # снятие как у других причин: хост на этот запуск
+
+
+def test_card_with_enough_disk_logs_its_size_to_file_only(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), disk_gb=100)
+    slot = _booting_slot(rig)
+    monkeypatch.setattr(rig.vast, "get_instance", lambda instance_id: _disk_info(instance_id, 100.0))
+    rig.orc._step_slot(slot, rig.clock.now, False)
+    assert rig.orc._slots.get(1) is slot                     # не меньше запрошенного: карта на месте
+    recs = [r for r in caplog.records if "диск карты 100 ГБ" in r.getMessage()]
+    assert len(recs) == 1
+    assert not any(getattr(recs[0], k, None) for k in orch.KEY_EVENT_EXTRA)   # в консоль не выводится
+
+
+def test_price_window_lines_carry_console_flag(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), scan_sec=40, scan_step_sec=20)
+    now = rig.clock.now
+    rig.orc._scan_open(now)
+    rig.orc._scan_step_if_due(now)
+    rig.orc._scan_close(now + 40)
+    for marker in ("Окно сбора цен открыто", "Окно сбора цен, шаг 1", "Окно сбора цен закрыто"):
+        recs = [r for r in caplog.records if marker in r.getMessage()]
+        assert len(recs) == 1, marker
+        assert all(getattr(recs[0], k, None) == v for k, v in orch.KEY_EVENT_EXTRA.items()), marker

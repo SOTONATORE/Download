@@ -943,3 +943,38 @@ def test_inet_price_cap_must_be_positive(key):
     c = make(lambda r: httpx.Response(200, json={"offers": []}))
     with pytest.raises(VastInputError):
         c.search_offers(OfferFilter(max_inet_price_per_tb=0))
+
+
+# --- диск предложения: фильтр при поиске (C2, поле DISK_SPACE_FIELD UNVERIFIED) и флаг консоли (C4) ---
+
+def test_offer_with_smaller_disk_is_dropped_and_counted(key, caplog):
+    caplog.set_level(logging.INFO)
+    small = bundle(1)
+    small["disk_space"] = 65.0
+    big = bundle(2)
+    big["disk_space"] = 100.0
+    c = make(lambda r: httpx.Response(200, json={"offers": [small, big]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter(min_disk_gb=100))] == [2]
+    assert "диск меньше запрошенного 1" in _summary_line(caplog)
+
+
+def test_offer_without_readable_disk_is_not_dropped_by_disk_filter(key):
+    c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1)]}))
+    assert [o.offer_id for o in c.search_offers(OfferFilter(min_disk_gb=100))] == [1]
+
+
+def test_disk_size_is_read_into_offer_and_instance(key):
+    offers = make(lambda r: httpx.Response(200, json={"offers": [dict(bundle(1), disk_space=65.5)]}))
+    assert offers.search_offers(OfferFilter())[0].disk_gb == 65.5
+    info = vc.VastClient._parse_instance({"id": 5, "actual_status": "loading", "disk_space": 100})
+    assert info.disk_gb == 100.0
+    assert vc.VastClient._parse_instance({"id": 5}).disk_gb is None
+
+
+def test_search_summary_line_carries_console_flag(key, caplog):
+    caplog.set_level(logging.INFO)
+    c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1)]}))
+    c.search_offers(OfferFilter())
+    recs = [r for r in caplog.records if "Поиск предложений Vast" in r.getMessage()]
+    assert len(recs) == 1
+    assert all(getattr(recs[0], k, None) == v for k, v in vc._console_extra().items())
