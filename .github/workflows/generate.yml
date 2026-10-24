@@ -252,10 +252,12 @@ jobs:
           import os
           import sys
 
-          values = sorted(
-              {os.environ.get(k, "").strip() for k in (
-                  "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN")} - {""},
-              key=len, reverse=True)
+          values = {os.environ.get(k, "").strip() for k in (
+              "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN", "VAST_SSH_KEY")}
+          # VAST_SSH_KEY многострочный: кроме всего значения маскируются его строки длиной не меньше 20 символов
+          values |= {line.strip() for line in os.environ.get("VAST_SSH_KEY", "").splitlines()
+                     if len(line.strip()) >= 20}
+          values = sorted(values - {""}, key=len, reverse=True)
           values = [v for v in values if len(v) >= 8]
           for line in sys.stdin:
               for v in values:
