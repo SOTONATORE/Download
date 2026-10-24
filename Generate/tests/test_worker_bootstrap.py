@@ -38,6 +38,17 @@ def _make_bin(tmp_path: Path) -> Path:
     return bin_dir
 
 
+def _comfy_stub(tmp_path: Path) -> Path:
+    """Заглушка COMFY_PYTHON (шаг 4б): пишет свои аргументы в файл и выходит с кодом 0. ComfyUI не нужен."""
+    stub = tmp_path / "comfy_python_stub"
+    args_file = tmp_path / "comfy_args.txt"
+    if not stub.exists():
+        _write_exec(stub, "#!/bin/sh\n"
+                    f"printf '%s\\n' \"$@\" > '{args_file}'\n"
+                    "exit 0\n")
+    return stub
+
+
 def _run_bootstrap(tmp_path: Path, *, comfy_exists: bool = True, repo_has_setup: bool = True,
                    extra: dict | None = None, drop: tuple = ()) -> subprocess.CompletedProcess:
     try:
@@ -66,6 +77,11 @@ def _run_bootstrap(tmp_path: Path, *, comfy_exists: bool = True, repo_has_setup:
         "COMFY_DIR": str(comfy),
         "WORKER_TOKEN": CANARY,
         "WORKER_BUILD": BUILD,
+        "COMFY_PYTHON": str(_comfy_stub(tmp_path)),  # шаг 4б: вместо /venv/main/bin/python
+        "COMFYUI_ARGS": "--disable-auto-launch --port 18188 --enable-cors-header",
+        "WORKER_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "COMFY_LOG_FILE": str(tmp_path / "comfyui.log"),
+        "COMFY_PID_FILE": str(tmp_path / "comfyui.pid"),
     }
     env.update(extra or {})
     for key in drop:
@@ -117,6 +133,13 @@ def test_success_passes_env_to_setup(tmp_path):
     assert f"pythonpath={tmp_path}" in lines  # родитель папки Generate: импорт Generate.worker
     assert f"comfy={tmp_path / 'ComfyUI'}" in lines
     assert "token=yes" in lines and "build=yes" in lines
+
+
+def test_missing_comfy_python_fails_with_russian_error_and_no_setup(tmp_path):
+    proc = _run_bootstrap(tmp_path, extra={"COMFY_PYTHON": str(tmp_path / "no_such_python")})
+    assert proc.returncode == 7, _output(proc)
+    assert "ОШИБКА: не найден Python ComfyUI" in _output(proc)
+    assert not (tmp_path / "setup_ran.txt").exists()
 
 
 def test_missing_comfy_dir_fails_with_path_and_no_setup(tmp_path):
@@ -297,7 +320,7 @@ def test_setup_server_stderr_goes_to_bootstrap_log():
     line = lines[0]
     assert ">/dev/null" in line
     assert '2>>"${WORKER_BOOTSTRAP_LOG}"' in line
-    assert 'WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"' in SETUP.read_text(encoding="utf-8")
+    assert 'WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"' in SETUP.read_text(encoding="utf-8")
 
 
 def test_setup_does_not_invent_template_comfy_log_path():

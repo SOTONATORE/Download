@@ -38,6 +38,8 @@ def _base_env(tmp_path: Path) -> dict:
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path),
         "WORKER_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "COMFY_LOG_FILE": str(tmp_path / "comfyui.log"),
+        "COMFY_PID_FILE": str(tmp_path / "comfyui.pid"),
     }
 
 
@@ -112,7 +114,7 @@ def test_bootstrap_error_path_prints_steps_and_no_secrets(tmp_path):
     for line in file_text.splitlines():
         assert line in out_lines, f"строка есть в логе, но нет в stdout: {line!r}"
     # б) строки шагов идут в одном и том же порядке в stdout и в файле.
-    # Диагностика (/workspace, процессы, PID, хвост лога) здесь не сравнивается: она меняется от запуска к запуску.
+    # Диагностика (/opt/worker, процессы, PID, хвост лога) здесь не сравнивается: она меняется от запуска к запуску.
     steps_out = [l for l in out_lines if l.startswith("[bootstrap] шаг")]
     steps_file = [l for l in file_text.splitlines() if l.startswith("[bootstrap] шаг")]
     assert steps_out, "в stdout нет строк шагов"

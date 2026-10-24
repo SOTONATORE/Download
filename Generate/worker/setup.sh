@@ -14,22 +14,22 @@ export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 
-# ComfyUI этим скриптом не запускается: порт 18188 задаётся COMFYUI_ARGS в env карты (SPEC 8.5). Стоковый путь образа через supervisor на Vast в ssh-режиме не работает.
+# ComfyUI запускает bootstrap.sh (шаг 4б), порт 18188 задаётся COMFYUI_ARGS в env карты (SPEC 8.5). setup.sh только ждёт его на порту 18188 (стоковый путь образа через supervisor на Vast в ssh-режиме не работает).
 COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
 COMFY_TIMEOUT_SEC=180
 COMFY_POLL_SEC=2
 
 # Файл готовности для GET /health сервера воркера (SPEC 8.1): создаётся после ответа ComfyUI.
-WORKER_READY_FLAG="${WORKER_READY_FLAG:-/workspace/worker_ready}"
+WORKER_READY_FLAG="${WORKER_READY_FLAG:-/opt/worker/worker_ready}"
 # Файл причины для GET /health: создаётся, если веса не загрузились (строка «weights_failed»). Имя = флаг + «.failed».
 WORKER_FAILED_FLAG="${WORKER_READY_FLAG}.failed"
 
 # Лог setup.sh и aria2 (SPEC 8.1): stderr сервера воркера (трассировки падения) пишется сюда.
-WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"
+WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
 
 # COMFY_TEMPLATE_LOG_PATH (SPEC 8.5): значение приходит из окружения карты и здесь не задаётся.
 # Если его нет, сервер пишет одну строку «не задан» и ComfyUI не читает; путь не угадывается.
-# Этот скрипт не пишет вывод ComfyUI через tee и ComfyUI не запускает.
+# Этот скрипт не пишет вывод ComfyUI через tee. ComfyUI запускает bootstrap.sh (шаг 4б), setup.sh только ждёт его на порту 18188.
 
 SERVER_PID=""
 

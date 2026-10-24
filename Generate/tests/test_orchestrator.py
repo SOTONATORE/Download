@@ -1855,8 +1855,8 @@ def test_worker_onstart_has_sha_and_no_secret(tmp_path, monkeypatch):
     onstart = received[0]
     assert VALID_BUILD in onstart
     assert f"https://codeload.github.com/SOTONATORE/Download/tar.gz/{VALID_BUILD}" in onstart
-    assert "/workspace/src" in onstart and "worker/bootstrap.sh" in onstart
-    assert "/workspace/bootstrap.log" in onstart and "2>&1 &" in onstart   # в фоне, вывод в файл
+    assert "/opt/worker/src" in onstart and "worker/bootstrap.sh" in onstart
+    assert "/opt/worker/bootstrap.log" in onstart and "2>&1 &" in onstart   # в фоне, вывод в файл
     assert canary not in onstart
     assert "set -x" not in onstart and "printenv" not in onstart
     assert re.search(r"\benv\b", onstart) is None

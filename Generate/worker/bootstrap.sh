@@ -10,22 +10,28 @@
 # в этом файле запрещены: они печатают секреты.
 # Все сообщения на русском (SPEC 0.5). Каждый шаг пишется строкой «[bootstrap] шаг N: ...»
 # с кодом возврата команды. Перед первым шагом и в каждой ветке ошибки пишется диагностика
-# (функция diag): имена и размеры файлов в /workspace, пути программ, PID процессов, признаки переменных.
+# (функция diag): имена и размеры файлов в /opt/worker, пути программ, PID процессов, признаки переменных.
 #
 # Коды выхода: 2 нет переменных или неверный WORKER_BUILD; 3 архив не получен;
 # 4 нет инструментов и их не удалось установить; 5 нет папки ComfyUI (ни по ожидаемому пути, ни поиском);
-# 6 не запустился setup.sh.
+# 6 не запустился setup.sh; 7 не запустился ComfyUI (шаг 4б: нет /venv/main/bin/python, пустой COMFYUI_ARGS, сбой cd или запуска).
 
 set -u
 
+# Папки логов создаются здесь, до первой записи: BOOTSTRAP_LOG и COMFY_LOG_FILE (пути по умолчанию в /opt/worker).
+# Значения читаются из окружения напрямую, потому что переменные ниже задаются после этой строки.
+mkdir -p "$(dirname "${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}")" "$(dirname "${COMFY_LOG_FILE:-/opt/worker/comfyui.log}")"
+
 REPO_SLUG="${REPO_SLUG:-SOTONATORE/Download}"
-REPO_DIR="${REPO_DIR:-/workspace/Generate}"
+REPO_DIR="${REPO_DIR:-/opt/worker/Generate}"
 # Ожидаемая папка ComfyUI. Если main.py там нет, шаг 4 ищет его в COMFY_SEARCH_DIRS.
-COMFY_DIR="${COMFY_DIR:-/workspace/ComfyUI}"
+COMFY_DIR="${COMFY_DIR:-/opt/workspace-internal/ComfyUI}"
+# Python для запуска ComfyUI (venv образа vastai/comfy, проверен на Vast). Переопределяется в тестах заглушкой.
+COMFY_PYTHON="${COMFY_PYTHON:-/venv/main/bin/python}"
 COMFY_SEARCH_DIRS="${COMFY_SEARCH_DIRS:-/workspace /opt /root /home}"
 COMFY_SEARCH_DEPTH="${COMFY_SEARCH_DEPTH:-6}"
 COMFY_SEARCH_TIMEOUT="${COMFY_SEARCH_TIMEOUT:-60}"
-BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/workspace/bootstrap.log}"
+BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
 
 # Одна функция записи для всех сообщений шагов. Строка уходит в stdout и в BOOTSTRAP_LOG.
 # onstart запускает скрипт с «>> лог 2>&1», то есть stdout уже и есть файл лога: тогда второй записи нет,
@@ -56,13 +62,13 @@ diag() {
     local reason="$1"
     say "диагностика (${reason}):"
 
-    say "  содержимое /workspace (имя, размер в байтах):"
-    if [ -d /workspace ]; then
-        find /workspace -mindepth 1 -maxdepth 1 -printf '%s %f\n' 2>/dev/null | while read -r size name; do
+    say "  содержимое /opt/worker (имя, размер в байтах):"
+    if [ -d /opt/worker ]; then
+        find /opt/worker -mindepth 1 -maxdepth 1 -printf '%s %f\n' 2>/dev/null | while read -r size name; do
             say "    ${name} ${size}"
         done
     else
-        say "    папки /workspace нет"
+        say "    папки /opt/worker нет"
     fi
 
     # Хвост лога только при повторном запуске: в логе уже есть строки прошлого bootstrap
@@ -258,6 +264,43 @@ else
         diag "шаг 4: ComfyUI не найден"
         exit 5
     fi
+fi
+
+# --- шаг 4б: запуск ComfyUI в фоне (как в пилоте: main.py + COMFYUI_ARGS; порт задаёт COMFYUI_ARGS) ---
+# Готовность здесь не ждём: setup.sh после загрузки весов сам ждёт 127.0.0.1:18188/system_stats.
+COMFY_LOG_FILE="${COMFY_LOG_FILE:-/opt/worker/comfyui.log}"
+COMFY_PID_FILE="${COMFY_PID_FILE:-/opt/worker/comfyui.pid}"
+comfy_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:18188/system_stats" 2>/dev/null || true)"
+if [ "${comfy_code}" = "200" ]; then
+    say "ComfyUI уже отвечает, запуск пропущен"
+else
+    if [ ! -x "${COMFY_PYTHON}" ]; then
+        say_err "шаг 4б: ОШИБКА: не найден Python ComfyUI (${COMFY_PYTHON}) (код 7)."
+        diag "шаг 4б: нет /venv/main/bin/python"
+        exit 7
+    fi
+    # COMFYUI_ARGS делится по пробелам без eval. Значения не печатаются.
+    ARGS=()
+    read -r -a ARGS <<< "${COMFYUI_ARGS:-}"
+    if [ "${#ARGS[@]}" -eq 0 ]; then
+        say_err "шаг 4б: ОШИБКА: переменная COMFYUI_ARGS пуста, аргументы запуска ComfyUI не заданы (код 7)."
+        diag "шаг 4б: пустой COMFYUI_ARGS"
+        exit 7
+    fi
+    say "шаг 4б: запуск ComfyUI из ${COMFY_DIR} (аргументов: ${#ARGS[@]}, вывод в ${COMFY_LOG_FILE})"
+    # cd в отдельном процессе шелла: рабочая папка bootstrap не меняется для следующих шагов
+    (
+        cd "${COMFY_DIR}" || exit 1
+        nohup "${COMFY_PYTHON}" main.py "${ARGS[@]}" >> "${COMFY_LOG_FILE}" 2>&1 &
+        printf '%s\n' "$!" > "${COMFY_PID_FILE}"
+    )
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        say_err "шаг 4б: ОШИБКА: не удалось перейти в ${COMFY_DIR} или запустить ComfyUI (код 7)."
+        diag "шаг 4б: cd или запуск ComfyUI"
+        exit 7
+    fi
+    say "шаг 4б: ComfyUI запущен в фоне, PID $(cat "${COMFY_PID_FILE}" 2>/dev/null || echo ?) (код 0)"
 fi
 
 # --- шаг 5: окружение для setup.sh и передача управления ---

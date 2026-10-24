@@ -163,8 +163,8 @@ OUTBID_REASON = "ставка bid перебита, Vast остановил ка
 # Сборка воркера (SPEC 8.4): номер коммита, 7-64 символа 0-9 и a-f
 WORKER_BUILD_RE = re.compile(r"[0-9a-f]{7,64}")
 WORKER_ARCHIVE_URL = "https://codeload.github.com/SOTONATORE/Download/tar.gz/{sha}"
-WORKER_SRC_DIR = "/workspace/src"
-WORKER_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
+WORKER_SRC_DIR = "/opt/worker/src"
+WORKER_BOOTSTRAP_LOG = "/opt/worker/bootstrap.log"
 # Логи контейнера карты через Vast (request_logs, SPEC 8.4): строк запрашивается, и сколько сохраняется
 # из большого файла (первые HEAD и последние TAIL строк, между ними строка-пометка с числом пропущенных).
 VAST_LOGS_TAIL_LINES = 2000
@@ -391,7 +391,8 @@ def _worker_onstart(worker_build: str) -> str:
     Номер коммита проверяется до сборки текста. Архив коммита скачивается с codeload.github.com во временный
     файл и распаковывается в WORKER_SRC_DIR без верхней папки (Generate окажется в WORKER_SRC_DIR/Generate).
     bootstrap.sh запускается в фоне, вывод дописывается в WORKER_BOOTSTRAP_LOG. REPO_DIR передаётся явно,
-    чтобы bootstrap не скачивал тот же архив второй раз. Лог создаётся в начале (touch), и каждый шаг
+    чтобы bootstrap не скачивал тот же архив второй раз. Папка /opt/worker создаётся первой командой (mkdir),
+    затем лог создаётся в начале (touch), и каждый шаг
     (mkdir, curl, tar, запуск bootstrap) пишет в него свой код возврата. В лог попадает только номер
     коммита, URL архива не пишется. В тексте команды нет токенов и секретов: они приходят в окружении
     карты (WORKER_TOKEN, HF_TOKEN).
@@ -405,7 +406,7 @@ def _worker_onstart(worker_build: str) -> str:
     # Шаги идут по порядку; при сбое rc не равен 0, следующие шаги пропускаются, а в лог пишется итог.
     # Строки шагов [onstart] идут и в файл лога, и в stdout карты (tee -a): если Vast сохраняет вывод контейнера,
     # они попадают в request_logs. Строки шагов не содержат URL архива и секретов; вывод bootstrap.sh идёт в файл.
-    return (f"touch {log}; rc=$?; "
+    return (f"mkdir -p /opt/worker; touch {log}; rc=$?; "
             f"echo '[onstart] старт, сборка {worker_build}' | tee -a {log}; "
             f"if [ $rc -eq 0 ]; then mkdir -p {src}; rc=$?; echo \"[onstart] шаг mkdir: код $rc\" | tee -a {log}; fi; "
             f"if [ $rc -eq 0 ]; then curl -fsSL --retry 3 -o {tgz} {url} 2>> {log}; rc=$?; "

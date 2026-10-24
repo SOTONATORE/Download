@@ -44,7 +44,7 @@ DEFAULT_IDLE_TIMEOUT_MIN = 2
 DEFAULT_MAX_UNACKED = 3
 # Папка вывода ComfyUI: bootstrap.sh находит ComfyUI и передаёт путь в COMFY_OUTPUT_DIR (поиск один, в bootstrap).
 # Этот дефолт нужен только без переменных окружения и строится от COMFY_DIR (тоже от bootstrap).
-DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or "/workspace/ComfyUI", "output")
+DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or "/opt/workspace-internal/ComfyUI", "output")
 MAX_BODY_BYTES = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
@@ -64,14 +64,14 @@ BUILD_UNKNOWN = "unknown"
 LOG_NEXT_HEADER = "X-Log-Next"
 # Файл готовности (SPEC 8.1): setup.sh создаёт его, когда ComfyUI отвечает; до этого /health даёт ok=false
 READY_FLAG_ENV = "WORKER_READY_FLAG"
-DEFAULT_READY_FLAG = "/workspace/worker_ready"
+DEFAULT_READY_FLAG = "/opt/worker/worker_ready"
 # Причина отказа загрузки весов (fix 2): setup.sh пишет файл «<флаг готовности>.failed», сервер его читает.
 # Поле reason появляется в /health только при таком отказе; в тексте причины нет путей и адресов.
 FAILED_FLAG_SUFFIX = ".failed"
 WEIGHTS_FAILED_REASON = "weights_failed"
 # Лог setup.sh и aria2 (onstart перенаправляет туда вывод bootstrap.sh): хвост идёт в буфер GET /logs (SPEC 8.1)
 BOOTSTRAP_LOG_ENV = "WORKER_BOOTSTRAP_LOG"
-DEFAULT_BOOTSTRAP_LOG = "/workspace/bootstrap.log"
+DEFAULT_BOOTSTRAP_LOG = "/opt/worker/bootstrap.log"
 # Лог ComfyUI шаблона образа (SPEC 8.5, B1, B2): путь пока не известен, первый прогон его подтвердит.
 # Пустое значение = не настроено: в лог пишется одна строка, файл не читается. Путь в коде не угадывается.
 TEMPLATE_COMFY_LOG_ENV = "COMFY_TEMPLATE_LOG_PATH"
@@ -83,7 +83,7 @@ TEMPLATE_COMFY_NOT_SET = ("Лог ComfyUI шаблона не задан (COMFY_
 SEGMENT_LINES = 10000
 SEGMENT_NAME = "seg-{:06d}.log"
 LOG_DIR_ENV = "WORKER_LOG_DIR"
-DEFAULT_LOG_DIR = "/workspace/worker_logs"
+DEFAULT_LOG_DIR = "/opt/worker/worker_logs"
 
 _ID_RE = r"([A-Za-z0-9_-]+)"
 _RE_TASK = re.compile(rf"^/task/{_ID_RE}$")

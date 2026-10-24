@@ -1,6 +1,6 @@
-"""Регрессия: setup.sh запускает сервер воркера из REPO_DIR, а не из жёсткого /workspace/Generate.
+"""Регрессия: setup.sh запускает сервер воркера из REPO_DIR, а не из жёсткого /opt/worker/Generate.
 
-Onstart распаковывает код в /workspace/src/Generate (WORKER_SRC_DIR), поэтому путь /workspace/Generate
+Onstart распаковывает код в /opt/worker/src/Generate (WORKER_SRC_DIR), поэтому путь /opt/worker/Generate
 на карте не существует и сервер воркера не стартует.
 """
 from pathlib import Path
@@ -24,4 +24,4 @@ def test_setup_launches_server_from_repo_dir():
 
 
 def test_setup_has_no_hardcoded_workspace_generate_path():
-    assert "/workspace/Generate" not in SETUP.read_text(encoding="utf-8")
+    assert "/opt/worker/Generate" not in SETUP.read_text(encoding="utf-8")

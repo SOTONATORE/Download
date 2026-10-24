@@ -30,8 +30,8 @@ except ImportError:  # pragma: no cover
 # Фиксированные команды. Имя -> точная строка команды на машине. Добавлять только явным решением владельца.
 COMMANDS: dict[str, str] = {
     "ping": "echo ok",
-    "bootstrap_tail": "tail -n 100 /workspace/bootstrap.log",
-    "workspace_list": "ls -la /workspace",
+    "bootstrap_tail": "tail -n 100 /opt/worker/bootstrap.log",
+    "workspace_list": "ls -la /opt/worker",
     "processes": "ps -eo pid,comm --no-headers | head -n 50",
     "listening": "(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | head -n 30",
     "worker_health": "curl -sS -m 5 http://127.0.0.1:8000/health",
