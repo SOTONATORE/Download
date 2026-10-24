@@ -41,8 +41,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
-    from .log_setup import (_MASK, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external, mask_fetched_text,
-                            mask_remote_text, set_known_secrets)
+    from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
+                            mask_fetched_text, mask_remote_text, set_known_secrets)
     from .missing import parse_missing
     from .naming import clip_filename
     from . import ssh_probe
@@ -58,8 +58,8 @@ except ImportError:  # pragma: no cover
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
-    from log_setup import (_MASK, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external, mask_fetched_text,  # type: ignore
-                           mask_remote_text, set_known_secrets)
+    from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
+                           mask_fetched_text, mask_remote_text, set_known_secrets)
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
@@ -89,9 +89,10 @@ LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
-WAIT_LOG_INTERVAL_SEC = 60.0  # строка состояния ожидания воркера: не чаще раза в минуту
+WAIT_LOG_INTERVAL_SEC = 30.0  # строка состояния ожидания воркера на карту: не чаще раза в 30 с
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
 SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
+CARD_WARN_REPEAT_SEC = 30.0  # повтор одного предупреждения карты в консоли: не чаще раза в 30 с (_warn_card)
 SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
 SSH_DIAG_BASE_COMMANDS = ("ping", "worker_health", "bootstrap_tail")  # каждый тик
 SSH_DIAG_EXTRA_COMMANDS = ("workspace_list", "processes", "listening", "gpu")  # каждый пятый тик
@@ -259,7 +260,8 @@ class _CardSlot:
     probe_answered: bool = False      # последний /health получил HTTP-ответ (не ошибку связи)
     health_reason: str = ""           # поле reason из последнего /health («weights_failed» или пусто)
     weights_wait_since: Optional[float] = None  # воркер отвечает, строк весов нет: с какого момента ждём весы
-    wait_log_at: float = -1e9         # время последней строки состояния ожидания (раз в минуту)
+    wait_log_at: float = -1e9         # время последней строки состояния ожидания (не чаще WAIT_LOG_INTERVAL_SEC)
+    ready_announced: bool = False     # строка «карта N: воркер готов» уже выведена (одна на карту)
     vast_silence_at: Optional[float] = None  # время последней периодической попытки логов Vast (молчание)
     vast_silence_busy: bool = False   # попытка логов Vast идёт сейчас (повторный вход пропускается)
     vast_logs_url: Optional[str] = None  # result_url после PUT request_logs; только в памяти, не логируется и не пишется
@@ -705,7 +707,8 @@ class RunPublisher:
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
-    _ssh_key_warned_at: Optional[float] = None  # время последней строки «ключ не задан» (A2b: не чаще раза в интервал)
+    _total_needed: int = 0  # клипов нужно в этом запуске: знаменатель строк «клип N из M» (задаёт run)
+    clock = staticmethod(time.monotonic)  # часы по умолчанию; конструктор подменяет их своими
 
     def __init__(
         self,
@@ -1028,7 +1031,8 @@ class Orchestrator:
                 raise _LogCursorError()
             text = resp.text
         except (httpx.HTTPError, _WorkerHttpError, _LogCursorError) as exc:
-            log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+            self._warn_card(slot, f"logs:{type(exc).__name__}", "Не удалось получить логи карты %d: %s.",
+                            slot.instance_id, type(exc).__name__)
             return False
         lines = self._mask_remote(text).splitlines()
         slot.log_next = int(cursor)
@@ -1063,7 +1067,8 @@ class Orchestrator:
                     reason, slot.weights_reason = slot.weights_reason, None
                     self._retire_bad(slot, reason)
             except Exception as exc:  # выгрузка логов не должна ронять конвейер
-                log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
+                self._warn_card(slot, f"logs:{type(exc).__name__}", "Не удалось получить логи карты %d: %s.",
+                                slot.instance_id, type(exc).__name__, now=now)
 
     def _pull_silent_vast_logs(self, now: float) -> None:
         """Логи Vast у карты, пока /health не ответил ok (этапы booting и «без ответа»): не чаще раза в 10 с.
@@ -1095,7 +1100,9 @@ class Orchestrator:
                     self._silent_vast_request(slot)
             except Exception as exc:  # логи не должны ронять конвейер
                 self._clear_silent_vast_logs(slot)
-                log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
+                self._warn_card(slot, f"vast_logs_exc:{type(exc).__name__}",
+                                "Не удалось получить логи Vast карты %d: %s.",
+                                slot.instance_id, type(exc).__name__, now=now)
             finally:
                 slot.vast_silence_busy = False
 
@@ -1110,8 +1117,10 @@ class Orchestrator:
         try:
             url = self.vast.request_logs(slot.instance_id, tail=VAST_LOGS_TAIL_LINES, daemon_logs=False)
         except VastRuntimeError as exc:
-            log.warning("%s: запрос логов Vast не принят, код %s, повтор на следующем тике.",
-                        _card_name(slot, cap=True), getattr(exc, "status", None) or "нет")
+            code = getattr(exc, "status", None) or "нет"
+            self._warn_card(slot, f"vast_request:{code}",
+                            "%s: запрос логов Vast не принят, код %s, повтор на следующем тике.",
+                            _card_name(slot, cap=True), code)
             return
         slot.vast_logs_url = url
         slot.vast_logs_phase = "pending"
@@ -1137,11 +1146,14 @@ class Orchestrator:
                 text = mask_fetched_text(self._mask_remote(raw.decode("utf-8", errors="replace")))
                 self._artifact.card_vast_logs(slot, limit_log_lines(text))
             elif code == 403:
-                log.warning("%s: логи Vast ещё не готовы, код 403, %d байт; повтор на более позднем тике.",
-                            _card_name(slot, cap=True), size)
+                self._warn_card(slot, "vast_logs_403",
+                                "%s: логи Vast ещё не готовы, код 403, %d байт; повтор на более позднем тике.",
+                                _card_name(slot, cap=True), size)
             else:
-                log.warning("%s: логи Vast, код %s, %d байт; повтор на более позднем тике.",
-                            _card_name(slot, cap=True), code if code is not None else "нет", size)
+                shown = code if code is not None else "нет"
+                self._warn_card(slot, f"vast_logs_code:{shown}",
+                                "%s: логи Vast, код %s, %d байт; повтор на более позднем тике.",
+                                _card_name(slot, cap=True), shown, size)
         finally:
             url = None
             if raw_path:
@@ -1169,19 +1181,18 @@ class Orchestrator:
             return
         key = os.environ.get("VAST_SSH_KEY", "")
         if not key:
-            last = self._ssh_key_warned_at
-            if last is None or now - last >= SSH_DIAG_INTERVAL_SEC:
-                log.warning("SSH-диагностика пропущена: ключ не задан")  # сам ключ и его длина не выводятся
-                self._ssh_key_warned_at = now
-            for slot in due:
+            for slot in due:  # строка на карту; сам ключ и его длина не выводятся
+                self._warn_card(slot, "ssh_key", "%s: SSH-диагностика пропущена: ключ не задан",
+                                _card_name(slot, cap=True), now=now)
                 slot.ssh_diag_at = now  # карта не попадает в due до следующего интервала
             return
         for slot in due:
             try:
                 self._ssh_diag_tick(slot, now, key)
             except Exception as exc:  # сбой записи или разбора не останавливает шаги карт
-                log.warning("%s: SSH-диагностика прервана, исключение %s.",
-                            _card_name(slot, cap=True), type(exc).__name__)
+                self._warn_card(slot, f"ssh_diag_abort:{type(exc).__name__}",
+                                "%s: SSH-диагностика прервана, исключение %s.",
+                                _card_name(slot, cap=True), type(exc).__name__, now=now)
 
     @staticmethod
     def _ssh_diag_due(slot: _CardSlot, now: float) -> bool:
@@ -1217,8 +1228,9 @@ class Orchestrator:
             except Exception as exc:  # только имя типа исключения: текст может содержать адрес или ключ
                 failure = "exception"
                 output = ""
-                log.warning("%s: SSH-проверка %s прервана, исключение %s.",
-                            _card_name(slot, cap=True), name, type(exc).__name__)
+                self._warn_card(slot, f"ssh_check:{name}:{type(exc).__name__}",
+                                "%s: SSH-проверка %s прервана, исключение %s.",
+                                _card_name(slot, cap=True), name, type(exc).__name__)
             if name == "ping":
                 ping_class = failure
             blocks.append(f"--- {name} ({failure}) ---")
@@ -1272,6 +1284,7 @@ class Orchestrator:
                                        mask=self._mask_remote)
         needed = [n for n in missing if n not in done]
         summary = RunSummary(total_needed=len(needed), skipped_done=len(missing) - len(needed))
+        self._total_needed = len(needed)  # тот же счётчик, что у итоговой строки (summary.total_needed)
         # E1: missing.txt и prompts.json до любых трат; ошибка загрузки останавливает запуск (код 2)
         self._publisher.start(self.missing_path, self.prompts_path)
         if not needed:
@@ -2162,12 +2175,14 @@ class Orchestrator:
             if isinstance(lookup_exc, VastInstanceNotFound):
                 # подряд идущие «не найдена» считаются отдельно (SPEC 8.3); остальные ошибки ниже, как раньше
                 slot.not_found += 1
-                log.warning("Не удалось получить статус %s: %s", _card_name(slot), lookup_exc)
+                self._warn_card(slot, f"status:{lookup_exc}", "Не удалось получить статус %s: %s",
+                                _card_name(slot), lookup_exc, now=now)
                 if slot.not_found >= NOT_FOUND_LIMIT:
                     self._retire_not_found(slot)
                     return
             elif lookup_exc is not None:
-                log.warning("Не удалось получить статус %s: %s", _card_name(slot), lookup_exc)
+                self._warn_card(slot, f"status:{lookup_exc}", "Не удалось получить статус %s: %s",
+                                _card_name(slot), lookup_exc, now=now)
             if info is not None:
                 slot.not_found = 0
                 if not slot.cost_checked:
@@ -2199,9 +2214,9 @@ class Orchestrator:
                         slot.ready_at = now
                         slot.contacted = True
                         slot.net_fail = 0
-                        log.info("%s: healthcheck OK через %.0f с после создания, "
-                                 "готова к приёму задач.", _card_name(slot, cap=True), age,
-                                 extra=KEY_EVENT_EXTRA)
+                        log.info("%s: healthcheck OK через %.0f с после создания.",
+                                 _card_name(slot, cap=True), age)  # подробности в файл
+                        self._announce_ready(slot)
                     elif self._track_ready_wait(slot, now):
                         return
             if slot.state == "booting":
@@ -2280,12 +2295,12 @@ class Orchestrator:
         return ok
 
     def _log_wait_state(self, slot: _CardSlot, now: float) -> None:
-        """Одна строка состояния ожидания воркера не чаще раза в минуту.
+        """Одна строка состояния ожидания воркера на карту не чаще WAIT_LOG_INTERVAL_SEC; после готовности молчит.
 
         Этапы: booting (адреса ещё нет или воркер отвечает, но готовности нет), без ответа (адрес есть,
         связь с /health не удалась). Без адреса, порта и значений; номер экземпляра Vast не пишется.
         """
-        if now - slot.wait_log_at < WAIT_LOG_INTERVAL_SEC:
+        if slot.state != "booting" or now - slot.wait_log_at < WAIT_LOG_INTERVAL_SEC:
             return
         slot.wait_log_at = now
         if slot.url and slot.probe_result and not slot.probe_answered:
@@ -2294,7 +2309,32 @@ class Orchestrator:
             stage = "booting"
         log.info("карта %d поколение %d: ожидание воркера, этап «%s», ждём %d с, последний результат: %s.",
                  slot.index, slot.generation, stage, int(now - slot.created),
-                 slot.probe_result or "проверки ещё не было")
+                 slot.probe_result or "проверки ещё не было", extra=KEY_EVENT_EXTRA)
+
+    def _announce_ready(self, slot: _CardSlot) -> None:
+        """Строка «карта N: воркер готов»: одна на карту, в момент первой готовности (P2)."""
+        if slot.ready_announced:
+            return
+        slot.ready_announced = True
+        log.info("карта %d: воркер готов", slot.index, extra=KEY_EVENT_EXTRA)
+
+    def _warn_card(self, slot: _CardSlot, key: str, text: str, *args, now: Optional[float] = None) -> None:
+        """Предупреждение по карте (P4): в консоль при первом появлении, дальше не чаще CARD_WARN_REPEAT_SEC.
+
+        key — идентификатор предупреждения без измеряемых значений (байты, секунды), но с identity ошибки
+        (тип исключения, код ответа, номер клипа). Другой текст для той же карты — другое предупреждение и
+        выводится сразу. Таблица «карта, ключ -> время последней строки в консоли» живёт в памяти запуска.
+        Каждый вызов пишется в файл журнала без ограничений: повтор помечен CONSOLE_SKIP_EXTRA.
+        """
+        when = self.clock() if now is None else now
+        table = self.__dict__.setdefault("_card_warn_at", {})
+        ident = (slot.index, slot.generation, key)
+        last = table.get(ident)
+        if last is None or when - last >= CARD_WARN_REPEAT_SEC:
+            table[ident] = when
+            log.warning(text, *args)
+        else:
+            log.warning(text, *args, extra=CONSOLE_SKIP_EXTRA)
 
     def _track_ready_wait(self, slot: _CardSlot, now: float) -> bool:
         """Правило (г), SPEC 8.2: готовность не подтверждена за worker_ready_timeout_min.
@@ -2452,8 +2492,7 @@ class Orchestrator:
             return  # готовый или назначенный клип не возвращается в очередь
         used = self._attempts.get(num, 0)
         if used >= MAX_ATTEMPTS:
-            log.error("Клип %d: попытки исчерпаны (%d), помечен как неудачный. Причина: %s",
-                      num, used, reason)
+            log.error("клип %d из %d: ошибка: %s", num, self._total_needed, reason, extra=KEY_EVENT_EXTRA)
             self._failed.add(num)
             self._mark(num, "failed")
         else:
@@ -2485,8 +2524,8 @@ class Orchestrator:
         except _WorkerNetError as exc:
             slot.net_fail += 1
             self._queue.appendleft(num)
-            log.warning("Воркер %s не принял клип %d (сбой связи: %s).",
-                        _card_name(slot), num, exc)
+            self._warn_card(slot, f"post_task:{num}:{exc}", "Воркер %s не принял клип %d (сбой связи: %s).",
+                            _card_name(slot), num, exc)
             return
         except _WorkerHttpError as exc:
             slot.net_fail += 1
@@ -2505,6 +2544,7 @@ class Orchestrator:
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         log.info("Клип %d отправлен: %s (попытка %d, промпт %d симв., sha256 %s).",
                  num, _card_name(slot), self._attempts[num], len(prompt), digest)
+        log.info("клип %d из %d: начало", num, self._total_needed, extra=KEY_EVENT_EXTRA)
 
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
@@ -2571,6 +2611,11 @@ class Orchestrator:
         self._mark(task.num, "done")
         log.info("Клип %d выдан в Release (рендер: %s, %.1f с).",
                  task.num, _card_name(slot), duration)
+        total = self._total_needed
+        done = len(self._done)
+        log.info("клип %d из %d: готов", task.num, total, extra=KEY_EVENT_EXTRA)
+        log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
+                 extra=KEY_EVENT_EXTRA)
         try:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):

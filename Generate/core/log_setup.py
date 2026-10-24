@@ -37,6 +37,9 @@ JOURNAL_PREFIXES = ("Запрос Vast #", "Ответ Vast #")
 # отметка записи для консоли: INFO-строка с этим атрибутом — ключевое событие (вызывать с extra=KEY_EVENT_EXTRA)
 KEY_EVENT_ATTR = "console_key"
 KEY_EVENT_EXTRA = {KEY_EVENT_ATTR: True}
+# отметка записи, которую консоль не выводит, а файл пишет (повтор предупреждения карты, см. _warn_card)
+CONSOLE_SKIP_ATTR = "console_skip"
+CONSOLE_SKIP_EXTRA = {CONSOLE_SKIP_ATTR: True}
 # предупреждения, которые в консоль не выводятся (проверка воркера /health: каждая попытка даёт строку)
 CONSOLE_DETAIL_RE = re.compile(r"проверка /health")
 # Режим маскирования (SPEC 0.1, п. 14; решение владельца 18.10.2026).
@@ -300,11 +303,14 @@ class MaskFilter(logging.Filter):
 class ConsoleFilter(logging.Filter):
     """Консоль: предупреждения и ошибки (кроме подробных), из INFO только ключевые события.
 
-    Подробные строки уровня INFO без отметки KEY_EVENT_ATTR в консоль не попадают. Файловый обработчик
-    этот фильтр не использует: он пишет всё, как прежде.
+    Подробные строки уровня INFO без отметки KEY_EVENT_ATTR в консоль не попадают. Запись с отметкой
+    CONSOLE_SKIP_ATTR (повтор предупреждения карты) в консоль тоже не попадает, в файл пишется.
+    Файловый обработчик этот фильтр не использует: он пишет всё, как прежде.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, CONSOLE_SKIP_ATTR, False):
+            return False
         if record.levelno >= logging.WARNING:
             try:
                 message = record.getMessage()

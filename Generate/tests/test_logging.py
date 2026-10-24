@@ -897,3 +897,178 @@ def test_detail_line_stays_out_of_console_but_reaches_file(tmp_path, monkeypatch
     assert "[setup] [1/5] Начинаю загрузку" in text
     assert "проверка /health: код 200" in text and "проверка /health: запрос не дошёл" in text
     assert "Веса ltx25 начало загрузки" in text
+
+
+# ---------------------------------------------------------------------------
+# Консоль: строки клипов (P1), готовности карты (P2), ожидания (P3), повтор предупреждений карты (P4)
+# Часы подставные (числа), сеть не используется. Консоль = тот же ConsoleFilter, что у обработчика.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    def __init__(self, data=None):
+        self._data = data or {}
+
+    def json(self):
+        return self._data
+
+
+class _FakeUploader:
+    def upload_clip(self, path):
+        pass
+
+
+def _console_lines(caplog):
+    """Строки, которые увидела бы консоль: ConsoleFilter применяется к записям caplog так же, как обработчик."""
+    flt = ls.ConsoleFilter()
+    return [r.getMessage() for r in caplog.records if flt.filter(r)]
+
+
+def _card(index, instance_id=77):
+    return orch._CardSlot(index=index, generation=1, instance_id=instance_id, machine_id=5,
+                          price=0.1, created=0.0)
+
+
+def _bare_log_orc():
+    """Оркестратор без конструктора: только для строк журнала и повтора предупреждений."""
+    return orch.Orchestrator.__new__(orch.Orchestrator)
+
+
+def _clip_orc(tmp_path, total):
+    """Оркестратор с очередью клипов и заглушками воркера, загрузки и состояния (без сети и диска запуска)."""
+    from collections import deque
+
+    orc = _bare_log_orc()
+    orc._total_needed = total
+    orc._queue = deque()
+    orc._prompts = {str(n): {"prompt": f"промпт {n}", "num_frames": 5} for n in range(1, total + 1)}
+    orc._attempts, orc._done, orc._failed, orc._durations = {}, set(), set(), []
+    orc._slots = {}
+    orc._tmp = str(tmp_path)
+    orc.seed_base = 0
+    orc.width, orc.template = 0, "{num}.mp4"
+    orc._uploader = _FakeUploader()
+    orc._mark = lambda num, status: None  # состояние промптов на диск не пишем
+
+    def call(slot, method, path, payload=None):
+        return _FakeResp({"id": f"t{payload['num']}"}) if payload else _FakeResp()
+
+    def download(slot, tid, path):
+        with open(path, "wb") as fh:
+            fh.write(b"clip")
+
+    orc._call = call
+    orc._download = download
+    return orc
+
+
+def _run_clip(orc, slot, num, now):
+    """Одна полная отправка клипа карте и его выдача в Release."""
+    orc._queue.append(num)
+    orc._dispatch(slot, now)
+    orc._finish_clip(slot, now + 10.0)
+
+
+def test_clip_lines_start_done_progress_in_order(tmp_path, caplog):
+    """P1: начало, готов и строка прогресса по порядку; знаменатель и процент — от total_needed запуска."""
+    caplog.set_level(logging.INFO)
+    orc = _clip_orc(tmp_path, total=3)
+    slot = _card(1)
+    orc._slots[1] = slot
+    _run_clip(orc, slot, 1, now=0.0)
+    _run_clip(orc, slot, 2, now=20.0)
+    assert _console_lines(caplog) == [
+        "клип 1 из 3: начало", "клип 1 из 3: готов", "готово 1 из 3 клипов (33%)",
+        "клип 2 из 3: начало", "клип 2 из 3: готов", "готово 2 из 3 клипов (66%)",
+    ]
+    assert len(orc._done) == 2  # тот же счётчик, что у итоговой строки (summary.completed)
+
+
+def test_failed_clip_prints_error_line_once(tmp_path, caplog):
+    """P1: окончательная неудача — одна строка «клип N из M: ошибка: причина»; промежуточная — без неё."""
+    caplog.set_level(logging.INFO)
+    orc = _clip_orc(tmp_path, total=3)
+    orc._attempts[2] = orch.MAX_ATTEMPTS
+    orc._fail_clip(2, "таймаут рендера")
+    orc._attempts[3] = 1
+    orc._fail_clip(3, "таймаут рендера")  # есть ещё попытки: клип возвращается в очередь
+    lines = _console_lines(caplog)
+    assert [l for l in lines if "ошибка" in l] == ["клип 2 из 3: ошибка: таймаут рендера"]
+    assert 2 in orc._failed and 3 not in orc._failed and 3 in orc._queue
+
+
+def test_worker_ready_line_once_per_card(caplog):
+    """P2: «карта N: воркер готов» — один раз на карту, в момент первой готовности."""
+    caplog.set_level(logging.INFO)
+    orc = _bare_log_orc()
+    first, second = _card(1), _card(2, instance_id=78)
+    orc._announce_ready(first)
+    orc._announce_ready(first)  # повтор на следующем тике: строки нет
+    orc._announce_ready(second)
+    assert _console_lines(caplog) == ["карта 1: воркер готов", "карта 2: воркер готов"]
+
+
+def test_wait_line_every_30_seconds_and_silent_after_ready(caplog):
+    """P3: строка ожидания не чаще раза в WAIT_LOG_INTERVAL_SEC (30 с) на карту; после готовности молчит."""
+    caplog.set_level(logging.INFO)
+    orc = _bare_log_orc()
+    slot = _card(1)
+    assert orch.WAIT_LOG_INTERVAL_SEC == 30.0
+    for now in (0.0, 10.0, 29.0, 30.0, 45.0, 60.0, 90.0):
+        orc._log_wait_state(slot, now)
+    waits = [l for l in _console_lines(caplog) if "ожидание воркера" in l]
+    assert [int(re.search(r"ждём (\d+) с", l).group(1)) for l in waits] == [0, 30, 60, 90]
+    slot.state = "ready"
+    orc._log_wait_state(slot, 120.0)
+    assert len([l for l in _console_lines(caplog) if "ожидание воркера" in l]) == 4
+
+
+def test_repeated_card_warning_printed_once_then_every_30_seconds(caplog):
+    """P4: повтор одного предупреждения карты — в консоль при первом появлении и затем не чаще раза в 30 с;
+    каждое вхождение остаётся в журнале файла; другой текст для той же карты печатается сразу."""
+    caplog.set_level(logging.DEBUG)
+    orc = _bare_log_orc()
+    slot = _card(1)
+    text = "Не удалось получить логи карты %d: %s."
+    for now in (0.0, 10.0, 29.9, 30.0):
+        orc._warn_card(slot, "logs:ConnectError", text, 77, "ConnectError", now=now)
+    orc._warn_card(slot, "logs:ReadError", text, 77, "ReadError", now=10.0)
+    console = [l for l in _console_lines(caplog) if "логи карты" in l]
+    assert console == [
+        "Не удалось получить логи карты 77: ConnectError.",  # 0 с
+        "Не удалось получить логи карты 77: ConnectError.",  # 30 с
+        "Не удалось получить логи карты 77: ReadError.",     # другой текст: сразу
+    ]
+    assert len([r for r in caplog.records if "логи карты" in r.getMessage()]) == 5  # файл: все пять вхождений
+
+
+def test_two_cards_keep_separate_warning_throttles(caplog):
+    """P4: у каждой карты свой интервал: одинаковое предупреждение двух карт печатается у каждой сразу."""
+    caplog.set_level(logging.DEBUG)
+    orc = _bare_log_orc()
+    a, b = _card(1), _card(2, instance_id=78)
+    for now in (0.0, 10.0):
+        orc._warn_card(a, "k", "Предупреждение карты %d", 1, now=now)
+        orc._warn_card(b, "k", "Предупреждение карты %d", 2, now=now)
+    assert [l for l in _console_lines(caplog) if "Предупреждение" in l] == [
+        "Предупреждение карты 1", "Предупреждение карты 2",
+    ]
+
+
+def test_console_skip_mark_keeps_line_out_of_console_only(tmp_path, monkeypatch):
+    """Метка повтора (CONSOLE_SKIP_EXTRA): запись не попадает в консоль, но пишется в файл журнала."""
+    import io
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", console)
+    art = tmp_path / "art"
+    handlers, _note = ls.setup_logging("DEBUG", str(art))
+    try:
+        log = logging.getLogger("Generate.test_console_skip")
+        log.warning("повтор предупреждения карты 1", extra=ls.CONSOLE_SKIP_EXTRA)
+        log.warning("первое предупреждение карты 1")
+    finally:
+        ls.teardown_logging(handlers)
+    assert "повтор предупреждения" not in console.getvalue()
+    assert "первое предупреждение карты 1" in console.getvalue()
+    text = (art / "run" / "debug.log").read_text(encoding="utf-8")
+    assert "повтор предупреждения карты 1" in text

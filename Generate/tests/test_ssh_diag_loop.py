@@ -186,7 +186,7 @@ def test_empty_key_skips_probes_with_one_line(tmp_path, monkeypatch, caplog):
     orc._slots[1] = _slot()
     _run(orc, monkeypatch, fake, [0.0, 10.0])  # второй вызов раньше интервала: строки нет
     assert fake.calls == []
-    assert _ssh_messages(caplog) == ["SSH-диагностика пропущена: ключ не задан"]
+    assert _ssh_messages(caplog) == ["Карта 1 поколение 1 (экземпляр 77): SSH-диагностика пропущена: ключ не задан"]
     assert not _diag_file(tmp_path).exists()
 
 
@@ -267,7 +267,24 @@ def test_empty_key_message_once_per_interval(tmp_path, monkeypatch, caplog):
     # 0 — строка; 10, 29, 45, 59 — в интервале, строк нет; 30 и 60 — новый интервал, строка
     _run(orc, monkeypatch, fake, [0.0, 10.0, 29.0, 30.0, 45.0, 59.0, 60.0])
     assert fake.calls == []
-    assert _ssh_messages(caplog) == ["SSH-диагностика пропущена: ключ не задан"] * 3
+    assert _ssh_messages(caplog) == ["Карта 1 поколение 1 (экземпляр 77): SSH-диагностика пропущена: ключ не задан"] * 3
+
+
+def test_empty_key_message_is_per_card(tmp_path, monkeypatch, caplog):
+    """P4: ключ не задан — строка на каждую карту (отдельный интервал у каждой), не одна на запуск."""
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("VAST_SSH_KEY", "")
+    fake = FakeProbe()
+    orc = _bare_orc(tmp_path)
+    orc._slots[1] = _slot()
+    second = _slot()
+    second.index, second.instance_id = 2, 78
+    orc._slots[2] = second
+    _run(orc, monkeypatch, fake, [0.0, 10.0, 30.0])  # 0 и 30 — по строке на карту; 10 — интервал не прошёл
+    assert _ssh_messages(caplog) == [
+        "Карта 1 поколение 1 (экземпляр 77): SSH-диагностика пропущена: ключ не задан",
+        "Карта 2 поколение 1 (экземпляр 78): SSH-диагностика пропущена: ключ не задан",
+    ] * 2
 
 
 def test_comfy_health_runs_on_tick_one_and_two(tmp_path, monkeypatch):
