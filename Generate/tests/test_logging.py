@@ -868,3 +868,32 @@ def test_canary_absent_from_debug_log_file_written_by_cli(tmp_path, monkeypatch)
     assert text.strip(), "файл журнала пуст: проверка значима только при записанных строках"
     assert canary not in text
     assert "***" in text
+
+
+def test_detail_line_stays_out_of_console_but_reaches_file(tmp_path, monkeypatch):
+    """Этап 7в (F3): подробная строка («[setup] ...», «проверка /health») не попадает в консоль, но есть в файле;
+    ключевое событие (extra=KEY_EVENT_EXTRA) и обычная ошибка попадают в консоль."""
+    import io
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", console)
+    art = tmp_path / "art"
+    handlers, note = ls.setup_logging("DEBUG", str(art))
+    try:
+        log = logging.getLogger("Generate.test_console_split")
+        log.info("[карта 500] [setup] [1/5] Начинаю загрузку: m.safetensors")
+        log.info("карта 500: проверка /health: код 200, ответ ok, за 0.1 с, готов.")
+        log.warning("карта 500: проверка /health: запрос не дошёл (ConnectError).")
+        log.info("Веса ltx25 начало загрузки", extra=ls.KEY_EVENT_EXTRA)
+        log.info("карта 500: Веса ltx25 10%", extra=ls.KEY_EVENT_EXTRA)
+        log.warning("Не удалось получить логи карты 500: ConnectError.")
+    finally:
+        ls.teardown_logging(handlers)
+    out = console.getvalue()
+    assert "[setup]" not in out and "проверка /health" not in out
+    assert "Веса ltx25 начало загрузки" in out
+    assert "карта 500: Веса ltx25 10%" in out
+    assert "Не удалось получить логи карты 500" in out
+    text = (art / "run" / "debug.log").read_text(encoding="utf-8")
+    assert "[setup] [1/5] Начинаю загрузку" in text
+    assert "проверка /health: код 200" in text and "проверка /health: запрос не дошёл" in text
+    assert "Веса ltx25 начало загрузки" in text

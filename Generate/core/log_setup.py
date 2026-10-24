@@ -1,8 +1,10 @@
 """Обработчики журнала шага run (SPEC 10, этап 7а).
 
 Два обработчика на корневом логгере:
-- консоль (stderr, окно GitHub Actions): уровень INFO всегда; сырой журнал обмена с Vast
-  (строки «Запрос Vast #» и «Ответ Vast #») в консоль не попадает;
+- консоль (stderr, окно GitHub Actions): ошибки и предупреждения, из INFO только ключевые события
+  (запись с extra=KEY_EVENT_EXTRA). Подробные строки (проверка /health, строки карты, журнал Vast,
+  поиск предложений, шаги загрузки весов кроме заданных) в консоль не попадают, в файле они есть.
+  Сырой журнал обмена с Vast (строки «Запрос Vast #» и «Ответ Vast #») в консоль не попадает;
 - файл <каталог артефакта>/run/debug.log: уровень из GEN_LOG_LEVEL, пишет все записи,
   включая DEBUG и сырой журнал Vast (--debug-logs). Создаётся только при заданном каталоге
   артефакта; без каталога (локальный запуск) файла нет.
@@ -32,6 +34,11 @@ DEBUG_FILE_PARTS = ("run", "debug.log")
 # строки сырого обмена с Vast: пишутся логгером клиента на уровне INFO (vast_client.py)
 JOURNAL_LOGGER = "Generate.vast_client"
 JOURNAL_PREFIXES = ("Запрос Vast #", "Ответ Vast #")
+# отметка записи для консоли: INFO-строка с этим атрибутом — ключевое событие (вызывать с extra=KEY_EVENT_EXTRA)
+KEY_EVENT_ATTR = "console_key"
+KEY_EVENT_EXTRA = {KEY_EVENT_ATTR: True}
+# предупреждения, которые в консоль не выводятся (проверка воркера /health: каждая попытка даёт строку)
+CONSOLE_DETAIL_RE = re.compile(r"проверка /health")
 # Режим маскирования (SPEC 0.1, п. 14; решение владельца 18.10.2026).
 # Режим A — текущий: маскируется пара ИМЯ=значение и "ИМЯ": "значение", если в имени есть часть,
 # похожая на секрет (KEY, TOKEN, SECRET, PASSWORD, AUTH, CREDENTIAL, SESSION; без учёта регистра).
@@ -290,6 +297,23 @@ class MaskFilter(logging.Filter):
         return True
 
 
+class ConsoleFilter(logging.Filter):
+    """Консоль: предупреждения и ошибки (кроме подробных), из INFO только ключевые события.
+
+    Подробные строки уровня INFO без отметки KEY_EVENT_ATTR в консоль не попадают. Файловый обработчик
+    этот фильтр не использует: он пишет всё, как прежде.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            try:
+                message = record.getMessage()
+            except Exception:  # noqa: BLE001
+                return True
+            return CONSOLE_DETAIL_RE.search(message) is None
+        return bool(getattr(record, KEY_EVENT_ATTR, False))
+
+
 class JournalFilter(logging.Filter):
     """Отсекает сырой журнал обмена с Vast: он идёт только в файл, не в консоль."""
 
@@ -315,6 +339,7 @@ def setup_logging(level: str, artifact_dir: Optional[str]) -> tuple[list[logging
     console.setLevel(CONSOLE_LEVEL)
     console.setFormatter(formatter)
     console.addFilter(JournalFilter())
+    console.addFilter(ConsoleFilter())
     console.addFilter(MaskFilter())
     handlers: list[logging.Handler] = [console]
 

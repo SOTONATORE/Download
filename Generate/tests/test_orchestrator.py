@@ -2121,12 +2121,19 @@ def test_first_heartbeat_has_no_secrets_no_addresses_and_utc_format(tmp_path, mo
 
 
 def test_speed_below_threshold_in_log_retires_card_and_host(tmp_path, monkeypatch, caplog):
+    """Правило (а) по агрегату за полное окно (90 с и 3 замера): ~1 МиБ/с, ниже порога; до окна карта на месте."""
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=7)
-    rig.worker.logs_text = (f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}\n"
-                            f"[#2089b0 2.1GiB/21GiB(10%) CN:16 DL:20MiB ETA:40s]\n")
+    # GET /logs в тесте отдаёт тот же текст при каждом запросе: на каждом проходе только новые строки
+    rig.worker.logs_text = (f"[setup] [1/1] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 10MiB/1000MiB(1%) CN:16 DL:1MiB ETA:40s]\n")
     rig.orc._pull_due_logs(rig.clock.now)
+    assert rig.orc._slots.get(1) is not None            # окно не набрано: решения нет
+    for done in (70, 130):                              # замеры через 60 с; третий на 120 с — окно полное
+        rig.clock.sleep(60.0)
+        rig.worker.logs_text = f"[#2089b0 {done}MiB/1000MiB({done // 10}%) CN:16 DL:1MiB ETA:40s]\n"
+        rig.orc._pull_due_logs(rig.clock.now)
     assert rig.orc._slots.get(1) is None
     assert "скорость загрузки весов ниже порога" in caplog.text
     assert 11 in rig.orc._bad_machines and 7 in rig.orc._bad_offers
@@ -2148,7 +2155,7 @@ def test_unrecognised_weights_format_warns_once(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     _ready_slot(rig, 1, instance_id=500)
-    rig.worker.logs_text = f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}\n[#2089b0 ??? ]\n"
+    rig.worker.logs_text = f"[setup] [1/5] Начинаю загрузку: {SETUP_FILE}\n[#2089b0 ??? (5%) ]\n"
     rig.orc._pull_due_logs(rig.clock.now)
     rig.clock.sleep(60.0)
     rig.orc._pull_due_logs(rig.clock.now)

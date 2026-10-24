@@ -3,6 +3,8 @@
 Строки «[setup] ...» повторяют вывод `Generate/worker/setup.sh` (функция log() и download_model).
 Строки aria2 повторяют прогон владельца (aria2c 1.37) с префиксом «[file=<имя>] », который ставит setup.sh.
 В фикстурах нет адресов с query-частью. Строки «[setup] ОШИБКА...» префикса не получают (setup.sh их не трогает).
+Правила: скорость — агрегат всех файлов за окно (MIN_WINDOW_SEC, MIN_SAMPLES), зависание — по файлу и тоже
+только при полном окне. Консоль получает начало этапа, шаги процентов (10%) и «загружены»; подробное — в журнал.
 Функции без pytest: запускаются и pytest, и `python -m Generate.tests.test_weights_log`.
 """
 from __future__ import annotations
@@ -33,19 +35,33 @@ class Clock:
         return self.now
 
 
-def _monitor(clock=None, logs=None, **kw):
+def _monitor(clock=None, logs=None, consoles=None, **kw):
+    """Возвращает (монитор, часы, журнал, консоль). Журнал: подробные строки; консоль: (вид, проценты)."""
     clock = clock or Clock()
     logs = logs if logs is not None else []
+    consoles = consoles if consoles is not None else []
     params = dict(speed_check_pct=10, speed_min_mbps=400.0, progress_step_pct=10,
                   stall_sec=180.0, stage_max_sec=1200.0)
     params.update(kw)
-    return wl.WeightsMonitor(clock=clock, log=lambda text, warn=False: logs.append(text), **params), clock, logs
+    mon = wl.WeightsMonitor(
+        clock=clock,
+        log=lambda text, warn=False: logs.append(text),
+        console=lambda kind, pct=0: consoles.append((kind, pct)),
+        **params)
+    return mon, clock, logs, consoles
 
 
 def _progress(pct: int, speed_mib: float = 500.0) -> str:
     total = 21.0
     done = total * pct / 100.0
     return f"[#2089b0 {done:.2f}GiB/{total:g}GiB({pct}%) CN:16 DL:{speed_mib:g}MiB ETA:40s]"
+
+
+def _aria(done_mib: float, total_mib: float, speed_mib: float, file: str = "") -> str:
+    """Строка прогресса aria2 в формате владельца; file — имя без подкаталога (префикс setup.sh)."""
+    pct = int(done_mib * 100 // total_mib)
+    line = f"[#2089b0 {done_mib:g}MiB/{total_mib:g}MiB({pct}%) CN:16 DL:{speed_mib:g}MiB ETA:40s]"
+    return f"[file={file}] {line}" if file else line
 
 
 def _start(name: str = NAME, idx: int = 1, total: int = 5) -> str:
@@ -94,108 +110,171 @@ def test_size_and_speed_conversion():
     assert round(wl.bytes_per_sec_to_mbps(50 * MIB)) == 419
 
 
-# --- прогресс каждые 10% без дублей ---------------------------------------------
-
-def test_progress_logged_at_every_step_without_duplicates():
-    mon, clock, logs = _monitor()
-    mon.feed([_start()])
-    for pct in (3, 3, 5, 9, 10, 10, 11, 15, 19, 20, 20, 33, 47, 60, 99):
-        clock.now += 10
-        assert mon.feed([_progress(pct)]) is None
-    lines = [m for m in logs if "%," in m]
-    pcts = [re.search(r"(\d+)%,", m).group(1) for m in lines]
-    # 3..9 — без строки; 10 (первый шаг), 20, затем 33, 47, 60 (шаг 70 не достигнут), 99 (последний)
-    assert pcts == ["10", "20", "33", "47", "60", "99"]
-    assert len(pcts) == len(set(pcts)), "процент не должен повторяться"
-    assert "Мбит/с" in lines[0] and "средняя" in lines[0] and "осталось" in lines[0]
+def test_one_mbit_is_125000_bytes_per_second():
+    assert wl.bytes_per_sec_to_mbps(125_000) == 1.0
+    assert wl.bytes_per_sec_to_mbps(1 * MIB) * 125_000 == 1 * MIB     # 1 МиБ/с в байтах, без потерь
 
 
-def test_same_percent_is_not_logged_twice_and_does_not_move_timer():
-    mon, clock, logs = _monitor(stall_sec=60.0)
-    mon.feed([_start()])
+# --- прогресс и шаги процентов для консоли ---------------------------------------
+
+def test_console_progress_once_per_10_percent_step():
+    """Шаги 10..100 по одной строке каждый; повторы процента и шаги внутри 10% не дают строк."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    for done in range(0, 1001, 5):                     # 1000 МиБ, по 5 МиБ, с повторами процента
+        clock.now += 1
+        mon.feed([_aria(done, 1000, 1)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    assert len(pcts) == len(set(pcts))
+
+
+def test_console_progress_never_printed_without_known_total():
+    """Пока не известны размеры всех файлов этапа, процентов в консоли нет (и «ожидания» тоже)."""
+    a_key = NAME.rsplit("/", 1)[-1]
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])             # номера известны, размера нет
     clock.now += 5
-    mon.feed([_progress(10)])
-    before = len(logs)
-    for _ in range(5):
+    mon.feed([_aria(500, 1000, 50, file=a_key)])                     # A 50%, размер B неизвестен
+    clock.now += 5
+    mon.feed([_aria(1000, 1000, 50, file=a_key)])                    # A 100%, B всё ещё без размера
+    assert [pct for kind, pct in consoles if kind == "progress"] == []
+    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатается шаг 70% (без повторов)
+    mon.feed([_aria(500, 1000, 50, file=VAE_FILE)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == [70]
+    mon.feed([_aria(1000, 1000, 50, file=VAE_FILE)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == [70, 100]
+
+
+def test_console_start_once_and_loaded_at_stage_end():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])
+    mon.feed(["[setup] [1/2] Файл успешно загружен: " + NAME + " (1 байт)",
+              "[setup] [2/2] Файл успешно загружен: " + VAE_NAME + " (1 байт)",
+              "[setup] Все файлы модели LTX-2.5 на месте."])
+    # оба файла полностью на месте: итог 100% печатается один раз до строки «загружены»
+    assert consoles == [("start", 0), ("progress", 100), ("loaded", 0)], consoles
+
+
+# --- правило (а): агрегатная скорость за окно ---------------------------------------
+
+def test_no_retirement_before_window_is_full_even_at_very_low_speed():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    for k in range(1, 10):                              # замеры каждые 10 с: 10..90 с от старта
         clock.now += 10
-        mon.feed([_progress(10)])
-    assert len(logs) == before
-    # последнее изменение процента было на +5 с; сейчас прошло 55 с (меньше 60): ещё не зависание
-    assert mon.check() is None
-    clock.now += 20   # 75 с без изменения процента
-    assert mon.check() == wl.REASON_STALL
+        assert mon.feed([_aria(10 * k, 1000, 1)]) is None   # 1 МиБ/с — очень мало, но окно не набрано
+        assert mon.check() is None
+    # первый замер на +10 с, последний на +90 с: окно 80 с < 90 с, решения нет
+    assert sum(1 for m in logs if m == wl.WINDOW_WAIT_NOTE) == 1
 
 
-# --- правило (а): скорость на срезе 10% -------------------------------------------
-
-def test_speed_below_threshold_at_10_percent_retires_once():
-    mon, clock, logs = _monitor()
-    mon.feed([_start()])
-    clock.now += 10
-    reason = mon.feed([_progress(10, speed_mib=20)])   # ~168 Мбит/с < 400
-    assert reason == "скорость загрузки весов ниже порога"
-
-
-def test_speed_above_threshold_at_10_percent_passes():
-    mon, clock, logs = _monitor()
-    mon.feed([_start()])
-    clock.now += 10
-    assert mon.feed([_progress(10, speed_mib=200)]) is None   # ~1677 Мбит/с
+def test_window_needs_three_samples_not_only_time():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    assert mon.feed([_aria(1, 1000, 1)]) is None                 # замер 1
+    clock.now += 95                                              # время набрано, замеров мало
+    assert mon.feed([_aria(96, 1000, 1)]) is None                # замер 2: окно не набрано
+    # ещё замер: 3 замера и 95 с — окно полное, скорость (96-1) МиБ / 95 с ≈ 1 МиБ/с, ниже порога
+    clock.now += 1
+    reason = mon.feed([_aria(97, 1000, 1)])
+    assert reason == wl.REASON_SPEED
 
 
-def test_speed_is_checked_only_once_per_file():
-    mon, clock, logs = _monitor()
-    mon.feed([_start()])
-    clock.now += 10
-    assert mon.feed([_progress(10, speed_mib=200)]) is None
-    # позже скорость упала: правило (а) уже использовано для этого файла
-    clock.now += 10
-    assert mon.feed([_progress(20, speed_mib=1)]) is None
+def test_aggregate_speed_decides_not_per_file():
+    """Файл A медленный (1 МиБ/с), B быстрый (60 МиБ/с): сумма ~61 МиБ/с (~512 Мбит/с) выше порога 400."""
+    a_key = NAME.rsplit("/", 1)[-1]
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])
+    for k in range(1, 13):                                            # 120 с
+        clock.now += 10
+        assert mon.feed([_aria(10 * k, 1000, 1, file=a_key),          # A: +10 МиБ за 10 с
+                         _aria(600 * k, 9000, 60, file=VAE_FILE)]) is None   # B: +600 МиБ за 10 с
+        assert mon.check() is None
+    # медленный файл не снимает карту сам по себе: его скорость только в журнале
+    assert any(NAME in m and "Мбит/с" in m and "только для журнала" in m for m in logs)
+
+    # те же числа, но сумма ниже порога (оба по 1 МиБ/с): снимается ОДИН раз
+    mon2, clock2, logs2, consoles2 = _monitor()
+    mon2.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])
+    reasons = []
+    for k in range(1, 13):
+        clock2.now += 10
+        r = mon2.feed([_aria(10 * k, 1000, 1, file=a_key), _aria(10 * k, 9000, 1, file=VAE_FILE)])
+        if r:
+            reasons.append(r)
+        r = mon2.check()
+        if r:
+            reasons.append(r)
+    assert reasons == [wl.REASON_SPEED], reasons
 
 
-def test_speed_rule_applies_to_next_file_again():
-    mon, clock, logs = _monitor()
-    mon.feed([_start(NAME, 1)])
-    clock.now += 10
-    mon.feed([_progress(10, speed_mib=200)])
-    mon.feed([f"[setup] [1/5] Файл успешно загружен: {NAME} (1 байт)"])
-    mon.feed([_start("vae/a.safetensors", 3)])
-    clock.now += 10
-    assert mon.feed([_progress(10, speed_mib=1)]) == "скорость загрузки весов ниже порога"
+def test_fast_aggregate_above_threshold_does_not_retire():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(10, 10000, 200)])
+    for k in range(1, 11):
+        clock.now += 10
+        assert mon.feed([_aria(10 + 500 * k, 10000, 200)]) is None   # ~50 МиБ/с ≈ 419 Мбит/с, выше порога
 
 
-# --- правила (б), (в): зависание и лимит этапа -----------------------------------
+# --- правило (б): зависание, только при полном окне --------------------------------------
 
-def test_stall_retires_when_percent_unchanged_too_long():
-    mon, clock, logs = _monitor(stall_sec=180.0)
-    mon.feed([_start()])
-    clock.now += 170
-    mon.feed([_progress(10, speed_mib=200)])
-    clock.now += 179
-    assert mon.check() is None
-    clock.now += 2
-    assert mon.check() == "загрузка весов зависла"
+def test_stall_respects_window_and_stays_per_file():
+    """Файл A стоит с 1005 с, B идёт быстро. Зависание не раньше полного окна (1005 + 90 с)."""
+    mon, clock, logs, consoles = _monitor(stall_sec=60.0, stage_max_sec=10_000.0)
+    a_key = NAME.rsplit("/", 1)[-1]
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])
+    clock.now = 1005.0
+    assert mon.feed([_aria(100, 1000, 0, file=a_key)]) is None      # A: 10% в 1005 с, потом стоит
+    window_open = 1005.0
+    reason = None
+    for k in range(1, 40):
+        clock.now = 1005.0 + 10 * k
+        assert mon.feed([_aria(600 * k, 9000, 60, file=VAE_FILE)]) is None
+        r = mon.check()
+        if clock.now - window_open < 90:
+            assert r is None, (clock.now, r)                        # окно не набрано: ни зависания, ни скорости
+        if r:
+            reason = r
+            reason_at = clock.now
+            break
+    assert reason == wl.REASON_STALL
+    assert reason_at - window_open >= 90                            # зависание только после полного окна
+    stall_logs = [m for m in logs if "не менялся" in m]
+    assert len(stall_logs) == 1 and a_key in stall_logs[0] and VAE_FILE not in stall_logs[0]
 
 
 def test_stall_does_not_fire_between_files():
-    mon, clock, logs = _monitor(stall_sec=60.0)
+    mon, clock, logs, consoles = _monitor(stall_sec=60.0)
     mon.feed([_start()])
     mon.feed([f"[setup] [1/5] Файл успешно загружен: {NAME} (1 байт)"])
     clock.now += 600
     assert mon.check() is None   # нет активного файла: зависания нет
 
 
-def test_stage_max_retires_even_with_progress():
-    mon, clock, logs = _monitor(stage_max_sec=1200.0, stall_sec=600.0)
-    mon.feed([_start()])
-    for step in range(0, 1300, 60):
+# --- правило (в): лимит этапа ------------------------------------------------------------
+
+def test_stage_max_retires_even_with_fast_progress():
+    """Скорость 50 МиБ/с (~419 Мбит/с): правило скорости не срабатывает, срабатывает лимит этапа."""
+    mon, clock, logs, consoles = _monitor(stage_max_sec=1200.0, stall_sec=600.0)
+    mon.feed([_start(total=1)])
+    reasons = []
+    for k in range(1, 22):
         clock.now += 60
-        mon.feed([_progress(min(99, 10 + step // 60), speed_mib=200)])
-    assert mon.check() == "этап загрузки весов превысил лимит"
+        r = mon.feed([_aria(3000 * k, 100_000, 50)])
+        if r:
+            reasons.append(r)
+        r = mon.check()
+        if r:
+            reasons.append(r)
+    assert reasons == [wl.REASON_STAGE]
 
 
 def test_stage_done_stops_all_timers():
-    mon, clock, logs = _monitor(stage_max_sec=100.0, stall_sec=50.0)
+    mon, clock, logs, consoles = _monitor(stage_max_sec=100.0, stall_sec=50.0)
     mon.feed([_start()])
     mon.feed([f"[setup] [1/5] Файл успешно загружен: {NAME} (1 байт)"])
     mon.feed(["[setup] Все файлы модели LTX-2.5 на месте."])
@@ -203,28 +282,83 @@ def test_stage_done_stops_all_timers():
     assert mon.check() is None
 
 
-# --- правило (е): ошибка файла ---------------------------------------------------
+# --- правило (е): ошибка файла -----------------------------------------------------------
 
 def test_file_error_line_retires_with_file_name_in_reason():
-    mon, clock, logs = _monitor()
+    mon, clock, logs, consoles = _monitor()
     mon.feed([_start()])
     reason = mon.feed([f"[setup] [1/5] ОШИБКА: не удалось загрузить файл {NAME} (код 4)."])
     assert reason == "ошибка загрузки весов: " + NAME
 
 
-# --- нераспознанный формат --------------------------------------------------------
+# --- строки, которые не разобрались, ничего не решают ------------------------------------
 
-def test_unrecognised_progress_warns_once_and_gives_no_percent():
-    mon, clock, logs = _monitor()
-    mon.feed([_start()])
-    mon.feed(["[#2089b0 1.2XiB/21GiB(5%) CN:16 DL:450MiB ETA:40s]"])
-    mon.feed(["[#2089b0 1.3XiB/21GiB(6%) CN:16 DL:450MiB ETA:40s]"])
+def test_unrecognised_progress_like_line_decides_nothing():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 10
+    mon.feed(["[#2089b0 1.2XiB/21GiB(5%) CN:16 DL:450MiB ETA:40s]"])     # похоже на прогресс, не разобрано
+    clock.now += 200
+    assert mon.feed(["[#2089b0 1.3XiB/21GiB(6%) CN:16 DL:450MiB ETA:40s]"]) is None
+    clock.now += 100
+    assert mon.feed(["[#2089b0 без процента]"]) is None                  # «[#», но без «%»: не участвует
+    assert mon.check() is None                                           # ни скорости, ни зависания по ним нет
     warnings = [m for m in logs if "не распознан" in m]
-    assert len(warnings) == 1
-    assert not any("%," in m for m in logs), "проценты не должны выдумываться"
-    # без распознанного прогресса остаётся только лимит этапа
+    assert len(warnings) == 1, warnings                                  # предупреждение один раз на этап
+    assert [kind for kind, _ in consoles] == ["start"]                  # ни процентов, ни шагов
+    assert mon.unrecognised == 2                                         # две строки с «%» посчитаны
     clock.now += 10_000
-    assert mon.check() == "этап загрузки весов превысил лимит"
+    assert mon.check() == wl.REASON_STAGE                                # остаётся только лимит этапа
+
+
+def test_unrecognised_lines_are_counted_only_with_percent_sign():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    mon.feed(["[#2089b0 ??? ]"])                             # «[#», нет «%»: не считается
+    assert mon.unrecognised == 0
+
+
+def test_unprefixed_progress_with_two_active_files_is_ignored():
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start("vae/a.safetensors", 3, 5), _start("vae/b.safetensors", 4, 5)])
+    clock.now += 10
+    assert mon.feed([_progress(50)]) is None
+    assert not any("Веса: файл" in m for m in logs)
+
+
+# --- средняя скорость и оставшееся время: фиксированные отметки времени -------------------
+
+def test_average_and_remaining_use_fixed_timestamps():
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1)])                             # этап начинается в 1000 с
+    clock.now = 1010.0
+    mon.feed([_aria(10, 1000, 1)])                          # окно открыто: замер 1, 10 МиБ
+    clock.now = 1050.0
+    mon.feed([_aria(50, 1000, 1)])                          # замер 2: окно 40 с — не набрано
+    status_1050 = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "окно не набрано" in status_1050
+    assert "осталось: оценка недоступна" in status_1050
+    assert "средняя 8 Мбит/с" in status_1050                # 50 МиБ / 50 с = 1 МиБ/с ≈ 8 Мбит/с
+    clock.now = 1100.0
+    mon.feed([_aria(100, 1000, 1)])                         # замер 3: окно 90 с, полное
+    status_1100 = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "загружено 100.0 из 1000.0 МиБ" in status_1100
+    assert "скорость 8 Мбит/с" in status_1100              # (100-10) МиБ / 90 с = 1 МиБ/с
+    assert "средняя 8 Мбит/с" in status_1100               # 100 МиБ / 100 с = 1 МиБ/с
+    assert "осталось ~15.0 мин" in status_1100             # (1000-100) МиБ / 1 МиБ/с = 900 с = 15 мин
+
+
+def test_average_is_never_negative_and_remaining_needs_total():
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(NAME, 1, 2)])                          # вторая часть этапа ещё не названа
+    clock.now = 1020.0
+    mon.feed([_aria(20, 1000, 1)])
+    status = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "итог неизвестен" in status and "осталось: оценка недоступна" in status
+    assert "средняя 8 Мбит/с" in status                     # 20 МиБ / 20 с
+    assert "-" not in status.split("средняя")[1].split(",")[0]
 
 
 # --- строки aria2 с префиксом [file=...] (этап 6б, параллельные загрузки) ----------------
@@ -268,36 +402,34 @@ def test_redirect_and_summary_are_ignored_and_complete_marks_file():
     done = wl.parse_line(FIXTURE[4])
     assert done.kind == "aria_done" and done.name == VAE_FILE
 
-    mon, clock, logs = _monitor(stall_sec=60.0, stage_max_sec=100_000.0)
+    mon, clock, logs, consoles = _monitor(stall_sec=60.0, stage_max_sec=100_000.0)
     mon.feed([_start(VAE_NAME, 3)])
     clock.now += 5
     mon.feed([FIXTURE[4]])
     clock.now += 10_000
     assert mon.check() is None          # файл завершён: зависать нечему
-    assert not any("%," in m for m in logs)
 
 
 def test_three_error_forms_give_the_same_error_event():
     for line in FIXTURE[5:8]:
         ev = wl.parse_line(line)
         assert ev.kind == "error" and ev.name == "vae/x.safetensors", line
-        mon, clock, logs = _monitor()
+        mon, clock, logs, consoles = _monitor()
         mon.feed([_start("vae/x.safetensors", 3)])
         assert mon.feed([line]) == "ошибка загрузки весов: vae/x.safetensors", line
 
 
 def test_two_parallel_files_only_the_stalled_one_is_reported():
-    mon, clock, logs = _monitor(stall_sec=180.0, stage_max_sec=10_000.0)
-    a_name = "diffusion_models/" + NAME
-    mon.feed([_start(a_name, 1), _start(VAE_NAME, 3)])
+    """Файл A стоит, B идёт быстро (~60 МиБ/с): снимается зависание A, и только оно, и не раньше окна."""
+    mon, clock, logs, consoles = _monitor(stall_sec=180.0, stage_max_sec=10_000.0)
+    a_key = NAME.rsplit("/", 1)[-1]
+    mon.feed([_start(NAME, 1, 3), _start(VAE_NAME, 3, 3)])
     clock.now += 5
-    assert mon.feed([f"[file={NAME}] " + _progress(10, speed_mib=500)]) is None   # A: 10%, потом стоит
+    assert mon.feed([_aria(100, 1000, 0, file=a_key)]) is None      # A: 10%, потом стоит
     reason = None
-    pct_b = 10
-    for _ in range(30):                  # B идёт по 1% каждые 10 с, A не меняется
+    for k in range(1, 40):
         clock.now += 10
-        pct_b = min(99, pct_b + 1)
-        assert mon.feed([f"[file={VAE_FILE}] " + _progress(pct_b, speed_mib=500)]) is None
+        assert mon.feed([_aria(600 * k, 9000, 60, file=VAE_FILE)]) is None
         reason = mon.check()
         if reason:
             break
@@ -305,14 +437,6 @@ def test_two_parallel_files_only_the_stalled_one_is_reported():
     stall_logs = [m for m in logs if "не менялся" in m]
     assert len(stall_logs) == 1
     assert NAME in stall_logs[0] and VAE_FILE not in stall_logs[0]
-
-
-def test_unprefixed_progress_with_two_active_files_is_ignored():
-    mon, clock, logs = _monitor()
-    mon.feed([_start("vae/a.safetensors", 3), _start("vae/b.safetensors", 4)])
-    clock.now += 10
-    assert mon.feed([_progress(50)]) is None
-    assert not any("%," in m for m in logs)
 
 
 def test_kib_and_gib_parse_to_the_same_bytes_as_mib():
@@ -335,6 +459,7 @@ def test_query_part_of_an_address_is_dropped_before_parsing():
     ev = wl.parse_line(f"[file=f.bin] 10/24 14:41:15 [NOTICE] CUID#9 - Redirecting to {url}")
     assert ev.kind == "ignore"
     assert wl._drop_query(url) == "https://cdn.example.test/ltx/f.bin"
+
 
 
 # --- запуск как скрипт ----------------------------------------------------------------

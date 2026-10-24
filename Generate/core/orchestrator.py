@@ -41,7 +41,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import gemini_prompts as gp
     from . import weights_log as wl
     from .budget import BudgetError, BudgetTracker
-    from .log_setup import _MASK, INTERNAL_PORTS, mask_external, mask_fetched_text, mask_remote_text, set_known_secrets
+    from .log_setup import (_MASK, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external, mask_fetched_text,
+                            mask_remote_text, set_known_secrets)
     from .missing import parse_missing
     from .naming import clip_filename
     from . import ssh_probe
@@ -57,7 +58,8 @@ except ImportError:  # pragma: no cover
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
-    from log_setup import _MASK, INTERNAL_PORTS, mask_external, mask_fetched_text, mask_remote_text, set_known_secrets  # type: ignore
+    from log_setup import (_MASK, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external, mask_fetched_text,  # type: ignore
+                           mask_remote_text, set_known_secrets)
     from missing import parse_missing  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
@@ -759,6 +761,8 @@ class Orchestrator:
         pilot_start_cmd: str = "",
         worker_build: Optional[str] = None,
         speed_check_at_pct: int = 10,
+        # ВНИМАНИЕ: порог 400 Мбит/с задан для одного файла; правило сравнивает АГРЕГАТ всех файлов за окно.
+        # Значение проверить по реальной линии (замер агрегатной скорости на арендованной карте); здесь не менять.
         speed_min_mbps: float = 400.0,
         progress_step_pct: int = 10,
         stall_timeout_min: int = 3,
@@ -825,6 +829,7 @@ class Orchestrator:
         self._last_heartbeat_tick = -1e9
         self._probe_notes_logged = False
         self._weights_source_noted = False
+        self._weights_start_noted = False   # «Веса ltx25 начало загрузки» печатается один раз за запуск
         self._deadline_sec = job_deadline_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
         # логи Vast при снятии карты без логов воркера (SPEC 8.4): число попыток и пауза из конфига
@@ -969,18 +974,39 @@ class Orchestrator:
         return mask_remote_text(text)
 
     def _monitor(self, slot: _CardSlot):
-        """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой."""
+        """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой.
+
+        Подробные строки идут в журнал без метки консоли (только файл run/debug.log). В консоль попадают
+        три вида строк (console): начало этапа (раз за запуск), шаг процентов «карта N: Веса <ключ> X%»
+        и «Веса <ключ> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
+        """
         if slot.monitor is None:
+            profile_key = self.profile or "ltx25"
+
             def emit(text: str, warn: bool = False, _slot=slot) -> None:
                 msg = f"{_card_name(_slot, cap=True)}: {text}"
                 if warn:
                     log.warning("%s", msg)
                 else:
                     log.info("%s", msg)
+
+            def console(kind: str, pct: int = 0, _slot=slot) -> None:
+                if kind == "start":
+                    if self._weights_start_noted:
+                        return
+                    self._weights_start_noted = True
+                    log.info("Веса %s начало загрузки", profile_key, extra=KEY_EVENT_EXTRA)
+                elif kind == "progress":
+                    log.info("карта %d: Веса %s %d%%", _slot.instance_id, profile_key, pct,
+                             extra=KEY_EVENT_EXTRA)
+                elif kind == "loaded":
+                    log.info("Веса %s загружены", profile_key, extra=KEY_EVENT_EXTRA)
+
             slot.monitor = wl.WeightsMonitor(
                 clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
                 speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
-                stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec)
+                stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec,
+                console=console, profile_key=profile_key)
         return slot.monitor
 
     def _pull_card_logs(self, slot: _CardSlot, *, final: bool, timeout: float = LOGS_TIMEOUT_SEC) -> bool:
@@ -1325,7 +1351,7 @@ class Orchestrator:
                  "уничтожено карт %d, среднее время клипа %.1f с, потрачено %.4f USD, код %d.",
                  summary.completed, summary.total_needed, summary.failed, summary.pending,
                  summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
-                 summary.spent_usd, summary.exit_code)
+                 summary.spent_usd, summary.exit_code, extra=KEY_EVENT_EXTRA)
 
     # --- пилот ComfyUI (pilot-comfyui.yml) -----------------------------------
     def _run_pilot(self) -> RunSummary:
@@ -1876,7 +1902,7 @@ class Orchestrator:
         self._cards_rented += 1
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
         log.info("Арендована %s по предложению %d (%s): %.4f USD/ч.",
-                 _card_name(slot), offer.offer_id, mode, price)
+                 _card_name(slot), offer.offer_id, mode, price, extra=KEY_EVENT_EXTRA)
         if from_scan and self._scan_started is not None:
             log.info("Окно сбора цен: выбрано предложение %d, dph_total %.4f USD/ч, "
                      "загрузка интернета %.1f Мбит/с; от старта окна до аренды %.0f с.",
@@ -2152,7 +2178,7 @@ class Orchestrator:
                 if info.actual_status != slot.vast_status:
                     slot.vast_status = info.actual_status
                     log.info("%s: состояние Vast «%s».", _card_name(slot, cap=True),
-                             info.actual_status or "неизвестно")
+                             info.actual_status or "неизвестно", extra=KEY_EVENT_EXTRA)
                     self._card_status(slot, f"состояние Vast «{info.actual_status or 'неизвестно'}»")
                 if info.actual_status == "loading":
                     slot.saw_loading = True
@@ -2174,7 +2200,8 @@ class Orchestrator:
                         slot.contacted = True
                         slot.net_fail = 0
                         log.info("%s: healthcheck OK через %.0f с после создания, "
-                                 "готова к приёму задач.", _card_name(slot, cap=True), age)
+                                 "готова к приёму задач.", _card_name(slot, cap=True), age,
+                                 extra=KEY_EVENT_EXTRA)
                     elif self._track_ready_wait(slot, now):
                         return
             if slot.state == "booting":
@@ -2564,7 +2591,7 @@ class Orchestrator:
         try:
             ids = self.vast.destroy_by_label(self.label)
             self._destroyed += len(ids)
-            log.info("Уничтожено карт по метке %s: %d.", self.label, len(ids))
+            log.info("Уничтожено карт по метке %s: %d.", self.label, len(ids), extra=KEY_EVENT_EXTRA)
         except Exception as exc:  # уборка не должна маскировать исходную ошибку
             self.cleanup_ok = False
             log.error("Не удалось уничтожить карты по метке %s: %s", self.label,
