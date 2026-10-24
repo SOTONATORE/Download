@@ -121,7 +121,7 @@ jobs:
       run:
         shell: bash   # bash -e -o pipefail
     env:
-      # вывод окна шагов (INFO, после маскирования секретов), артефакт шага «Upload run log».
+      # вывод окна шагов (INFO, после маскирования секретов), копируется в артефакт шагом «Collect run log».
       # Подробный журнал (DEBUG и сырой обмен с Vast) пишется отдельно: run/debug.log в артефакте запуска.
       RUN_LOG: /tmp/generate-run.log
 
@@ -347,7 +347,7 @@ jobs:
 
       # SPEC 8.3 (в): выполняется всегда — при ошибке, таймауте и отмене.
       # Шаг 1: сначала немедленно гасим карты, чтобы остановить списание денег.
-      # Вывод шагов уборки пишется и в $RUN_LOG (артефакт generate-run-log): через ту же маскировку,
+      # Вывод шагов уборки пишется и в $RUN_LOG (файл generate-run.log в артефакте): через ту же маскировку,
       # что и в шаге run, потому что файл артефакта публичен (SPEC 0.1). Код выхода — от python (pipefail).
       - name: Kill rented cards
         if: always()
@@ -408,23 +408,32 @@ jobs:
             | python3 -I -u -c "$mask_code" \
             | tee -a "$RUN_LOG"
 
-      # Журнал окон шагов run, уборки и релиза (INFO, с маскированием) сохраняется даже при отмене и ошибке.
-      # Подробный журнал (DEBUG и сырой обмен с Vast) — run/debug.log в артефакте generate-artifact-<run_id>.
-      - name: Upload run log
+      # Журнал окон шагов run, уборки и релиза (INFO, с маскированием) копируется в каталог артефакта рядом
+      # с run/debug.log (как у пилота). Сбой копирования — предупреждение, шаг не падает.
+      - name: Collect run log
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: generate-run-log-${{ github.run_id }}
-          path: ${{ env.RUN_LOG }}
-          retention-days: 30
-          if-no-files-found: warn
+        run: |
+          dir="$RUNNER_TEMP/generate-artifact"
+          if ! mkdir -p "$dir"; then
+            echo "WARNING: каталог артефакта $dir не создан, журнал окон в артефакт не попадёт"
+            exit 0
+          fi
+          if [ ! -f "$RUN_LOG" ]; then
+            echo "WARNING: лог запуска $RUN_LOG не найден, в артефакт он не попадёт"
+            exit 0
+          fi
+          if ! cp "$RUN_LOG" "$dir/generate-run.log"; then
+            echo "WARNING: лог запуска не скопирован в артефакт"
+          fi
 
-      # Артефакт запуска (SPEC 10.4): каталог, который пишет оркестратор (--artifact-dir шага run).
+      # Один артефакт запуска (SPEC 10.4): каталог, который пишет оркестратор (--artifact-dir шага run),
+      # плюс generate-run.log из шага выше. Загружается при любом исходе. Подробный журнал (DEBUG и сырой
+      # обмен с Vast) — run/debug.log в этом же артефакте.
       - name: Upload run artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: generate-artifact-${{ github.run_id }}
+          name: generate-${{ github.run_id }}
           path: ${{ runner.temp }}/generate-artifact
           retention-days: 30
           if-no-files-found: warn
