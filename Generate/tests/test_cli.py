@@ -270,10 +270,9 @@ def test_run_default_offer_filter(capsys, run_env, missing_file):
     assert isinstance(f, cli.OfferFilter)
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
-    assert f.max_price == 1.0
+    assert f.max_price == 0.55
     assert f.min_reliability == 0.90
-    assert f.min_inet_mbps == 800.0
-    assert f.interruptible is False                 # rental_type по умолчанию on-demand
+    assert f.min_inet_mbps == 500.0
     assert f.max_inet_price_per_tb == 4.1
 
 
@@ -1146,3 +1145,13 @@ def test_pilot_onstart_refuses_bad_sha(sha):
 def test_pilot_onstart_refuses_bad_repo(repo):
     with pytest.raises(ValueError):
         cli.pilot_onstart_cmd(PILOT_SHA, repo)
+
+
+def test_cli_summary_average_label_says_what_is_measured(capsys):
+    cli._print_summary(SimpleNamespace(avg_render_sec=12.34))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: 12.3" in out
+    assert "рендера" not in out
+    cli._print_summary(SimpleNamespace(avg_render_sec=0.0))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: нет данных" in out
