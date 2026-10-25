@@ -176,7 +176,6 @@ jobs:
         env:
           GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
-          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
@@ -253,7 +252,7 @@ jobs:
           import sys
 
           values = {os.environ.get(k, "").strip() for k in (
-              "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN", "VAST_SSH_KEY")}
+              "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN")}
           # VAST_SSH_KEY многострочный: кроме всего значения маскируются его строки длиной не меньше 20 символов
           values |= {line.strip() for line in os.environ.get("VAST_SSH_KEY", "").splitlines()
                      if len(line.strip()) >= 20}
