@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -338,6 +339,7 @@ def test_on_demand_skips_price_window_and_searches_once(tmp_path, monkeypatch, c
               offer_filter=vc.OfferFilter(interruptible=False))
     vast = _use_vast(rig, _SpyVast([offer], rig.events, rig.clock))
     now = rig.clock.now
+    rig.orc._queue = deque([1])                             # как в run(): очередь не пуста, иначе _desired = 0
 
     rig.orc._maybe_rent(now)
 

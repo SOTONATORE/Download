@@ -1714,8 +1714,9 @@ class Orchestrator:
 
     # --- окно сбора цен (SPEC 8.2, v0.6) ---------------------------------------
     def _scan_wanted(self) -> bool:
-        return (not self.pilot and not self._scan_done and self._cards_rented == 0
-                and self.scan_sec > 0)
+        # окно только для прерываемой аренды (ставка bid меняется); при on-demand цена фиксирована
+        return (not self.pilot and self.offer_filter.interruptible and not self._scan_done
+                and self._cards_rented == 0 and self.scan_sec > 0)
 
     def _scan_open(self, now: float) -> None:
         self._scan_started = now

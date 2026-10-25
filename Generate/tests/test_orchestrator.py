@@ -2087,13 +2087,13 @@ def test_probe_has_no_comfy_port_state(tmp_path, monkeypatch):
     assert not hasattr(orch, "COMFY_PORT") and not hasattr(orch, "_probe_comfy")
 
 
-def test_ssh_and_portal_are_noted_once_per_run(tmp_path, monkeypatch, caplog):
+def test_portal_is_noted_once_per_run_and_ssh_not_logged(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     slot = _slot_with_url(rig)
     rig.orc._probe_ready(slot)
     rig.orc._probe_ready(slot)
-    assert caplog.text.count("SSH-проверка не реализована (SPEC 8.2)") == 1
+    assert "SSH-проверка не реализована" not in caplog.text   # фаза A: строки про SSH в журнале нет
     assert caplog.text.count("проверка через портал не реализована") == 1
 
 
