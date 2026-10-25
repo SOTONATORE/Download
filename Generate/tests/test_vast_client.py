@@ -62,9 +62,10 @@ def test_offer_filter_defaults():
     f = OfferFilter()
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
-    assert f.max_price == 0.55
+    assert f.max_price == 1.0
     assert f.min_inet_mbps == 800.0
     assert f.max_inet_price_per_tb == 4.1
+    assert f.interruptible is False                # обычная аренда по умолчанию
 
 
 def test_build_query_verified_key_only_when_flag_is_true():
@@ -74,6 +75,12 @@ def test_build_query_verified_key_only_when_flag_is_true():
     assert "verified" not in off
     # флаг меняет только это условие: остальной запрос тот же
     assert {k: v for k, v in on.items() if k != "verified"} == off
+
+
+def test_default_query_is_on_demand_and_bid_needs_explicit_flag():
+    # умолчание OfferFilter — обычная аренда (как rental_type в config.default.yaml); bid только явно
+    assert vc.VastClient._build_query(OfferFilter())["type"] == "on-demand"
+    assert vc.VastClient._build_query(OfferFilter(interruptible=True))["type"] == "bid"
 
 
 def test_missing_key_raises(monkeypatch):
@@ -112,7 +119,7 @@ def test_search_serialization_filter_sort(key):
         ]})
 
     with make(handler) as c:
-        offers = c.search_offers(OfferFilter(min_vram_gb=16))
+        offers = c.search_offers(OfferFilter(min_vram_gb=16, interruptible=True))
     assert [o.offer_id for o in offers] == [2, 1]
     assert isinstance(offers[0], GpuOffer)
     assert offers[0].vram_gb == 24.0 and offers[0].is_interruptible
@@ -120,7 +127,7 @@ def test_search_serialization_filter_sort(key):
     assert seen["auth"] == f"Bearer {SECRET}"
     assert SECRET not in seen["query"]
     q = seen["body"]
-    assert q["dph_total"] == {"lte": 0.55, "gte": 0.35}
+    assert q["dph_total"] == {"lte": 1.0, "gte": 0.35}
     assert q["reliability2"] == {"gte": 0.95}
     assert q["inet_down"] == {"gte": 800.0}
     assert "inet_up_cost" not in q and "inet_down_cost" not in q  # цена трафика: клиентская проверка
@@ -148,7 +155,7 @@ def test_search_min_price_zero_omits_gte(key):
         return httpx.Response(200, json={"offers": []})
 
     make(handler).search_offers(OfferFilter(min_price=0.0))
-    assert seen["body"]["dph_total"] == {"lte": 0.55}
+    assert seen["body"]["dph_total"] == {"lte": 1.0}
 
 
 def test_search_filters_cheaper_than_min_price(key):
@@ -168,7 +175,7 @@ def test_search_min_price_applies_to_min_bid(key):
         bundle(1, price=0.8, bid=0.2),   # ставка ниже минимума
         bundle(2, price=0.8, bid=0.5),
     ]}))
-    assert [o.offer_id for o in c.search_offers(OfferFilter())] == [2]
+    assert [o.offer_id for o in c.search_offers(OfferFilter(interruptible=True))] == [2]
 
 
 def test_search_sorted_ascending(key):
@@ -230,7 +237,7 @@ def test_search_query_requires_single_gpu(key):
 
 def test_search_uses_min_bid_for_interruptible(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [bundle(1, price=2.0, bid=0.4)]}))
-    assert c.search_offers(OfferFilter())[0].price_per_hr == 0.4
+    assert c.search_offers(OfferFilter(interruptible=True))[0].price_per_hr == 0.4
 
 
 def test_search_drops_bool_and_fractional_num_gpus(key):
@@ -250,7 +257,7 @@ def test_offer_without_readable_price_is_dropped_even_with_zero_min_price(key):
     c = make(lambda r: httpx.Response(200, json={"offers": [
         no_price, bundle(2, price=0.5, bid=0.0), bundle(3, price=0.5),
     ]}))
-    offers = c.search_offers(OfferFilter(min_price=0.0))
+    offers = c.search_offers(OfferFilter(min_price=0.0, interruptible=True))
     assert [o.offer_id for o in offers] == [3]
     assert all(o.price_per_hr > 0 for o in offers)
 

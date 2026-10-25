@@ -1976,7 +1976,8 @@ def test_bid_margin_comes_from_constructor_parameter(tmp_path, monkeypatch):
 
 def test_bid_above_max_price_is_skipped_before_request(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.54)])
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.54)],
+              offer_filter=vc.OfferFilter(max_price=0.55))   # лимит явно: умолчание теперь 1.00
     assert rig.orc._rent_one(rig.clock.now) == "retry"
     assert rig.vast.created == []                               # запрос аренды не отправлен
     assert "Предложение 1 пропущено" in caplog.text
@@ -1985,7 +1986,8 @@ def test_bid_above_max_price_is_skipped_before_request(tmp_path, monkeypatch, ca
 
 def test_skipped_offer_falls_through_to_next_affordable_offer(tmp_path, monkeypatch):
     offers = [make_offer(1, 11, price=0.54), make_offer(2, 22, price=0.3)]
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers,
+              offer_filter=vc.OfferFilter(max_price=0.55))   # лимит явно: умолчание теперь 1.00
     assert rig.orc._rent_one(rig.clock.now, offers=offers) == "ok"
     assert len(rig.vast.created) == 1
     assert rig.vast.created[0]["bid_price"] == 0.33             # взято второе предложение: 0.3 + 0.03
@@ -2085,13 +2087,13 @@ def test_probe_has_no_comfy_port_state(tmp_path, monkeypatch):
     assert not hasattr(orch, "COMFY_PORT") and not hasattr(orch, "_probe_comfy")
 
 
-def test_portal_is_noted_once_per_run(tmp_path, monkeypatch, caplog):
+def test_ssh_and_portal_are_noted_once_per_run(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     slot = _slot_with_url(rig)
     rig.orc._probe_ready(slot)
     rig.orc._probe_ready(slot)
-    assert "SSH-проверка не реализована" not in caplog.text
+    assert caplog.text.count("SSH-проверка не реализована (SPEC 8.2)") == 1
     assert caplog.text.count("проверка через портал не реализована") == 1
 
 

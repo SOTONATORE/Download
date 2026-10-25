@@ -236,6 +236,8 @@ def _read_inputs() -> tuple[OfferFilter, int]:
         max_price=max_price,
         min_reliability=min_rel,
         min_inet_mbps=min_inet,
+        # явно прерываемые (bid), как до смены умолчания OfferFilter на обычную аренду
+        interruptible=True,
     )
     return offer_filter, show_count
 
