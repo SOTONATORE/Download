@@ -145,7 +145,6 @@ READY_REASON = "воркер не готов"
 WEIGHTS_FAILED_REASON = "weights_failed"
 WEIGHTS_FAILED_RETIRE = "загрузка весов не удалась"
 ACCEPT_REASON = "задача не принята"
-SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
 PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
@@ -457,25 +456,6 @@ def _ports_mapping(raw: dict) -> Optional[dict]:
         except ValueError:
             return None
     return ports if isinstance(ports, dict) else None
-
-
-def _external_values(info: InstanceInfo) -> tuple:
-    """Внешние адреса карты Vast: публичный IP и все HostPort из поля ports (SPEC 0.1, правило портов).
-
-    Значения только в памяти: передаются mask_external при записи ssh_diag.log; не выводятся и не пишутся.
-    """
-    raw = getattr(info, "raw", None) or {}
-    values = []
-    ip = raw.get("public_ipaddr")
-    if ip:
-        values.append(str(ip))
-    ports = _ports_mapping(raw) or {}
-    for mapped in ports.values():
-        if isinstance(mapped, list):
-            for entry in mapped:
-                if isinstance(entry, dict) and entry.get("HostPort"):
-                    values.append(str(entry["HostPort"]))
-    return tuple(values)
 
 
 def _internal_ports_view(raw: dict) -> Optional[dict]:
@@ -1702,7 +1682,6 @@ class Orchestrator:
             stopping = stopping or self._oom_stopped
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
-            self._pull_ssh_diag(now)
             self._heartbeat(now)
 
             inflight = self._inflight()
@@ -2220,12 +2199,6 @@ class Orchestrator:
         if info is not None and self._is_outbid(info):
             self._retire_outbid(slot)
             return
-        if info is not None and info.ssh_host and info.ssh_port:
-            # адрес SSH для диагностики: только в памяти карты (SPEC 0.1, F01); в файлы и журнал не пишется
-            slot.ssh_host = info.ssh_host
-            slot.ssh_port = info.ssh_port
-        if info is not None:
-            slot.ext_values = _external_values(info)  # внешние значения для маски ssh_diag.log, только в памяти
         if slot.state == "booting":
             # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
             reason = self._monitor(slot).check()
@@ -2318,11 +2291,10 @@ class Orchestrator:
         return resp
 
     def _note_unimplemented(self) -> None:
-        """SSH и портал не проверяются в 6б (SPEC 8.2, 13.1): одна строка на запуск."""
+        """Портал не проверяется в 6б (SPEC 8.2, 13.1): одна строка на запуск."""
         if self._probe_notes_logged:
             return
         self._probe_notes_logged = True
-        log.info("%s.", SSH_NOT_IMPLEMENTED)
         log.info("%s.", PORTAL_NOT_IMPLEMENTED)
 
     def _probe_ready(self, slot: _CardSlot) -> bool:
