@@ -77,7 +77,7 @@ class GeminiRuntimeError(GeminiError):
 
 @dataclass
 class PromptConfig:
-    style_file: str                  # путь к prompt_styles/<модель>.md (из профиля)
+    style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
@@ -441,7 +441,7 @@ def _garbage_reason(prompt: str) -> str:
     return ""
 
 
-# Проверка стиля по правилам ltx25.md: отрицания, кавычки, keyword spam, эмоциональные метки.
+# Проверка стиля по правилам models/<профиль>/prompts/style.md: отрицания, кавычки, keyword spam, эмоциональные метки.
 # Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 _STYLE_RULES = [
