@@ -3,6 +3,7 @@ import json
 import logging
 import pathlib
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -1175,6 +1176,10 @@ def tmp_profiles(tmp_path, monkeypatch):
     """Корень профилей и папка пресетов — временные; реальные папки не меняются."""
     root = tmp_path / "profiles"
     (root / "models").mkdir(parents=True)
+    # профиль ltx25 копируется из репозитория (до подмены корня): проверка профиля проходит,
+    # и тесты доходят до проверки пресета
+    shutil.copytree(_config_loader.MODEL_PROFILES_DIR / "models" / "ltx25",
+                    root / "models" / "ltx25")
     presets = tmp_path / "presets"
     presets.mkdir()
     monkeypatch.setattr(_config_loader, "MODEL_PROFILES_DIR", root)
