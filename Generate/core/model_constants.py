@@ -11,6 +11,12 @@ import math
 # Единственное место литерала «ltx25» в коде (config.default.yaml и входы generate.yml задают то же значение файлами).
 DEFAULT_MODEL_PROFILE = "ltx25"
 
+# Имя профиля или пресета (имя файла без расширения): латинские буквы, цифры, «_» и «-».
+# Один шаблон для config_loader (входы профиля и пресета) и gemini_prompts (файл пресета).
+PROFILE_NAME_PATTERN = r"[A-Za-z0-9_\-]+"
+# Значение пресета «без пресета»: всегда допустимо, файла не требует.
+PRESET_NONE = "none"
+
 
 def speed_threshold_mbps(min_inet_mbps: float) -> int:
     """Порог правила скорости, Мбит/с: половина min_inet_mbps входа запуска, округлённая вниз до целого.

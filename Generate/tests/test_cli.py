@@ -12,6 +12,8 @@ import pytest
 from Generate import cli
 from Generate.core import vast_client
 from Generate.core.srt_parser import parse_srt, srt_hash
+from Generate.core import config_loader as _config_loader
+from Generate.core import gemini_prompts as _gemini_prompts
 
 DATA = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
 VAST_KEY_ENV = "GEN_" + "VAST_API_KEY"
@@ -167,7 +169,7 @@ def run_env(monkeypatch):
     FakeVast.credit_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
-                        lambda profile, batch_size: ("CFG", profile, batch_size))
+                        lambda profile, batch_size, preset="none": ("CFG", profile, batch_size))
     monkeypatch.setattr(cli, "_make_transport", lambda: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
@@ -317,7 +319,7 @@ def test_run_verified_zero_from_config_reaches_offer_filter(capsys, run_env, mis
     assert kwargs["offer_filter"].verified is False
 
 
-# ---------------------------------------------------------------- --preset (вход workflow, пока не применяется)
+# ---------------------------------------------------------------- --preset (вход workflow)
 
 def test_preset_defaults_to_none_and_reaches_config(loaded_cfgs, run_env, missing_file):
     assert cli.build_parser().parse_args(["run"]).preset == "none"
@@ -1164,3 +1166,102 @@ def test_cli_summary_average_label_says_what_is_measured(capsys):
     cli._print_summary(SimpleNamespace(avg_render_sec=0.0))
     out = capsys.readouterr().out
     assert "  среднее время клипа от отправки до выгрузки, с: нет данных" in out
+
+
+# ---------------------------------------------------------------- проверка профиля и пресета до аренды (фаза E2)
+
+@pytest.fixture
+def tmp_profiles(tmp_path, monkeypatch):
+    """Корень профилей и папка пресетов — временные; реальные папки не меняются."""
+    root = tmp_path / "profiles"
+    (root / "models").mkdir(parents=True)
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    monkeypatch.setattr(_config_loader, "MODEL_PROFILES_DIR", root)
+    monkeypatch.setattr(_gemini_prompts, "PRESETS_DIR", presets)
+    return SimpleNamespace(root=root, presets=presets)
+
+
+def _complete_profile(root, name):
+    folder = root / "models" / name
+    (folder / "prompts").mkdir(parents=True)
+    for rel in ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md"):
+        (folder / rel).write_text("{}", encoding="utf-8")
+    return folder
+
+
+def test_check_builtin_profile_and_none_is_ok():
+    assert cli._check_profile_and_preset("ltx25", "none") is None
+
+
+def test_check_unknown_profile_is_input_error(capsys):
+    assert cli._check_profile_and_preset("nope", "none") == cli.EXIT_INPUT
+    err = capsys.readouterr().err
+    assert "профиль модели «nope» не найден" in err and "Traceback" not in err
+
+
+def test_check_incomplete_profile_is_input_error(capsys, tmp_profiles):
+    folder = tmp_profiles.root / "models" / "half"
+    (folder / "prompts").mkdir(parents=True)
+    (folder / "profile.yaml").write_text("{}", encoding="utf-8")
+    assert cli._check_profile_and_preset("half", "none") == cli.EXIT_INPUT
+    err = capsys.readouterr().err
+    assert "неполный" in err
+    for name in ("workflow.json", "bindings.json", "prompts/style.md"):
+        assert name in err
+
+
+def test_check_complete_temp_profile_is_ok(tmp_profiles):
+    _complete_profile(tmp_profiles.root, "full")
+    assert cli._check_profile_and_preset("full", "none") is None
+
+
+def test_check_preset_missing_is_input_error(capsys, tmp_profiles):
+    assert cli._check_profile_and_preset("ltx25", "nope") == cli.EXIT_INPUT
+    assert "Пресет «nope» не найден" in capsys.readouterr().err
+
+
+def test_check_preset_empty_is_input_error(capsys, tmp_profiles):
+    (tmp_profiles.presets / "empty.md").write_text("\n", encoding="utf-8")
+    assert cli._check_profile_and_preset("ltx25", "empty") == cli.EXIT_INPUT
+    assert "пуст" in capsys.readouterr().err
+
+
+def test_check_preset_present_is_ok(tmp_profiles):
+    (tmp_profiles.presets / "pz.md").write_text("текст пресета", encoding="utf-8")
+    assert cli._check_profile_and_preset("ltx25", "pz") is None
+
+
+def test_run_unknown_profile_stops_before_vast(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--model-profile", "nope"))
+    cap = capsys.readouterr()
+    assert code == cli.EXIT_INPUT
+    assert "профиль модели «nope» не найден" in cap.err and "Traceback" not in cap.err
+    assert run_env.calls == [] and FakeVast.instances == []
+
+
+def test_run_missing_preset_stops_before_vast(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--preset", "nope"))
+    cap = capsys.readouterr()
+    assert code == cli.EXIT_INPUT
+    assert "Пресет «nope» не найден" in cap.err and "Traceback" not in cap.err
+    assert run_env.calls == [] and FakeVast.instances == []
+
+
+def test_preset_reaches_prompt_config(capsys, run_env, missing_file, monkeypatch, tmp_profiles):
+    (tmp_profiles.presets / "pz.md").write_text("текст пресета", encoding="utf-8")
+    seen = []
+
+    def fake_build(profile, batch_size, preset="none"):
+        seen.append(preset)
+        return ("CFG",)
+
+    monkeypatch.setattr(cli, "_build_prompt_config", fake_build)
+    code = cli.main(_run_args(DATA, missing_file, "--preset", "pz"))
+    assert code == cli.EXIT_OK
+    assert seen == ["pz"]
+
+
+def test_build_prompt_config_carries_preset_field():
+    cfg = cli._build_prompt_config("ltx25", 20, "none")
+    assert cfg.preset == "none" and cfg.batch_size == 20

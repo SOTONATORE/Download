@@ -20,8 +20,10 @@ from typing import Any, Callable, Optional, Protocol
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
+    from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
+    from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -79,6 +81,8 @@ class PromptConfig:
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
+    # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
+    preset: str = PRESET_NONE
 
 
 @dataclass(frozen=True)
@@ -303,6 +307,30 @@ def response_schema(response_format: Any) -> dict:
             "items": {"type": "object", "properties": props, "required": list(props)}}
 
 
+# Пресеты: файлы presets/prompts/<имя>.md рядом с профилями моделей. README в этой папке — описание,
+# не пресет (в списке выбора GitHub его нет), поэтому имя README запрещено.
+PRESETS_DIR = Path(__file__).resolve().parent.parent / "model_profiles" / "presets" / "prompts"
+_PRESET_RESERVED = {"README"}
+
+
+def read_preset(preset: str) -> str:
+    """Текст пресета (USER_ONLY вырезан). Общая проверка для cli (до аренды) и для системной инструкции.
+    Ошибка — GeminiInputError с текстом на русском: имя недопустимо, файла нет или он пуст."""
+    if not re.fullmatch(PROFILE_NAME_PATTERN, preset or "") or preset in _PRESET_RESERVED:
+        raise GeminiInputError("Недопустимое имя пресета: допустимы латинские буквы, цифры, «_» и «-», "
+                               "кроме README.")
+    path = PRESETS_DIR / f"{preset}.md"
+    if not path.is_file():
+        raise GeminiInputError(f"Пресет «{preset}» не найден: нет файла presets/prompts/{preset}.md.")
+    try:
+        text = strip_user_only(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        raise GeminiInputError(f"Пресет «{preset}» не удалось прочитать: presets/prompts/{preset}.md.") from None
+    if not text:
+        raise GeminiInputError(f"Пресет «{preset}» пуст: в файле presets/prompts/{preset}.md нет текста.")
+    return text
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     parts = [
@@ -331,6 +359,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
+    # слой пресета — после стиля модели; при «none» список остаётся прежним, вывод байт в байт тот же
+    if cfg.preset != PRESET_NONE:
+        parts.append("# Preset\n" + read_preset(cfg.preset))
     return "\n\n".join(parts)
 
 

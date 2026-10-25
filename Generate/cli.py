@@ -51,8 +51,9 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, profile_exists)
-    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError
+        load_profile_number, profile_dir, profile_exists)
+    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
+    from Generate.core.model_constants import PRESET_NONE
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
@@ -64,8 +65,9 @@ except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, profile_exists)
-    from gemini_prompts import GeminiInputError, GeminiRuntimeError  # type: ignore
+        load_profile_number, profile_dir, profile_exists)
+    from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
+    from model_constants import PRESET_NONE  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
@@ -89,6 +91,8 @@ DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
 STYLE_DIR = "Generate/model_profiles/models"
+# файлы, без которых профиль модели не запускается (проверяются до аренды, см. _check_profile_and_preset)
+PROFILE_REQUIRED_FILES = ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md")
 # запасной профиль, если профиля или файла стиля для выбранного профиля нет (прежнее поведение)
 FALLBACK_STYLE_PROFILE = DEFAULT_MODEL_PROFILE
 # наблюдатель heartbeat (SPEC 8.3 а): пороги по умолчанию и формат времени в файле heartbeat
@@ -274,12 +278,44 @@ def _build_timing(cfg: Config, profile: str):
                gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
 
 
-def _build_prompt_config(profile: str, batch_size: int):
+def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
+    """Проверка входов профиля модели и пресета ДО поиска цен и любого вызова Vast (вход run).
+
+    Профиль: папка Generate/model_profiles/models/<профиль>/ должна существовать и содержать
+    PROFILE_REQUIRED_FILES. Пресет: «none» допустим всегда; иначе нужен непустой файл пресета
+    (проверка та же, что при сборке системной инструкции: read_preset).
+    Возвращает None, если всё на месте; иначе печатает сообщение на русском и возвращает EXIT_INPUT.
+    """
+    try:
+        folder = profile_dir(model_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if not folder.is_dir():
+        _err(f"Ошибка входных данных: профиль модели «{model_profile}» не найден: нет папки "
+             f"models/{model_profile}/.")
+        return EXIT_INPUT
+    missing = [name for name in PROFILE_REQUIRED_FILES if not (folder / name).is_file()]
+    if missing:
+        _err(f"Ошибка входных данных: профиль модели «{model_profile}» неполный: нет файлов "
+             f"{', '.join(missing)}.")
+        return EXIT_INPUT
+    if preset == PRESET_NONE:
+        return None
+    try:
+        read_preset(preset)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    return None
+
+
+def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
     if not os.path.isfile(style_file):
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
-    return cls(style_file=style_file, batch_size=batch_size)
+    return cls(style_file=style_file, batch_size=batch_size, preset=preset)
 
 
 def _gemini_options(cfg: Config) -> dict:
@@ -459,10 +495,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     except BadHostsError as e:
         _err(f"Ошибка входных данных: {e}")
         return EXIT_INPUT
+    # профиль модели и пресет: до клиентов Vast/Gemini, поиска цен и аренды (одна проверка, см. docstring)
+    input_code = _check_profile_and_preset(cfg.model_profile, cfg.preset)
+    if input_code is not None:
+        return input_code
 
     try:
         timing = _build_timing(cfg, cfg.model_profile)
-        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size)
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         transport = None if _pilot_mode(args) else _make_transport()
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
@@ -1065,7 +1105,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
     run_p.add_argument("--preset", default="none",
-                       help="пресет профиля; none = без пресета (значение пока не применяется)")
+                       help="пресет профиля; none = без пресета (файл пресета проверяется до аренды)")
     run_p.add_argument("--repo", default="",
                        help="репозиторий owner/name (передаётся явно)")
     run_p.add_argument("--run-id", default="",

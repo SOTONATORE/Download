@@ -29,10 +29,11 @@ import yaml
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .gemini_prompts import GeminiInputError
-    from .model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps
+    from .model_constants import DEFAULT_MODEL_PROFILE, PROFILE_NAME_PATTERN, speed_threshold_mbps
 except ImportError:  # pragma: no cover
     from gemini_prompts import GeminiInputError  # type: ignore
-    from model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # type: ignore
+    from model_constants import (  # type: ignore
+        DEFAULT_MODEL_PROFILE, PROFILE_NAME_PATTERN, speed_threshold_mbps)
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
@@ -47,7 +48,7 @@ ACTIONS_JOB_LIMIT_MIN = 360
 
 # Подстроки имён ключей: если неизвестный ключ похож на секрет, сообщаем об этом отдельно.
 _SECRET_NAME_HINTS = ("api_key", "apikey", "token", "secret", "password")
-_PROFILE_NAME_PATTERN = r"[A-Za-z0-9_\-]+"
+_PROFILE_NAME_PATTERN = PROFILE_NAME_PATTERN
 # Режимы аренды карт Vast (rental_type): прерываемая (bid) и обычная (on-demand).
 RENTAL_TYPES = ("interruptible", "on-demand")
 
@@ -78,7 +79,7 @@ class Config:
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,
                                hint="допустимы латинские буквы, цифры, «_» и «-»")
-    # пресет профиля: только формат; значение читается, но пока не применяется
+    # пресет профиля: имя проверяется здесь; наличие файла проверяет cli до аренды (presets/prompts/)
     preset: str = _rule(pattern=_PROFILE_NAME_PATTERN,
                         hint="допустимы латинские буквы, цифры, «_» и «-»")
     fps: int = _rule(ge=1)
