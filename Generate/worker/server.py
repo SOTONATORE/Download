@@ -28,12 +28,12 @@ from urllib.parse import parse_qs
 
 try:
     from Generate.worker.comfy_client import (
-        ComfyClient, ComfyError, inject_workflow)
+        ComfyClient, ComfyError, inject_workflow, new_second_pass_seed)
     from Generate.worker.comfy_output import (
         COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT)
     from Generate.worker.telemetry import SystemSampler, TelemetrySampler
 except ImportError:  # запуск прямо на карте, без пакета Generate
-    from worker.comfy_client import ComfyClient, ComfyError, inject_workflow
+    from worker.comfy_client import ComfyClient, ComfyError, inject_workflow, new_second_pass_seed
     from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT
     from worker.telemetry import SystemSampler, TelemetrySampler
 
@@ -585,6 +585,7 @@ class _Task:
     error: Optional[str] = None
     path: Optional[Path] = None
     size_bytes: Optional[int] = None
+    second_seed: Optional[int] = None  # сид второго прохода этого клипа (первый проход = seed)
     acked: bool = False
     lines: Deque[str] = field(default_factory=collections.deque)  # журнал клипа целиком, без хвоста (этап 9в)
 
@@ -687,7 +688,8 @@ class TaskManager:
                 return None
             return {"state": task.state, "stage": task.stage,
                     "log_tail": "\n".join(task.lines),
-                    "size_bytes": task.size_bytes, "error": task.error}
+                    "size_bytes": task.size_bytes, "error": task.error,
+                    "seed_first": task.seed, "seed_second": task.second_seed}
 
     def file_info(self, task_id: str) -> Optional[Tuple[Path, int]]:
         """(путь, размер) готового и не подтверждённого файла, иначе None."""
@@ -772,12 +774,16 @@ class TaskManager:
         try:
             self._set(task, "running", "подстановка параметров в workflow")
             prefix = f"clip_{task.num}_{task.task_id[:8]}"
+            second_seed = new_second_pass_seed()
+            with self._lock:
+                task.second_seed = second_seed
             graph = inject_workflow(self.workflow, self.bindings, task.prompt,
-                                    task.num_frames, task.seed, prefix, self.extra_inputs)
+                                    task.num_frames, task.seed, prefix, self.extra_inputs,
+                                    second_seed=second_seed)
             self._set(task, "running", "постановка в очередь ComfyUI")
             started = time.monotonic()
-            log.info("Клип %d: старт рендера в %s (id %s).",
-                     task.num, _clock_text(), task.task_id[:8])
+            log.info("Клип %d: старт рендера в %s (id %s), сид первого прохода %d, сид второго прохода %d.",
+                     task.num, _clock_text(), task.task_id[:8], task.seed, second_seed)
             prompt_id = self.comfy.queue_prompt(graph)
             self._set(task, "running", "генерация в ComfyUI")
             rel = self.comfy.wait_for_completion(prompt_id, timeout=self.task_timeout)

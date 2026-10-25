@@ -44,6 +44,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
                             mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from .missing import parse_missing
+    from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
     from . import ssh_probe
     from .release_adapter import (  # noqa: F401
@@ -61,6 +62,7 @@ except ImportError:  # pragma: no cover
     from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from missing import parse_missing  # type: ignore
+    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
@@ -981,7 +983,7 @@ class Orchestrator:
         и «Веса <ключ> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
         """
         if slot.monitor is None:
-            profile_key = self.profile or "ltx25"
+            profile_key = self.profile or DEFAULT_MODEL_PROFILE
 
             def emit(text: str, warn: bool = False, _slot=slot) -> None:
                 msg = f"{_card_name(_slot, cap=True)}: {text}"

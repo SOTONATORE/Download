@@ -50,7 +50,8 @@ from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
-        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
+        DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
+        load_profile_number, profile_exists)
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
@@ -62,7 +63,8 @@ try:  # пакетный и «плоский» импорт
 except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
-        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
+        DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
+        load_profile_number, profile_exists)
     from gemini_prompts import GeminiInputError, GeminiRuntimeError  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
@@ -86,11 +88,9 @@ LOG_LEVELS = ("INFO", "DEBUG")
 DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
-STYLE_DIR = "Generate/model_profiles/prompt_styles"
-# запасной стиль, если файла стиля для профиля нет (прежнее поведение)
-FALLBACK_STYLE_PROFILE = "ltx25"
-# значения по умолчанию, которых нет в config.default.yaml (описаны в профиле модели и SPEC 5)
-TIMING_FRAME_RULE = {"kind": "8k+1"}
+STYLE_DIR = "Generate/model_profiles/models"
+# запасной профиль, если профиля или файла стиля для выбранного профиля нет (прежнее поведение)
+FALLBACK_STYLE_PROFILE = DEFAULT_MODEL_PROFILE
 # наблюдатель heartbeat (SPEC 8.3 а): пороги по умолчанию и формат времени в файле heartbeat
 WATCH_DEFAULT_SILENCE_SEC = 120
 WATCH_DEFAULT_CHECK_SEC = 30
@@ -257,21 +257,28 @@ def _load_cfg(path: Optional[str], overrides: Optional[dict] = None) -> tuple[Op
         return None, EXIT_INPUT
 
 
+def _frame_rule_for(profile: str) -> dict:
+    # правило кадров берётся из profile.yaml выбранного профиля; если профиля нет, из запасного
+    # (прежнее поведение: тот же 8k+1)
+    src = profile if profile_exists(profile) else FALLBACK_STYLE_PROFILE
+    return load_profile_frame_rule(src)
+
+
 def _build_timing(cfg: Config, profile: str):
     cls = _find_symbol("TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
     # gpu_max_sec в конфиге может быть null: тогда берётся из профиля модели
     gpu_max = (cfg.gpu_max_sec if cfg.gpu_max_sec is not None
                else load_profile_number(profile, "gpu_max_sec"))
-    return cls(fps=cfg.fps, frame_rule=dict(TIMING_FRAME_RULE),
+    return cls(fps=cfg.fps, frame_rule=_frame_rule_for(profile),
                clip_min_sec=cfg.clip_min_sec, clip_max_sec=cfg.clip_max_sec,
                gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
 
 
 def _build_prompt_config(profile: str, style_brief: str, batch_size: int):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
-    style_file = f"{STYLE_DIR}/{profile}.md"
+    style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
     if not os.path.isfile(style_file):
-        style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}.md"
+        style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
     return cls(style_file=style_file, style_brief=style_brief, batch_size=batch_size)
 
 

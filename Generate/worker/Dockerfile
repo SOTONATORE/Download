@@ -22,8 +22,8 @@ ENV PYTHONUNBUFFERED=1 \
     COMFY_OUTPUT_DIR=/workspace/ComfyUI/output \
     COMFY_URL=http://127.0.0.1:8188 \
     WORKER_HTTP_PORT=8000 \
-    WORKER_WORKFLOW_PATH=/workspace/Generate/model_profiles/workflows/ltx25.json \
-    WORKER_BINDINGS_PATH=/workspace/Generate/model_profiles/workflows/ltx25_bindings.json \
+    WORKER_WORKFLOW_PATH=/workspace/Generate/model_profiles/models/ltx25/workflow.json \
+    WORKER_BINDINGS_PATH=/workspace/Generate/model_profiles/models/ltx25/bindings.json \
     COMFY_LOG_PATH=/workspace/comfyui.log
 
 # Номер коммита сборки: первая строка вывода воркера и GET /logs («Сборка воркера: <значение>»).

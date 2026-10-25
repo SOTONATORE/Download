@@ -35,13 +35,16 @@ except ImportError:  # pragma: no cover
     from weights_log import speed_threshold_mbps  # type: ignore
 
 __all__ = [
-    "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN",
-    "parse_config", "load_config", "load_profile_number",
+    "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = GENERATE_DIR / "config.default.yaml"
 MODEL_PROFILES_DIR = GENERATE_DIR / "model_profiles"
+# Профиль модели по умолчанию: вход model_profile, запасной стиль и значение по умолчанию в коде.
+# Единственное место литерала «ltx25» в коде (config.default.yaml и входы generate.yml задают то же значение файлами).
+DEFAULT_MODEL_PROFILE = "ltx25"
 
 # Лимит GitHub Actions на одно задание, минут (generate.yml: timeout-minutes: 360).
 ACTIONS_JOB_LIMIT_MIN = 360
@@ -348,19 +351,42 @@ def load_config(path: Optional[Path | str] = None,
     return parse_config(raw, source=label)
 
 
-def load_profile_number(profile: str, key: str) -> float:
-    """Положительное число из профиля модели: Generate/model_profiles/<profile>.yaml."""
+def profile_dir(profile: str) -> Path:
+    """Папка профиля модели: Generate/model_profiles/models/<profile>/ (имя проверяется)."""
     if not re.fullmatch(_PROFILE_NAME_PATTERN, profile or ""):
         raise GeminiInputError("Недопустимое имя профиля модели.")
-    path = MODEL_PROFILES_DIR / f"{profile}.yaml"
+    return MODEL_PROFILES_DIR / "models" / profile
+
+
+def profile_exists(profile: str) -> bool:
+    """Есть ли файл profile.yaml у профиля модели."""
+    return (profile_dir(profile) / "profile.yaml").is_file()
+
+
+def _read_profile(profile: str) -> dict:
+    path = profile_dir(profile) / "profile.yaml"
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise GeminiInputError(f"Профиль модели не найден: {profile}.yaml") from None
+        raise GeminiInputError(f"Профиль модели не найден: {profile}/profile.yaml") from None
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        raise GeminiInputError(f"Профиль модели не удалось прочитать: {profile}.yaml") from None
-    value = data.get(key) if isinstance(data, dict) else None
+        raise GeminiInputError(f"Профиль модели не удалось прочитать: {profile}/profile.yaml") from None
+    return data if isinstance(data, dict) else {}
+
+
+def load_profile_number(profile: str, key: str) -> float:
+    """Положительное число из профиля модели: Generate/model_profiles/models/<profile>/profile.yaml."""
+    value = _read_profile(profile).get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise GeminiInputError(
-            f"В профиле {profile}.yaml не задан положительный параметр «{key}».")
+            f"В профиле {profile}/profile.yaml не задан положительный параметр «{key}».")
     return float(value)
+
+
+def load_profile_frame_rule(profile: str) -> dict:
+    """Правило кадров из профиля модели (ключ frame_rule), например {«kind»: «8k+1»}."""
+    rule = _read_profile(profile).get("frame_rule")
+    if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
+        raise GeminiInputError(
+            f"В профиле {profile}/profile.yaml не задано правило кадров («frame_rule»).")
+    return dict(rule)

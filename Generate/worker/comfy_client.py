@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import secrets
 import time
 from typing import Any, Optional
 
@@ -58,14 +59,25 @@ def _set_input(graph: dict, binding: Any, name: str, value: Any) -> None:
     inputs[field] = value
 
 
+SECOND_PASS_SEED_LIMIT = 2 ** 32  # сид RandomNoise: 32-битное беззнаковое число (диапазон ComfyUI)
+
+
+def new_second_pass_seed() -> int:
+    """Новый случайный сид второго прохода (на каждый запуск клипа)."""
+    return secrets.randbelow(SECOND_PASS_SEED_LIMIT)
+
+
 def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frames: int,
                     seed: int, filename_prefix: str,
-                    extra_inputs: Optional[dict] = None) -> dict:
+                    extra_inputs: Optional[dict] = None,
+                    second_seed: Optional[int] = None) -> dict:
     """Возвращает глубокую копию workflow с подставленными значениями.
 
     bindings: {имя: {"node_id": "6", "field": "text"}}. Обязательные имена:
     prompt, num_frames, seed, filename_prefix. extra_inputs: {имя_привязки: значение};
     каждое имя должно присутствовать в bindings.
+    second_seed: сид нешифрованного (не привязанного) RandomNoise, то есть второго прохода;
+    None = новый случайный сид. Привязанный сид (первый проход) задаётся только через bindings.
     """
     missing = [k for k in REQUIRED_BINDINGS if k not in bindings]
     if missing:
@@ -79,6 +91,18 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
         if name not in bindings:
             raise ComfyError(f"Для дополнительного входа «{name}» нет привязки.")
         _set_input(graph, bindings[name], name, value)
+    # второй проход: каждый RandomNoise, которого нет в привязках, получает сид этого запуска
+    bound_nodes = {str(b["node_id"]) for b in bindings.values()
+                   if isinstance(b, dict) and "node_id" in b}
+    if second_seed is None:
+        second_seed = new_second_pass_seed()
+    if not isinstance(second_seed, int) or isinstance(second_seed, bool) \
+            or not 0 <= second_seed < SECOND_PASS_SEED_LIMIT:
+        raise ComfyError("Сид второго прохода должен быть целым числом от 0 до 2^32-1.")
+    for node_id, node in graph.items():
+        if (isinstance(node, dict) and node.get("class_type") == "RandomNoise"
+                and node_id not in bound_nodes and isinstance(node.get("inputs"), dict)):
+            node["inputs"]["noise_seed"] = second_seed
     return graph
 
 

@@ -49,6 +49,11 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
+try:  # пакетный и «плоский» импорт
+    from .config_loader import DEFAULT_MODEL_PROFILE
+except ImportError:  # pragma: no cover
+    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
+
 # --- строки setup.sh: префикс log() «[setup] », индекс «[i/N] » (MODEL_FILES_TOTAL) ---
 _SETUP_PREFIX = r"\[setup\] \[(?P<idx>\d+)/(?P<total>\d+)\] "
 START_RE = re.compile(_SETUP_PREFIX + r"Начинаю загрузку: (?P<name>\S+)\s*$")
@@ -247,7 +252,7 @@ class WeightsMonitor:
     stage_max_sec: float
     # console(вид, проценты): вид «start» (начало этапа), «progress» (шаг процентов), «loaded» (все файлы на месте)
     console: Optional[Callable[..., None]] = None
-    profile_key: str = "ltx25"        # ключ профиля модели для строк консоли (не отображаемое имя)
+    profile_key: str = DEFAULT_MODEL_PROFILE  # ключ профиля модели для строк консоли (не отображаемое имя)
     min_window_sec: float = MIN_WINDOW_SEC
     min_samples: int = MIN_SAMPLES
     seen_start: bool = False          # первая строка файла уже пришла

@@ -18,7 +18,7 @@ from Generate.core.gemini_prompts import (
 from Generate.core.srt_parser import Segment
 
 GEN = pathlib.Path(__file__).resolve().parent.parent
-LTX_STYLE = GEN / "model_profiles" / "prompt_styles" / "ltx25.md"
+LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 # Имя переменной окружения собрано из частей (структурный тест запрещает литерал в коде).
 ENV_NAME = "GEN_" + "GEMINI_API_KEY"
 TESTKEY = "TESTKEY-12345"

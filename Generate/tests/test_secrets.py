@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover - плоский импорт
 
 GEN = pathlib.Path(__file__).resolve().parents[1]
 CORE_DIR = GEN / "core"
-STYLE_FILE = str(GEN / "model_profiles" / "prompt_styles" / "ltx25.md")
+STYLE_FILE = str(GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md")
 DATA_SRT = GEN / "tests" / "data" / "final.srt"
 
 SECRET = "TESTKEY-12345"
