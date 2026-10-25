@@ -29,10 +29,10 @@ import yaml
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .gemini_prompts import GeminiInputError
-    from .weights_log import speed_threshold_mbps
+    from .model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps
 except ImportError:  # pragma: no cover
     from gemini_prompts import GeminiInputError  # type: ignore
-    from weights_log import speed_threshold_mbps  # type: ignore
+    from model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # type: ignore
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
@@ -42,10 +42,6 @@ __all__ = [
 GENERATE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = GENERATE_DIR / "config.default.yaml"
 MODEL_PROFILES_DIR = GENERATE_DIR / "model_profiles"
-# Профиль модели по умолчанию: вход model_profile, запасной стиль и значение по умолчанию в коде.
-# Единственное место литерала «ltx25» в коде (config.default.yaml и входы generate.yml задают то же значение файлами).
-DEFAULT_MODEL_PROFILE = "ltx25"
-
 # Лимит GitHub Actions на одно задание, минут (generate.yml: timeout-minutes: 360).
 ACTIONS_JOB_LIMIT_MIN = 360
 

@@ -44,15 +44,14 @@ download_model: имя файла без подкаталога). Загрузк
 """
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
-try:  # пакетный и «плоский» импорт
-    from .config_loader import DEFAULT_MODEL_PROFILE
+try:  # пакетный и «плоский» импорт; общие константы — в model_constants (без цикла)
+    from .model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # speed_threshold_mbps: реэкспорт
 except ImportError:  # pragma: no cover
-    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
+    from model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # type: ignore
 
 # --- строки setup.sh: префикс log() «[setup] », индекс «[i/N] » (MODEL_FILES_TOTAL) ---
 _SETUP_PREFIX = r"\[setup\] \[(?P<idx>\d+)/(?P<total>\d+)\] "
@@ -111,15 +110,6 @@ def size_to_bytes(text: str) -> float:
 def bytes_per_sec_to_mbps(bytes_per_sec: float) -> float:
     """Байты в секунду -> Мбит/с (десятичные мегабиты: 1 Мбит/с = 125000 байт/с)."""
     return bytes_per_sec / BYTES_PER_MBIT
-
-
-def speed_threshold_mbps(min_inet_mbps: float) -> int:
-    """Порог правила скорости, Мбит/с: половина min_inet_mbps входа запуска, округлённая вниз до целого.
-
-    Вход — workflow MIN_INET или --min-inet-mbps (cfg.min_inet_mbps), а не значение из конфига.
-    Меньше 1 Мбит/с — ошибка входа: проверяется в config_loader (GeminiInputError).
-    """
-    return math.floor(float(min_inet_mbps) / 2.0)
 
 
 def _form_key(text: str) -> str:
