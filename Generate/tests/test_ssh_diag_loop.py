@@ -248,7 +248,7 @@ def test_diag_log_masks_external_literals_in_output_and_logs(tmp_path, monkeypat
     monkeypatch.setattr(orch.ssh_probe.subprocess, "run", _fake_ssh(stdout))
     orc = _bare_orc(tmp_path)
     slot = _slot()
-    slot.ext_values = (EXT_IP, EXT_PORT)  # публичный IP и HostPort, как их передаёт _step_slot
+    slot.ext_values = (EXT_IP, EXT_PORT)  # задаёт сам тест: _step_slot их не передаёт; проверка общего цикла (пилот)
     orc._slots[1] = slot
     orc._pull_ssh_diag(0.0)
     text = _diag_file(tmp_path).read_text(encoding="utf-8")
