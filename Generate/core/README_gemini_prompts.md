@@ -9,7 +9,7 @@
 |---|---|
 | `segments` | `list[Segment]` из `srt_parser` по ПОЛНОМУ SRT |
 | `wanted_nums` | номера из `missing.txt` (дубли убираются, порядок по возрастанию) |
-| `cfg: PromptConfig` | `style_file` (путь к `prompt_styles/<модель>.md` из профиля), `style_brief`, `max_prompt_chars` (1500), `batch_size` (20), `response_format` (по умолчанию `[{"segment_index": int, "prompt": str}]`; значения: типы Python или строки `"int"`/`"str"`) |
+| `cfg: PromptConfig` | `style_file` (путь к `prompt_styles/<модель>.md` из профиля), `max_prompt_chars` (1500), `batch_size` (20), `response_format` (по умолчанию `[{"segment_index": int, "prompt": str}]`; значения: типы Python или строки `"int"`/`"str"`) |
 | `transport` | объект с методом `generate_json(model, system, user, schema) -> str` (`GeminiTransport`) |
 | `model` | API-ID модели, параметром. В коде не зашит |
 

@@ -167,7 +167,7 @@ def run_env(monkeypatch):
     FakeVast.credit_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
-                        lambda profile, brief, batch_size: ("CFG", profile, brief))
+                        lambda profile, batch_size: ("CFG", profile, batch_size))
     monkeypatch.setattr(cli, "_make_transport", lambda: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
@@ -215,14 +215,14 @@ def test_run_success(capsys, run_env, missing_file):
     code = cli.main(_run_args(DATA, missing_file, "--repo", "o/r", "--run-id", "77",
                               "--limit-clips", "3", "--max-cards", "2",
                               "--budget-limit", "1.5", "--release-tag", "v1",
-                              "--model-profile", "ltx25", "--style-brief", "стиль",
+                              "--model-profile", "ltx25",
                               "--prompts-path", "p.json"))
     out = capsys.readouterr().out
     assert code == 0
     assert "Итоги запуска" in out
     (args, kwargs), = run_env.calls
     assert args[1] == str(missing_file)
-    assert args[2] == ("CFG", "ltx25", "стиль")
+    assert args[2] == ("CFG", "ltx25", 100)   # gemini_batch_size из config.default.yaml
     assert args[3] == "TIMING"
     assert args[4] == ("STORE", "o/r")
     assert isinstance(args[5], FakeVast)
@@ -315,6 +315,14 @@ def test_run_verified_zero_from_config_reaches_offer_filter(capsys, run_env, mis
     assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg))) == 0
     _, kwargs = run_env.calls[0]
     assert kwargs["offer_filter"].verified is False
+
+
+# ---------------------------------------------------------------- --preset (вход workflow, пока не применяется)
+
+def test_preset_defaults_to_none_and_reaches_config(loaded_cfgs, run_env, missing_file):
+    assert cli.build_parser().parse_args(["run"]).preset == "none"
+    cli.main(_run_args(DATA, missing_file))
+    assert loaded_cfgs[-1].preset == "none"
 
 
 # ---------------------------------------------------------------- --verified (вход workflow)

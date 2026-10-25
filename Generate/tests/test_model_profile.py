@@ -105,16 +105,18 @@ def test_single_model_constant_used_in_place_of_literal():
     assert cl.DEFAULT_MODEL_PROFILE == "ltx25"
     # литерал профиля как значение в коде: допустим только в объявлении константы
     literal = re.compile(r'(?:=|\bor)\s*"ltx25"')
-    files = ["cli.py", "core/orchestrator.py", "core/weights_log.py", "core/config_loader.py"]
+    files = ["cli.py", "core/orchestrator.py", "core/weights_log.py", "core/config_loader.py",
+             "core/model_constants.py"]
     hits = {}
     for rel in files:
         lines = (GEN / rel).read_text(encoding="utf-8").splitlines()
         hits[rel] = [n + 1 for n, line in enumerate(lines)
                      if literal.search(line) and not line.lstrip().startswith("#")]
-    assert hits["core/config_loader.py"] == [
-        next(n + 1 for n, line in enumerate((GEN / "core/config_loader.py").read_text(encoding="utf-8").splitlines())
+    decl = "core/model_constants.py"
+    assert hits[decl] == [
+        next(n + 1 for n, line in enumerate((GEN / decl).read_text(encoding="utf-8").splitlines())
              if line.startswith("DEFAULT_MODEL_PROFILE"))]
-    assert all(hits[rel] == [] for rel in files if rel != "core/config_loader.py")
+    assert all(hits[rel] == [] for rel in files if rel != decl)
 
 
 # ------------------------------------------------ setup.sh = граф = профиль

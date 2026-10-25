@@ -76,7 +76,6 @@ class GeminiRuntimeError(GeminiError):
 @dataclass
 class PromptConfig:
     style_file: str                  # путь к prompt_styles/<модель>.md (из профиля)
-    style_brief: str = ""            # краткое описание стиля/сюжета от пользователя
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
@@ -332,9 +331,6 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
-    brief = (cfg.style_brief or "").strip()
-    if brief:
-        parts.append("# Style brief from the user\n" + brief)
     return "\n\n".join(parts)
 
 

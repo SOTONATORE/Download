@@ -53,7 +53,6 @@ def make_cfg(tmp_path, **kw):
                      "<!-- USER_ONLY_END -->\n# Style guide\nWrite one paragraph.\n",
                      encoding="utf-8")
     kw.setdefault("style_file", str(style))
-    kw.setdefault("style_brief", "dusty medieval chronicle")
     kw.setdefault("max_prompt_chars", 300)
     kw.setdefault("batch_size", 10)
     return PromptConfig(**kw)
@@ -139,7 +138,6 @@ def test_strip_user_only_synthetic(tmp_path):
     system = build_requests(make_segments(), [1], cfg)[0].system
     assert "USER_ONLY" not in system and "SECRET-NOTE" not in system
     assert "Write one paragraph." in system
-    assert "dusty medieval chronicle" in system
 
 
 def test_strip_user_only_real_style_file():
@@ -391,6 +389,16 @@ def test_system_has_hard_rules(tmp_path):
     system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
     assert "# Hard rules for every prompt" in system
     assert "Exactly one camera move" in system
+
+
+def test_system_instruction_without_brief_ends_with_style_guide(tmp_path):
+    # без описания стиля от пользователя: блок «Style brief» не добавляется,
+    # системная инструкция заканчивается фиксированной частью и style.md (без USER_ONLY)
+    system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
+    style = strip_user_only((tmp_path / "style.md").read_text(encoding="utf-8"))
+    assert "Style brief from the user" not in system   # заголовок удалённого блока; «## Style brief» в style.md остаётся
+    assert system.count("# Style guide") == 1
+    assert system.endswith("\n\n# Style guide\n" + style)
 
 
 # ---------------------------------------------------------------- RealTransport и ключ

@@ -115,6 +115,10 @@ def test_generate_workflow_defaults_match_config_default():
     assert inputs["min_inet_mbps"]["type"] == "string"
     assert inputs["rental_type"]["type"] == "choice"
     assert inputs["rental_type"]["default"] in inputs["rental_type"]["options"]
+    # входы выбора: model_profile (только ltx25) и preset (только none, пока пресетов нет)
+    assert inputs["model_profile"]["type"] == "choice" and inputs["model_profile"]["options"] == ["ltx25"]
+    assert inputs["preset"]["type"] == "choice" and inputs["preset"]["options"] == ["none"]
+    assert inputs["preset"]["default"] == "none" and cfg.preset == "none"
 
 
 # ---------------------------------------------------------------- rental_type (режим аренды)
@@ -372,9 +376,8 @@ def test_file_with_bad_value_is_rejected(tmp_path):
 # ---------------------------------------------------------------- входы (overrides)
 
 def test_overrides_replace_file_values_and_none_is_ignored():
-    cfg = cl.load_config(overrides={"max_cards": 2, "style_brief": "стиль", "disk_gb": None})
+    cfg = cl.load_config(overrides={"max_cards": 2, "disk_gb": None})
     assert cfg.max_cards == 2
-    assert cfg.style_brief == "стиль"
     assert cfg.disk_gb == 100               # None = «не задано», остаётся из файла
 
 

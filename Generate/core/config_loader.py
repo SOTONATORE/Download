@@ -67,7 +67,6 @@ class Config:
     # --- имена файлов и текст ---
     filename_template: str = _rule(nonempty=True, contains="{num}")
     clip_name_width: int = _rule(ge=0)
-    style_brief: str = _rule()
 
     # --- Gemini ---
     gemini_models: list[str] = _rule(min_items=1)
@@ -79,6 +78,9 @@ class Config:
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,
                                hint="допустимы латинские буквы, цифры, «_» и «-»")
+    # пресет профиля: только формат; значение читается, но пока не применяется
+    preset: str = _rule(pattern=_PROFILE_NAME_PATTERN,
+                        hint="допустимы латинские буквы, цифры, «_» и «-»")
     fps: int = _rule(ge=1)
     clip_min_sec: float = _rule(gt=0)
     clip_max_sec: float = _rule(gt=0)

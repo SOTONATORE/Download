@@ -274,12 +274,12 @@ def _build_timing(cfg: Config, profile: str):
                gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
 
 
-def _build_prompt_config(profile: str, style_brief: str, batch_size: int):
+def _build_prompt_config(profile: str, batch_size: int):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
     if not os.path.isfile(style_file):
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
-    return cls(style_file=style_file, style_brief=style_brief, batch_size=batch_size)
+    return cls(style_file=style_file, batch_size=batch_size)
 
 
 def _gemini_options(cfg: Config) -> dict:
@@ -426,7 +426,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "budget_limit_usd": args.budget_limit,
         "min_balance_usd": args.min_balance_usd,
         "model_profile": args.model_profile,
-        "style_brief": args.style_brief,
+        "preset": args.preset,
         "gpu_name": args.gpu_name,
         "min_price_per_hour": args.min_price_per_hour,
         "max_price_per_hour": args.max_price_per_hour,
@@ -462,7 +462,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         timing = _build_timing(cfg, cfg.model_profile)
-        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.style_brief, cfg.gemini_batch_size)
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         transport = None if _pilot_mode(args) else _make_transport()
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
@@ -1064,8 +1064,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="минимальный кредит Vast.ai для старта, USD; по умолчанию из конфига")
     run_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
-    run_p.add_argument("--style-brief", default=None,
-                       help="общее описание стиля/мира; по умолчанию из конфига")
+    run_p.add_argument("--preset", default="none",
+                       help="пресет профиля; none = без пресета (значение пока не применяется)")
     run_p.add_argument("--repo", default="",
                        help="репозиторий owner/name (передаётся явно)")
     run_p.add_argument("--run-id", default="",
