@@ -397,7 +397,7 @@ def test_system_instruction_without_brief_ends_with_style_guide(tmp_path):
     system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
     style = strip_user_only((tmp_path / "style.md").read_text(encoding="utf-8"))
     assert "Style brief from the user" not in system   # заголовок удалённого блока; «## Style brief» в style.md остаётся
-    assert system.count("# Style guide") == 1
+    assert system.count("# Style guide\n") == style.count("# Style guide\n") + 1
     assert system.endswith("\n\n# Style guide\n" + style)
 
 
