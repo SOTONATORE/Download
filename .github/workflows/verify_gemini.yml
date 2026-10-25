@@ -173,7 +173,7 @@ jobs:
 
           # Аргументы по реальной сигнатуре generate_and_store:
           # (segments, wanted_nums, cfg, inner_transport, prompts_path, *, profile, timing)
-          style_file = f"Generate/model_profiles/prompt_styles/{profile}.md"
+          style_file = f"Generate/model_profiles/models/{profile}/prompts/style.md"
           try:
               cfg = PromptConfig(style_file=style_file, style_brief=style_brief)
           except TypeError as exc:
