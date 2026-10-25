@@ -1145,3 +1145,13 @@ def test_pilot_onstart_refuses_bad_sha(sha):
 def test_pilot_onstart_refuses_bad_repo(repo):
     with pytest.raises(ValueError):
         cli.pilot_onstart_cmd(PILOT_SHA, repo)
+
+
+def test_cli_summary_average_label_says_what_is_measured(capsys):
+    cli._print_summary(SimpleNamespace(avg_render_sec=12.34))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: 12.3" in out
+    assert "рендера" not in out
+    cli._print_summary(SimpleNamespace(avg_render_sec=0.0))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: нет данных" in out

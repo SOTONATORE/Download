@@ -367,6 +367,18 @@ def test_search_counts_add_up_and_no_per_offer_lines(monkeypatch, vast_key, capl
     assert "Пропущено предложение" not in caplog.text  # номера предложений в логе не выводятся
 
 
+def test_summary_md_average_label_says_what_is_measured():
+    from types import SimpleNamespace
+
+    from Generate.core import orchestrator as orch
+    summary = SimpleNamespace(total_needed=2, completed=2, failed=0, pending=0, skipped_done=0,
+                              cards_rented=1, destroyed_cards=1, avg_render_sec=42.0, spent_usd=0.5,
+                              exit_code=0, cleanup_ok=True)
+    text = orch.Orchestrator._report_text(SimpleNamespace(run_id="t"), summary)
+    assert "- среднее время клипа от отправки до выгрузки, с: 42.0" in text
+    assert "рендера" not in text
+
+
 def test_clip_duration_logged_per_clip_and_summary_fields(logs_rig, caplog):
     caplog.set_level(logging.INFO)
     rig = logs_rig(missing=(1, 2))
@@ -375,7 +387,7 @@ def test_clip_duration_logged_per_clip_and_summary_fields(logs_rig, caplog):
                           caplog.text)) == 2
     assert summary.destroyed_cards >= 1
     assert summary.avg_render_sec > 0
-    assert "уничтожено карт" in caplog.text and "среднее время клипа" in caplog.text
+    assert "уничтожено карт" in caplog.text and "среднее время клипа от отправки до выгрузки" in caplog.text
 
 
 def test_card_state_transitions_logged_once(logs_rig, caplog):

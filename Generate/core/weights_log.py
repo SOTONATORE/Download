@@ -358,7 +358,8 @@ class WeightsMonitor:
             return self._reason(REASON_FILE_ERROR + ev.name)
         if ev.kind == "stage_done":
             self.stage_done = True
-            self.log(f"Веса: этап загрузки весов завершён; строк прогресса не распознано: {self.unrecognised}.")
+            self.log(f"Веса: этап загрузки весов завершён; итого {self._final_total() / MIB:.1f} МиБ; "
+                     f"строк прогресса не распознано: {self.unrecognised}.")
             self._console("loaded")
             return None
         if ev.kind == "aria_unknown":
@@ -421,6 +422,10 @@ class WeightsMonitor:
     def _agg_done(self) -> float:
         """Байт получено всеми файлами этапа (завершённые — полным размером)."""
         return sum(state.done_bytes for state in self.files.values())
+
+    def _final_total(self) -> float:
+        """Итог этапа, байт: сумма итоговых размеров файлов (из строки «успешно загружен», иначе размер aria2)."""
+        return sum(state.total_bytes for state in self.files.values())
 
     def _agg_total(self) -> Optional[float]:
         """Общий размер файлов этапа, байт; None, пока он не известен полностью.

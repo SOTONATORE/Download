@@ -156,6 +156,21 @@ def test_console_start_once_and_loaded_at_stage_end():
     assert consoles == [("start", 0), ("progress", 100), ("loaded", 0)], consoles
 
 
+def test_completion_total_is_sum_of_final_file_sizes():
+    """Итог в строке завершения — сумма итоговых размеров файлов, а не округлённые размеры aria2 (1000 + 500 МиБ)."""
+    mon, clock, logs, consoles = _monitor()
+    final_a = int(1000.4 * MIB)
+    final_b = int(500.3 * MIB)
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])
+    mon.feed([_aria(500, 1000, 1, file=wl._key(NAME)), _aria(250, 500, 1, file=VAE_FILE)])
+    mon.feed([f"[setup] [1/2] Файл успешно загружен: {NAME} ({final_a} байт)",
+              f"[setup] [2/2] Файл успешно загружен: {VAE_NAME} ({final_b} байт)",
+              "[setup] Все файлы модели LTX-2.5 на месте."])
+    done_line = [m for m in logs if m.startswith("Веса: этап загрузки весов завершён")][-1]
+    assert f"итого {(final_a + final_b) / MIB:.1f} МиБ" in done_line     # 1500.7 МиБ
+    assert "итого 1500.0 МиБ" not in done_line
+
+
 # --- правило (а): агрегатная скорость за окно ---------------------------------------
 
 def test_no_retirement_before_window_is_full_even_at_very_low_speed():

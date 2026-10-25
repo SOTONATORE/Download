@@ -356,8 +356,8 @@ def _print_summary(s) -> None:
     print(f"  уже было в Release: {g('skipped_done')}")
     print(f"  арендовано карт: {g('cards_rented')}")
     print(f"  уничтожено карт: {g('destroyed_cards')}")
-    print(f"  среднее время рендера клипа, с: {avg:.1f}" if avg > 0
-          else "  среднее время рендера клипа, с: нет данных")
+    print(f"  среднее время клипа от отправки до выгрузки, с: {avg:.1f}" if avg > 0
+          else "  среднее время клипа от отправки до выгрузки, с: нет данных")
     print(f"  потрачено, USD: {float(g('spent_usd', 0.0)):.2f}")
     if g("deadline_reached", False):
         print("  достигнут срок задания: новые клипы не брались")

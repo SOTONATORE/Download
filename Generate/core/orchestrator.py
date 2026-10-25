@@ -220,7 +220,7 @@ class RunSummary:
     cleanup_ok: bool = True
     cards_rented: int = 0
     destroyed_cards: int = 0   # карты, уничтоженные в этом запуске (по ходу и при уборке)
-    avg_render_sec: float = 0.0  # среднее время рендера клипа: от отправки до выдачи, с
+    avg_render_sec: float = 0.0  # среднее время клипа от отправки до выгрузки, с (не время рендера)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -1330,7 +1330,7 @@ class Orchestrator:
             f"- уже было в Release: {summary.skipped_done}",
             f"- арендовано карт: {summary.cards_rented}",
             f"- уничтожено карт: {summary.destroyed_cards}",
-            f"- среднее время клипа, с: {summary.avg_render_sec:.1f}",
+            f"- среднее время клипа от отправки до выгрузки, с: {summary.avg_render_sec:.1f}",
             f"- потрачено, USD: {summary.spent_usd:.4f}",
             f"- код завершения (до загрузки отчёта): {summary.exit_code}",
         ]
@@ -1359,7 +1359,7 @@ class Orchestrator:
             if pub.failures:  # E4: частичный итог, каждая ошибка уже записана одной строкой
                 summary.exit_code = EXIT_PARTIAL
         log.info("Итог: готово %d из %d, ошибок %d, не начато %d, арендовано карт %d, "
-                 "уничтожено карт %d, среднее время клипа %.1f с, потрачено %.4f USD, код %d.",
+                 "уничтожено карт %d, среднее время клипа от отправки до выгрузки %.1f с, потрачено %.4f USD, код %d.",
                  summary.completed, summary.total_needed, summary.failed, summary.pending,
                  summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
                  summary.spent_usd, summary.exit_code, extra=KEY_EVENT_EXTRA)
