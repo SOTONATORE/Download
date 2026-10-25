@@ -13,7 +13,7 @@ on:
         type: string
         default: "missing.txt"
       limit_clips:
-        description: "0 = все клипы; N > 0 = первые N клипов (пробный прогон; для первого прогона 2)"
+        description: "0 = все клипы из missing.txt; N > 0 = первые N клипов по возрастанию номера (пробный прогон; для первого прогона 2)"
         type: string
         default: "0"
       release_tag:
@@ -44,13 +44,13 @@ on:
         type: string
         default: "2.0"
       model_profile:
-        description: "Профиль видеомодели"
+        description: "Профиль модели: имя папки в Generate/model_profiles/models/ (сейчас доступна ltx25)"
         type: choice
         options:
           - "ltx25"
         default: "ltx25"
       preset:
-        description: "Пресет профиля: none = без пресета; новые пресеты добавляются в этот список при их создании"
+        description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
         options:
           - "none"
@@ -64,7 +64,7 @@ on:
         type: string
         default: "0.35"
       max_price_per_hour:
-        description: "Максимальная цена аренды ($/ч)"
+        description: "Потолок цены карты, $/ч (по умолчанию 1.00): предложение дороже отбрасывается; для прерываемой аренды ставка bid выше потолка не отправляется"
         type: string
         default: "1.00"
       min_reliability:
@@ -72,7 +72,7 @@ on:
         type: string
         default: "0.90"
       min_inet_mbps:
-        description: "Минимальная скорость интернета карты (Мбит/с)"
+        description: "Минимальная скорость интернета карты для отбора предложений, Мбит/с. Порог скорости загрузки весов равен половине этого значения, округлённой вниз"
         type: string
         default: "800"
       max_inet_price_per_tb:
@@ -87,7 +87,7 @@ on:
           - "0"
         default: "1"
       rental_type:
-        description: "Режим аренды карт Vast: interruptible (прерываемая, ставка bid) или on-demand (обычная)"
+        description: "Режим аренды Vast: on-demand (обычная, по умолчанию, цена фиксирована) или interruptible (прерываемая: перед арендой собирается окно цен, ставка bid, карту может остановить перебитая ставка)"
         type: choice
         options:
           - "interruptible"
@@ -102,7 +102,7 @@ on:
         type: number
         default: 20
       scan_sec:
-        description: "Seconds to collect offer prices before the first rental"
+        description: "Окно сбора цен перед первой арендой, секунд. Действует только при rental_type interruptible; при on-demand не используется"
         type: number
         required: false
         default: 300
