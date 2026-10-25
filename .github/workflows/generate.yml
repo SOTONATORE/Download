@@ -15,7 +15,7 @@ on:
       limit_clips:
         description: "0 = все клипы; N > 0 = первые N клипов (пробный прогон; для первого прогона 2)"
         type: string
-        default: "2"
+        default: "0"
       release_tag:
         description: "Пользовательский тег Release (необязательно)"
         type: string
@@ -62,7 +62,7 @@ on:
       max_price_per_hour:
         description: "Максимальная цена аренды ($/ч)"
         type: string
-        default: "0.55"
+        default: "1.00"
       min_reliability:
         description: "Минимальная надёжность хоста (0-1)"
         type: string
@@ -70,7 +70,7 @@ on:
       min_inet_mbps:
         description: "Минимальная скорость интернета карты (Мбит/с)"
         type: string
-        default: "500"
+        default: "800"
       max_inet_price_per_tb:
         description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
         type: string
@@ -88,7 +88,7 @@ on:
         options:
           - "interruptible"
           - "on-demand"
-        default: "interruptible"
+        default: "on-demand"
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
@@ -176,6 +176,7 @@ jobs:
         env:
           GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
@@ -252,7 +253,7 @@ jobs:
           import sys
 
           values = {os.environ.get(k, "").strip() for k in (
-              "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN")}
+              "GEN_GEMINI_API_KEY", "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN", "VAST_SSH_KEY")}
           # VAST_SSH_KEY многострочный: кроме всего значения маскируются его строки длиной не меньше 20 символов
           values |= {line.strip() for line in os.environ.get("VAST_SSH_KEY", "").splitlines()
                      if len(line.strip()) >= 20}
