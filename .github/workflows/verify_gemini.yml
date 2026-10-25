@@ -18,10 +18,6 @@ on:
         description: "Профиль модели"
         type: string
         default: "ltx25"
-      style_brief:
-        description: "Описание стиля/мира"
-        type: string
-        default: ""
       limit_clips:
         # GitHub Actions не поддерживает type: integer, поэтому number
         description: "Лимит сегментов для проверки (0 = все)"
@@ -64,7 +60,6 @@ jobs:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
           MODEL_PROFILE: ${{ inputs.model_profile }}
-          STYLE_BRIEF: ${{ inputs.style_brief }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
         run: |
           python - <<'PY'
@@ -143,7 +138,6 @@ jobs:
           srt_path = os.environ["SRT_PATH"]
           missing_path = os.environ["MISSING_PATH"]
           profile = os.environ["MODEL_PROFILE"]
-          style_brief = os.environ.get("STYLE_BRIEF", "")
           try:
               limit = int(float(os.environ.get("LIMIT_CLIPS") or 0))
           except ValueError:
@@ -175,7 +169,7 @@ jobs:
           # (segments, wanted_nums, cfg, inner_transport, prompts_path, *, profile, timing)
           style_file = f"Generate/model_profiles/models/{profile}/prompts/style.md"
           try:
-              cfg = PromptConfig(style_file=style_file, style_brief=style_brief)
+              cfg = PromptConfig(style_file=style_file)
           except TypeError as exc:
               fail("не удалось создать PromptConfig: " + mask(exc))
 

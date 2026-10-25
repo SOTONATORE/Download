@@ -45,12 +45,16 @@ on:
         default: "2.0"
       model_profile:
         description: "Профиль видеомодели"
-        type: string
+        type: choice
+        options:
+          - "ltx25"
         default: "ltx25"
-      style_brief:
-        description: "Краткое описание стиля/сюжета от пользователя"
-        type: string
-        default: ""
+      preset:
+        description: "Пресет профиля: none = без пресета; новые пресеты добавляются в этот список при их создании"
+        type: choice
+        options:
+          - "none"
+        default: "none"
       gpu_name:
         description: "Модель видеокарты на Vast.ai"
         type: string
@@ -140,7 +144,7 @@ jobs:
         run: pip install -r Generate/requirements-dev.txt
 
       # Значения входов передаются через env, а не подстановкой в текст скрипта:
-      # так свободный текст (style_brief и др.) не может внедрить shell-команды.
+      # так свободный текст (например, gpu_name) не может внедрить shell-команды.
       # Предстартовая проверка (SPEC 8.4, вариант A): конфиг и входные файлы. Образ карты стоковый,
       # его в GHCR не проверяем: он не собирается этим репозиторием.
       - name: Preflight check
@@ -187,7 +191,7 @@ jobs:
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
           MODEL_PROFILE: ${{ inputs.model_profile }}
-          STYLE_BRIEF: ${{ inputs.style_brief }}
+          PRESET: ${{ inputs.preset }}
           GPU_NAME: ${{ inputs.gpu_name }}
           MIN_PRICE: ${{ inputs.min_price_per_hour }}
           MAX_PRICE: ${{ inputs.max_price_per_hour }}
@@ -221,7 +225,7 @@ jobs:
             --budget-limit "$BUDGET_LIMIT"
             --min-balance-usd "$MIN_BALANCE"
             --model-profile "$MODEL_PROFILE"
-            --style-brief "$STYLE_BRIEF"
+            --preset "$PRESET"
             --gpu-name "$GPU_NAME"
             --min-price-per-hour "$MIN_PRICE"
             --max-price-per-hour "$MAX_PRICE"
