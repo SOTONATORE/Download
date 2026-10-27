@@ -351,6 +351,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
         "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
+        "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+        "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
         "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
         "the move ends (for a static camera: what the frame holds on).\n"
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
@@ -453,9 +455,10 @@ _STYLE_RULES = [
      "стиль: кавычки",
      "Remove quotation marks and any spoken or written words."),
     (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
-                r"photorealistic|hyperrealistic)\b", re.I),
+                r"photorealistic|hyperrealistic|render|octane|unreal[ -]engine)\b", re.I),
      "стиль: keyword spam",
-     "Remove quality keywords such as 4k, masterpiece, trending, ultra detailed."),
+     "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
+     "render, octane, unreal engine."),
     (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
@@ -463,6 +466,16 @@ _STYLE_RULES = [
      "стиль: эмоциональная метка",
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
+    (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
+                r"lens|shot\s+on|aperture|focal\s+length)\b", re.I),
+     "стиль: кино и камера",
+     "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
+     "aperture, focal length, shot on. Describe only the scene and its one camera move."),
+    (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
+                r"stickmen?|pixel\s+art)\b", re.I),
+     "стиль: художественная техника",
+     "Remove art-medium words such as illustration, cartoon, anime, watercolor, oil painting, sketch, "
+     "stickman, pixel art. Describe the real scene instead."),
 ]
 _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
