@@ -20,10 +20,8 @@ from typing import Any, Callable, Optional, Protocol
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
-    from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
-    from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -77,12 +75,11 @@ class GeminiRuntimeError(GeminiError):
 
 @dataclass
 class PromptConfig:
-    style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
+    style_file: str                  # путь к prompt_styles/<модель>.md (из профиля)
+    style_brief: str = ""            # краткое описание стиля/сюжета от пользователя
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
-    # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
-    preset: str = PRESET_NONE
 
 
 @dataclass(frozen=True)
@@ -307,30 +304,6 @@ def response_schema(response_format: Any) -> dict:
             "items": {"type": "object", "properties": props, "required": list(props)}}
 
 
-# Пресеты: файлы presets/prompts/<имя>.md рядом с профилями моделей. README в этой папке — описание,
-# не пресет (в списке выбора GitHub его нет), поэтому имя README запрещено.
-PRESETS_DIR = Path(__file__).resolve().parent.parent / "model_profiles" / "presets" / "prompts"
-_PRESET_RESERVED = {"README"}
-
-
-def read_preset(preset: str) -> str:
-    """Текст пресета (USER_ONLY вырезан). Общая проверка для cli (до аренды) и для системной инструкции.
-    Ошибка — GeminiInputError с текстом на русском: имя недопустимо, файла нет или он пуст."""
-    if not re.fullmatch(PROFILE_NAME_PATTERN, preset or "") or preset in _PRESET_RESERVED:
-        raise GeminiInputError("Недопустимое имя пресета: допустимы латинские буквы, цифры, «_» и «-», "
-                               "кроме README.")
-    path = PRESETS_DIR / f"{preset}.md"
-    if not path.is_file():
-        raise GeminiInputError(f"Пресет «{preset}» не найден: нет файла presets/prompts/{preset}.md.")
-    try:
-        text = strip_user_only(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        raise GeminiInputError(f"Пресет «{preset}» не удалось прочитать: presets/prompts/{preset}.md.") from None
-    if not text:
-        raise GeminiInputError(f"Пресет «{preset}» пуст: в файле presets/prompts/{preset}.md нет текста.")
-    return text
-
-
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     parts = [
@@ -351,8 +324,6 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
         "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
-        "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-        "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
         "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
         "the move ends (for a static camera: what the frame holds on).\n"
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
@@ -361,9 +332,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
-    # слой пресета — после стиля модели; при «none» список остаётся прежним, вывод байт в байт тот же
-    if cfg.preset != PRESET_NONE:
-        parts.append("# Preset\n" + read_preset(cfg.preset))
+    brief = (cfg.style_brief or "").strip()
+    if brief:
+        parts.append("# Style brief from the user\n" + brief)
     return "\n\n".join(parts)
 
 
@@ -443,7 +414,7 @@ def _garbage_reason(prompt: str) -> str:
     return ""
 
 
-# Проверка стиля по правилам models/<профиль>/prompts/style.md: отрицания, кавычки, keyword spam, эмоциональные метки.
+# Проверка стиля по правилам ltx25.md: отрицания, кавычки, keyword spam, эмоциональные метки.
 # Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 _STYLE_RULES = [
@@ -455,10 +426,9 @@ _STYLE_RULES = [
      "стиль: кавычки",
      "Remove quotation marks and any spoken or written words."),
     (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
-                r"photorealistic|hyperrealistic|render|octane|unreal[ -]engine)\b", re.I),
+                r"photorealistic|hyperrealistic)\b", re.I),
      "стиль: keyword spam",
-     "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
-     "render, octane, unreal engine."),
+     "Remove quality keywords such as 4k, masterpiece, trending, ultra detailed."),
     (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
@@ -466,16 +436,6 @@ _STYLE_RULES = [
      "стиль: эмоциональная метка",
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
-    (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
-                r"lens|shot\s+on|aperture|focal\s+length)\b", re.I),
-     "стиль: кино и камера",
-     "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
-     "aperture, focal length, shot on. Describe only the scene and its one camera move."),
-    (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
-                r"stickmen?|pixel\s+art)\b", re.I),
-     "стиль: художественная техника",
-     "Remove art-medium words such as illustration, cartoon, anime, watercolor, oil painting, sketch, "
-     "stickman, pixel art. Describe the real scene instead."),
 ]
 _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
