@@ -52,7 +52,6 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 3. **Subject.** For people: age, hair, clothing, distinguishing features. Express emotion with physical cues ("her jaw tightens and she looks away"), never with labels like "sad" or "confused". Give each person one consistent outfit; do not combine conflicting garments (a suit and an overcoat) unless the layering is stated clearly.
 4. **Action.** The core action as a natural sequence from beginning to end, moment to moment. If you want a pause, write it ("she pauses", "a beat of silence"); the model will not invent one.
 5. **Camera.** How and when the camera moves, described relative to the subject (follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, handheld, static frame). Say how the subject appears after the movement ends ("the camera pushes in until her face fills the frame"). **(recommendation)** Always finish the camera sentence with the end state, also for a static frame ("the frame holds on the crown").
-6. **Style.** Optional, one short phrase: film characteristics (film grain, shallow depth of field), a genre or look (documentary, film noir, painterly, claymation) when the brief asks for it.
 
 ## 4. Length
 
@@ -80,7 +79,6 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - Light: pick one logic (natural sunlight, golden hour, neon glow, flickering candles, dramatic shadows, backlight, rim light).
 - Colour: name a palette (vibrant, muted, monochromatic, high contrast, warm amber).
 - Texture and atmosphere: rough stone, worn fabric, glossy surfaces; fog, rain, dust, smoke, particles.
-- Style words only when useful and only a few (documentary, film noir, painterly, claymation, film grain). If the project provides a style brief, apply it consistently in every prompt.
 
 ## 8. People, faces, text, logos
 

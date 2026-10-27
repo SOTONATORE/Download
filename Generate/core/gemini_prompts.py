@@ -455,7 +455,7 @@ _STYLE_RULES = [
      "стиль: кавычки",
      "Remove quotation marks and any spoken or written words."),
     (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
-                r"photorealistic|hyperrealistic|render|octane|unreal[ -]engine)\b", re.I),
+                r"photorealistic|hyperrealistic|render\s+(?:engine|farm)|rendered|octane|unreal[ -]engine)\b", re.I),
      "стиль: keyword spam",
      "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
      "render, octane, unreal engine."),
@@ -467,7 +467,7 @@ _STYLE_RULES = [
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
     (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
-                r"lens|shot\s+on|aperture|focal\s+length)\b", re.I),
+                r"lens|shot\s+on\s+(?:a\s+|an\s+)?(?:camera|film)|aperture|focal\s+length)\b", re.I),
      "стиль: кино и камера",
      "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
      "aperture, focal length, shot on. Describe only the scene and its one camera move."),
