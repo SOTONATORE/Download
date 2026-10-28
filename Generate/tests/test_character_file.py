@@ -77,9 +77,11 @@ class ScriptClient:
     def __init__(self, replies):
         self.replies = list(replies)
         self.calls = []
+        self.systems = []
 
     def generate_json(self, model, system, user, schema):
         self.calls.append(user)
+        self.systems.append(system)
         return self.replies.pop(0)
 
 
@@ -119,7 +121,7 @@ def test_completed_run_writes_characters_json_and_removes_partial(tmp_path, monk
     out = cf.get_character_file(tmp_path, segs, client)
     stored = json.loads((tmp_path / cf.CHARACTERS_FILENAME).read_text(encoding="utf-8"))
     assert stored == out
-    assert set(stored) == {"srt_hash", "characters"}
+    assert set(stored) == {"srt_hash", "characters", "objects"}
     assert not (tmp_path / cf.PARTIAL_FILENAME).exists()
     assert len(client.calls) == 2
 
@@ -128,9 +130,118 @@ def test_completed_run_writes_characters_json_and_removes_partial(tmp_path, monk
 
 def test_request_text_asks_for_appearance_even_without_visual_details():
     text = "Anna walks in.\nBob talks."  # в окне нет описаний внешности
-    assert "permanent appearance" in cf._SYSTEM
-    assert "Return only one JSON object" in cf._SYSTEM
+    instr = cf.build_character_instructions()
+    assert "permanent appearance" in instr
+    assert "Return only one JSON object, with no markdown, no code fences and no text before or after it." in instr
     user = cf._window_request(text, [])
-    assert "always contains at least age range, build, hair, and facial features" in user
-    assert "do not add any identifier beyond the name" in user
-    assert "Do not add any uncertainty marker or extra field." in user
+    assert "always contains at least age range, build, hair, and facial features" in instr
+    assert "do not add any identifier beyond the name" in instr
+    assert "Do not add any uncertainty marker or extra field." in instr
+    assert "always contains at least age range" not in user  # правила не дублируются в запросе окна
+    assert "do not add any identifier beyond the name" not in user
+    assert "Do not add any uncertainty marker or extra field." not in user
+
+
+def test_instruction_covers_characters_objects_and_appearance():
+    instr = cf.build_character_instructions()
+    assert "Rules for characters:" in instr
+    assert "Rules for objects:" in instr
+    assert "Appearance rule:" in instr
+    assert "owner:" in instr
+    assert "Do not describe clothing or temporary state" in instr
+
+
+def test_window_request_has_no_old_permanent_visible_wording():
+    user = cf._window_request("Anna walks in.", [ANNA])
+    assert "only permanent visible traits" not in user
+    assert "CHAR_1 ANNA" not in user  # ANNA здесь без id: строка без id
+    assert "ANNA: A woman in her thirties with short dark hair." in user
+
+
+# ------------------------------------------------------------------ id, миграция, объекты (часть B)
+
+def _obj(name, owner=None, new_traits=(), conflicts=(), keywords=(), aliases=()):
+    return {"name": name, "aliases": list(aliases), "keywords": list(keywords),
+            "new_traits": list(new_traits), "conflicts": list(conflicts), "owner": owner}
+
+
+def test_character_ids_assigned_in_order():
+    out = cf.merge_characters([], [_item("ANNA", ["woman in her thirties"]),
+                                   _item("BOB", ["man in his forties"])])
+    assert [c["id"] for c in out] == ["CHAR_1", "CHAR_2"]
+
+
+def test_old_record_without_id_gets_id_on_migration():
+    old = {"srt_hash": "h", "characters": [dict(ANNA), dict(BOB)]}
+    before = json.dumps(old, sort_keys=True)
+    new = cf.migrate_record(old)
+    assert [c["id"] for c in new["characters"]] == ["CHAR_1", "CHAR_2"]
+    assert new["objects"] == []
+    assert json.dumps(old, sort_keys=True) == before  # вход не меняется
+
+
+def test_migration_keeps_existing_ids_and_numbers_new_ones_after_them():
+    old = {"srt_hash": "h", "characters": [dict(ANNA, id="CHAR_3"), dict(BOB)]}
+    new = cf.migrate_record(old)
+    assert [c["id"] for c in new["characters"]] == ["CHAR_3", "CHAR_4"]
+
+
+def test_same_name_objects_with_different_owners_stay_separate():
+    chars = [dict(ANNA, id="CHAR_1"), dict(BOB, id="CHAR_2")]
+    out = cf.merge_objects([], [_obj("HOUSE", "ANNA", ["two-storey brick house"]),
+                                _obj("HOUSE", "BOB", ["wooden cabin"])], chars)
+    assert len(out) == 2
+    assert [(o["id"], o["owner"]) for o in out] == [("OBJ_1", "CHAR_1"), ("OBJ_2", "CHAR_2")]
+
+
+def test_same_name_objects_without_owner_merge_into_one():
+    out = cf.merge_objects([], [_obj("KEY", None, ["small brass key"]),
+                                _obj("KEY", None, ["brass key", "worn edges"])], [])
+    assert len(out) == 1
+    assert out[0]["owner"] is None
+    assert out[0]["appearance"] == "Small brass key. Worn edges."
+
+
+def test_unknown_owner_name_sets_owner_null_and_logs(caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    out = cf.merge_objects([], [_obj("HOUSE", "NOBODY", ["two-storey brick house"])],
+                           [dict(ANNA, id="CHAR_1")])
+    assert out[0]["owner"] is None
+    assert "owner not found, set to null: HOUSE" in caplog.messages
+
+
+def test_new_object_without_visual_details_gets_appearance_from_stub():
+    segs = [Segment(1, 0, 1000, "The house stands on the hill.")]
+    stub_reply = json.dumps({"characters": [], "objects": [
+        {"name": "HOUSE", "aliases": [], "keywords": ["house"],
+         "new_traits": ["two-storey brick house", "white shutters"], "conflicts": [], "owner": None}]})
+    client = ScriptClient([stub_reply])
+    record = cf.build_character_file(segs, client, {})
+    assert len(record["objects"]) == 1
+    assert record["objects"][0]["appearance"]
+    assert "brick house" in record["objects"][0]["appearance"]
+    assert "Rules for objects:" in client.systems[0]
+
+
+def test_new_object_without_appearance_is_rejected_for_retry():
+    segs = [Segment(1, 0, 1000, "The house stands on the hill.")]
+    bad = json.dumps({"characters": [], "objects": [
+        {"name": "HOUSE", "aliases": [], "keywords": [], "new_traits": [], "conflicts": [], "owner": None}]})
+    with pytest.raises(cf.CharacterWindowError):
+        cf.build_character_file(segs, ScriptClient([bad, bad]), {})
+
+
+def test_marker_descriptions_keyed_by_id():
+    record = {"characters": [dict(ANNA, id="CHAR_1")],
+              "objects": [{"id": "OBJ_1", "name": "HOUSE", "owner": "CHAR_1", "aliases": [],
+                           "keywords": [], "appearance": "Two-storey brick house."}]}
+    assert cf.build_marker_descriptions(record) == {
+        "CHAR_1": ANNA["appearance"],
+        "OBJ_1": "Two-storey brick house.",
+    }
+
+
+def test_id_format_matches_marker_regex():
+    gp = cf.gp
+    for rid in ("CHAR_1", "CHAR_12", "OBJ_1", "OBJ_40"):
+        assert gp._MARKER_RX.fullmatch(f"[{rid}]"), rid
