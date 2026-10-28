@@ -57,7 +57,11 @@ def test_cached_file_with_matching_hash_returned_without_client(tmp_path):
             raise AssertionError("клиент не должен вызываться при совпавшем srt_hash")
 
     out = cf.get_character_file(tmp_path, segs, NoCallClient())
-    assert out == record
+    # 5b: запись без id и без objects мигрирует при чтении; сравниваем с мигрированной записью, не с исходной
+    expected = {"srt_hash": record["srt_hash"], "characters": [dict(ANNA, id="CHAR_1")], "objects": []}
+    assert out == expected
+    stored = json.loads((tmp_path / cf.CHARACTERS_FILENAME).read_text(encoding="utf-8"))
+    assert stored == expected
 
 
 # ------------------------------------------------------------------ окна, частичный файл (часть A)
@@ -245,3 +249,112 @@ def test_id_format_matches_marker_regex():
     gp = cf.gp
     for rid in ("CHAR_1", "CHAR_12", "OBJ_1", "OBJ_40"):
         assert gp._MARKER_RX.fullmatch(f"[{rid}]"), rid
+
+
+# ------------------------------------------------------------------ часть C: владелец, пустая внешность, миграция
+
+def test_owner_schema_is_plain_string():
+    props = cf.WINDOW_SCHEMA["properties"]["objects"]["items"]["properties"]
+    assert props["owner"] == {"type": "string"}  # без anyOf и без null (3a)
+    assert "null" not in json.dumps(cf.WINDOW_SCHEMA)
+
+
+def test_owner_rule_says_empty_string():
+    instr = cf.build_character_instructions()
+    assert "or an empty string when no listed character owns it." in instr
+    assert '"owner": ""' in instr
+
+
+def test_owner_empty_string_stored_as_null_without_log(caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    raw = json.dumps({"characters": [], "objects": [{"name": "KEY", "aliases": [], "keywords": [],
+                                                     "new_traits": ["small brass key"], "conflicts": [],
+                                                     "owner": ""}]})
+    parsed = cf.parse_window_reply(raw, "A key lies here.")
+    out = cf.merge_objects([], parsed["objects"], [])
+    assert out[0]["owner"] is None
+    assert not any("owner not found" in m for m in caplog.messages)  # пустая строка — без записи в лог
+
+
+def test_unknown_owner_name_via_parse_sets_null_and_logs(caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    raw = json.dumps({"characters": [], "objects": [{"name": "HOUSE", "aliases": [], "keywords": [],
+                                                     "new_traits": ["brick house"], "conflicts": [],
+                                                     "owner": "NOBODY"}]})
+    parsed = cf.parse_window_reply(raw, "The house stands.")
+    out = cf.merge_objects([], parsed["objects"], [dict(ANNA, id="CHAR_1")])
+    assert out[0]["owner"] is None
+    assert "owner not found, set to null: HOUSE" in caplog.messages
+
+
+def test_same_name_other_owner_is_new_object_after_retry(monkeypatch):
+    monkeypatch.setattr(cf, "WINDOW_SEGMENTS", 1)
+    segs = [Segment(1, 0, 1000, "Anna and Bob talk."), Segment(2, 1000, 2000, "Bob sees the house.")]
+    w1 = json.dumps({"characters": [
+        {"name": "ANNA", "aliases": [], "keywords": ["Anna"], "new_traits": ["woman in her thirties"], "conflicts": []},
+        {"name": "BOB", "aliases": [], "keywords": ["Bob"], "new_traits": ["man in his forties"], "conflicts": []}],
+        "objects": [{"name": "HOUSE", "aliases": [], "keywords": [], "new_traits": ["two-storey brick house"],
+                     "conflicts": [], "owner": "ANNA"}]})
+    # второе окно: тот же HOUSE, но владелец BOB — новый объект; первый ответ без внешности, повтор с внешностью
+    w2_bad = json.dumps({"characters": [], "objects": [{"name": "HOUSE", "aliases": [], "keywords": [],
+                                                        "new_traits": [], "conflicts": [], "owner": "BOB"}]})
+    w2_good = json.dumps({"characters": [], "objects": [{"name": "HOUSE", "aliases": [], "keywords": [],
+                                                         "new_traits": ["wooden cabin"], "conflicts": [],
+                                                         "owner": "BOB"}]})
+    client = ScriptClient([w1, w2_bad, w2_good])
+    record = cf.build_character_file(segs, client, {})
+    assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", "CHAR_1"), ("OBJ_2", "CHAR_2")]
+    assert record["objects"][1]["appearance"] == "Wooden cabin."
+    assert len(client.calls) == 3  # окно 1, окно 2 и один повтор окна 2
+
+
+def test_empty_new_object_twice_raises_named_error_and_stores_nothing(tmp_path):
+    segs = [Segment(1, 0, 1000, "The key lies here.")]
+    bad = json.dumps({"characters": [], "objects": [{"name": "KEY", "aliases": [], "keywords": ["key"],
+                                                     "new_traits": [], "conflicts": [], "owner": ""}]})
+    client = ScriptClient([bad, bad])
+    with pytest.raises(cf.EmptyAppearanceError) as exc:
+        cf.get_character_file(tmp_path, segs, client)
+    assert exc.value.record_name == "KEY"
+    assert "KEY" in str(exc.value)
+    assert isinstance(exc.value, cf.CharacterWindowError)
+    assert len(client.calls) == 2  # один повтор, не больше
+    assert not (tmp_path / cf.CHARACTERS_FILENAME).exists()
+    assert not (tmp_path / cf.PARTIAL_FILENAME).exists()
+
+
+def test_empty_new_character_twice_raises_named_error(tmp_path):
+    segs = [Segment(1, 0, 1000, "Carl enters.")]
+    bad = json.dumps({"characters": [{"name": "CARL", "aliases": [], "keywords": ["Carl"],
+                                      "new_traits": [], "conflicts": []}]})
+    client = ScriptClient([bad, bad])
+    with pytest.raises(cf.EmptyAppearanceError) as exc:
+        cf.get_character_file(tmp_path, segs, client)
+    assert exc.value.record_name == "CARL"
+    assert len(client.calls) == 2
+
+
+def test_cached_file_without_ids_migrated_and_written_back(tmp_path):
+    segs = [Segment(1, 0, 1000, "Anna walks in.")]
+    old = {"srt_hash": srt_hash(segs), "characters": [dict(ANNA)],
+           "objects": [{"name": "HOUSE", "appearance": "Brick house."}]}
+    (tmp_path / cf.CHARACTERS_FILENAME).write_text(json.dumps(old), encoding="utf-8")
+
+    class NoCallClient:
+        def generate_json(self, *args, **kwargs):
+            raise AssertionError("клиент не должен вызываться при совпавшем srt_hash")
+
+    out = cf.get_character_file(tmp_path, segs, NoCallClient())
+    stored = json.loads((tmp_path / cf.CHARACTERS_FILENAME).read_text(encoding="utf-8"))
+    assert stored == out
+    assert set(stored) == {"srt_hash", "characters", "objects"}
+    assert stored["srt_hash"] == srt_hash(segs)  # srt_hash не меняется
+    assert [c["id"] for c in stored["characters"]] == ["CHAR_1"]
+    assert stored["objects"] == [{"id": "OBJ_1", "name": "HOUSE", "owner": None, "aliases": [],
+                                  "keywords": [], "appearance": "Brick house."}]
+
+
+def test_loaded_character_keeps_its_id_new_one_gets_next():
+    out = cf.merge_characters([dict(ANNA, id="CHAR_5")], [_item("BOB", ["man in his forties"])])
+    assert [c["id"] for c in out] == ["CHAR_5", "CHAR_6"]
+    assert out[0]["appearance"] == ANNA["appearance"]

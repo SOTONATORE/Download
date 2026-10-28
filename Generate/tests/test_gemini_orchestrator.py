@@ -591,3 +591,47 @@ def test_success_logs_model_time_and_attempts_without_prompt_text(tmp_path, capl
     assert any(l.startswith(f"Модель {M1}: ответ получен за") and "сбоев подряд до этого: 1" in l
                for l in lines)
     assert "A wide shot" not in caplog.text
+
+
+# ------------------------------------------------------------------ часть B/C: id и объекты в промптах
+
+class RecordingFake(FakeTransport):
+    """FakeTransport, который запоминает тексты запросов (пользовательские сообщения)."""
+
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.users = []
+
+    def generate_json(self, model, system, user, schema):
+        self.users.append(user)
+        return super().generate_json(model, system, user, schema)
+
+
+def test_objects_reach_prompt_stage_and_markers_resolved(tmp_path):
+    segments = [Segment(1, 0, 1000, "Anna puts the key on the table.")]
+    record = {
+        "srt_hash": srt_hash(segments),
+        "characters": [{"id": "CHAR_1", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                        "appearance": "a woman in her thirties"}],
+        "objects": [{"id": "OBJ_1", "name": "KEY", "aliases": [], "keywords": ["key"], "owner": "CHAR_1",
+                     "appearance": "a small brass key"}],
+    }
+    (tmp_path / "characters.json").write_text(json.dumps(record), encoding="utf-8")
+    t = RecordingFake([[{"segment_index": 1, "prompt": "[CHAR_1] puts [OBJ_1] on the table."}]])
+    run(tmp_path, t, [1], segments=segments, with_characters=False)
+    e = read(tmp_path / "prompts.json")["prompts"]["1"]
+    assert e["prompt"] == "a woman in her thirties puts a small brass key on the table."
+    assert "CHAR_1" in t.users[0] and "OBJ_1" in t.users[0]   # id попадают в инструкцию о маркерах
+    assert "a small brass key" not in t.users[0]              # описание в запрос не идёт
+    assert t.calls == [M1]
+
+
+def test_cached_file_without_ids_is_migrated_during_run(tmp_path):
+    segments = segs(2)
+    write_characters(tmp_path, srt_hash(segments))           # старый формат: без id и без objects
+    t = FakeTransport([ok([1, 2])])
+    run(tmp_path, t, [1, 2], segments=segments, with_characters=False)
+    stored = read(tmp_path / "characters.json")
+    assert stored["srt_hash"] == srt_hash(segments)
+    assert [c["id"] for c in stored["characters"]] == ["CHAR_1"]
+    assert stored["objects"] == []

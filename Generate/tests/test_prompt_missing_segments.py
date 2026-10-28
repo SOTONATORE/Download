@@ -15,8 +15,8 @@ from Generate.core.srt_parser import Segment, srt_hash
 
 TIMING = go.TimingParams(24, {"kind": "8k+1"}, 2.5, 5.0, 10.0, 0.5)
 GOOD_PROMPT = "A wide shot of a quiet street at dawn."
-ANNA = {"name": "ANNA", "aliases": [], "keywords": ["Anna"], "appearance": "a woman in her thirties"}
-BOB = {"name": "BOB", "aliases": ["Robert"], "keywords": ["Bob"], "appearance": "a man in his forties"}
+ANNA = {"id": "CHAR_1", "name": "ANNA", "aliases": [], "keywords": ["Anna"], "appearance": "a woman in her thirties"}
+BOB = {"id": "CHAR_2", "name": "BOB", "aliases": ["Robert"], "keywords": ["Bob"], "appearance": "a man in his forties"}
 
 
 @pytest.fixture(autouse=True)
@@ -105,20 +105,45 @@ def test_config_default_batch_size_is_fifty():
 # ------------------------------------------------------------------ описания персонажей по батчу (B3, B4)
 
 def test_batch_descriptions_only_characters_in_batch():
-    chars = [ANNA, BOB, {"name": "CARL", "aliases": [], "keywords": ["Carl"], "appearance": ""}]
-    assert gp.batch_descriptions(chars, "Before: Anna waves. Text: nothing else") == {"ANNA": "a woman in her thirties"}
-    assert gp.batch_descriptions(chars, "Robert sits down") == {"BOB": "a man in his forties"}
+    chars = [ANNA, BOB, {"id": "CHAR_3", "name": "CARL", "aliases": [], "keywords": ["Carl"], "appearance": ""}]
+    assert gp.batch_descriptions(chars, "Before: Anna waves. Text: nothing else") == {"CHAR_1": "a woman in her thirties"}
+    assert gp.batch_descriptions(chars, "Robert sits down") == {"CHAR_2": "a man in his forties"}
     assert gp.batch_descriptions(chars, "Carl enters") == {}  # запись без внешности не передаётся
+
+
+def test_batch_descriptions_keys_characters_and_objects():
+    house = {"id": "OBJ_1", "name": "HOUSE", "aliases": [], "keywords": ["house"],
+             "appearance": "a brick house", "owner": "CHAR_1"}
+    out = gp.batch_descriptions([ANNA, house], "Anna looks at the house.")
+    assert out == {"CHAR_1": "a woman in her thirties", "OBJ_1": "a brick house"}
+
+
+def test_marker_instruction_lists_ids_not_names():
+    text = gp.marker_instruction(["CHAR_1", "OBJ_2"])
+    assert "CHAR_1, OBJ_2" in text
+    assert "[CHAR_1]" in text and "[OBJ_2]" in text
+    assert "ANNA" not in text and "HOUSE" not in text
 
 
 def test_marker_instruction_in_user_message_not_system(tmp_path):
     segs = [Segment(1, 0, 1000, "Anna walks in.")]
     t = RecordingTransport([json.dumps([{"segment_index": 1,
-                                         "prompt": "[ANNA] walks in a quiet street at dawn."}])])
+                                         "prompt": "[CHAR_1] walks in a quiet street at dawn."}])])
     res = gp.generate_prompts(segs, [1], cfg(tmp_path), t, "m", characters=[ANNA])
-    assert "[NAME]" in t.users[0]
-    assert "ANNA" in t.users[0]
+    assert "CHAR_1" in t.users[0]
+    assert "ANNA" not in t.users[0]  # имя не входит в инструкцию о маркерах
     assert "a woman in her thirties" not in t.users[0]
-    assert "[NAME]" not in t.systems[0]
+    assert "[CHAR_1]" not in t.systems[0]
     assert res[0].prompt == "a woman in her thirties walks in a quiet street at dawn."
     assert res[0].needs_review is False
+
+
+def test_generate_prompts_receives_object_ids_and_resolves_them(tmp_path):
+    house = {"id": "OBJ_1", "name": "HOUSE", "aliases": [], "keywords": ["house"],
+             "appearance": "a brick house", "owner": "CHAR_1"}
+    segs = [Segment(1, 0, 1000, "Anna enters the house.")]
+    t = RecordingTransport([json.dumps([{"segment_index": 1, "prompt": "[CHAR_1] enters [OBJ_1]."}])])
+    res = gp.generate_prompts(segs, [1], cfg(tmp_path), t, "m", characters=[ANNA, house])
+    assert "OBJ_1" in t.users[0]
+    assert "a brick house" not in t.users[0]
+    assert res[0].prompt == "a woman in her thirties enters a brick house."

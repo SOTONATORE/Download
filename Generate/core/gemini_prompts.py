@@ -608,7 +608,7 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
                marker_note: str = "") -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
-    marker_note: строка инструкции о маркерах [ИМЯ]; добавляется и к повторному запросу батча."""
+    marker_note: строка инструкции о маркерах [ID]; добавляется и к повторному запросу батча."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
     results, problems = parse_and_validate(raw, expected, builder.cfg)
@@ -644,30 +644,36 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     return final
 
 
-def batch_descriptions(characters: list, batch_text: str) -> dict:
-    """{ИМЯ: внешность} для персонажей, чьё имя, псевдоним или ключевое слово есть в тексте батча.
+def batch_descriptions(records: list, batch_text: str) -> dict:
+    """{ID: внешность} для записей персонажей и объектов, чьё имя, псевдоним или ключевое слово есть в тексте батча.
 
-    Совпадение по коду (без учёта регистра, целыми словами), Gemini не вызывается. Запись без внешности
-    пропускается: её маркер останется неразрешённым и попадёт в needs_review."""
+    records: записи файла персонажей (id, name, aliases, keywords, appearance), персонажи и объекты вместе.
+    Ключ — id записи (CHAR_N или OBJ_N), значение — внешность; имя владельца здесь не нужно.
+    Совпадение по коду (без учёта регистра, целыми словами), Gemini не вызывается. Запись без id или без
+    внешности пропускается: её маркер останется неразрешённым и попадёт в needs_review."""
     out: dict = {}
-    for rec in characters:
+    for rec in records:
+        rid = str(rec.get("id") or "").strip()
         name = str(rec.get("name") or "").strip()
         appearance = str(rec.get("appearance") or "").strip()
-        if not name or not appearance:
+        if not rid or not name or not appearance:
             continue
         terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
         for term in terms:
             term = str(term).strip()
             if term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", batch_text, re.IGNORECASE):
-                out[name] = appearance
+                out[rid] = appearance
                 break
     return out
 
 
-def marker_instruction(names: list) -> str:
-    """Одно предложение для пользовательского сообщения батча: просит писать [ИМЯ] вместо персонажа."""
-    return ("Where one of these characters appears, write its marker [NAME] in place of the character, "
-            "using only these NAME values: " + ", ".join(names) + ".")
+def marker_instruction(ids: list) -> str:
+    """Одно предложение для пользовательского сообщения батча: маркер пишется как id в квадратных скобках.
+
+    В списке только id (CHAR_N, OBJ_N); имена персонажей и объектов в маркеры не входят."""
+    return ("Where one of these characters or objects appears, write the marker [ID] in place of it, where ID is "
+            "the id exactly as listed: [CHAR_1] for a person, [OBJ_2] for an object. Use only these ids: "
+            + ", ".join(ids) + ".")
 
 
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
@@ -686,12 +692,13 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
     отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
 
-    descriptions: описания персонажей для маркеров [ИМЯ] в промптах. Без них (None или {}) маркеры
-    остаются в тексте и помечаются needs_review.
+    descriptions: описания для маркеров [ID] в промптах (ключ — id, значение — внешность). Без них (None или {})
+    маркеры остаются в тексте и помечаются needs_review.
 
-    characters: записи персонажей (name, aliases, keywords, appearance) из файла персонажей. Если заданы,
-    для каждого батча в запрос попадают только описания персонажей, найденных в его сегментах и контексте,
-    и в пользовательское сообщение добавляется инструкция о маркерах. descriptions тогда не используется."""
+    characters: записи персонажей и объектов (id, name, aliases, keywords, appearance) из файла персонажей.
+    Если заданы, для каждого батча в запрос попадают описания записей, найденных в его сегментах и контексте
+    (ключ — id), и в пользовательское сообщение добавляется инструкция о маркерах [ID]. descriptions тогда
+    не используется."""
     desc = descriptions or {}
     builder = _Builder(segments, wanted_nums, cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа

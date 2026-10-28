@@ -38,7 +38,8 @@ _LIST_FIELDS = ("aliases", "keywords", "new_traits", "conflicts")
 _ITEM_PROPS = {"name": {"type": "string"}, "aliases": _STR_LIST, "keywords": _STR_LIST,
                "new_traits": _STR_LIST, "conflicts": _STR_LIST}
 _ITEM_REQUIRED = ["name", "aliases", "keywords", "new_traits", "conflicts"]
-_OWNER_SCHEMA = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+# Владелец — обычная строка (3a): пустая строка означает «нет владельца». null в схеме не используется.
+_OWNER_SCHEMA = {"type": "string"}
 
 # Схема ответа одного окна (responseJsonSchema). Форма дублирует текст инструкции ниже.
 WINDOW_SCHEMA = {
@@ -91,7 +92,7 @@ def build_character_instructions() -> str:
         "- aliases and keywords: as for characters.",
         "- new_traits: permanent properties only: material, shape, color, size, and other fixed features.",
         "- owner: the name of the character who owns the object, exactly as in the characters list, "
-        "or null when no listed character owns it.",
+        "or an empty string when no listed character owns it.",
         "- For an object already in the record, new_traits and conflicts follow the same rules as for characters.",
         "- For an object not in the record, all permanent properties go into new_traits and conflicts is empty.",
         "Rules for everyone:",
@@ -108,7 +109,7 @@ def build_character_instructions() -> str:
         '{"characters": [{"name": "ANNA", "aliases": ["ANNA"], "keywords": ["Anna"], '
         '"new_traits": ["woman in her thirties", "short dark hair"], "conflicts": []}], '
         '"objects": [{"name": "HOUSE", "aliases": [], "keywords": ["house"], '
-        '"new_traits": ["two-storey brick house", "white shutters"], "conflicts": [], "owner": null}]}',
+        '"new_traits": ["two-storey brick house", "white shutters"], "conflicts": [], "owner": ""}]}',
     ]
     return "\n".join(lines)
 
@@ -135,13 +136,8 @@ def _window_request(text: str, known: list, known_objects: list = ()) -> str:
     )
 
 
-def _name_set(records: list) -> frozenset:
-    """Имена и псевдонимы записей в верхнем регистре: по ним ответ различает известных и новых."""
-    return frozenset(k.upper() for r in records for k in [r.get("name", ""), *r.get("aliases", [])] if k)
-
-
-def _parse_items(items: list, low: str, known: frozenset, what: str, *, owner: bool) -> list:
-    """Разбор списка персонажей или объектов. Новый элемент без внешности — ValueError."""
+def _parse_items(items: list, low: str, what: str, *, owner: bool) -> list:
+    """Разбор списка персонажей или объектов. Проверка формы; пустая внешность новой записи — после слияния."""
     out: list = []
     for item in items:
         if not isinstance(item, dict):
@@ -164,9 +160,6 @@ def _parse_items(items: list, low: str, known: frozenset, what: str, *, owner: b
             log.warning("Имя (%s) не подходит по формату маркера, запись пропущена.", what)
             continue
         new_traits = [t.strip() for t in item["new_traits"] if t.strip()]
-        if nm not in known and not new_traits:
-            # постоянная внешность обязательна для новой записи (правило 2f)
-            raise ValueError(f"новый {what} без внешности")
         entry = {
             "name": nm,
             "aliases": [a.strip() for a in item["aliases"] if a.strip()],
@@ -180,14 +173,13 @@ def _parse_items(items: list, low: str, known: frozenset, what: str, *, owner: b
     return out
 
 
-def parse_window_reply(raw: str, window_text: str, known_chars: frozenset = frozenset(),
-                       known_objs: frozenset = frozenset()) -> dict:
+def parse_window_reply(raw: str, window_text: str) -> dict:
     """Строгий разбор ответа одного окна. Любое нарушение формы: ValueError с коротким описанием.
 
     Возвращает {characters: [...], objects: [...]}. Отсутствующий ключ objects читается как пустой список.
     Имя приводится к верхнему регистру и проверяется по форме маркера; неподходящее имя пропускается с записью
     в лог. Ключевые слова оставляются только те, что есть в тексте окна (без учёта регистра).
-    Новый персонаж или новый объект без постоянной внешности — ValueError (окно пойдёт повторно)."""
+    Новая запись без постоянной внешности проверяется после слияния в _ask_window: тогда окно пойдёт повторно."""
     if not isinstance(raw, str):
         raise ValueError("ответ не строка")
     data = json.loads(raw)  # не JSON -> json.JSONDecodeError (подкласс ValueError)
@@ -198,8 +190,8 @@ def parse_window_reply(raw: str, window_text: str, known_chars: frozenset = froz
         raise ValueError("поле objects не список")
     low = window_text.lower()
     return {
-        "characters": _parse_items(data["characters"], low, known_chars, "персонаж", owner=False),
-        "objects": _parse_items(objects_raw, low, known_objs, "объект", owner=True),
+        "characters": _parse_items(data["characters"], low, "персонаж", owner=False),
+        "objects": _parse_items(objects_raw, low, "объект", owner=True),
     }
 
 
@@ -422,23 +414,62 @@ class CharacterWindowError(gp.GeminiError):
         self.last = last
 
 
-def _ask_window(client: Any, model: str, text: str, known: list, known_objects: list,
-                first: int, last: int) -> dict:
-    """Один запрос на окно. Нарушение формы: ещё один запрос (всего два). Два провала: CharacterWindowError.
+class EmptyAppearanceError(CharacterWindowError):
+    """Новая запись (персонаж или объект) без внешности и после повтора окна. Запись не сохраняется.
+
+    Поля: record_name — имя записи, first и last — сегменты окна. Наследует CharacterWindowError (код выхода 3)."""
+
+    def __init__(self, record_name: str, first: int, last: int):
+        gp.GeminiError.__init__(self, f"Запись «{record_name}» без внешности после повтора, окно сегментов "
+                                f"{first}..{last}. Запись не сохранена, characters.json не записан.")
+        self.record_name = record_name
+        self.first = first
+        self.last = last
+
+
+def _first_empty_new(old_chars: list, old_objs: list, new_chars: list, new_objs: list) -> Optional[str]:
+    """Имя первой новой записи без внешности или None. Новая — запись, чьего id не было до слияния."""
+    for old, new in ((old_chars, new_chars), (old_objs, new_objs)):
+        old_ids = {r.get("id") for r in old}
+        for rec in new:
+            if rec.get("id") not in old_ids and not str(rec.get("appearance") or "").strip():
+                return rec.get("name")
+    return None
+
+
+def _ask_window(client: Any, model: str, text: str, characters: list, objects: list,
+                first: int, last: int) -> tuple:
+    """Один запрос на окно, слияние и проверка внешности новых записей. Возвращает (characters, objects).
+
+    Нарушение формы или новая запись без внешности: ещё один запрос (всего два). Два провала: CharacterWindowError;
+    если последний провал — пустая внешность, то EmptyAppearanceError с именем записи. Слияние выполняется здесь,
+    чтобы проверка учитывала владельца объекта (4a).
 
     Ошибки транспорта (GeminiRuntimeError) не перехватываются: квота и сбои сети ManagedTransport
     обрабатывает сам и не превращает их в пропущенное окно."""
     system = build_character_instructions()
-    user = _window_request(text, known, known_objects)
-    known_chars = _name_set(known)
-    known_objs = _name_set(known_objects)
+    user = _window_request(text, characters, objects)
+    empty_name: Optional[str] = None
     for attempt in (1, 2):
         raw = client.generate_json(model, system, user, WINDOW_SCHEMA)
         try:
-            return parse_window_reply(raw, text, known_chars, known_objs)
+            extracted = parse_window_reply(raw, text)
         except ValueError as exc:
+            empty_name = None
             log.warning("Окно сегментов %s..%s: ответ не прошёл проверку (%s), попытка %d из 2.",
                         first, last, exc, attempt)
+            continue
+        new_chars = merge_characters(characters, extracted["characters"])
+        new_objs = merge_objects(objects, extracted["objects"], new_chars)
+        empty_name = _first_empty_new(characters, objects, new_chars, new_objs)
+        if empty_name is None:
+            return new_chars, new_objs
+        log.warning("Окно сегментов %s..%s: новая запись «%s» без внешности, попытка %d из 2.",
+                    first, last, empty_name, attempt)
+    if empty_name is not None:
+        log.error("Окно сегментов %s..%s: запись «%s» без внешности после повтора, прогон остановлен.",
+                  first, last, empty_name)
+        raise EmptyAppearanceError(empty_name, first, last)
     log.error("Окно сегментов %s..%s: два ответа подряд не прошли проверку, прогон остановлен.", first, last)
     raise CharacterWindowError(first, last)
 
@@ -484,9 +515,7 @@ def build_character_file(segments: list, client: Any, existing: dict, *, model: 
         if (first, last) in done:
             continue
         if text:
-            extracted = _ask_window(client, model, text, characters, objects, first, last)
-            characters = merge_characters(characters, extracted["characters"])
-            objects = merge_objects(objects, extracted["objects"], characters)
+            characters, objects = _ask_window(client, model, text, characters, objects, first, last)
         finished.append({"first": first, "last": last})
         done.add((first, last))
         if on_window is not None:
@@ -542,8 +571,15 @@ def get_character_file(out_dir, segments: list, client: Any, *, model: str = "")
     current = srt_hash(segments)
     stored = load_character_file(path)
     if stored is not None and stored.get("srt_hash") == current:
+        # 5a: миграция (id, objects, owner) при совпавшем srt_hash; запись обратно только если что-то изменилось
+        migrated = migrate_record(stored)
+        final = {"srt_hash": stored["srt_hash"], "characters": migrated["characters"],
+                 "objects": migrated["objects"]}
+        if final != stored:
+            atomic_write_json(path, final)
+            log.info("Файл персонажей дополнен id и объектами (миграция): %s.", CHARACTERS_FILENAME)
         log.info("Файл персонажей для этого SRT уже есть (%s): Gemini не вызывается.", CHARACTERS_FILENAME)
-        return stored
+        return final
 
     partial = load_partial(partial_path)
 

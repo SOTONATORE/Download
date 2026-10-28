@@ -373,6 +373,10 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         atomic_write_json(prompts_path, state)
         log.info("Сохранён батч: %d промптов, всего в файле: %d.", len(results), len(prompts))
 
+    # 2c: маркеры [CHAR_N] и [OBJ_N] разрешаются по записям персонажей и объектов. Записи передаются целиком:
+    # совпадение с текстом батча идёт по имени, псевдониму и ключевому слову, а ключ описания — id.
+    # build_marker_descriptions (character_file) даёт только {id: внешность} без имён, поэтому здесь не нужен.
+    marker_records = [*char_record.get("characters", []), *char_record.get("objects", [])]
     gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
-                        characters=char_record.get("characters", []))
+                        characters=marker_records)
     return state
