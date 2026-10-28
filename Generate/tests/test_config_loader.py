@@ -33,7 +33,7 @@ def _assert_rejected(raw: dict, *fragments: str) -> GeminiInputError:
 def test_default_file_loads_and_matches_spec_values():
     cfg = cl.load_config()
     assert cfg.gemini_models == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
-    assert cfg.gemini_batch_size == 100
+    assert cfg.gemini_batch_size == 50
     assert cfg.disk_gb == 100
     assert cfg.silent_host_timeout_min == 20
     assert cfg.worker_idle_timeout_min == 2

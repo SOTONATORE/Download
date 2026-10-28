@@ -1620,6 +1620,10 @@ class Orchestrator:
             state = go.generate_and_store(
                 self.segments, needed, self.cfg, self.gemini_transport, self.prompts_path,
                 profile=self.profile, timing=self.timing_params, **self.gemini_options)
+        except go.CharacterStepError as exc:
+            # сбой файла персонажей останавливает прогон, как плохое окно (CharacterWindowError)
+            log.error("Прогон остановлен: %s", exc)
+            raise
         except gp.GeminiRuntimeError as exc:
             log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)
             state = self._read_state()

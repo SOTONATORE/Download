@@ -225,7 +225,7 @@ def test_run_success(capsys, run_env, missing_file):
     assert "Итоги запуска" in out
     (args, kwargs), = run_env.calls
     assert args[1] == str(missing_file)
-    assert args[2] == ("CFG", "ltx25", 100)   # gemini_batch_size из config.default.yaml
+    assert args[2] == ("CFG", "ltx25", 50)   # gemini_batch_size из config.default.yaml
     assert args[3] == "TIMING"
     assert args[4] == ("STORE", "o/r")
     assert isinstance(args[5], FakeVast)

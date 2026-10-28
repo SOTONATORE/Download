@@ -288,6 +288,19 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
+class CharacterStepError(gp.GeminiRuntimeError):
+    """Сбой Gemini при построении файла персонажей (квота, сеть, временные ошибки). Прогон останавливается
+    до генерации промптов. status, code, daily_quota, retry_after и код выхода 3 берутся из исходной ошибки.
+    Готовые окна лежат в characters.partial.json."""
+
+    def __init__(self, cause: gp.GeminiRuntimeError):
+        super().__init__(
+            "Файл персонажей не построен: " + str(cause) + " Промпты не генерировались; готовые окна "
+            "(если есть) сохранены в characters.partial.json, повторите запуск.",
+            status=cause.status, code=cause.code, daily_quota=cause.daily_quota,
+            retry_after=cause.retry_after)
+
+
 def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, inner_transport,
                        prompts_path, *, profile: str, timing: TimingParams,
                        models=DEFAULT_MODELS, rpm_limit: int = 15, tpm_limit: int = 250_000,
@@ -330,8 +343,12 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         from . import character_file as cf
     except ImportError:  # pragma: no cover
         import character_file as cf  # type: ignore
-    char_record = cf.get_character_file(Path(prompts_path).parent, segments, managed,
-                                        model=managed.active_model)
+    try:
+        char_record = cf.get_character_file(Path(prompts_path).parent, segments, managed,
+                                            model=managed.active_model)
+    except gp.GeminiRuntimeError as exc:
+        # сбой файла персонажей останавливает прогон до первого запроса промптов (как плохое окно)
+        raise CharacterStepError(exc) from exc
 
     def on_batch(results: list) -> None:
         for r in results:
