@@ -572,7 +572,7 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
 # ---------------------------------------------------------------------------
 
 # Маркер персонажа в промпте: [ИМЯ], заглавные латинские и кириллические буквы, цифры, «_».
-_MARKER_RX = re.compile(r"\[([A-Z0-9_\u0410-\u042f\u0401]+)\]")
+_MARKER_RX = re.compile(r"\[([A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*)\]")
 
 
 def resolve_markers(prompt: str, descriptions: dict) -> tuple:
