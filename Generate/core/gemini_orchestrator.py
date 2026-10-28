@@ -283,6 +283,11 @@ def _has_prompt(entry) -> bool:
             and bool(str(entry.get("prompt", "")).strip()))
 
 
+def missing_segments(prompts: dict, wanted: list) -> list:
+    """Номера из wanted, у которых в prompts нет готового промпта (по возрастанию). Чистая функция."""
+    return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
+
+
 def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, inner_transport,
                        prompts_path, *, profile: str, timing: TimingParams,
                        models=DEFAULT_MODELS, rpm_limit: int = 15, tpm_limit: int = 250_000,
@@ -308,7 +313,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         raise gp.GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
 
     prompts = state["prompts"]
-    pending = [n for n in wanted if not _has_prompt(prompts.get(str(n)))]
+    pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
     if not pending:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state
@@ -318,6 +323,15 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
         rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
         max_rate_retries=max_rate_retries, clock=clock, sleep=sleep)
+
+    # H3: файл персонажей берётся из characters.json (или строится по окнам, частичный файл при сбое).
+    # Его записи передаются в генерацию промптов; в батч попадают только персонажи из его окна.
+    try:
+        from . import character_file as cf
+    except ImportError:  # pragma: no cover
+        import character_file as cf  # type: ignore
+    char_record = cf.get_character_file(Path(prompts_path).parent, segments, managed,
+                                        model=managed.active_model)
 
     def on_batch(results: list) -> None:
         for r in results:
@@ -337,5 +351,6 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         atomic_write_json(prompts_path, state)
         log.info("Сохранён батч: %d промптов, всего в файле: %d.", len(results), len(prompts))
 
-    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch)
+    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
+                        characters=char_record.get("characters", []))
     return state

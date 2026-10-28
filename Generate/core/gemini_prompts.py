@@ -598,8 +598,10 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
-def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest) -> dict:
-    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult."""
+def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
+               marker_note: str = "") -> dict:
+    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
+    marker_note: строка инструкции о маркерах [ИМЯ]; добавляется и к повторному запросу батча."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
     results, problems = parse_and_validate(raw, expected, builder.cfg)
@@ -614,6 +616,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                     expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
+            if marker_note:
+                rb = replace(rb, user=rb.user + marker_note)
             note = _retry_note(rb.nums, problems)
             if note:
                 rb = replace(rb, user=rb.user + note)
@@ -633,10 +637,37 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     return final
 
 
+def batch_descriptions(characters: list, batch_text: str) -> dict:
+    """{ИМЯ: внешность} для персонажей, чьё имя, псевдоним или ключевое слово есть в тексте батча.
+
+    Совпадение по коду (без учёта регистра, целыми словами), Gemini не вызывается. Запись без внешности
+    пропускается: её маркер останется неразрешённым и попадёт в needs_review."""
+    out: dict = {}
+    for rec in characters:
+        name = str(rec.get("name") or "").strip()
+        appearance = str(rec.get("appearance") or "").strip()
+        if not name or not appearance:
+            continue
+        terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
+        for term in terms:
+            term = str(term).strip()
+            if term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", batch_text, re.IGNORECASE):
+                out[name] = appearance
+                break
+    return out
+
+
+def marker_instruction(names: list) -> str:
+    """Одно предложение для пользовательского сообщения батча: просит писать [ИМЯ] вместо персонажа."""
+    return ("Where one of these characters appears, write its marker [NAME] in place of the character, "
+            "using only these NAME values: " + ", ".join(names) + ".")
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
                      on_batch: Optional[Callable[[list], None]] = None,
-                     descriptions: Optional[dict] = None) -> list:
+                     descriptions: Optional[dict] = None,
+                     characters: Optional[list] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -649,15 +680,26 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
 
     descriptions: описания персонажей для маркеров [ИМЯ] в промптах. Без них (None или {}) маркеры
-    остаются в тексте и помечаются needs_review."""
+    остаются в тексте и помечаются needs_review.
+
+    characters: записи персонажей (name, aliases, keywords, appearance) из файла персонажей. Если заданы,
+    для каждого батча в запрос попадают только описания персонажей, найденных в его сегментах и контексте,
+    и в пользовательское сообщение добавляется инструкция о маркерах. descriptions тогда не используется."""
     desc = descriptions or {}
     builder = _Builder(segments, wanted_nums, cfg)
     out: dict = {}
     for batch in builder.batches(builder.wanted):
-        batch_res = _run_batch(transport, model, builder, batch)
-        # H3 hook: character descriptions come from the character file, not implemented yet
+        if characters is None:
+            batch_desc, note = desc, ""
+        else:
+            # H3: в запрос батча идут только описания персонажей, найденных в его сегментах или контексте
+            batch_desc = batch_descriptions(characters, batch.user)
+            note = ("\n\n" + marker_instruction(sorted(batch_desc))) if batch_desc else ""
+            if note:
+                batch = replace(batch, user=batch.user + note)
+        batch_res = _run_batch(transport, model, builder, batch, note)
         for r in batch_res.values():
-            r.prompt, unresolved = resolve_markers(r.prompt, desc)
+            r.prompt, unresolved = resolve_markers(r.prompt, batch_desc)
             if unresolved:
                 r.needs_review = True
                 reason = "; ".join(f"маркер персонажа без описания: {n}" for n in unresolved)

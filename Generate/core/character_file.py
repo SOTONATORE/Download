@@ -12,12 +12,14 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
+    from . import gemini_prompts as gp
     from .srt_parser import Segment, srt_hash
     from .gemini_orchestrator import atomic_write_json
 except ImportError:  # pragma: no cover
+    import gemini_prompts as gp  # type: ignore
     from srt_parser import Segment, srt_hash  # type: ignore
     from gemini_orchestrator import atomic_write_json  # type: ignore
 
@@ -25,6 +27,7 @@ log = logging.getLogger("Generate.character_file")
 
 WINDOW_SEGMENTS = 200
 CHARACTERS_FILENAME = "characters.json"
+PARTIAL_FILENAME = "characters.partial.json"
 MAX_NAME_LEN = 40
 # Та же форма, что маркер [ИМЯ] в gemini_prompts: заглавные латинские и кириллические буквы, цифры, «_».
 _NAME_RX = re.compile(r"[A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*")
@@ -207,11 +210,25 @@ def merge_characters(characters: list, extracted: list) -> list:
 # Окна, запросы, сборка записи
 # ---------------------------------------------------------------------------
 
-def _ask_window(client: Any, model: str, text: str, known: list, first: int, last: int) -> Optional[list]:
-    """Один запрос на окно. Нарушение формы: ещё один запрос (всего два). Два провала: None (окно пропущено).
+class CharacterWindowError(gp.GeminiError):
+    """Окно сегментов не дало разобранного ответа даже после повтора. Прогон останавливается.
+
+    characters.json в этом случае не пишется; готовые окна лежат в characters.partial.json.
+    Поля: first и last, номера первого и последнего сегмента окна. Текст ответа Gemini не сохраняется."""
+    exit_code = 3
+
+    def __init__(self, first: int, last: int):
+        super().__init__(f"Окно персонажей, сегменты {first}..{last}, не дало верного ответа после повтора. "
+                         "Прогон остановлен, characters.json не записан.")
+        self.first = first
+        self.last = last
+
+
+def _ask_window(client: Any, model: str, text: str, known: list, first: int, last: int) -> list:
+    """Один запрос на окно. Нарушение формы: ещё один запрос (всего два). Два провала: CharacterWindowError.
 
     Ошибки транспорта (GeminiRuntimeError) не перехватываются: квота и сбои сети ManagedTransport
-    обрабатывает сам, и ошибка не должна превращаться в тихо пропущенное окно."""
+    обрабатывает сам и не превращает их в пропущенное окно."""
     user = _window_request(text, known)
     for attempt in (1, 2):
         raw = client.generate_json(model, _SYSTEM, user, WINDOW_SCHEMA)
@@ -220,38 +237,56 @@ def _ask_window(client: Any, model: str, text: str, known: list, first: int, las
         except ValueError as exc:
             log.warning("Окно сегментов %s..%s: ответ не прошёл проверку (%s), попытка %d из 2.",
                         first, last, exc, attempt)
-    log.error("Окно сегментов %s..%s пропущено: два ответа подряд не прошли проверку. "
-              "Персонажи этого окна не записаны.", first, last)
-    return None
+    log.error("Окно сегментов %s..%s: два ответа подряд не прошли проверку, прогон остановлен.", first, last)
+    raise CharacterWindowError(first, last)
 
 
-def build_character_file(segments: list, client: Any, existing: dict, *, model: str = "") -> dict:
-    """Строит запись о персонажах по окнам по WINDOW_SEGMENTS сегментов, по одному запросу на окно.
-
-    existing: ранее сохранённая запись. Если её srt_hash не совпадает с текущим SRT, она отбрасывается
-    (файл один на SRT) и запись строится заново. Результаты каждого окна сливаются до следующего окна,
-    чтобы следующий запрос видел уже записанных персонажей.
-    model: имя модели для транспорта. ManagedTransport его игнорирует (модель выбирает цепочка);
-    для RealTransport указывать обязательно.
-    Возвращает dict: {srt_hash, characters, skipped_windows}."""
-    current = srt_hash(segments)
-    if existing and existing.get("srt_hash") != current:
-        log.warning("Файл персонажей относится к другому SRT: запись строится заново.")
-        existing = {}
-    characters = [copy.deepcopy(c) for c in (existing.get("characters") or [])] if existing else []
-    skipped = list(existing.get("skipped_windows") or []) if existing else []
-
+def _window_ranges(segments: list) -> list:
+    """(первый номер, последний номер, текст окна) для каждого окна по WINDOW_SEGMENTS сегментов."""
+    out = []
     for start in range(0, len(segments), WINDOW_SEGMENTS):
         window = segments[start:start + WINDOW_SEGMENTS]
-        text = "\n".join(s.text for s in window if s.text)
-        if not text:
+        out.append((window[0].num, window[-1].num, "\n".join(s.text for s in window if s.text)))
+    return out
+
+
+def _load_finished(raw: Any) -> list:
+    """Список завершённых окон из частичного файла: только пары целых чисел first и last."""
+    out = []
+    for item in raw or []:
+        if isinstance(item, dict) and isinstance(item.get("first"), int) and isinstance(item.get("last"), int):
+            out.append({"first": item["first"], "last": item["last"]})
+    return out
+
+
+def build_character_file(segments: list, client: Any, existing: dict, *, model: str = "",
+                         on_window: Optional[Callable[[dict], None]] = None) -> dict:
+    """Строит запись о персонажах по окнам, по одному запросу на окно с текстом.
+
+    existing: частичная запись прошлого запуска ({srt_hash, characters, finished}). Если её srt_hash не
+    совпадает с текущим SRT, она отбрасывается. Окна из finished пропускаются без запроса.
+    Результат каждого окна сливается до следующего окна. После каждого успешного окна вызывается
+    on_window с текущей записью. Ошибка окна (CharacterWindowError) выходит наружу без возврата.
+    Возвращает dict: {srt_hash, characters, finished}."""
+    current = srt_hash(segments)
+    if existing and existing.get("srt_hash") != current:
+        log.warning("Частичный файл персонажей относится к другому SRT: запись строится заново.")
+        existing = {}
+    characters = [copy.deepcopy(c) for c in (existing.get("characters") or [])] if existing else []
+    finished = _load_finished(existing.get("finished")) if existing else []
+    done = {(f["first"], f["last"]) for f in finished}
+
+    for first, last, text in _window_ranges(segments):
+        if (first, last) in done:
             continue
-        extracted = _ask_window(client, model, text, characters, window[0].num, window[-1].num)
-        if extracted is None:
-            skipped.append({"first": window[0].num, "last": window[-1].num})
-            continue
-        characters = merge_characters(characters, extracted)
-    return {"srt_hash": current, "characters": characters, "skipped_windows": skipped}
+        if text:
+            extracted = _ask_window(client, model, text, characters, first, last)
+            characters = merge_characters(characters, extracted)
+        finished.append({"first": first, "last": last})
+        done.add((first, last))
+        if on_window is not None:
+            on_window({"srt_hash": current, "characters": characters, "finished": finished})
+    return {"srt_hash": current, "characters": characters, "finished": finished}
 
 
 def load_character_file(path) -> Optional[dict]:
@@ -271,19 +306,51 @@ def load_character_file(path) -> Optional[dict]:
     return data
 
 
+def load_partial(path) -> Optional[dict]:
+    """Читает characters.partial.json. Нет файла или его форма неверна: None (окна пойдут заново)."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("Частичный файл персонажей повреждён и будет построен заново: %s.", path.name)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("characters"), list) \
+            or not isinstance(data.get("srt_hash"), str):
+        log.warning("Частичный файл персонажей имеет неверный формат и будет построен заново: %s.", path.name)
+        return None
+    return data
+
+
 def get_character_file(out_dir, segments: list, client: Any, *, model: str = "") -> dict:
     """Файл персонажей для SRT в папке out_dir (рядом с prompts.json).
 
-    Если characters.json есть и его srt_hash совпадает с текущим, возвращается сохранённый файл,
-    Gemini не вызывается. Иначе запись строится (build_character_file) и пишется атомарно."""
-    path = Path(out_dir) / CHARACTERS_FILENAME
+    Если characters.json есть и его srt_hash совпадает с текущим, возвращается он; Gemini не вызывается.
+    Иначе окна обрабатываются с частичным файлом characters.partial.json: готовые окна пропускаются,
+    после каждого нового окна частичный файл записывается атомарно. characters.json пишется только
+    когда все окна готовы; тогда частичный файл удаляется. При ошибке окна исключение выходит наружу,
+    characters.json не пишется."""
+    out_dir = Path(out_dir)
+    path = out_dir / CHARACTERS_FILENAME
+    partial_path = out_dir / PARTIAL_FILENAME
     current = srt_hash(segments)
     stored = load_character_file(path)
     if stored is not None and stored.get("srt_hash") == current:
         log.info("Файл персонажей для этого SRT уже есть (%s): Gemini не вызывается.", CHARACTERS_FILENAME)
         return stored
-    record = build_character_file(segments, client, stored or {}, model=model)
-    atomic_write_json(path, record)
-    log.info("Файл персонажей записан (%s): персонажей %d, окон без результата %d.",
-             CHARACTERS_FILENAME, len(record["characters"]), len(record["skipped_windows"]))
-    return record
+
+    partial = load_partial(partial_path)
+
+    def save_partial(rec: dict) -> None:
+        atomic_write_json(partial_path, rec)
+
+    record = build_character_file(segments, client, partial or {}, model=model, on_window=save_partial)
+    final = {"srt_hash": record["srt_hash"], "characters": record["characters"]}
+    atomic_write_json(path, final)
+    try:
+        partial_path.unlink()
+    except FileNotFoundError:
+        pass
+    log.info("Файл персонажей записан (%s): персонажей %d.", CHARACTERS_FILENAME, len(final["characters"]))
+    return final
