@@ -54,6 +54,7 @@ on:
         type: choice
         options:
           - "none"
+          - "test"
         default: "none"
       gpu_name:
         description: "Модель видеокарты на Vast.ai"
