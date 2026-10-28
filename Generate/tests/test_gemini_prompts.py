@@ -12,13 +12,13 @@ import pytest
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import (
     GeminiInputError, GeminiRuntimeError, PromptConfig, RealTransport,
-    build_requests, generate_prompts, merge_segments_into_sentences,
+    attach_style, build_requests, generate_prompts, merge_segments_into_sentences,
     parse_and_validate, strip_user_only,
 )
 from Generate.core.srt_parser import Segment
 
 GEN = pathlib.Path(__file__).resolve().parent.parent
-LTX_STYLE = GEN / "model_profiles" / "prompt_styles" / "ltx25.md"
+LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 # Имя переменной окружения собрано из частей (структурный тест запрещает литерал в коде).
 ENV_NAME = "GEN_" + "GEMINI_API_KEY"
 TESTKEY = "TESTKEY-12345"
@@ -53,7 +53,6 @@ def make_cfg(tmp_path, **kw):
                      "<!-- USER_ONLY_END -->\n# Style guide\nWrite one paragraph.\n",
                      encoding="utf-8")
     kw.setdefault("style_file", str(style))
-    kw.setdefault("style_brief", "dusty medieval chronicle")
     kw.setdefault("max_prompt_chars", 300)
     kw.setdefault("batch_size", 10)
     return PromptConfig(**kw)
@@ -139,7 +138,6 @@ def test_strip_user_only_synthetic(tmp_path):
     system = build_requests(make_segments(), [1], cfg)[0].system
     assert "USER_ONLY" not in system and "SECRET-NOTE" not in system
     assert "Write one paragraph." in system
-    assert "dusty medieval chronicle" in system
 
 
 def test_strip_user_only_real_style_file():
@@ -393,6 +391,35 @@ def test_system_has_hard_rules(tmp_path):
     assert "Exactly one camera move" in system
 
 
+def test_system_instruction_without_brief_ends_with_style_guide(tmp_path):
+    # без описания стиля от пользователя: блок «Style brief» не добавляется,
+    # системная инструкция заканчивается фиксированной частью и style.md (без USER_ONLY)
+    system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
+    style = strip_user_only((tmp_path / "style.md").read_text(encoding="utf-8"))
+    assert "Style brief from the user" not in system   # заголовок удалённого блока; «## Style brief» в style.md остаётся
+    assert system.count("# Style guide\n") == style.count("# Style guide\n") + 1
+    assert system.endswith("\n\n# Style guide\n" + style)
+
+
+# ---------------------------------------------------------------- маркеры персонажей
+
+def test_resolve_markers_one_resolved_one_unresolved():
+    out, left = gp.resolve_markers("A [ANNA] walks past [BOB].", {"ANNA": "a woman in a grey coat"})
+    assert out == "A a woman in a grey coat walks past [BOB]."
+    assert left == ["BOB"]
+
+
+def test_resolve_markers_repeated_marker():
+    out, left = gp.resolve_markers("[ANNA] waves; [ANNA] smiles.", {"ANNA": "a woman"})
+    assert out == "a woman waves; a woman smiles."
+    assert left == []
+
+
+def test_resolve_markers_without_markers_unchanged():
+    text = "A wide shot of a quiet street at dawn."
+    assert gp.resolve_markers(text, {"ANNA": "a woman"}) == (text, [])
+
+
 # ---------------------------------------------------------------- RealTransport и ключ
 
 def _transport(handler):
@@ -581,3 +608,38 @@ def test_module_does_not_import_download():
         else:
             continue
         assert "Download" not in roots and "generate_queries" not in roots
+
+
+# ---------------------------------------------------------------- стиль пресета
+
+def test_attach_style_empty_returns_prompt_unchanged():
+    assert attach_style("A man walks.", "") == "A man walks."
+    assert attach_style("A man walks", "") == "A man walks"
+
+
+def test_attach_style_appends_with_dot_space():
+    assert attach_style("A man walks.", "test") == "A man walks. test"
+    assert attach_style("A man walks", "test") == "A man walks. test"
+
+
+def test_attach_style_no_double_dot():
+    assert attach_style("A man walks..", "test") == "A man walks. test"
+
+
+def test_generate_prompts_with_preset_ends_with_style(tmp_path, monkeypatch):
+    presets = tmp_path / "prompts"
+    presets.mkdir()
+    (presets / "test.md").write_text("test\n", encoding="utf-8")
+    monkeypatch.setattr(gp, "PRESETS_DIR", presets)
+    cfg = make_cfg(tmp_path, preset="test")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn. test"] * 2
+    assert "# Preset" not in t.calls[0]["system"]
+
+
+def test_generate_prompts_preset_none_unchanged(tmp_path):
+    cfg = make_cfg(tmp_path, preset="none")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn."] * 2

@@ -20,8 +20,10 @@ from typing import Any, Callable, Optional, Protocol
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
+    from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
+    from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -75,11 +77,12 @@ class GeminiRuntimeError(GeminiError):
 
 @dataclass
 class PromptConfig:
-    style_file: str                  # путь к prompt_styles/<модель>.md (из профиля)
-    style_brief: str = ""            # краткое описание стиля/сюжета от пользователя
+    style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
+    # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
+    preset: str = PRESET_NONE
 
 
 @dataclass(frozen=True)
@@ -304,6 +307,37 @@ def response_schema(response_format: Any) -> dict:
             "items": {"type": "object", "properties": props, "required": list(props)}}
 
 
+# Пресеты: файлы presets/prompts/<имя>.md рядом с профилями моделей. README в этой папке — описание,
+# не пресет (в списке выбора GitHub его нет), поэтому имя README запрещено.
+PRESETS_DIR = Path(__file__).resolve().parent.parent / "model_profiles" / "presets" / "prompts"
+_PRESET_RESERVED = {"README"}
+
+
+def read_preset(preset: str) -> str:
+    """Текст пресета (USER_ONLY вырезан). Общая проверка для cli (до аренды) и для системной инструкции.
+    Ошибка — GeminiInputError с текстом на русском: имя недопустимо, файла нет или он пуст."""
+    if not re.fullmatch(PROFILE_NAME_PATTERN, preset or "") or preset in _PRESET_RESERVED:
+        raise GeminiInputError("Недопустимое имя пресета: допустимы латинские буквы, цифры, «_» и «-», "
+                               "кроме README.")
+    path = PRESETS_DIR / f"{preset}.md"
+    if not path.is_file():
+        raise GeminiInputError(f"Пресет «{preset}» не найден: нет файла presets/prompts/{preset}.md.")
+    try:
+        text = strip_user_only(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        raise GeminiInputError(f"Пресет «{preset}» не удалось прочитать: presets/prompts/{preset}.md.") from None
+    if not text:
+        raise GeminiInputError(f"Пресет «{preset}» пуст: в файле presets/prompts/{preset}.md нет текста.")
+    return text
+
+
+def attach_style(prompt: str, style_text: str) -> str:
+    """Дописывает текст стиля в конец готового промпта через «. ». Пустой стиль — промпт без изменений."""
+    if not style_text:
+        return prompt
+    return prompt.rstrip().rstrip(".") + ". " + style_text
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     parts = [
@@ -324,6 +358,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
         "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
+        "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+        "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
         "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
         "the move ends (for a static camera: what the frame holds on).\n"
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
@@ -332,9 +368,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
-    brief = (cfg.style_brief or "").strip()
-    if brief:
-        parts.append("# Style brief from the user\n" + brief)
+    # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
+    if cfg.preset != PRESET_NONE:
+        read_preset(cfg.preset)
     return "\n\n".join(parts)
 
 
@@ -414,7 +450,7 @@ def _garbage_reason(prompt: str) -> str:
     return ""
 
 
-# Проверка стиля по правилам ltx25.md: отрицания, кавычки, keyword spam, эмоциональные метки.
+# Проверка стиля по правилам models/<профиль>/prompts/style.md: отрицания, кавычки, keyword spam, эмоциональные метки.
 # Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 _STYLE_RULES = [
@@ -426,9 +462,10 @@ _STYLE_RULES = [
      "стиль: кавычки",
      "Remove quotation marks and any spoken or written words."),
     (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
-                r"photorealistic|hyperrealistic)\b", re.I),
+                r"photorealistic|hyperrealistic|render\s+(?:engine|farm)|rendered|octane|unreal[ -]engine)\b", re.I),
      "стиль: keyword spam",
-     "Remove quality keywords such as 4k, masterpiece, trending, ultra detailed."),
+     "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
+     "render, octane, unreal engine."),
     (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
@@ -436,6 +473,16 @@ _STYLE_RULES = [
      "стиль: эмоциональная метка",
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
+    (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
+                r"lens|shot\s+on\s+(?:a\s+|an\s+)?(?:camera|film)|aperture|focal\s+length)\b", re.I),
+     "стиль: кино и камера",
+     "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
+     "aperture, focal length, shot on. Describe only the scene and its one camera move."),
+    (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
+                r"stickmen?|pixel\s+art)\b", re.I),
+     "стиль: художественная техника",
+     "Remove art-medium words such as illustration, cartoon, anime, watercolor, oil painting, sketch, "
+     "stickman, pixel art. Describe the real scene instead."),
 ]
 _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
@@ -531,13 +578,37 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
 # Прогон батчей на заданном транспорте (без лимитера и цепочки: это 4б)
 # ---------------------------------------------------------------------------
 
+# Маркер персонажа в промпте: [ИМЯ], заглавные латинские и кириллические буквы, цифры, «_».
+_MARKER_RX = re.compile(r"\[([A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*)\]")
+
+
+def resolve_markers(prompt: str, descriptions: dict) -> tuple:
+    """Заменяет каждый [ИМЯ], у которого ИМЯ есть в descriptions, на описание из descriptions.
+
+    Возвращает (новый текст, список неразрешённых имён). Неизвестный маркер остаётся в тексте как есть
+    и попадает в список (каждое имя один раз, по порядку первого появления). Описания не придумываются."""
+    unresolved: list = []
+
+    def repl(m):
+        name = m.group(1)
+        if name in descriptions:
+            return descriptions[name]
+        if name not in unresolved:
+            unresolved.append(name)
+        return m.group(0)
+
+    return _MARKER_RX.sub(repl, prompt), unresolved
+
+
 def _is_clean(results: dict, num: int, problems: list) -> bool:
     r = results.get(num)
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
-def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest) -> dict:
-    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult."""
+def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
+               marker_note: str = "") -> dict:
+    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
+    marker_note: строка инструкции о маркерах [ИМЯ]; добавляется и к повторному запросу батча."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
     results, problems = parse_and_validate(raw, expected, builder.cfg)
@@ -552,6 +623,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                     expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
+            if marker_note:
+                rb = replace(rb, user=rb.user + marker_note)
             note = _retry_note(rb.nums, problems)
             if note:
                 rb = replace(rb, user=rb.user + note)
@@ -571,9 +644,37 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     return final
 
 
+def batch_descriptions(characters: list, batch_text: str) -> dict:
+    """{ИМЯ: внешность} для персонажей, чьё имя, псевдоним или ключевое слово есть в тексте батча.
+
+    Совпадение по коду (без учёта регистра, целыми словами), Gemini не вызывается. Запись без внешности
+    пропускается: её маркер останется неразрешённым и попадёт в needs_review."""
+    out: dict = {}
+    for rec in characters:
+        name = str(rec.get("name") or "").strip()
+        appearance = str(rec.get("appearance") or "").strip()
+        if not name or not appearance:
+            continue
+        terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
+        for term in terms:
+            term = str(term).strip()
+            if term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", batch_text, re.IGNORECASE):
+                out[name] = appearance
+                break
+    return out
+
+
+def marker_instruction(names: list) -> str:
+    """Одно предложение для пользовательского сообщения батча: просит писать [ИМЯ] вместо персонажа."""
+    return ("Where one of these characters appears, write its marker [NAME] in place of the character, "
+            "using only these NAME values: " + ", ".join(names) + ".")
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
-                     on_batch: Optional[Callable[[list], None]] = None) -> list:
+                     on_batch: Optional[Callable[[list], None]] = None,
+                     descriptions: Optional[dict] = None,
+                     characters: Optional[list] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -583,11 +684,38 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     on_batch(results): необязательный колбэк. Вызывается после каждого готового батча (с учётом
     retry), до начала следующего; results: list[PromptResult] этого батча по возрастанию номера,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
-    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее."""
+    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
+
+    descriptions: описания персонажей для маркеров [ИМЯ] в промптах. Без них (None или {}) маркеры
+    остаются в тексте и помечаются needs_review.
+
+    characters: записи персонажей (name, aliases, keywords, appearance) из файла персонажей. Если заданы,
+    для каждого батча в запрос попадают только описания персонажей, найденных в его сегментах и контексте,
+    и в пользовательское сообщение добавляется инструкция о маркерах. descriptions тогда не используется."""
+    desc = descriptions or {}
     builder = _Builder(segments, wanted_nums, cfg)
+    # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
+    style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
     out: dict = {}
     for batch in builder.batches(builder.wanted):
-        batch_res = _run_batch(transport, model, builder, batch)
+        if characters is None:
+            batch_desc, note = desc, ""
+        else:
+            # H3: в запрос батча идут только описания персонажей, найденных в его сегментах или контексте
+            batch_desc = batch_descriptions(characters, batch.user)
+            note = ("\n\n" + marker_instruction(sorted(batch_desc))) if batch_desc else ""
+            if note:
+                batch = replace(batch, user=batch.user + note)
+        batch_res = _run_batch(transport, model, builder, batch, note)
+        for r in batch_res.values():
+            r.prompt, unresolved = resolve_markers(r.prompt, batch_desc)
+            if unresolved:
+                r.needs_review = True
+                reason = "; ".join(f"маркер персонажа без описания: {n}" for n in unresolved)
+                r.review_reason = "; ".join(x for x in (r.review_reason, reason) if x)
+            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+            if r.prompt.strip():
+                r.prompt = attach_style(r.prompt, style_text)
         out.update(batch_res)
         if on_batch is not None:
             on_batch([batch_res[n] for n in batch.nums])
