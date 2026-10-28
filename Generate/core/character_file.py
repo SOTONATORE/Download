@@ -102,14 +102,16 @@ def build_character_instructions() -> str:
         "hair, and facial features for a person, or the main fixed properties for an object, even when the "
         "window text has no visual details. Base it on what you know about the person or object by name and "
         "on the context of the subtitles.",
+        "- Write each new_traits item as a short noun phrase in lowercase, with an article where it fits, "
+        "with no final period, at most 25 words. Do not write full sentences.",
         "- Do not add any uncertainty marker or extra field.",
         "- If nothing relevant appears in the text, return empty lists.",
         "Return only one JSON object, with no markdown, no code fences and no text before or after it.",
         "Return only JSON in this exact shape:",
         '{"characters": [{"name": "ANNA", "aliases": ["ANNA"], "keywords": ["Anna"], '
-        '"new_traits": ["woman in her thirties", "short dark hair"], "conflicts": []}], '
+        '"new_traits": ["a woman in her thirties with short dark hair"], "conflicts": []}], '
         '"objects": [{"name": "HOUSE", "aliases": [], "keywords": ["house"], '
-        '"new_traits": ["two-storey brick house", "white shutters"], "conflicts": [], "owner": ""}]}',
+        '"new_traits": ["a two-storey brick house with white shutters"], "conflicts": [], "owner": ""}]}',
     ]
     return "\n".join(lines)
 
@@ -261,6 +263,28 @@ def _sentence(text: str) -> str:
     return t if t[-1] in ".!?" else t + "."
 
 
+def _lower_first(piece: str) -> str:
+    """Первая буква строчная; первое слово-аббревиатуру (два и больше заглавных подряд) не трогаем."""
+    word = piece.split(" ", 1)[0]
+    if len(word) >= 2 and word.isalpha() and word.isupper():
+        return piece
+    return piece[:1].lower() + piece[1:]
+
+
+def normalize_appearance(text: str) -> str:
+    """Внешность в виде фразы для вставки в середину промпта.
+
+    Убирает лишние пробелы и одну точку в конце. Внутренние «. » между чертами заменяются на «, »,
+    каждая черта начинается со строчной буквы: старые записи хранят черты предложениями
+    («Man in his fifties. Grey beard.»), а в промпте нужна одна фраза. Аббревиатура в начале черты сохраняется.
+    Читается при каждом использовании, поэтому старые characters.json работают без пересборки."""
+    t = " ".join(str(text or "").split())
+    if t.endswith("."):
+        t = t[:-1].rstrip()
+    pieces = [p for p in re.split(r"\.\s+", t) if p]
+    return ", ".join(_lower_first(p) for p in pieces)
+
+
 def _add_trait(appearance: str, trait: str) -> str:
     """Дописывает черту в конец внешности, если её там ещё нет (по нормализованному тексту)."""
     sen = _sentence(trait)
@@ -378,21 +402,6 @@ def merge_objects(objects: list, extracted: list, characters: list) -> list:
                 rec["aliases"].append(a)
                 index[(owner, a.upper())] = pos
         _apply_traits(rec, item)
-    return out
-
-
-def build_marker_descriptions(record: dict) -> dict:
-    """{id: внешность} для персонажей и объектов записи: ключи — маркеры вида CHAR_N и OBJ_N.
-
-    Записи без id или без внешности пропускаются: маркер без описания не должен разрешаться в пустоту.
-    resolve_markers в gemini_prompts не меняется; здесь только словарь, который ему передают."""
-    out: dict = {}
-    for group in ("characters", "objects"):
-        for rec in record.get(group) or []:
-            rid = rec.get("id")
-            appearance = str(rec.get("appearance") or "").strip()
-            if isinstance(rid, str) and rid and appearance:
-                out[rid] = appearance
     return out
 
 

@@ -411,13 +411,33 @@ def test_resolve_markers_one_resolved_one_unresolved():
 
 def test_resolve_markers_repeated_marker():
     out, left = gp.resolve_markers("[ANNA] waves; [ANNA] smiles.", {"ANNA": "a woman"})
-    assert out == "a woman waves; a woman smiles."
+    assert out == "A woman waves; a woman smiles."
     assert left == []
 
 
 def test_resolve_markers_without_markers_unchanged():
     text = "A wide shot of a quiet street at dawn."
     assert gp.resolve_markers(text, {"ANNA": "a woman"}) == (text, [])
+
+
+def test_resolve_markers_capitalized_at_prompt_start():
+    out, left = gp.resolve_markers("[ANNA] waves.", {"ANNA": "a woman"})
+    assert out == "A woman waves." and left == []
+
+
+def test_resolve_markers_capitalized_after_period_space():
+    out, _ = gp.resolve_markers("Dawn breaks. [ANNA] waves.", {"ANNA": "a woman"})
+    assert out == "Dawn breaks. A woman waves."
+
+
+def test_resolve_markers_capitalized_after_newline():
+    out, _ = gp.resolve_markers("Dawn breaks.\n[ANNA] waves.", {"ANNA": "a woman"})
+    assert out == "Dawn breaks.\nA woman waves."
+
+
+def test_resolve_markers_lowercase_in_middle_of_sentence():
+    out, _ = gp.resolve_markers("Then [ANNA] waves; the sky is clear.", {"ANNA": "a woman"})
+    assert out == "Then a woman waves; the sky is clear."
 
 
 # ---------------------------------------------------------------- RealTransport и ключ

@@ -8,6 +8,7 @@ import socket
 
 import pytest
 
+from Generate.core import character_file as cf
 from Generate.core import gemini_orchestrator as go
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import PromptConfig
@@ -111,6 +112,20 @@ def test_batch_descriptions_only_characters_in_batch():
     assert gp.batch_descriptions(chars, "Carl enters") == {}  # запись без внешности не передаётся
 
 
+def test_batch_descriptions_normalizes_old_cached_appearance():
+    # старая запись с точкой в конце: в батч уходит фраза без точки и со строчной буквы
+    old = dict(ANNA, appearance="A woman in her thirties with short dark hair.")
+    assert gp.batch_descriptions([old], "Anna waves.") == {"CHAR_1": "a woman in her thirties with short dark hair"}
+
+
+def test_batch_descriptions_normalizer_matches_character_file():
+    # копия в gemini_prompts должна давать тот же результат, что normalize_appearance в character_file
+    samples = ["A woman in her thirties with short dark hair.", "Man in his fifties. Grey beard.",
+               "NATO flag.", "  a brick house  ", "Two-storey brick house. White shutters.", ""]
+    for text in samples:
+        assert gp._normalize_appearance(text) == cf.normalize_appearance(text), text
+
+
 def test_batch_descriptions_keys_characters_and_objects():
     house = {"id": "OBJ_1", "name": "HOUSE", "aliases": [], "keywords": ["house"],
              "appearance": "a brick house", "owner": "CHAR_1"}
@@ -134,8 +149,21 @@ def test_marker_instruction_in_user_message_not_system(tmp_path):
     assert "ANNA" not in t.users[0]  # имя не входит в инструкцию о маркерах
     assert "a woman in her thirties" not in t.users[0]
     assert "[CHAR_1]" not in t.systems[0]
-    assert res[0].prompt == "a woman in her thirties walks in a quiet street at dawn."
+    assert res[0].prompt == "A woman in her thirties walks in a quiet street at dawn."
     assert res[0].needs_review is False
+
+
+def test_old_cached_appearance_reads_as_one_sentence_in_prompt(tmp_path):
+    # старые записи (точки в конце и между чертами) дают одно предложение без точки внутри
+    old_anna = dict(ANNA, appearance="A woman in her thirties with short dark hair.")
+    old_house = {"id": "OBJ_1", "name": "HOUSE", "aliases": [], "keywords": ["house"],
+                 "appearance": "Two-storey brick house.", "owner": "CHAR_1"}
+    segs = [Segment(1, 0, 1000, "Anna stands by the house.")]
+    t = RecordingTransport([json.dumps([{"segment_index": 1,
+                                         "prompt": "[CHAR_1] stands by [OBJ_1] in the quiet street."}])])
+    res = gp.generate_prompts(segs, [1], cfg(tmp_path), t, "m", characters=[old_anna, old_house])
+    assert res[0].prompt == ("A woman in her thirties with short dark hair stands by a two-storey brick house "
+                             "in the quiet street.")
 
 
 def test_generate_prompts_receives_object_ids_and_resolves_them(tmp_path):
@@ -146,4 +174,4 @@ def test_generate_prompts_receives_object_ids_and_resolves_them(tmp_path):
     res = gp.generate_prompts(segs, [1], cfg(tmp_path), t, "m", characters=[ANNA, house])
     assert "OBJ_1" in t.users[0]
     assert "a brick house" not in t.users[0]
-    assert res[0].prompt == "a woman in her thirties enters a brick house."
+    assert res[0].prompt == "A woman in her thirties enters a brick house."

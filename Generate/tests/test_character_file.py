@@ -235,14 +235,32 @@ def test_new_object_without_appearance_is_rejected_for_retry():
         cf.build_character_file(segs, ScriptClient([bad, bad]), {})
 
 
-def test_marker_descriptions_keyed_by_id():
-    record = {"characters": [dict(ANNA, id="CHAR_1")],
-              "objects": [{"id": "OBJ_1", "name": "HOUSE", "owner": "CHAR_1", "aliases": [],
-                           "keywords": [], "appearance": "Two-storey brick house."}]}
-    assert cf.build_marker_descriptions(record) == {
-        "CHAR_1": ANNA["appearance"],
-        "OBJ_1": "Two-storey brick house.",
-    }
+def test_build_marker_descriptions_is_removed():
+    # мёртвая функция удалена (3a); маркеры по id обслуживает gemini_prompts.batch_descriptions
+    assert not hasattr(cf, "build_marker_descriptions")
+
+
+def test_normalize_appearance_strips_old_trailing_period():
+    # старая запись с точкой в конце (как её писал прежний _sentence) читается как фраза
+    assert cf.normalize_appearance("A woman in her thirties with short dark hair.") == \
+        "a woman in her thirties with short dark hair"
+
+
+def test_normalize_appearance_turns_inner_sentences_into_one_phrase():
+    # две черты, склеенные «. », дают одну фразу без точки внутри
+    assert cf.normalize_appearance("Man in his fifties. Grey beard.") == "man in his fifties, grey beard"
+
+
+def test_normalize_appearance_keeps_leading_acronym():
+    assert cf.normalize_appearance("NATO flag.") == "NATO flag"
+
+
+def test_appearance_rule_asks_for_noun_phrase_and_example_matches():
+    instr = cf.build_character_instructions()
+    assert "short noun phrase in lowercase" in instr
+    assert "with no final period, at most 25 words" in instr
+    assert '"new_traits": ["a woman in her thirties with short dark hair"]' in instr
+    assert '"new_traits": ["a two-storey brick house with white shutters"]' in instr
 
 
 def test_id_format_matches_marker_regex():

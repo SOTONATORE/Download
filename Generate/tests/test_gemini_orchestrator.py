@@ -620,7 +620,7 @@ def test_objects_reach_prompt_stage_and_markers_resolved(tmp_path):
     t = RecordingFake([[{"segment_index": 1, "prompt": "[CHAR_1] puts [OBJ_1] on the table."}]])
     run(tmp_path, t, [1], segments=segments, with_characters=False)
     e = read(tmp_path / "prompts.json")["prompts"]["1"]
-    assert e["prompt"] == "a woman in her thirties puts a small brass key on the table."
+    assert e["prompt"] == "A woman in her thirties puts a small brass key on the table."
     assert "CHAR_1" in t.users[0] and "OBJ_1" in t.users[0]   # id попадают в инструкцию о маркерах
     assert "a small brass key" not in t.users[0]              # описание в запрос не идёт
     assert t.calls == [M1]

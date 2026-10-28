@@ -582,17 +582,28 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
 _MARKER_RX = re.compile(r"\[([A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*)\]")
 
 
+def _at_sentence_start(text: str, pos: int) -> bool:
+    """Стоит ли позиция pos в начале предложения: начало текста, после «. » или перевода строки."""
+    head = text[:pos]
+    return head == "" or head.endswith(". ") or head.endswith("\n")
+
+
 def resolve_markers(prompt: str, descriptions: dict) -> tuple:
     """Заменяет каждый [ИМЯ], у которого ИМЯ есть в descriptions, на описание из descriptions.
 
-    Возвращает (новый текст, список неразрешённых имён). Неизвестный маркер остаётся в тексте как есть
-    и попадает в список (каждое имя один раз, по порядку первого появления). Описания не придумываются."""
+    Если маркер стоит в начале предложения, первая буква описания становится заглавной; в середине
+    предложения описание вставляется как есть (строчной). Возвращает (новый текст, список неразрешённых имён).
+    Неизвестный маркер остаётся в тексте как есть и попадает в список (каждое имя один раз, по порядку
+    первого появления). Описания не придумываются."""
     unresolved: list = []
 
     def repl(m):
         name = m.group(1)
         if name in descriptions:
-            return descriptions[name]
+            text = descriptions[name]
+            if text and _at_sentence_start(m.string, m.start()):
+                text = text[:1].upper() + text[1:]
+            return text
         if name not in unresolved:
             unresolved.append(name)
         return m.group(0)
@@ -644,6 +655,24 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     return final
 
 
+# Копия normalize_appearance из character_file. Импорт оттуда дал бы цикл: character_file сам импортирует
+# gemini_prompts. Оба варианта держать одинаковыми: тест сравнивает их на одних и тех же входах.
+def _normalize_appearance(text: str) -> str:
+    """Внешность в виде фразы для вставки в промпт (см. normalize_appearance в character_file)."""
+    t = " ".join(str(text or "").split())
+    if t.endswith("."):
+        t = t[:-1].rstrip()
+    pieces = [p for p in re.split(r"\.\s+", t) if p]
+    out = []
+    for piece in pieces:
+        word = piece.split(" ", 1)[0]
+        if len(word) >= 2 and word.isalpha() and word.isupper():
+            out.append(piece)
+        else:
+            out.append(piece[:1].lower() + piece[1:])
+    return ", ".join(out)
+
+
 def batch_descriptions(records: list, batch_text: str) -> dict:
     """{ID: внешность} для записей персонажей и объектов, чьё имя, псевдоним или ключевое слово есть в тексте батча.
 
@@ -655,7 +684,7 @@ def batch_descriptions(records: list, batch_text: str) -> dict:
     for rec in records:
         rid = str(rec.get("id") or "").strip()
         name = str(rec.get("name") or "").strip()
-        appearance = str(rec.get("appearance") or "").strip()
+        appearance = _normalize_appearance(rec.get("appearance") or "")
         if not rid or not name or not appearance:
             continue
         terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
