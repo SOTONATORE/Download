@@ -420,8 +420,9 @@ def test_transient_errors_leave_no_key_or_prompt_text_in_logs(tmp_path, monkeypa
 # ------------------------------------------------------- шаг персонажей (сбой останавливает прогон)
 
 def char_reply(name="ANNA"):
-    return {"characters": [{"name": name, "aliases": [], "keywords": [],
-                            "new_traits": ["woman in her thirties"], "conflicts": []}]}
+    # новая запись: id пустой строкой, внешность — строка (new_traits и conflicts удалены из схемы)
+    return {"characters": [{"id": "", "name": name, "aliases": [], "keywords": [],
+                            "appearance": "woman in her thirties"}]}
 
 
 def test_character_quota_stops_run_keeps_partial(tmp_path, monkeypatch):

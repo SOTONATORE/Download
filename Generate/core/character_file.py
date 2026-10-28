@@ -1,8 +1,10 @@
 """Файл персонажей и объектов одного SRT: characters.json (H3, часть A).
 
-Окно = WINDOW_SEGMENTS сегментов подряд, на каждое окно один запрос Gemini. Ответы сливаются в записи:
-персонажи и объекты получают стабильные id (CHAR_N, OBJ_N), известная запись сохраняет внешность,
-к ней дописываются новые постоянные черты, противоречие не записывается и попадает в лог.
+Окно = WINDOW_SEGMENTS сегментов подряд, на каждое окно один запрос Gemini. Записи обновляются, а не пишутся заново:
+в запрос окна передаётся предыдущая внешность каждой известной записи, модель возвращает полную внешность по id.
+Существующая запись (id из списка окна) меняется, только если возвращённая внешность отличается от записанной.
+Новая запись (id — пустая строка) получает CHAR_N или OBJ_N по порядку появления. Ключевые слова и псевдонимы
+дописываются. Ответ, не прошедший проверку, повторяется один раз; второй провал останавливает окно.
 Запрос идёт через тот же транспорт, что и генерация промптов (метод generate_json; в оркестраторе это
 ManagedTransport с лимитером и повторами). Ключ здесь не читается.
 """
@@ -33,14 +35,13 @@ MAX_NAME_LEN = 40
 # Та же форма, что маркер [ИМЯ] в gemini_prompts: заглавные латинские и кириллические буквы, цифры, «_».
 _NAME_RX = re.compile(r"[A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*")
 _STR_LIST = {"type": "array", "items": {"type": "string"}}
-_LIST_FIELDS = ("aliases", "keywords", "new_traits", "conflicts")
-# Общая форма элемента персонажа и объекта.
-_ITEM_PROPS = {"name": {"type": "string"}, "aliases": _STR_LIST, "keywords": _STR_LIST,
-               "new_traits": _STR_LIST, "conflicts": _STR_LIST}
-_ITEM_REQUIRED = ["name", "aliases", "keywords", "new_traits", "conflicts"]
-# Владелец — обычная строка (3a): пустая строка означает «нет владельца». null в схеме не используется.
+_LIST_FIELDS = ("aliases", "keywords")
+# Общая форма элемента персонажа и объекта. id: у известной записи — её id из окна, у новой — пустая строка.
+_ITEM_PROPS = {"id": {"type": "string"}, "name": {"type": "string"}, "aliases": _STR_LIST,
+               "keywords": _STR_LIST, "appearance": {"type": "string"}}
+_ITEM_REQUIRED = ["id", "name", "aliases", "keywords", "appearance"]
+# Владелец — обычная строка: пустая строка означает «нет владельца». null в схеме не используется (3a).
 _OWNER_SCHEMA = {"type": "string"}
-
 # Схема ответа одного окна (responseJsonSchema). Форма дублирует текст инструкции ниже.
 WINDOW_SCHEMA = {
     "type": "object",
@@ -68,53 +69,50 @@ WINDOW_SCHEMA = {
 
 def build_character_instructions() -> str:
     """Полный текст инструкции для одного окна: роль, правила персонажей и объектов, правило внешности,
-    правило владельца, форма ответа. Правила записаны здесь один раз."""
+    правило владельца, форма ответа. Правила записаны здесь один раз; запрос окна их не повторяет."""
     lines = [
         "You list the people and the important objects that appear in the subtitle text of one video window. "
         "Each one is kept in a record that lasts across windows.",
+        "Return a record only for a person or an object that is visible in the window text, identified by its id.",
+        "- id: for a record listed in the known records, return its id exactly as listed. "
+        "For a new person or object, return an empty string. Do not invent any other id.",
         "Rules for characters:",
         "- name: one word in uppercase Latin or Cyrillic letters, no spaces, for example ANNA or АННА. "
-        "For a character already in the record, use the existing name exactly.",
+        "For a record already listed, use its name exactly.",
         "- aliases: other names this same person has in the text (may be empty).",
         "- keywords: words or short phrases that appear in the window text and identify this person.",
-        "- new_traits: permanent appearance only: age range, build, hair, face, beard.",
-        "- For a character already in the record, new_traits holds only permanent traits that the recorded "
-        "appearance does not contain yet, and conflicts holds permanent traits that contradict it.",
-        "- For a character not in the record, all permanent traits go into the one new_traits item and conflicts is empty.",
         "- If the name is ambiguous, choose the most likely historical person from the context of the text; "
         "do not add any identifier beyond the name.",
         "Rules for objects:",
         "- List an object only when it matters to the plot of this window, not because a word repeats often. "
         "A background mention with no name and no further detail is not listed. "
         "An object central to the scene is always listed.",
-        "- name: one word, same form as character names. For an object already in the record, use the "
-        "existing name exactly.",
+        "- name: one word, same form as character names. For a record already listed, use its name exactly.",
         "- aliases and keywords: as for characters.",
-        "- new_traits: permanent properties only: material, shape, color, size, and other fixed features.",
         "- owner: the name of the character who owns the object, exactly as in the characters list, "
         "or an empty string when no listed character owns it.",
-        "- For an object already in the record, new_traits and conflicts follow the same rules as for characters.",
-        "- For an object not in the record, all permanent properties go into the one new_traits item and conflicts is empty.",
-        "Rules for everyone:",
-        "- Do not describe clothing or temporary state (wet, tired, and similar), for people or objects.",
         "Appearance rule:",
-        "- For every new character and every new object, new_traits always contains at least age range, build, "
-        "hair, and facial features for a person, or the main fixed properties for an object, even when the "
-        "window text has no visual details. Base it on what you know about the person or object by name and "
-        "on the context of the subtitles.",
-        "- For every new character and every new object, new_traits contains exactly one item: one complete noun phrase "
-        "in lowercase, with an article and a preposition where it fits, for example "
-        "\"a woman in her thirties with short dark hair\" or \"a two-storey brick house with white shutters\". "
-        "The phrase holds all the permanent traits, linked inside the phrase with \"with\" and \"and\". "
-        "No final period. At most 30 words. Do not write full sentences.",
+        "- appearance is one complete phrase in lowercase, with an article and a preposition where it fits, "
+        "for example \"a woman in her thirties with short dark hair\" or "
+        "\"a two-storey brick house with white shutters\". "
+        "It holds all permanent traits: age range, build, hair, and facial features for a person, "
+        "or the main fixed properties of an object: material, shape, color, size. "
+        "The traits are linked inside the phrase with \"with\" and \"and\". No final period. At most 30 words. "
+        "Do not write full sentences.",
+        "- For a new person or object, appearance is always filled, even when the window text has no visual "
+        "details. Base it on what you know about the person or object by name and on the context of the subtitles.",
+        "- For a record already listed, return its appearance in full, exactly as given. Change it only when a new "
+        "permanent trait appears in the window text or the previous phrase contains a clear error. "
+        "When you change it, keep every permanent trait of the previous phrase.",
+        "- Do not describe clothing or temporary state (wet, tired, and similar), for people or objects.",
         "- Do not add any uncertainty marker or extra field.",
         "- If nothing relevant appears in the text, return empty lists.",
         "Return only one JSON object, with no markdown, no code fences and no text before or after it.",
         "Return only JSON in this exact shape:",
-        '{"characters": [{"name": "ANNA", "aliases": ["ANNA"], "keywords": ["Anna"], '
-        '"new_traits": ["a woman in her thirties with short dark hair"], "conflicts": []}], '
-        '"objects": [{"name": "HOUSE", "aliases": [], "keywords": ["house"], '
-        '"new_traits": ["a two-storey brick house with white shutters"], "conflicts": [], "owner": ""}]}',
+        '{"characters": [{"id": "", "name": "ANNA", "aliases": ["ANNA"], "keywords": ["Anna"], '
+        '"appearance": "a woman in her thirties with short dark hair"}], '
+        '"objects": [{"id": "", "name": "HOUSE", "aliases": [], "keywords": ["house"], '
+        '"appearance": "a two-storey brick house with white shutters", "owner": ""}]}',
     ]
     return "\n".join(lines)
 
@@ -124,53 +122,76 @@ def _is_valid_name(name: str) -> bool:
 
 
 def _window_request(text: str, known: list, known_objects: list = ()) -> str:
-    """Текст запроса одного окна: текст окна, уже известные персонажи и объекты с id, список имён.
-    Правила здесь не пишутся: они в build_character_instructions()."""
-    owner_names = {c["id"]: c["name"] for c in known if c.get("id")}
-    recorded = "\n".join(f"{c.get('id', '')} {c['name']}: {c.get('appearance', '')}" for c in known) \
-        or "(none yet)"
-    objs = "\n".join(
-        f"{o.get('id', '')} {o['name']} (owner: {owner_names.get(o.get('owner'), 'none')}): "
-        f"{o.get('appearance', '')}" for o in known_objects) or "(none yet)"
+    """Текст запроса одного окна: текст окна, известные записи с предыдущей внешностью по id, список имён.
+    Правила здесь не пишутся: они в build_character_instructions(). Блок известных записей содержит только данные."""
+    lines = [f"id: {c.get('id', '')} | name: {c['name']} | previous appearance: {c.get('appearance', '')}"
+             for c in known]
+    for o in known_objects:
+        owner = o.get("owner") or "none"
+        lines.append(f"id: {o.get('id', '')} | name: {o['name']} | previous appearance: "
+                     f"{o.get('appearance', '')} | owner: {owner}")
+    block = "\n".join(lines) or "(none yet)"
     names = [c["name"] for c in known] + [o["name"] for o in known_objects]
     return (
         "Window text (one subtitle segment per line):\n" + text + "\n\n"
-        "Characters already in the record (id name: recorded appearance):\n" + recorded + "\n\n"
-        "Objects already in the record (id name (owner: character name): recorded appearance):\n" + objs + "\n\n"
+        "Known records (each one is separate; do not mix them):\n" + block + "\n\n"
+        "Return a record only if its id is in this list or it is a new person or object in the window text. "
+        "Copy the previous appearance into your reply unless a permanent trait is new or the previous appearance "
+        "has a clear error.\n\n"
         "Names already in the record: " + json.dumps(names, ensure_ascii=False)
     )
 
 
+class _EmptyNewAppearance(ValueError):
+    """Новая запись (id пустой строкой) без внешности в ответе. Ответ повторяется; если повтор снова такой,
+    окно даёт EmptyAppearanceError с именем этой записи."""
+
+    def __init__(self, record_name: str):
+        super().__init__(f"новая запись «{record_name}» без внешности")
+        self.record_name = record_name
+
+
 def _parse_items(items: list, low: str, what: str, *, owner: bool) -> list:
-    """Разбор списка персонажей или объектов. Проверка формы; пустая внешность новой записи — после слияния."""
+    """Разбор списка персонажей или объектов: проверка формы каждого поля и пустой внешности (5a)."""
     out: list = []
     for item in items:
         if not isinstance(item, dict):
             raise ValueError(f"элемент {what} не объект")
+        rid = item.get("id")
+        if not isinstance(rid, str):
+            raise ValueError(f"поле id не строка ({what})")
+        rid = rid.strip()
         name = item.get("name")
         if not isinstance(name, str):
             raise ValueError(f"поле name не строка ({what})")
         for key in _LIST_FIELDS:
             value = item.get(key)
             if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
-                raise ValueError(f"поле {key} не список строк")
-        owner_name = None
+                raise ValueError(f"поле {key} не список строк ({what} «{name}»)")
+        appearance = item.get("appearance")
+        if not isinstance(appearance, str):
+            raise ValueError(f"поле appearance не строка, а список или другой тип ({what} «{name}»)")
+        owner_name = ""
         if owner:
             raw_owner = item.get("owner")
-            if raw_owner is not None and not isinstance(raw_owner, str):
-                raise ValueError("поле owner не строка и не null")
-            owner_name = raw_owner.strip() if isinstance(raw_owner, str) and raw_owner.strip() else None
+            if not isinstance(raw_owner, str):
+                raise ValueError(f"поле owner не строка ({what} «{name}»)")
+            owner_name = raw_owner.strip()
         nm = name.strip().upper()
         if not _is_valid_name(nm):
             log.warning("Имя (%s) не подходит по формату маркера, запись пропущена.", what)
             continue
-        new_traits = [t.strip() for t in item["new_traits"] if t.strip()]
+        app = appearance.strip()
+        if not app:
+            if rid == "":
+                raise _EmptyNewAppearance(nm)
+            raise ValueError(f"запись {rid} «{nm}»: внешность пустая")
         entry = {
+            "id": rid,
             "name": nm,
             "aliases": [a.strip() for a in item["aliases"] if a.strip()],
             "keywords": [k.strip() for k in item["keywords"] if k.strip() and k.strip().lower() in low],
-            "new_traits": new_traits,
-            "conflicts": [t.strip() for t in item["conflicts"] if t.strip()],
+            "appearance": app,
         }
         if owner:
             entry["owner"] = owner_name
@@ -179,12 +200,13 @@ def _parse_items(items: list, low: str, what: str, *, owner: bool) -> list:
 
 
 def parse_window_reply(raw: str, window_text: str) -> dict:
-    """Строгий разбор ответа одного окна. Любое нарушение формы: ValueError с коротким описанием.
+    """Строгий разбор ответа одного окна. Любое нарушение формы: ValueError с коротким описанием на русском.
 
-    Возвращает {characters: [...], objects: [...]}. Отсутствующий ключ objects читается как пустой список.
-    Имя приводится к верхнему регистру и проверяется по форме маркера; неподходящее имя пропускается с записью
-    в лог. Ключевые слова оставляются только те, что есть в тексте окна (без учёта регистра).
-    Новая запись без постоянной внешности проверяется после слияния в _ask_window: тогда окно пойдёт повторно."""
+    Возвращает {characters: [...], objects: [...]}; у каждого элемента есть id (пустая строка для новой записи),
+    name, aliases, keywords, appearance, у объектов ещё owner (строка, пустая — нет владельца). Отсутствующий ключ
+    objects читается как пустой список. Имя приводится к верхнему регистру и проверяется по форме маркера;
+    неподходящее имя пропускается с записью в лог. Ключевые слова оставляются только те, что есть в тексте окна.
+    Соответствие id известным записям проверяется в _check_reply."""
     if not isinstance(raw, str):
         raise ValueError("ответ не строка")
     data = json.loads(raw)  # не JSON -> json.JSONDecodeError (подкласс ValueError)
@@ -254,10 +276,6 @@ def migrate_record(record: dict) -> dict:
 # Слияние (чистые функции: вход не меняется)
 # ---------------------------------------------------------------------------
 
-def _norm(text: str) -> str:
-    return " ".join(text.lower().split()).strip(" .!?")
-
-
 def _sentence(text: str) -> str:
     """Внешность одной фразой для записи: пробелы по краям и одна точка в конце убираются, первая буква заглавная.
     Ничего не склеивает и точку не добавляет: фраза из ответа модели записывается как есть."""
@@ -290,89 +308,97 @@ def normalize_appearance(text: str) -> str:
     return ", and ".join(_lower_first(p) for p in pieces)
 
 
-def _apply_traits(rec: dict, item: dict, is_new: bool) -> None:
-    """Общая часть слияния персонажа и объекта: ключевые слова, внешность, конфликты (меняет rec).
+def _same_appearance(old: Any, new: str) -> bool:
+    """Записанная и возвращённая внешность совпадают: строки после обрезки пробелов по краям (6a, 6b).
+    Если normalize_appearance меняет записанную строку (старая запись: точка в конце, «. » между чертами,
+    заглавная буква), обе строки сравниваются после нормализации (6f)."""
+    old_s = str(old or "").strip()
+    new_s = str(new or "").strip()
+    if old_s == new_s:
+        return True
+    if normalize_appearance(old_s) != old_s:
+        return normalize_appearance(old_s) == normalize_appearance(new_s)
+    return False
 
-    Новая запись получает внешность из единственного элемента new_traits, как он пришёл (первая буква заглавная).
-    Лишние элементы логируются и не пишутся. Существующая запись сохраняет свою внешность: новый элемент
-    не дописывается и не объединяется; если он не пуст и отличается от записанного, пишется строка лога."""
+
+def _name_keys(name: str, aliases: list) -> set:
+    """Имя и псевдонимы в верхнем регистре. По ним ищется совпадение новой записи с существующей (2d)."""
+    return {name.upper(), *(a.upper() for a in aliases)}
+
+
+def _dedupe_aliases(name: str, aliases: list) -> list:
+    """Псевдонимы новой записи без повторов и без имени записи."""
+    return list(dict.fromkeys(a for a in aliases if a.upper() != name.upper()))
+
+
+def _merge_known(rec: dict, item: dict) -> None:
+    """Существующая запись (id из окна): ключевые слова и псевдонимы дописываются. Внешность меняется, только если
+    возвращённая отличается от записанной (6a); при изменении пишется строка лога «appearance updated».
+    Имя, id и владелец записи не меняются (6d)."""
     for k in item["keywords"]:
         if k not in rec["keywords"]:
             rec["keywords"].append(k)
-    traits = item["new_traits"]
-    if is_new:
-        if traits:
-            rec["appearance"] = _sentence(traits[0])
-            for extra in traits[1:]:
-                log.warning("extra new trait not recorded: %s, %s", rec["name"], extra)
-    else:
-        for t in traits:
-            if _norm(t) != _norm(rec["appearance"]):
-                log.warning("appearance kept, new trait not recorded: %s, %s", rec["name"], t)
-    for t in item["conflicts"]:
-        log.warning("conflict, not recorded: %s, %s", rec["name"], t)
+    known_names = _name_keys(rec["name"], rec["aliases"])
+    for a in item["aliases"]:
+        if a.upper() not in known_names:
+            rec["aliases"].append(a)
+            known_names.add(a.upper())
+    old = rec.get("appearance") or ""
+    new = item["appearance"].strip()
+    if _same_appearance(old, new):
+        return
+    log.info("appearance updated: %s %s: %s -> %s", rec["id"], rec["name"], str(old).strip(), new)
+    rec["appearance"] = new
 
 
 def merge_characters(characters: list, extracted: list) -> list:
     """Сливает разобранные элементы окна в список записей. Чистая функция, Gemini не вызывается.
 
     Правила:
-    - персонаж ищется по имени или псевдониму; известный сохраняет id и внешность, новые черты не дописываются,
-      при отличии пишется «appearance kept, new trait not recorded: <имя>, <черта>»;
-    - новый персонаж заводится новой записью с очередным id (CHAR_N); его внешность — единственный элемент
-      new_traits, как пришёл (см. _apply_traits);
-    - черта из conflicts не записывается и логируется: «conflict, not recorded: <имя>, <черта>».
-    Единственный побочный эффект — строки лога."""
+    - известная запись ищется по id (6d), её имя и id не меняются, внешность меняется по правилу 6a;
+    - новая запись (id пустой строкой) получает очередной CHAR_N и внешность из ответа с заглавной первой
+      буквой, без точки в конце (6c);
+    - единственный побочный эффект — строки лога."""
     out = copy.deepcopy(characters)
     _assign_ids(out, "CHAR")
     for rec in out:
         rec.setdefault("aliases", [])
         rec.setdefault("keywords", [])
         rec.setdefault("appearance", "")
-    index: dict = {}  # имя или псевдоним в верхнем регистре -> позиция записи
-    for pos, rec in enumerate(out):
-        for key in [rec["name"], *rec["aliases"]]:
-            index.setdefault(key.upper(), pos)
-
+    by_id = {rec["id"]: rec for rec in out}
     for item in extracted:
-        name = item["name"]
-        pos = index.get(name.upper())
-        if pos is None:
-            aliases = list(dict.fromkeys(a for a in item["aliases"] if a.upper() != name.upper()))
-            rec = {"id": _new_id(out, "CHAR"), "name": name, "aliases": aliases,
-                   "keywords": [], "appearance": ""}
-            _apply_traits(rec, item, is_new=True)
-            out.append(rec)
-            pos = len(out) - 1
-            for key in [name, *aliases]:
-                index.setdefault(key.upper(), pos)
+        if item["id"]:
+            rec = by_id.get(item["id"])
+            if rec is not None:
+                _merge_known(rec, item)
             continue
-
-        rec = out[pos]
-        for a in item["aliases"]:
-            if a.upper() not in index:
-                rec["aliases"].append(a)
-                index[a.upper()] = pos
-        _apply_traits(rec, item, is_new=False)
+        rec = {"id": _new_id(out, "CHAR"), "name": item["name"],
+               "aliases": _dedupe_aliases(item["name"], item["aliases"]),
+               "keywords": list(dict.fromkeys(item["keywords"])),
+               "appearance": _sentence(item["appearance"])}
+        out.append(rec)
+        by_id[rec["id"]] = rec
     return out
 
 
 def _owner_index(characters: list) -> dict:
-    """Имя или псевдоним персонажа в верхнем регистре -> его id."""
+    """Имя, псевдоним или id персонажа в верхнем регистре -> его id. По id тоже находится владелец: запрос окна
+    показывает владельца по id, и модель может вернуть его так же."""
     index: dict = {}
     for rec in characters:
-        for key in [rec["name"], *rec.get("aliases", [])]:
-            index.setdefault(key.upper(), rec["id"])
+        for key in [rec["name"], *rec.get("aliases", []), rec.get("id") or ""]:
+            if key:
+                index.setdefault(key.upper(), rec["id"])
     return index
 
 
 def merge_objects(objects: list, extracted: list, characters: list) -> list:
     """Сливает разобранные объекты окна в список записей. Чистая функция, Gemini не вызывается.
 
-    Объект ищется по владельцу и имени (или псевдониму): владелец — id персонажа из characters, или None.
-    Два объекта с одним именем и разными владельцами — две записи. Два объекта без владельца с одним именем —
-    одна запись. Имя владельца, которого нет среди персонажей, даёт владельца None и лог
-    «owner not found, set to null: <имя объекта>». Слияние черт и конфликтов то же, что у персонажей."""
+    Известный объект ищется по id (6d); его владелец, имя и id не меняются, внешность меняется по правилу 6a.
+    Новый объект (id пустой строкой) получает очередной OBJ_N. Владелец — id персонажа из characters, найденный
+    по имени, псевдониму или id (6e). Имя, которого нет среди персонажей, даёт владельца None и лог
+    «owner not found, set to null: <имя объекта>»; пустая строка даёт None без записи в лог."""
     out = copy.deepcopy(objects)
     _assign_ids(out, "OBJ")
     for rec in out:
@@ -381,36 +407,24 @@ def merge_objects(objects: list, extracted: list, characters: list) -> list:
         rec.setdefault("keywords", [])
         rec.setdefault("appearance", "")
     owners = _owner_index(characters)
-    index: dict = {}  # (id владельца или None, имя или псевдоним в верхнем регистре) -> позиция записи
-    for pos, rec in enumerate(out):
-        for key in [rec["name"], *rec["aliases"]]:
-            index.setdefault((rec["owner"], key.upper()), pos)
-
+    by_id = {rec["id"]: rec for rec in out}
     for item in extracted:
-        name = item["name"]
+        if item["id"]:
+            rec = by_id.get(item["id"])
+            if rec is not None:
+                _merge_known(rec, item)
+            continue
         owner = None
         if item.get("owner"):
             owner = owners.get(item["owner"].upper())
             if owner is None:
-                log.warning("owner not found, set to null: %s", name)
-        pos = index.get((owner, name.upper()))
-        if pos is None:
-            aliases = list(dict.fromkeys(a for a in item["aliases"] if a.upper() != name.upper()))
-            rec = {"id": _new_id(out, "OBJ"), "owner": owner, "name": name, "aliases": aliases,
-                   "keywords": [], "appearance": ""}
-            _apply_traits(rec, item, is_new=True)
-            out.append(rec)
-            pos = len(out) - 1
-            for key in [name, *aliases]:
-                index.setdefault((owner, key.upper()), pos)
-            continue
-
-        rec = out[pos]
-        for a in item["aliases"]:
-            if (owner, a.upper()) not in index:
-                rec["aliases"].append(a)
-                index[(owner, a.upper())] = pos
-        _apply_traits(rec, item, is_new=False)
+                log.warning("owner not found, set to null: %s", item["name"])
+        rec = {"id": _new_id(out, "OBJ"), "owner": owner, "name": item["name"],
+               "aliases": _dedupe_aliases(item["name"], item["aliases"]),
+               "keywords": list(dict.fromkeys(item["keywords"])),
+               "appearance": _sentence(item["appearance"])}
+        out.append(rec)
+        by_id[rec["id"]] = rec
     return out
 
 
@@ -445,49 +459,73 @@ class EmptyAppearanceError(CharacterWindowError):
         self.last = last
 
 
-def _first_empty_new(old_chars: list, old_objs: list, new_chars: list, new_objs: list) -> Optional[str]:
-    """Имя первой новой записи без внешности или None. Новая — запись, чьего id не было до слияния."""
-    for old, new in ((old_chars, new_chars), (old_objs, new_objs)):
-        old_ids = {r.get("id") for r in old}
-        for rec in new:
-            if rec.get("id") not in old_ids and not str(rec.get("appearance") or "").strip():
-                return rec.get("name")
-    return None
+def _keep_known_ids(items: list, known: list, what: str) -> list:
+    """Оставляет новые записи (id пустой строкой) и записи с id из этого окна. Остальные отбрасываются с записью
+    в лог: «id not in window, dropped: <id> <имя>» (2b)."""
+    ids = {r.get("id") for r in known}
+    out = []
+    for item in items:
+        if item["id"] == "" or item["id"] in ids:
+            out.append(item)
+        else:
+            log.warning("id not in window, dropped: %s %s", item["id"], item["name"])
+    return out
+
+
+def _check_reply(parsed: dict, characters: list, objects: list) -> dict:
+    """Проверка разобранного ответа по известным записям. Неизвестный id отбрасывается (_keep_known_ids).
+    Новая запись (id пустой), чьё имя или псевдоним совпадает с записью того же владельца, — ошибка ответа (2d):
+    такая запись уже есть и должна вернуться с её id. Владелец объекта сравнивается по id."""
+    chars = _keep_known_ids(parsed["characters"], characters, "персонаж")
+    objs = _keep_known_ids(parsed["objects"], objects, "объект")
+    for item in chars:
+        if item["id"] != "":
+            continue
+        for rec in characters:
+            if _name_keys(item["name"], item["aliases"]) & _name_keys(rec["name"], rec.get("aliases", [])):
+                raise ValueError(f"новая запись «{item['name']}» совпадает с записью {rec['id']}: "
+                                 "её нужно вернуть с этим id")
+    owners = _owner_index(characters)
+    for item in objs:
+        if item["id"] != "":
+            continue
+        owner_id = owners.get(item["owner"].upper()) if item["owner"] else None
+        for rec in objects:
+            if rec.get("owner") != owner_id:
+                continue
+            if _name_keys(item["name"], item["aliases"]) & _name_keys(rec["name"], rec.get("aliases", [])):
+                raise ValueError(f"новый объект «{item['name']}» совпадает с объектом {rec['id']} того же "
+                                 "владельца: его нужно вернуть с этим id")
+    return {"characters": chars, "objects": objs}
 
 
 def _ask_window(client: Any, model: str, text: str, characters: list, objects: list,
                 first: int, last: int) -> tuple:
-    """Один запрос на окно, слияние и проверка внешности новых записей. Возвращает (characters, objects).
+    """Один запрос на окно: проверка ответа и слияние. Возвращает (characters, objects).
 
-    Нарушение формы или новая запись без внешности: ещё один запрос (всего два). Два провала: CharacterWindowError;
-    если последний провал — пустая внешность, то EmptyAppearanceError с именем записи. Слияние выполняется здесь,
-    чтобы проверка учитывала владельца объекта (4a).
-
-    Ошибки транспорта (GeminiRuntimeError) не перехватываются: квота и сбои сети ManagedTransport
-    обрабатывает сам и не превращает их в пропущенное окно."""
+    Ответ проверяется parse_window_reply и _check_reply. Нарушение — ещё один запрос (всего два). Если второй
+    ответ тоже не прошёл, то при пустой внешности новой записи выходит EmptyAppearanceError, иначе
+    CharacterWindowError. Слияние выполняется только для ответа, прошедшего проверку. Ошибки транспорта
+    (GeminiRuntimeError) не перехватываются: квоту и сбои сети обрабатывает ManagedTransport."""
     system = build_character_instructions()
     user = _window_request(text, characters, objects)
-    empty_name: Optional[str] = None
+    last_error: Optional[ValueError] = None
     for attempt in (1, 2):
         raw = client.generate_json(model, system, user, WINDOW_SCHEMA)
         try:
-            extracted = parse_window_reply(raw, text)
+            extracted = _check_reply(parse_window_reply(raw, text), characters, objects)
         except ValueError as exc:
-            empty_name = None
+            last_error = exc
             log.warning("Окно сегментов %s..%s: ответ не прошёл проверку (%s), попытка %d из 2.",
                         first, last, exc, attempt)
             continue
         new_chars = merge_characters(characters, extracted["characters"])
         new_objs = merge_objects(objects, extracted["objects"], new_chars)
-        empty_name = _first_empty_new(characters, objects, new_chars, new_objs)
-        if empty_name is None:
-            return new_chars, new_objs
-        log.warning("Окно сегментов %s..%s: новая запись «%s» без внешности, попытка %d из 2.",
-                    first, last, empty_name, attempt)
-    if empty_name is not None:
+        return new_chars, new_objs
+    if isinstance(last_error, _EmptyNewAppearance):
         log.error("Окно сегментов %s..%s: запись «%s» без внешности после повтора, прогон остановлен.",
-                  first, last, empty_name)
-        raise EmptyAppearanceError(empty_name, first, last)
+                  first, last, last_error.record_name)
+        raise EmptyAppearanceError(last_error.record_name, first, last)
     log.error("Окно сегментов %s..%s: два ответа подряд не прошли проверку, прогон остановлен.", first, last)
     raise CharacterWindowError(first, last)
 
