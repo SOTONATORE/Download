@@ -23,6 +23,13 @@ on:
         description: "Лимит сегментов для проверки (0 = все)"
         type: number
         default: 3
+      preset:
+        description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
+        type: choice
+        options:
+          - "none"
+          - "test"
+        default: "none"
 
 concurrency:
   group: verify-gemini
@@ -61,6 +68,7 @@ jobs:
           MISSING_PATH: ${{ inputs.missing_path }}
           MODEL_PROFILE: ${{ inputs.model_profile }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
+          PRESET: ${{ inputs.preset }}
         run: |
           python - <<'PY'
           import importlib
@@ -126,6 +134,8 @@ jobs:
           parse_srt = find_symbol("parse_srt", ("srt_parser",))
           parse_missing = find_symbol(
               "parse_missing", ("missing", "srt_parser", "missing_parser"))
+          read_preset = find_symbol("read_preset", ("gemini_prompts",))
+          load_config = find_symbol("load_config", ("config_loader",))
 
           for label, obj in (("generate_and_store", generate_and_store),
                              ("RealTransport", RealTransport),
@@ -168,8 +178,25 @@ jobs:
           # Аргументы по реальной сигнатуре generate_and_store:
           # (segments, wanted_nums, cfg, inner_transport, prompts_path, *, profile, timing)
           style_file = f"Generate/model_profiles/models/{profile}/prompts/style.md"
+          # значение пресета как в cli.py: пусто = «none», иначе передаётся без изменений
+          preset = os.environ.get("PRESET") or "none"
+          # пресет проверяется до первого запроса к Gemini, как при полной генерации (cli.py)
+          if preset != "none":
+              if read_preset is None:
+                  fail("в проекте не найден символ read_preset")
+              try:
+                  read_preset(preset)
+              except Exception as exc:  # noqa: BLE001
+                  fail("пресет не прошёл проверку: " + mask(exc))
+          # размер батча из конфигурации по умолчанию (как load_config(path, overrides) в cli.py, путь не задан)
+          if load_config is None:
+              fail("в проекте не найден символ load_config")
           try:
-              cfg = PromptConfig(style_file=style_file)
+              batch_size = int(load_config().gemini_batch_size)
+          except Exception as exc:  # noqa: BLE001
+              fail("не удалось прочитать конфигурацию: " + type(exc).__name__ + ": " + mask(exc))
+          try:
+              cfg = PromptConfig(style_file=style_file, batch_size=batch_size, preset=preset)
           except TypeError as exc:
               fail("не удалось создать PromptConfig: " + mask(exc))
 
@@ -289,10 +316,13 @@ jobs:
           say(f"Проверка пройдена: промптов {len(rows)}")
           PY
 
-      - name: Загрузка prompts.json
+      - name: Загрузка prompts.json и файла персонажей
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prompts-json
-          path: prompts.json
+          name: verify-gemini-files
+          path: |
+            prompts.json
+            characters.json
+            characters.partial.json
           if-no-files-found: warn
