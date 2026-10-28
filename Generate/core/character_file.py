@@ -58,6 +58,7 @@ WINDOW_SCHEMA = {
 
 _SYSTEM = (
     "You list the people who appear in the subtitle text of one video window. "
+    "For every new person listed, new_traits must contain a description of permanent appearance, even when the window text has no visual details. The description is based on what you know about the historical person by name and on the context of the subtitles. "
     "Return only one JSON object, with no markdown, no code fences and no text before or after it."
 )
 
@@ -85,6 +86,12 @@ def _window_request(text: str, known: list) -> str:
         "appearance does not contain yet. Put in conflicts any permanent trait that contradicts the recorded "
         "appearance.\n"
         "- For a person not in the record, put all permanent traits in new_traits and leave conflicts empty.\n"
+        "- For a new person, new_traits always contains at least age range, build, hair, and facial features, "
+        "based on the historical person.\n"
+        "- If the name is ambiguous, choose the most likely historical person from the context of the text; "
+        "do not leave new_traits empty and do not add any identifier beyond the name.\n"
+        "- Do not describe clothing or temporary state (wet, tired, and similar).\n"
+        "- Do not add any uncertainty marker or extra field.\n"
         "- If nobody appears in the text, return an empty list.\n\n"
         "Return only JSON in this exact shape:\n"
         '{"characters": [{"name": "ANNA", "aliases": ["ANNA"], "keywords": ["Anna"], '

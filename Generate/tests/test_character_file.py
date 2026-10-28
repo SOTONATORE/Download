@@ -122,3 +122,15 @@ def test_completed_run_writes_characters_json_and_removes_partial(tmp_path, monk
     assert set(stored) == {"srt_hash", "characters"}
     assert not (tmp_path / cf.PARTIAL_FILENAME).exists()
     assert len(client.calls) == 2
+
+
+# ------------------------------------------------------------------ текст запроса (без сети)
+
+def test_request_text_asks_for_appearance_even_without_visual_details():
+    text = "Anna walks in.\nBob talks."  # в окне нет описаний внешности
+    assert "permanent appearance" in cf._SYSTEM
+    assert "Return only one JSON object" in cf._SYSTEM
+    user = cf._window_request(text, [])
+    assert "always contains at least age range, build, hair, and facial features" in user
+    assert "do not add any identifier beyond the name" in user
+    assert "Do not add any uncertainty marker or extra field." in user
