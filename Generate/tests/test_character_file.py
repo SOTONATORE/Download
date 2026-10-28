@@ -5,6 +5,7 @@ import logging
 import pytest
 
 from Generate.core import character_file as cf
+from Generate.core import log_setup
 from Generate.core.srt_parser import Segment, srt_hash
 
 ANNA = {"name": "ANNA", "aliases": [], "keywords": ["Anna"],
@@ -651,3 +652,142 @@ def test_owner_empty_string_null_without_log_and_unknown_name_null_with_log(capl
     assert [o["owner"] for o in out] == [None, None]
     assert "owner not found, set to null: HOUSE" in caplog.messages
     assert not any("owner not found, set to null: KEY" in m for m in caplog.messages)
+
+
+# ---------------------------------------------------------------------------
+# Проверка дубликатов объектов после слияния персонажей (2a–2e) и события журнала (3)
+# ---------------------------------------------------------------------------
+
+def _existing(characters=(), objects=(), segs=()):
+    """Частичная запись прошлого запуска с тем же srt_hash, что у сегментов: окна уже не ждут очереди."""
+    return {"srt_hash": srt_hash(list(segs)), "characters": list(characters), "objects": list(objects),
+            "finished": []}
+
+
+def test_reproduction_unowned_house_and_new_owner_is_not_duplicate():
+    # 2e: известный HOUSE без владельца; ответ: новый персонаж ANNA и HOUSE с владельцем ANNA.
+    # Раньше владелец сравнивался по старому списку персонажей (None) и давал ложный дубль.
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(objects=[_obj("HOUSE", None, "a brick house", rid="OBJ_1")], segs=segs)
+    reply = _reply(_c("ANNA", "a woman in her thirties"),
+                   objects=[_obj("HOUSE", "ANNA", "a two-storey house with white shutters")])
+    record, client = _run_window(segs, [reply], existing)
+    assert len(client.calls) == 1  # повтора нет
+    assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", None), ("OBJ_2", "CHAR_1")]
+
+
+def test_two_new_objects_same_name_same_owner_in_one_reply_retry_then_raise():
+    # 2b, 2c: два новых HOUSE с владельцем ANNA в одном ответе — дубль; повтор такой же — ошибка окна
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    dup = _reply(_c("ANNA", "a woman in her thirties"),
+                 objects=[_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")])
+    written = []
+    client = ScriptClient([dup, dup])
+    with pytest.raises(cf.CharacterWindowError) as exc:
+        cf.build_character_file(segs, client, {}, on_window=written.append)
+    assert type(exc.value) is cf.CharacterWindowError
+    assert len(client.calls) == 2  # один повтор
+    assert written == []  # окно не сохранено
+
+
+def test_two_new_objects_same_name_same_owner_one_retry_then_good_reply_stored():
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    dup = _reply(_c("ANNA", "a woman in her thirties"),
+                 objects=[_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")])
+    good = _reply(_c("ANNA", "a woman in her thirties"), objects=[_obj("HOUSE", "ANNA", "two-storey house")])
+    record, client = _run_window(segs, [dup, good], {})
+    assert len(client.calls) == 2
+    assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", "CHAR_1")]
+
+
+def test_new_object_same_name_same_owner_id_as_existing_retry_then_raise():
+    # 2b, 2c: новый HOUSE с владельцем ANNA; ANNA известен как CHAR_1, у существующего HOUSE тот же владелец CHAR_1
+    segs = [Segment(1, 0, 1000, "Anna sits by the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")],
+                         objects=[_obj("HOUSE", "CHAR_1", "a brick house", rid="OBJ_1")], segs=segs)
+    dup = _reply(_c("ANNA", ANNA["appearance"], rid="CHAR_1"),
+                 objects=[_obj("HOUSE", "ANNA", "two-storey house")])
+    client = ScriptClient([dup, dup])
+    with pytest.raises(cf.CharacterWindowError):
+        cf.build_character_file(segs, client, existing)
+    assert len(client.calls) == 2
+
+
+def test_new_object_same_name_same_owner_id_as_existing_one_retry_then_known_id_stored():
+    segs = [Segment(1, 0, 1000, "Anna sits by the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")],
+                         objects=[_obj("HOUSE", "CHAR_1", "a brick house", rid="OBJ_1")], segs=segs)
+    dup = _reply(_c("ANNA", ANNA["appearance"], rid="CHAR_1"), objects=[_obj("HOUSE", "ANNA", "two-storey house")])
+    good = _reply(_c("ANNA", ANNA["appearance"], rid="CHAR_1"),
+                  objects=[_obj("HOUSE", "ANNA", "two-storey house", rid="OBJ_1")])
+    record, client = _run_window(segs, [dup, good], existing)
+    assert len(client.calls) == 2
+    assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", "CHAR_1")]
+
+
+def test_new_object_same_name_other_owner_id_is_separate_record():
+    # 2b: то же имя, но другой владелец по id — не дубль, одна запись на одно окно без повтора
+    segs = [Segment(1, 0, 1000, "Anna and Bob at the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")],
+                         objects=[_obj("HOUSE", "CHAR_1", "a brick house", rid="OBJ_1")], segs=segs)
+    reply = _reply(_c("ANNA", ANNA["appearance"], rid="CHAR_1"), _c("BOB", BOB["appearance"]),
+                   objects=[_obj("HOUSE", "BOB", "wooden cabin")])
+    record, client = _run_window(segs, [reply], existing)
+    assert len(client.calls) == 1
+    assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", "CHAR_1"), ("OBJ_2", "CHAR_2")]
+
+
+def test_two_new_characters_same_name_in_one_reply_retry_then_raise():
+    # 2b: два новых персонажа с одним именем в одном ответе — дубль (владельца у персонажей нет)
+    segs = [Segment(1, 0, 1000, "Anna waves.")]
+    dup = _reply(_c("ANNA", "a woman in her thirties"), _c("ANNA", "a woman in her forties"))
+    client = ScriptClient([dup, dup])
+    with pytest.raises(cf.CharacterWindowError):
+        cf.build_character_file(segs, client, {})
+    assert len(client.calls) == 2
+
+
+def _run_window(segs, replies, existing):
+    client = ScriptClient(replies)
+    record = cf.build_character_file(segs, client, existing)
+    return record, client
+
+
+def test_three_record_events_reach_run_debug_log_file(tmp_path):
+    # 3a, 3d: при уровне INFO три события пишутся в <каталог>/run/debug.log с прежним текстом
+    prev_level = logging.getLogger().level
+    handlers, note = log_setup.setup_logging("INFO", str(tmp_path))
+    try:
+        assert note is None
+        cf.merge_characters([dict(ANNA, id="CHAR_1")],
+                            [_item("ANNA", "a woman in her forties with grey hair", rid="CHAR_1")])
+        cf.merge_objects([], [_obj("HOUSE", "NOBODY", "two-storey brick house")], [dict(ANNA, id="CHAR_1")])
+        cf._check_reply({"characters": [_item("CARL", "a man in his fifties", rid="CHAR_9")], "objects": []},
+                        [dict(ANNA, id="CHAR_1")], [])
+    finally:
+        log_setup.teardown_logging(handlers)
+        logging.getLogger().setLevel(prev_level)
+    lines = (tmp_path / "run" / "debug.log").read_text(encoding="utf-8").splitlines()
+    # строка лога: «дата время [УРОВЕНЬ] текст», поэтому ищем текст внутри строки
+    def _has(text):
+        return any(text in line for line in lines)
+    assert _has("[INFO] appearance updated: CHAR_1 ANNA: A woman in her thirties with short dark hair. -> "
+                "a woman in her forties with grey hair")
+    assert _has("[WARNING] owner not found, set to null: HOUSE")
+    assert _has("[WARNING] id not in window, dropped: CHAR_9 CARL")
+
+
+def test_record_events_are_not_console_key_events(caplog):
+    # 3b: события не помечены как ключевые, а INFO-строка «appearance updated» консоль не пропускает
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    cf.merge_characters([dict(ANNA, id="CHAR_1")], [_item("ANNA", "a woman in her forties", rid="CHAR_1")])
+    cf.merge_objects([], [_obj("HOUSE", "NOBODY", "two-storey brick house")], [dict(ANNA, id="CHAR_1")])
+    cf._check_reply({"characters": [_item("CARL", "a man in his fifties", rid="CHAR_9")], "objects": []},
+                    [dict(ANNA, id="CHAR_1")], [])
+    events = [r for r in caplog.records if r.name == "Generate.character_file"]
+    assert len(events) == 3
+    for r in events:
+        assert not getattr(r, log_setup.KEY_EVENT_ATTR, False)
+    info = [r for r in events if r.levelno == logging.INFO]
+    assert len(info) == 1 and info[0].getMessage().startswith("appearance updated: ")
+    assert log_setup.ConsoleFilter().filter(info[0]) is False

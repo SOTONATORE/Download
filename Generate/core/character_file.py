@@ -474,36 +474,59 @@ def _keep_known_ids(items: list, known: list, what: str) -> list:
 
 def _check_reply(parsed: dict, characters: list, objects: list) -> dict:
     """Проверка разобранного ответа по известным записям. Неизвестный id отбрасывается (_keep_known_ids).
-    Новая запись (id пустой), чьё имя или псевдоним совпадает с записью того же владельца, — ошибка ответа (2d):
-    такая запись уже есть и должна вернуться с её id. Владелец объекта сравнивается по id."""
+    Новая запись персонажа (id пустой), чьё имя или псевдоним совпадает с известным персонажем, — ошибка ответа
+    (2d): такая запись уже есть и должна вернуться с её id. Два новых персонажа с одним именем в одном ответе
+    — тоже ошибка (2b). Проверка объектов по владельцу здесь не делается: владелец известен только после
+    слияния персонажей, см. _check_new_objects."""
     chars = _keep_known_ids(parsed["characters"], characters, "персонаж")
     objs = _keep_known_ids(parsed["objects"], objects, "объект")
+    seen_new: list = []
     for item in chars:
         if item["id"] != "":
             continue
+        keys = _name_keys(item["name"], item["aliases"])
         for rec in characters:
-            if _name_keys(item["name"], item["aliases"]) & _name_keys(rec["name"], rec.get("aliases", [])):
+            if keys & _name_keys(rec["name"], rec.get("aliases", [])):
                 raise ValueError(f"новая запись «{item['name']}» совпадает с записью {rec['id']}: "
                                  "её нужно вернуть с этим id")
-    owners = _owner_index(characters)
-    for item in objs:
+        if any(keys & prev for prev in seen_new):
+            raise ValueError(f"новая запись «{item['name']}» повторяется в этом ответе")
+        seen_new.append(keys)
+    return {"characters": chars, "objects": objs}
+
+
+def _check_new_objects(items: list, objects: list, new_chars: list) -> None:
+    """Проверка новых объектов ответа после слияния персонажей (2a). Владелец находится по new_chars, то есть
+    id, который merge_characters только что назначил персонажам окна; неизвестное имя владельца даёт None,
+    как в merge_objects. Дубль (2b): новый объект с тем же именем или псевдонимом, что у записи с тем же
+    владельцем по id, или два новых объекта с тем же именем и тем же владельцем внутри этого ответа.
+    Ошибка — ValueError: окно повторяется (2c)."""
+    owners = _owner_index(new_chars)
+    seen_new: list = []
+    for item in items:
         if item["id"] != "":
             continue
         owner_id = owners.get(item["owner"].upper()) if item["owner"] else None
+        keys = _name_keys(item["name"], item["aliases"])
         for rec in objects:
             if rec.get("owner") != owner_id:
                 continue
-            if _name_keys(item["name"], item["aliases"]) & _name_keys(rec["name"], rec.get("aliases", [])):
+            if keys & _name_keys(rec["name"], rec.get("aliases", [])):
                 raise ValueError(f"новый объект «{item['name']}» совпадает с объектом {rec['id']} того же "
                                  "владельца: его нужно вернуть с этим id")
-    return {"characters": chars, "objects": objs}
+        for prev_owner, prev_keys, prev_name in seen_new:
+            if prev_owner == owner_id and keys & prev_keys:
+                raise ValueError(f"новый объект «{item['name']}» повторяет новый объект «{prev_name}» того же "
+                                 "владельца в этом ответе")
+        seen_new.append((owner_id, keys, item["name"]))
 
 
 def _ask_window(client: Any, model: str, text: str, characters: list, objects: list,
                 first: int, last: int) -> tuple:
     """Один запрос на окно: проверка ответа и слияние. Возвращает (characters, objects).
 
-    Ответ проверяется parse_window_reply и _check_reply. Нарушение — ещё один запрос (всего два). Если второй
+    Ответ проверяется parse_window_reply, _check_reply, слияние персонажей и _check_new_objects (владелец
+    объекта — id после слияния). Нарушение — ещё один запрос (всего два). Если второй
     ответ тоже не прошёл, то при пустой внешности новой записи выходит EmptyAppearanceError, иначе
     CharacterWindowError. Слияние выполняется только для ответа, прошедшего проверку. Ошибки транспорта
     (GeminiRuntimeError) не перехватываются: квоту и сбои сети обрабатывает ManagedTransport."""
@@ -514,12 +537,13 @@ def _ask_window(client: Any, model: str, text: str, characters: list, objects: l
         raw = client.generate_json(model, system, user, WINDOW_SCHEMA)
         try:
             extracted = _check_reply(parse_window_reply(raw, text), characters, objects)
+            new_chars = merge_characters(characters, extracted["characters"])
+            _check_new_objects(extracted["objects"], objects, new_chars)
         except ValueError as exc:
             last_error = exc
             log.warning("Окно сегментов %s..%s: ответ не прошёл проверку (%s), попытка %d из 2.",
                         first, last, exc, attempt)
             continue
-        new_chars = merge_characters(characters, extracted["characters"])
         new_objs = merge_objects(objects, extracted["objects"], new_chars)
         return new_chars, new_objs
     if isinstance(last_error, _EmptyNewAppearance):
