@@ -37,6 +37,7 @@ from typing import Callable, Optional
 import httpx
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
+    from . import character_file as cf
     from . import gemini_orchestrator as go
     from . import gemini_prompts as gp
     from . import weights_log as wl
@@ -55,6 +56,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
         VastError, VastInstanceNotFound, VastRuntimeError, remove_instance_fields,
     )
 except ImportError:  # pragma: no cover
+    import character_file as cf  # type: ignore
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
@@ -1621,8 +1623,12 @@ class Orchestrator:
                 self.segments, needed, self.cfg, self.gemini_transport, self.prompts_path,
                 profile=self.profile, timing=self.timing_params, **self.gemini_options)
         except go.CharacterStepError as exc:
-            # сбой файла персонажей останавливает прогон, как плохое окно (CharacterWindowError)
+            # сбой файла персонажей останавливает прогон: исключение уходит наверх без повтора
             log.error("Прогон остановлен: %s", exc)
+            raise
+        except cf.CharacterWindowError as exc:
+            # плохое окно персонажей после повтора останавливает прогон: исключение уходит наверх
+            log.error("Прогон остановлен: окно персонажей не прошло проверку дважды: %s", exc)
             raise
         except gp.GeminiRuntimeError as exc:
             log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)

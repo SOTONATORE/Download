@@ -49,9 +49,11 @@ from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 
 try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
+    from Generate.core.character_file import CharacterWindowError
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, profile_dir, profile_exists)
+    from Generate.core.gemini_orchestrator import CharacterStepError
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
@@ -63,9 +65,11 @@ try:  # пакетный и «плоский» импорт
         OfferFilter, VastClient, VastError, VastInstanceNotFound, VastRuntimeError)
 except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
+    from character_file import CharacterWindowError  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, profile_dir, profile_exists)
+    from gemini_orchestrator import CharacterStepError  # type: ignore
     from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
     from model_constants import PRESET_NONE  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
@@ -601,6 +605,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             # артефакт запуска (SPEC 10.4): каталог задаёт workflow; пусто = не ведётся
             artifact_dir=(getattr(args, "artifact_dir", "") or None),
         )
+    except CharacterStepError:
+        # сбой файла персонажей (Gemini): код выхода 3, как у GeminiRuntimeError
+        _err("Файл персонажей не построен: прогон остановлен. Повторите запуск, готовые окна сохранены.")
+        return EXIT_RUNTIME
+    except CharacterWindowError:
+        # окно персонажей дважды не прошло проверку: код выхода 3, как у самой ошибки
+        _err("Окно персонажей не прошло проверку дважды: прогон остановлен, повторите запуск.")
+        return EXIT_RUNTIME
     except ReleaseStartError as e:
         # служебный релиз или файл запуска не загружены: остановка до трат, код 2 (SPEC 9.1, E1)
         _err(f"Ошибка выдачи в релиз: {e}")

@@ -38,5 +38,4 @@ def test_preset_options_match_preset_files():
     options, default = _choice("preset")
     files = {p.stem for p in PRESETS_DIR.glob("*.md")} - NOT_PRESETS
     assert options == {"none"} | files
-    assert options == {"none"}
     assert default in options

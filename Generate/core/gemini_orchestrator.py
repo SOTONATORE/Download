@@ -279,8 +279,13 @@ def load_state(path, segments: list, profile: str) -> dict:
 
 
 def _has_prompt(entry) -> bool:
-    return (isinstance(entry, dict) and entry.get("status") == "ready"
-            and bool(str(entry.get("prompt", "")).strip()))
+    if not isinstance(entry, dict):
+        return False
+    num_frames = entry.get("num_frames")
+    return (entry.get("status") == "ready"
+            and bool(str(entry.get("prompt", "")).strip())
+            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
+            and num_frames > 0)
 
 
 def missing_segments(prompts: dict, wanted: list) -> list:
