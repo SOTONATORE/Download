@@ -102,7 +102,7 @@ def build_character_instructions() -> str:
         "hair, and facial features for a person, or the main fixed properties for an object, even when the "
         "window text has no visual details. Base it on what you know about the person or object by name and "
         "on the context of the subtitles.",
-        "- Write each new_traits item as a short noun phrase in lowercase, with an article where it fits, "
+        "- Write each new_traits item as one short noun phrase in lowercase, one trait per item, with an article where it fits, "
         "with no final period, at most 25 words. Do not write full sentences.",
         "- Do not add any uncertainty marker or extra field.",
         "- If nothing relevant appears in the text, return empty lists.",
@@ -256,11 +256,10 @@ def _norm(text: str) -> str:
 
 
 def _sentence(text: str) -> str:
-    t = " ".join(text.split())
-    if not t:
-        return ""
-    t = t[0].upper() + t[1:]
-    return t if t[-1] in ".!?" else t + "."
+    """Одна черта в виде фразы для записи: без точки в конце, первая буква заглавная.
+    Несколько черт склеивает _add_trait через «, and »; точка между ними не ставится."""
+    t = normalize_appearance(text)
+    return t[:1].upper() + t[1:] if t else ""
 
 
 def _lower_first(piece: str) -> str:
@@ -274,24 +273,29 @@ def _lower_first(piece: str) -> str:
 def normalize_appearance(text: str) -> str:
     """Внешность в виде фразы для вставки в середину промпта.
 
-    Убирает лишние пробелы и одну точку в конце. Внутренние «. » между чертами заменяются на «, »,
+    Убирает лишние пробелы и одну точку в конце. Внутренние «. » между чертами заменяются на «, and »,
     каждая черта начинается со строчной буквы: старые записи хранят черты предложениями
-    («Man in his fifties. Grey beard.»), а в промпте нужна одна фраза. Аббревиатура в начале черты сохраняется.
+    («Man in his fifties. Grey beard.»), а в промпте нужна одна фраза. Точка не разрывает фразу, если стоит
+    после одной буквы («U.S. army»). Аббревиатура в начале черты сохраняется.
     Читается при каждом использовании, поэтому старые characters.json работают без пересборки."""
     t = " ".join(str(text or "").split())
     if t.endswith("."):
         t = t[:-1].rstrip()
-    pieces = [p for p in re.split(r"\.\s+", t) if p]
-    return ", ".join(_lower_first(p) for p in pieces)
+    pieces = [p for p in re.split(r"(?<!\b[A-Za-z])\.\s+", t) if p]
+    return ", and ".join(_lower_first(p) for p in pieces)
 
 
 def _add_trait(appearance: str, trait: str) -> str:
-    """Дописывает черту в конец внешности, если её там ещё нет (по нормализованному тексту)."""
+    """Дописывает черту к внешности через «, and », если её там ещё нет (по нормализованному тексту).
+    Старая запись с точками читается через normalize_appearance и переписывается в новую форму."""
     sen = _sentence(trait)
     n = _norm(trait)
     if not sen or (n and n in _norm(appearance)):
         return appearance
-    return (appearance + " " + sen).strip()
+    base = normalize_appearance(appearance)
+    if not base:
+        return sen
+    return _sentence(base + ", and " + _lower_first(sen))
 
 
 def _apply_traits(rec: dict, item: dict) -> None:

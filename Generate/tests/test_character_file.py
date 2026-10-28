@@ -23,7 +23,7 @@ def test_new_character_added():
     assert len(out) == 1
     assert out[0]["name"] == "CARL"
     assert out[0]["keywords"] == ["Carl"]
-    assert out[0]["appearance"] == "Man in his fifties. Grey beard."
+    assert out[0]["appearance"] == "Man in his fifties, and grey beard"
 
 
 def test_known_character_unchanged():
@@ -37,7 +37,7 @@ def test_known_character_unchanged():
 def test_new_permanent_trait_appended():
     out = cf.merge_characters([BOB], [_item("BOB", new_traits=["grey beard"])])
     assert len(out) == 1
-    assert out[0]["appearance"] == "A man in his forties with short grey hair. Grey beard."
+    assert out[0]["appearance"] == "A man in his forties with short grey hair, and grey beard"
 
 
 def test_conflicting_trait_not_recorded_and_logged(caplog):
@@ -203,7 +203,7 @@ def test_same_name_objects_without_owner_merge_into_one():
                                 _obj("KEY", None, ["brass key", "worn edges"])], [])
     assert len(out) == 1
     assert out[0]["owner"] is None
-    assert out[0]["appearance"] == "Small brass key. Worn edges."
+    assert out[0]["appearance"] == "Small brass key, and worn edges"
 
 
 def test_unknown_owner_name_sets_owner_null_and_logs(caplog):
@@ -248,11 +248,30 @@ def test_normalize_appearance_strips_old_trailing_period():
 
 def test_normalize_appearance_turns_inner_sentences_into_one_phrase():
     # две черты, склеенные «. », дают одну фразу без точки внутри
-    assert cf.normalize_appearance("Man in his fifties. Grey beard.") == "man in his fifties, grey beard"
+    assert cf.normalize_appearance("Man in his fifties. Grey beard.") == "man in his fifties, and grey beard"
 
 
 def test_normalize_appearance_keeps_leading_acronym():
     assert cf.normalize_appearance("NATO flag.") == "NATO flag"
+
+
+def test_sentence_one_trait_has_no_period():
+    assert cf._sentence("a grey beard") == "A grey beard"
+    assert cf._sentence("a grey beard.") == "A grey beard"
+
+
+def test_two_new_traits_stored_as_one_phrase_without_period():
+    out = cf.merge_characters([], [_item("CARL", ["a man in his fifties", "a grey beard"], keywords=["Carl"])])
+    assert out[0]["appearance"] == "A man in his fifties, and a grey beard"
+    assert "." not in out[0]["appearance"]
+
+
+def test_normalize_appearance_one_old_trait_has_no_period():
+    assert cf.normalize_appearance("Two-storey brick house.") == "two-storey brick house"
+
+
+def test_normalize_appearance_does_not_split_on_us_abbreviation():
+    assert cf.normalize_appearance("Man from the U.S. army. Grey beard.") == "man from the U.S. army, and grey beard"
 
 
 def test_appearance_rule_asks_for_noun_phrase_and_example_matches():
@@ -322,7 +341,7 @@ def test_same_name_other_owner_is_new_object_after_retry(monkeypatch):
     client = ScriptClient([w1, w2_bad, w2_good])
     record = cf.build_character_file(segs, client, {})
     assert [(o["id"], o["owner"]) for o in record["objects"]] == [("OBJ_1", "CHAR_1"), ("OBJ_2", "CHAR_2")]
-    assert record["objects"][1]["appearance"] == "Wooden cabin."
+    assert record["objects"][1]["appearance"] == "Wooden cabin"
     assert len(client.calls) == 3  # окно 1, окно 2 и один повтор окна 2
 
 

@@ -121,7 +121,11 @@ def test_batch_descriptions_normalizes_old_cached_appearance():
 def test_batch_descriptions_normalizer_matches_character_file():
     # копия в gemini_prompts должна давать тот же результат, что normalize_appearance в character_file
     samples = ["A woman in her thirties with short dark hair.", "Man in his fifties. Grey beard.",
-               "NATO flag.", "  a brick house  ", "Two-storey brick house. White shutters.", ""]
+               "NATO flag.", "  a brick house  ", "Two-storey brick house. White shutters.", "",
+               # новая форма: одна фраза с «, and », без точки
+               "a man in his fifties, and a grey beard", "A man in his fifties, and a grey beard",
+               # старая форма с одной чертой и с «U.S.», где точка не делит фразу
+               "Two-storey brick house.", "Man from the U.S. army. Grey beard."]
     for text in samples:
         assert gp._normalize_appearance(text) == cf.normalize_appearance(text), text
 
@@ -161,8 +165,10 @@ def test_old_cached_appearance_reads_as_one_sentence_in_prompt(tmp_path):
     segs = [Segment(1, 0, 1000, "Anna stands by the house.")]
     t = RecordingTransport([json.dumps([{"segment_index": 1,
                                          "prompt": "[CHAR_1] stands by [OBJ_1] in the quiet street."}])])
+    # фикстура без артикля, поэтому в ожидаемом тексте тоже нет «a»; код артикль не добавляет
+    assert gp._normalize_appearance(old_anna["appearance"]) == "a woman in her thirties with short dark hair"
     res = gp.generate_prompts(segs, [1], cfg(tmp_path), t, "m", characters=[old_anna, old_house])
-    assert res[0].prompt == ("A woman in her thirties with short dark hair stands by a two-storey brick house "
+    assert res[0].prompt == ("A woman in her thirties with short dark hair stands by two-storey brick house "
                              "in the quiet street.")
 
 

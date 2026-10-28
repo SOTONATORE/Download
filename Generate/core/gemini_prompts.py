@@ -662,7 +662,7 @@ def _normalize_appearance(text: str) -> str:
     t = " ".join(str(text or "").split())
     if t.endswith("."):
         t = t[:-1].rstrip()
-    pieces = [p for p in re.split(r"\.\s+", t) if p]
+    pieces = [p for p in re.split(r"(?<!\b[A-Za-z])\.\s+", t) if p]
     out = []
     for piece in pieces:
         word = piece.split(" ", 1)[0]
@@ -670,7 +670,7 @@ def _normalize_appearance(text: str) -> str:
             out.append(piece)
         else:
             out.append(piece[:1].lower() + piece[1:])
-    return ", ".join(out)
+    return ", and ".join(out)
 
 
 def batch_descriptions(records: list, batch_text: str) -> dict:
