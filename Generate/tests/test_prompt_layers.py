@@ -1,11 +1,13 @@
 """Слои системной инструкции (фаза E2): правила, стиль модели, затем пресет. Файлы пресетов — только tmp_path."""
 import hashlib
+import json
 import pathlib
 
 import pytest
 
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiInputError, PromptConfig, build_system_instruction
+from Generate.core.srt_parser import Segment
 
 GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
@@ -38,16 +40,24 @@ def test_preset_none_is_byte_identical_to_baseline():
     assert "# Preset" not in absent
 
 
-def test_preset_overlay_sits_after_model_style(presets):
-    (presets / "pz.md").write_text(
-        "PRESET LINE one\n<!-- USER_ONLY_START -->HIDDEN NOTE<!-- USER_ONLY_END -->\nPRESET LINE two\n",
-        encoding="utf-8")
+def test_preset_not_in_system_instruction_and_attached_to_prompts(presets):
+    (presets / "test.md").write_text("test\n", encoding="utf-8")
     base = build_system_instruction(PromptConfig(style_file=str(LTX_STYLE)))
-    system = build_system_instruction(PromptConfig(style_file=str(LTX_STYLE), preset="pz"))
-    # только добавлен блок в конец: правила и стиль модели не меняются
-    assert system == base + "\n\n# Preset\nPRESET LINE one\n\nPRESET LINE two"
-    assert system.index("# Style guide") < system.index("# Preset")
-    assert "HIDDEN NOTE" not in system
+    system = build_system_instruction(PromptConfig(style_file=str(LTX_STYLE), preset="test"))
+    # системная инструкция с пресетом совпадает с базовой: ни заголовка, ни текста пресета
+    assert system == base
+    assert "# Preset" not in system
+    assert system.count("test") == base.count("test")
+    # готовый промпт заканчивается текстом пресета
+    segs = [Segment(1, 0, 1000, "The old city woke slowly.")]
+    cfg = PromptConfig(style_file=str(LTX_STYLE), preset="test", max_prompt_chars=300)
+
+    class _Stub:
+        def generate_json(self, model, system, user, schema):
+            return json.dumps([{"segment_index": 1, "prompt": "A baker lifts a tray at dawn."}])
+
+    res = gp.generate_prompts(segs, [1], cfg, _Stub(), "m")
+    assert res[0].prompt == "A baker lifts a tray at dawn. test"
 
 
 def test_preset_missing_file_is_input_error(presets):

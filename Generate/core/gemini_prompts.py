@@ -331,6 +331,13 @@ def read_preset(preset: str) -> str:
     return text
 
 
+def attach_style(prompt: str, style_text: str) -> str:
+    """Дописывает текст стиля в конец готового промпта через «. ». Пустой стиль — промпт без изменений."""
+    if not style_text:
+        return prompt
+    return prompt.rstrip().rstrip(".") + ". " + style_text
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     parts = [
@@ -361,9 +368,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
-    # слой пресета — после стиля модели; при «none» список остаётся прежним, вывод байт в байт тот же
+    # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
     if cfg.preset != PRESET_NONE:
-        parts.append("# Preset\n" + read_preset(cfg.preset))
+        read_preset(cfg.preset)
     return "\n\n".join(parts)
 
 
@@ -687,6 +694,8 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     и в пользовательское сообщение добавляется инструкция о маркерах. descriptions тогда не используется."""
     desc = descriptions or {}
     builder = _Builder(segments, wanted_nums, cfg)
+    # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
+    style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
     out: dict = {}
     for batch in builder.batches(builder.wanted):
         if characters is None:
@@ -704,6 +713,9 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                 r.needs_review = True
                 reason = "; ".join(f"маркер персонажа без описания: {n}" for n in unresolved)
                 r.review_reason = "; ".join(x for x in (r.review_reason, reason) if x)
+            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+            if r.prompt.strip():
+                r.prompt = attach_style(r.prompt, style_text)
         out.update(batch_res)
         if on_batch is not None:
             on_batch([batch_res[n] for n in batch.nums])

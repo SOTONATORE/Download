@@ -12,7 +12,7 @@ import pytest
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import (
     GeminiInputError, GeminiRuntimeError, PromptConfig, RealTransport,
-    build_requests, generate_prompts, merge_segments_into_sentences,
+    attach_style, build_requests, generate_prompts, merge_segments_into_sentences,
     parse_and_validate, strip_user_only,
 )
 from Generate.core.srt_parser import Segment
@@ -608,3 +608,38 @@ def test_module_does_not_import_download():
         else:
             continue
         assert "Download" not in roots and "generate_queries" not in roots
+
+
+# ---------------------------------------------------------------- стиль пресета
+
+def test_attach_style_empty_returns_prompt_unchanged():
+    assert attach_style("A man walks.", "") == "A man walks."
+    assert attach_style("A man walks", "") == "A man walks"
+
+
+def test_attach_style_appends_with_dot_space():
+    assert attach_style("A man walks.", "test") == "A man walks. test"
+    assert attach_style("A man walks", "test") == "A man walks. test"
+
+
+def test_attach_style_no_double_dot():
+    assert attach_style("A man walks..", "test") == "A man walks. test"
+
+
+def test_generate_prompts_with_preset_ends_with_style(tmp_path, monkeypatch):
+    presets = tmp_path / "prompts"
+    presets.mkdir()
+    (presets / "test.md").write_text("test\n", encoding="utf-8")
+    monkeypatch.setattr(gp, "PRESETS_DIR", presets)
+    cfg = make_cfg(tmp_path, preset="test")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn. test"] * 2
+    assert "# Preset" not in t.calls[0]["system"]
+
+
+def test_generate_prompts_preset_none_unchanged(tmp_path):
+    cfg = make_cfg(tmp_path, preset="none")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn."] * 2
