@@ -571,6 +571,28 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
 # Прогон батчей на заданном транспорте (без лимитера и цепочки: это 4б)
 # ---------------------------------------------------------------------------
 
+# Маркер персонажа в промпте: [ИМЯ], заглавные латинские и кириллические буквы, цифры, «_».
+_MARKER_RX = re.compile(r"\[([A-Z0-9_\u0410-\u042f\u0401]+)\]")
+
+
+def resolve_markers(prompt: str, descriptions: dict) -> tuple:
+    """Заменяет каждый [ИМЯ], у которого ИМЯ есть в descriptions, на описание из descriptions.
+
+    Возвращает (новый текст, список неразрешённых имён). Неизвестный маркер остаётся в тексте как есть
+    и попадает в список (каждое имя один раз, по порядку первого появления). Описания не придумываются."""
+    unresolved: list = []
+
+    def repl(m):
+        name = m.group(1)
+        if name in descriptions:
+            return descriptions[name]
+        if name not in unresolved:
+            unresolved.append(name)
+        return m.group(0)
+
+    return _MARKER_RX.sub(repl, prompt), unresolved
+
+
 def _is_clean(results: dict, num: int, problems: list) -> bool:
     r = results.get(num)
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
@@ -613,7 +635,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
 
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
-                     on_batch: Optional[Callable[[list], None]] = None) -> list:
+                     on_batch: Optional[Callable[[list], None]] = None,
+                     descriptions: Optional[dict] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -623,11 +646,22 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     on_batch(results): необязательный колбэк. Вызывается после каждого готового батча (с учётом
     retry), до начала следующего; results: list[PromptResult] этого батча по возрастанию номера,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
-    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее."""
+    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
+
+    descriptions: описания персонажей для маркеров [ИМЯ] в промптах. Без них (None или {}) маркеры
+    остаются в тексте и помечаются needs_review."""
+    desc = descriptions or {}
     builder = _Builder(segments, wanted_nums, cfg)
     out: dict = {}
     for batch in builder.batches(builder.wanted):
         batch_res = _run_batch(transport, model, builder, batch)
+        # H3 hook: character descriptions come from the character file, not implemented yet
+        for r in batch_res.values():
+            r.prompt, unresolved = resolve_markers(r.prompt, desc)
+            if unresolved:
+                r.needs_review = True
+                reason = "; ".join(f"маркер персонажа без описания: {n}" for n in unresolved)
+                r.review_reason = "; ".join(x for x in (r.review_reason, reason) if x)
         out.update(batch_res)
         if on_batch is not None:
             on_batch([batch_res[n] for n in batch.nums])

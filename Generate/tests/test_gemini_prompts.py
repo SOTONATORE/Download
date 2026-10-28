@@ -401,6 +401,25 @@ def test_system_instruction_without_brief_ends_with_style_guide(tmp_path):
     assert system.endswith("\n\n# Style guide\n" + style)
 
 
+# ---------------------------------------------------------------- маркеры персонажей
+
+def test_resolve_markers_one_resolved_one_unresolved():
+    out, left = gp.resolve_markers("A [ANNA] walks past [BOB].", {"ANNA": "a woman in a grey coat"})
+    assert out == "A a woman in a grey coat walks past [BOB]."
+    assert left == ["BOB"]
+
+
+def test_resolve_markers_repeated_marker():
+    out, left = gp.resolve_markers("[ANNA] waves; [ANNA] smiles.", {"ANNA": "a woman"})
+    assert out == "a woman waves; a woman smiles."
+    assert left == []
+
+
+def test_resolve_markers_without_markers_unchanged():
+    text = "A wide shot of a quiet street at dawn."
+    assert gp.resolve_markers(text, {"ANNA": "a woman"}) == (text, [])
+
+
 # ---------------------------------------------------------------- RealTransport и ключ
 
 def _transport(handler):

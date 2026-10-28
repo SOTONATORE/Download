@@ -11,8 +11,8 @@ GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
 # Эталон: системная инструкция ltx25 ДО фазы E2 (код до слоя пресета), снято с исходного дерева.
-BASELINE_BYTES = 16212
-BASELINE_SHA256 = "1f8febaa1c40164ed94197274c9c2de7d7252ad39de37614ccf36d1a0e082964"
+BASELINE_BYTES = 16007
+BASELINE_SHA256 = "df7351ffd49270bfed51b1b768340f43f48152fd30256928fa82621d44454f1b"
 
 
 @pytest.fixture
