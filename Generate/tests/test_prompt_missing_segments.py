@@ -125,9 +125,22 @@ def test_batch_descriptions_normalizer_matches_character_file():
                # новая форма: одна фраза с «, and », без точки
                "a man in his fifties, and a grey beard", "A man in his fifties, and a grey beard",
                # старая форма с одной чертой и с «U.S.», где точка не делит фразу
-               "Two-storey brick house.", "Man from the U.S. army. Grey beard."]
+               "Two-storey brick house.", "Man from the U.S. army. Grey beard.",
+               # новая форма записи: одна фраза с предлогом и без точки, с точкой и с пробелами по краям
+               "A woman in her thirties with short dark hair", "a two-storey brick house with white shutters",
+               "A two-storey brick house with white shutters.", "  A two-storey brick house with white shutters  "]
     for text in samples:
         assert gp._normalize_appearance(text) == cf.normalize_appearance(text), text
+
+
+def test_new_single_phrase_values_match_in_both_copies():
+    # новая фраза возвращается строчной, без точки; артикль не добавляется
+    cases = [("A woman in her thirties with short dark hair", "a woman in her thirties with short dark hair"),
+             ("A two-storey brick house with white shutters.", "a two-storey brick house with white shutters"),
+             ("Two-storey brick house with white shutters", "two-storey brick house with white shutters")]
+    for raw, expected in cases:
+        assert gp._normalize_appearance(raw) == expected, raw
+        assert cf.normalize_appearance(raw) == expected, raw
 
 
 def test_batch_descriptions_keys_characters_and_objects():

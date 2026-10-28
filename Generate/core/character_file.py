@@ -80,7 +80,7 @@ def build_character_instructions() -> str:
         "- new_traits: permanent appearance only: age range, build, hair, face, beard.",
         "- For a character already in the record, new_traits holds only permanent traits that the recorded "
         "appearance does not contain yet, and conflicts holds permanent traits that contradict it.",
-        "- For a character not in the record, all permanent traits go into new_traits and conflicts is empty.",
+        "- For a character not in the record, all permanent traits go into the one new_traits item and conflicts is empty.",
         "- If the name is ambiguous, choose the most likely historical person from the context of the text; "
         "do not add any identifier beyond the name.",
         "Rules for objects:",
@@ -94,7 +94,7 @@ def build_character_instructions() -> str:
         "- owner: the name of the character who owns the object, exactly as in the characters list, "
         "or an empty string when no listed character owns it.",
         "- For an object already in the record, new_traits and conflicts follow the same rules as for characters.",
-        "- For an object not in the record, all permanent properties go into new_traits and conflicts is empty.",
+        "- For an object not in the record, all permanent properties go into the one new_traits item and conflicts is empty.",
         "Rules for everyone:",
         "- Do not describe clothing or temporary state (wet, tired, and similar), for people or objects.",
         "Appearance rule:",
@@ -102,8 +102,11 @@ def build_character_instructions() -> str:
         "hair, and facial features for a person, or the main fixed properties for an object, even when the "
         "window text has no visual details. Base it on what you know about the person or object by name and "
         "on the context of the subtitles.",
-        "- Write each new_traits item as one short noun phrase in lowercase, one trait per item, with an article where it fits, "
-        "with no final period, at most 25 words. Do not write full sentences.",
+        "- For every new character and every new object, new_traits contains exactly one item: one complete noun phrase "
+        "in lowercase, with an article and a preposition where it fits, for example "
+        "\"a woman in her thirties with short dark hair\" or \"a two-storey brick house with white shutters\". "
+        "The phrase holds all the permanent traits, linked inside the phrase with \"with\" and \"and\". "
+        "No final period. At most 30 words. Do not write full sentences.",
         "- Do not add any uncertainty marker or extra field.",
         "- If nothing relevant appears in the text, return empty lists.",
         "Return only one JSON object, with no markdown, no code fences and no text before or after it.",
@@ -256,9 +259,11 @@ def _norm(text: str) -> str:
 
 
 def _sentence(text: str) -> str:
-    """Одна черта в виде фразы для записи: без точки в конце, первая буква заглавная.
-    Несколько черт склеивает _add_trait через «, and »; точка между ними не ставится."""
-    t = normalize_appearance(text)
+    """Внешность одной фразой для записи: пробелы по краям и одна точка в конце убираются, первая буква заглавная.
+    Ничего не склеивает и точку не добавляет: фраза из ответа модели записывается как есть."""
+    t = " ".join(str(text or "").split())
+    if t.endswith("."):
+        t = t[:-1].rstrip()
     return t[:1].upper() + t[1:] if t else ""
 
 
@@ -285,26 +290,25 @@ def normalize_appearance(text: str) -> str:
     return ", and ".join(_lower_first(p) for p in pieces)
 
 
-def _add_trait(appearance: str, trait: str) -> str:
-    """Дописывает черту к внешности через «, and », если её там ещё нет (по нормализованному тексту).
-    Старая запись с точками читается через normalize_appearance и переписывается в новую форму."""
-    sen = _sentence(trait)
-    n = _norm(trait)
-    if not sen or (n and n in _norm(appearance)):
-        return appearance
-    base = normalize_appearance(appearance)
-    if not base:
-        return sen
-    return _sentence(base + ", and " + _lower_first(sen))
+def _apply_traits(rec: dict, item: dict, is_new: bool) -> None:
+    """Общая часть слияния персонажа и объекта: ключевые слова, внешность, конфликты (меняет rec).
 
-
-def _apply_traits(rec: dict, item: dict) -> None:
-    """Общая часть слияния персонажа и объекта: ключевые слова, новые черты, конфликты (меняет rec)."""
+    Новая запись получает внешность из единственного элемента new_traits, как он пришёл (первая буква заглавная).
+    Лишние элементы логируются и не пишутся. Существующая запись сохраняет свою внешность: новый элемент
+    не дописывается и не объединяется; если он не пуст и отличается от записанного, пишется строка лога."""
     for k in item["keywords"]:
         if k not in rec["keywords"]:
             rec["keywords"].append(k)
-    for t in item["new_traits"]:
-        rec["appearance"] = _add_trait(rec["appearance"], t)
+    traits = item["new_traits"]
+    if is_new:
+        if traits:
+            rec["appearance"] = _sentence(traits[0])
+            for extra in traits[1:]:
+                log.warning("extra new trait not recorded: %s, %s", rec["name"], extra)
+    else:
+        for t in traits:
+            if _norm(t) != _norm(rec["appearance"]):
+                log.warning("appearance kept, new trait not recorded: %s, %s", rec["name"], t)
     for t in item["conflicts"]:
         log.warning("conflict, not recorded: %s, %s", rec["name"], t)
 
@@ -313,10 +317,11 @@ def merge_characters(characters: list, extracted: list) -> list:
     """Сливает разобранные элементы окна в список записей. Чистая функция, Gemini не вызывается.
 
     Правила:
-    - персонаж ищется по имени или псевдониму; известный сохраняет id и внешность, новые постоянные черты
-      дописываются в конец, черта, уже присутствующая в внешности, пропускается;
-    - черта из conflicts не записывается и логируется: «conflict, not recorded: <имя>, <черта>»;
-    - новый персонаж заводится новой записью с очередным id (CHAR_N) и всеми своими чертами.
+    - персонаж ищется по имени или псевдониму; известный сохраняет id и внешность, новые черты не дописываются,
+      при отличии пишется «appearance kept, new trait not recorded: <имя>, <черта>»;
+    - новый персонаж заводится новой записью с очередным id (CHAR_N); его внешность — единственный элемент
+      new_traits, как пришёл (см. _apply_traits);
+    - черта из conflicts не записывается и логируется: «conflict, not recorded: <имя>, <черта>».
     Единственный побочный эффект — строки лога."""
     out = copy.deepcopy(characters)
     _assign_ids(out, "CHAR")
@@ -336,7 +341,7 @@ def merge_characters(characters: list, extracted: list) -> list:
             aliases = list(dict.fromkeys(a for a in item["aliases"] if a.upper() != name.upper()))
             rec = {"id": _new_id(out, "CHAR"), "name": name, "aliases": aliases,
                    "keywords": [], "appearance": ""}
-            _apply_traits(rec, item)
+            _apply_traits(rec, item, is_new=True)
             out.append(rec)
             pos = len(out) - 1
             for key in [name, *aliases]:
@@ -348,7 +353,7 @@ def merge_characters(characters: list, extracted: list) -> list:
             if a.upper() not in index:
                 rec["aliases"].append(a)
                 index[a.upper()] = pos
-        _apply_traits(rec, item)
+        _apply_traits(rec, item, is_new=False)
     return out
 
 
@@ -393,7 +398,7 @@ def merge_objects(objects: list, extracted: list, characters: list) -> list:
             aliases = list(dict.fromkeys(a for a in item["aliases"] if a.upper() != name.upper()))
             rec = {"id": _new_id(out, "OBJ"), "owner": owner, "name": name, "aliases": aliases,
                    "keywords": [], "appearance": ""}
-            _apply_traits(rec, item)
+            _apply_traits(rec, item, is_new=True)
             out.append(rec)
             pos = len(out) - 1
             for key in [name, *aliases]:
@@ -405,7 +410,7 @@ def merge_objects(objects: list, extracted: list, characters: list) -> list:
             if (owner, a.upper()) not in index:
                 rec["aliases"].append(a)
                 index[(owner, a.upper())] = pos
-        _apply_traits(rec, item)
+        _apply_traits(rec, item, is_new=False)
     return out
 
 

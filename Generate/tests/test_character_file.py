@@ -19,11 +19,11 @@ def _item(name, new_traits=(), conflicts=(), keywords=(), aliases=()):
 
 
 def test_new_character_added():
-    out = cf.merge_characters([], [_item("CARL", ["man in his fifties", "grey beard"], keywords=["Carl"])])
+    out = cf.merge_characters([], [_item("CARL", ["a man in his fifties with a grey beard"], keywords=["Carl"])])
     assert len(out) == 1
     assert out[0]["name"] == "CARL"
     assert out[0]["keywords"] == ["Carl"]
-    assert out[0]["appearance"] == "Man in his fifties, and grey beard"
+    assert out[0]["appearance"] == "A man in his fifties with a grey beard"
 
 
 def test_known_character_unchanged():
@@ -34,10 +34,10 @@ def test_known_character_unchanged():
     assert json.dumps([ANNA], sort_keys=True) == before  # вход не меняется
 
 
-def test_new_permanent_trait_appended():
+def test_new_trait_for_known_record_not_appended():
     out = cf.merge_characters([BOB], [_item("BOB", new_traits=["grey beard"])])
     assert len(out) == 1
-    assert out[0]["appearance"] == "A man in his forties with short grey hair, and grey beard"
+    assert out[0]["appearance"] == BOB["appearance"]
 
 
 def test_conflicting_trait_not_recorded_and_logged(caplog):
@@ -203,7 +203,7 @@ def test_same_name_objects_without_owner_merge_into_one():
                                 _obj("KEY", None, ["brass key", "worn edges"])], [])
     assert len(out) == 1
     assert out[0]["owner"] is None
-    assert out[0]["appearance"] == "Small brass key, and worn edges"
+    assert out[0]["appearance"] == "Small brass key"
 
 
 def test_unknown_owner_name_sets_owner_null_and_logs(caplog):
@@ -260,9 +260,9 @@ def test_sentence_one_trait_has_no_period():
     assert cf._sentence("a grey beard.") == "A grey beard"
 
 
-def test_two_new_traits_stored_as_one_phrase_without_period():
-    out = cf.merge_characters([], [_item("CARL", ["a man in his fifties", "a grey beard"], keywords=["Carl"])])
-    assert out[0]["appearance"] == "A man in his fifties, and a grey beard"
+def test_new_phrase_stored_capitalized_without_period():
+    out = cf.merge_characters([], [_item("CARL", ["a man in his fifties with a grey beard"], keywords=["Carl"])])
+    assert out[0]["appearance"] == "A man in his fifties with a grey beard"
     assert "." not in out[0]["appearance"]
 
 
@@ -276,8 +276,8 @@ def test_normalize_appearance_does_not_split_on_us_abbreviation():
 
 def test_appearance_rule_asks_for_noun_phrase_and_example_matches():
     instr = cf.build_character_instructions()
-    assert "short noun phrase in lowercase" in instr
-    assert "with no final period, at most 25 words" in instr
+    assert "exactly one item: one complete noun phrase in lowercase" in instr
+    assert "No final period. At most 30 words." in instr
     assert '"new_traits": ["a woman in her thirties with short dark hair"]' in instr
     assert '"new_traits": ["a two-storey brick house with white shutters"]' in instr
 
@@ -395,3 +395,79 @@ def test_loaded_character_keeps_its_id_new_one_gets_next():
     out = cf.merge_characters([dict(ANNA, id="CHAR_5")], [_item("BOB", ["man in his forties"])])
     assert [c["id"] for c in out] == ["CHAR_5", "CHAR_6"]
     assert out[0]["appearance"] == ANNA["appearance"]
+
+
+# ------------------------------------------------------------------ часть D: одна фраза на запись
+
+def test_new_character_one_phrase_stored_capitalized_no_period():
+    out = cf.merge_characters([], [_item("ANNA", ["a woman in her thirties with short dark hair."])])
+    assert out[0]["appearance"] == "A woman in her thirties with short dark hair"
+    assert not out[0]["appearance"].endswith(".")
+
+
+def test_new_object_one_phrase_stored_capitalized_no_period():
+    out = cf.merge_objects([], [_obj("HOUSE", None, ["a two-storey brick house with white shutters"])], [])
+    assert out[0]["appearance"] == "A two-storey brick house with white shutters"
+
+
+def test_existing_record_keeps_appearance_and_logs_new_trait(caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    out = cf.merge_characters([ANNA], [_item("ANNA", ["a scar on her left cheek"])])
+    assert out[0]["appearance"] == ANNA["appearance"]
+    assert "appearance kept, new trait not recorded: ANNA, a scar on her left cheek" in caplog.messages
+
+
+def test_existing_record_same_trait_logs_nothing(caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    cf.merge_characters([ANNA], [_item("ANNA", ["a woman in her thirties with short dark hair"])])
+    assert not any("appearance kept" in m for m in caplog.messages)
+
+
+def test_empty_new_item_retried_once_and_good_retry_is_stored():
+    segs = [Segment(1, 0, 1000, "Carl enters.")]
+    bad = json.dumps({"characters": [{"name": "CARL", "aliases": [], "keywords": ["Carl"],
+                                      "new_traits": [], "conflicts": []}]})
+    good = json.dumps({"characters": [{"name": "CARL", "aliases": [], "keywords": ["Carl"],
+                                       "new_traits": ["a man in his fifties with a grey beard"], "conflicts": []}]})
+    client = ScriptClient([bad, good])
+    record = cf.build_character_file(segs, client, {})
+    assert len(client.calls) == 2
+    assert record["characters"][0]["appearance"] == "A man in his fifties with a grey beard"
+
+
+def test_empty_new_item_twice_raises_and_stores_nothing():
+    segs = [Segment(1, 0, 1000, "Carl enters.")]
+    bad = json.dumps({"characters": [{"name": "CARL", "aliases": [], "keywords": ["Carl"],
+                                      "new_traits": [], "conflicts": []}]})
+    client = ScriptClient([bad, bad])
+    written = []
+    with pytest.raises(cf.EmptyAppearanceError) as exc:
+        cf.build_character_file(segs, client, {}, on_window=written.append)
+    assert exc.value.record_name == "CARL"
+    assert len(client.calls) == 2
+    assert written == []  # окно не сохранено ни в каком виде
+
+
+def test_normalize_new_phrase_lowercased_no_period():
+    assert cf.normalize_appearance("A woman in her thirties with short dark hair") == \
+        "a woman in her thirties with short dark hair"
+
+
+def test_normalize_legacy_three_sentences_keeps_comma_and_form():
+    assert cf.normalize_appearance("Man in his fifties. Grey beard. Short hair.") == \
+        "man in his fifties, and grey beard, and short hair"
+
+
+def test_instruction_one_phrase_rule_and_no_joining_word():
+    instr = cf.build_character_instructions()
+    assert "exactly one item" in instr
+    assert "one complete noun phrase in lowercase" in instr
+    assert "No final period. At most 30 words." in instr
+    plain = instr.lower().replace("no code fences", "")  # «code fences» — формат ответа, не про код
+    for word in ("join", "joined", "joining", "storage", "stored", "code"):
+        assert word not in plain, word
+
+
+def test_add_trait_removed_no_joining_left():
+    # _add_trait склеивал черты через «, and »; после отказа от склейки его нет и вызывать его некому
+    assert not hasattr(cf, "_add_trait")
