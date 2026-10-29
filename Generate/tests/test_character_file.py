@@ -1068,3 +1068,75 @@ def test_non_string_reply_does_not_raise_and_is_logged(caplog):
     msgs = _debug_messages(caplog, _RAW_MARK)
     assert len(msgs) == 2
     assert "попытка 1 из 2: сырой ответ модели: None" in msgs[0]
+
+
+# ------------------------------------------------------------------ пустой ответ на окно с именами, предупреждение о мало записях
+
+_NAMED_WINDOW = "The Army met Fuad and Hussein and Karim and Omar and Yusuf there."
+_EMPTY_REPLY = json.dumps({"characters": [], "objects": []})
+
+
+def test_empty_reply_on_name_window_is_retried_and_good_reply_accepted():
+    client = ScriptClient([_EMPTY_REPLY, GOOD_ANNA])
+    characters, objects = cf._ask_window(client, "m", _NAMED_WINDOW, [], [], 1, 2)
+    assert len(client.calls) == 2
+    assert [c["name"] for c in characters] == ["ANNA"]
+    assert objects == []
+
+
+def test_empty_reply_twice_on_name_window_raises_and_keeps_stored_characters():
+    segs = [Segment(1, 0, 900, _NAMED_WINDOW)]
+    known = dict(ANNA, id="CHAR_1")
+    existing = {"srt_hash": srt_hash(segs), "characters": [dict(known)], "objects": [], "finished": []}
+    written = []
+    client = ScriptClient([_EMPTY_REPLY, _EMPTY_REPLY])
+    with pytest.raises(cf.CharacterWindowError) as exc:
+        cf.build_character_file(segs, client, existing, on_window=written.append)
+    assert type(exc.value) is cf.CharacterWindowError
+    assert len(client.calls) == 2
+    assert written == []
+    assert existing["characters"] == [known]
+
+
+def test_empty_reply_on_window_without_name_words_accepted_on_first_attempt():
+    client = ScriptClient([_EMPTY_REPLY])
+    characters, objects = cf._ask_window(client, "m", "it is a long day.", [], [], 1, 2)
+    assert len(client.calls) == 1
+    assert characters == [] and objects == []
+
+
+def test_count_name_like_counts_only_non_first_capitalised_words():
+    assert cf.count_name_like("The house is big.") == 0
+    assert cf.count_name_like("The army met Fuad and Hussein there.") == 2
+
+
+def test_instruction_has_named_shown_narrated_and_narration_rule():
+    instr = cf.build_character_instructions()
+    assert "named, shown or narrated in the window text" in instr
+    assert "is always listed" in instr
+
+
+def _long_segments(n=566):
+    return [Segment(i + 1, i * 1000, i * 1000 + 900, "it is a long day.") for i in range(n)]
+
+
+def test_low_record_count_writes_warning(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    obj = {"id": "", "name": "KEY", "aliases": [], "keywords": [], "appearance": "small brass key", "owner": ""}
+    first = json.dumps({"characters": [{"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                                        "appearance": "woman in her thirties"}], "objects": [obj]})
+    client = ScriptClient([first, _EMPTY_REPLY, _EMPTY_REPLY])
+    cf.get_character_file(tmp_path, _long_segments(), client)
+    assert any("мало записей" in m for m in caplog.messages)
+    assert (tmp_path / cf.CHARACTERS_FILENAME).exists()
+
+
+def test_low_record_warning_absent_at_threshold(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    names = ["ANNA", "BOB", "CARL", "DANA", "EVE"]
+    chars = [{"id": "", "name": n, "aliases": [], "keywords": [n.title()], "appearance": "a man in his forties"}
+             for n in names]
+    first = json.dumps({"characters": chars, "objects": []})
+    client = ScriptClient([first, _EMPTY_REPLY, _EMPTY_REPLY])
+    cf.get_character_file(tmp_path, _long_segments(), client)
+    assert not any("мало записей" in m for m in caplog.messages)

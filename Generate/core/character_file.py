@@ -29,6 +29,8 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger("Generate.character_file")
 
 WINDOW_SEGMENTS = 200
+# Минимум слов с заглавной буквы в окне, при котором пустой ответ (ни одного персонажа и ни одного объекта) подозрителен.
+EMPTY_WINDOW_MIN_NAMES = 5
 CHARACTERS_FILENAME = "characters.json"
 PARTIAL_FILENAME = "characters.partial.json"
 MAX_NAME_LEN = 40
@@ -73,7 +75,7 @@ def build_character_instructions() -> str:
     lines = [
         "You list the people and the important objects that appear in the subtitle text of one video window. "
         "Each one is kept in a record that lasts across windows.",
-        "Return a record only for a person or an object that is visible in the window text, identified by its id.",
+        "Return a record only for a person or an object that is named, shown or narrated in the window text, identified by its id.",
         "- id: for a record listed in the known records, return its id exactly as listed. "
         "For a new person or object, return an empty string. Do not invent any other id.",
         "Rules for characters:",
@@ -94,6 +96,7 @@ def build_character_instructions() -> str:
         "A physical object named in the window text (for example a train, a warship, a passport, a document or a palace) "
         "is listed when it is central to what happens in the window: people travel on it, use it, hand it over, "
         "lose it, seize it, or the events take place in it.",
+        "A person named in the narration of the window is always listed, even when the window shows no picture of them.",
         "- name: one word, same form as character names. For a record already listed, use its name exactly.",
         "- aliases and keywords: as for characters.",
         "- owner: the name of the character who owns the object, exactly as in the characters list, "
@@ -561,6 +564,21 @@ def _raw_for_log(raw: Any) -> str:
     return text
 
 
+def count_name_like(text: str) -> int:
+    """Число слов с заглавной буквы в тексте окна, кроме первого слова каждого предложения.
+
+    Предложения делятся по «.», «!», «?» с пробелом после них и по переводу строки. Первое слово предложения
+    не считается: оно пишется с заглавной буквой и без имени. Слово засчитывается, если оно начинается с заглавной
+    латинской буквы и состоит из букв, цифр, «_», апострофов и дефисов. Используется для проверки пустого ответа."""
+    total = 0
+    for sentence in re.split(r"[.!?]\s+|\n", text):
+        words = sentence.split()
+        for word in words[1:]:
+            if re.match(r"^[A-ZÀ-ÖØ-Þ][\w'’-]*$", word, re.UNICODE):
+                total += 1
+    return total
+
+
 def _ask_window(client: Any, model: str, text: str, characters: list, objects: list,
                 first: int, last: int) -> tuple:
     """Один запрос на окно: проверка ответа и слияние. Возвращает (characters, objects).
@@ -587,6 +605,12 @@ def _ask_window(client: Any, model: str, text: str, characters: list, objects: l
             # Число записей до проверки: видно, был ли пустой или отсутствующий список objects (только в файл).
             log.debug("Окно сегментов %s..%s, попытка %d из 2: разобрано до проверки: персонажей %d, объектов %d.",
                       first, last, attempt, len(parsed["characters"]), len(parsed["objects"]))
+            # Пустой ответ на окно с множеством имён подозрителен: модель, вероятно, ничего не вернула. Ошибка
+            # уходит в тот же повтор, что и остальные нарушения; отдельной строки лога здесь нет.
+            if len(parsed["characters"]) == 0 and len(parsed["objects"]) == 0:
+                names = count_name_like(text)
+                if names >= EMPTY_WINDOW_MIN_NAMES:
+                    raise ValueError(f"пустой ответ при {names} именах в окне")
             extracted = _check_reply(parsed, characters, objects, pending)
             new_chars = merge_characters(characters, extracted["characters"], pending)
             _check_new_objects(extracted["objects"], objects, new_chars)
@@ -725,6 +749,11 @@ def get_character_file(out_dir, segments: list, client: Any, *, model: str = "")
 
     record = build_character_file(segments, client, partial or {}, model=model, on_window=save_partial)
     final = {"srt_hash": record["srt_hash"], "characters": record["characters"], "objects": record["objects"]}
+    # Записей меньше одной на 100 сегментов — возможно, модель вернула слишком мало. Только предупреждение:
+    # прогон не останавливается, файл пишется как обычно.
+    if (len(final["characters"]) + len(final["objects"])) < len(segments) // 100:
+        log.warning("В файле персонажей мало записей: персонажей %d, объектов %d при %d сегментах.",
+                    len(final["characters"]), len(final["objects"]), len(segments))
     atomic_write_json(path, final)
     try:
         partial_path.unlink()
