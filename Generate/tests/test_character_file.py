@@ -936,3 +936,21 @@ def test_invalid_name_format_warning_contains_the_name(caplog):
     caplog.set_level(logging.WARNING, logger="Generate.character_file")
     cf.parse_window_reply(_reply(_c("Bob Smith!", "a man in his forties")), "Bob Smith! walks.")
     assert "Имя «Bob Smith!» (персонаж) не подходит по формату маркера, запись пропущена." in caplog.messages
+
+
+# ------------------------------------------------------------------ транслитерация имени и объекты (2e, 3d)
+
+def test_instruction_has_name_transliteration_rule_with_g_example():
+    # текст инструкции, без вызова Gemini: правило переводит Ğ в G (2b)
+    instr = cf.build_character_instructions()
+    assert "name transliteration:" in instr
+    assert "Ğ→G" in instr
+
+
+def test_instruction_has_physical_object_trigger_sentence():
+    # текст инструкции, без вызова Gemini: физический объект, названный в окне и важный для события, подлежит записи (3b, случай B)
+    instr = cf.build_character_instructions()
+    trigger = ("A physical object named in the window text (for example a train, a warship, a passport, "
+               "a document or a palace) is listed when it is central to what happens in the window: "
+               "people travel on it, use it, hand it over, lose it, seize it, or the events take place in it.")
+    assert trigger in instr

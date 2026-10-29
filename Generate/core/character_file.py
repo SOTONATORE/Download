@@ -79,6 +79,10 @@ def build_character_instructions() -> str:
         "Rules for characters:",
         "- name: one word in uppercase Latin or Cyrillic letters, no spaces, for example ANNA or АННА. "
         "For a record already listed, use its name exactly.",
+        # Транслитерация имени: буквы с диакритикой переводятся в обычную латиницу (2b).
+        "- name transliteration: if the name in the window text has letters with diacritics or other non-ASCII "
+        "Latin letters (for example Ğ, Ü, Ş, Ç, İ, Ö), write the name with the plain Latin letter instead "
+        "(Ğ→G, Ü→U, Ş→S, Ç→C, İ→I, Ö→O, and so on), and keep the name otherwise unchanged.",
         "- aliases: other names this same person has in the text (may be empty).",
         "- keywords: words or short phrases that appear in the window text and identify this person.",
         "- If the name is ambiguous, choose the most likely historical person from the context of the text; "
@@ -86,7 +90,10 @@ def build_character_instructions() -> str:
         "Rules for objects:",
         "- List an object only when it matters to the plot of this window, not because a word repeats often. "
         "A background mention with no name and no further detail is not listed. "
-        "An object central to the scene is always listed.",
+        # Физический объект, названный в тексте окна, — позитивный признак для объектов (3b, случай B).
+        "A physical object named in the window text (for example a train, a warship, a passport, a document or a palace) "
+        "is listed when it is central to what happens in the window: people travel on it, use it, hand it over, "
+        "lose it, seize it, or the events take place in it.",
         "- name: one word, same form as character names. For a record already listed, use its name exactly.",
         "- aliases and keywords: as for characters.",
         "- owner: the name of the character who owns the object, exactly as in the characters list, "

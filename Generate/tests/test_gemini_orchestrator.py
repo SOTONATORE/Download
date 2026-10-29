@@ -294,7 +294,7 @@ def test_transient_failures_never_switch_model(tmp_path):
     clock = FakeClock()
     t = FakeTransport([unavail() for _ in range(5)] + [ok([1, 2]), unavail(), ok([3, 4])])
     run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
-    assert set(t.calls) == {M1} and len(t.calls) == 9
+    assert set(t.calls) == {M1} and len(t.calls) == 8
     assert read(tmp_path / "prompts.json")["model"] == M1
 
 
