@@ -38,6 +38,11 @@ CONTEXT_BEFORE_WORDS = 40
 CONTEXT_AFTER_WORDS = 25
 SHORT_SEGMENT_MAX_WORDS = 3
 
+# Проверка маркеров объектов: если имя, псевдоним или ключевое слово объекта есть в тексте самого сегмента,
+# промпт обязан содержать маркер [OBJ_N]; иначе нарушение уходит в повторный запрос батча.
+# True — проверка включена; False — выключена. Персонажи этой проверкой не проверяются.
+OBJECT_MARKER_CHECK = True
+
 # ---------------------------------------------------------------------------
 # Исключения
 # ---------------------------------------------------------------------------
@@ -582,6 +587,13 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
 _MARKER_RX = re.compile(r"\[([A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*)\]")
 
 
+# Маркер в промпте: [ИМЯ] (как раньше) или голый id записи CHAR_N / OBJ_N целым словом.
+# Скобочная форма [CHAR_N] попадает в первую ветвь, поэтому порядок ветвей важен.
+_MARKER_OR_ID_RX = re.compile(r"\[([A-Z\u0410-\u042f\u0401][A-Z0-9_\u0410-\u042f\u0401]*)\]|(?<![\w\[])((?:CHAR|OBJ)_\d+)(?!\w)")
+# Любой id записи, оставшийся в тексте промпта (в скобках или без): такой текст не должен уйти в генерацию.
+_LEFT_ID_RX = re.compile(r"(?<!\w)(?:CHAR|OBJ)_\d+(?!\w)")
+
+
 def _at_sentence_start(text: str, pos: int) -> bool:
     """Стоит ли позиция pos в начале предложения: начало текста, после «. » или перевода строки."""
     head = text[:pos]
@@ -598,7 +610,7 @@ def resolve_markers(prompt: str, descriptions: dict) -> tuple:
     unresolved: list = []
 
     def repl(m):
-        name = m.group(1)
+        name = m.group(1) or m.group(2)   # [ИМЯ] или голый id (CHAR_N / OBJ_N)
         if name in descriptions:
             text = descriptions[name]
             if text and _at_sentence_start(m.string, m.start()):
@@ -608,7 +620,7 @@ def resolve_markers(prompt: str, descriptions: dict) -> tuple:
             unresolved.append(name)
         return m.group(0)
 
-    return _MARKER_RX.sub(repl, prompt), unresolved
+    return _MARKER_OR_ID_RX.sub(repl, prompt), unresolved
 
 
 def _is_clean(results: dict, num: int, problems: list) -> bool:
@@ -617,12 +629,18 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 
 
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
-               marker_note: str = "") -> dict:
+               marker_note: str = "", objects: Optional[list] = None) -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
-    marker_note: строка инструкции о маркерах [ID]; добавляется и к повторному запросу батча."""
+    marker_note: строка инструкции о маркерах [ID]; добавляется и к повторному запросу батча.
+    objects: записи объектов, маркеры которых объявлены в батче; по ним проверяется наличие маркера [OBJ_N]
+    в промпте сегмента, где объект назван. Нарушение идёт в тот же повторный запрос, что и остальные."""
     expected = list(batch.nums)
+    objects = objects or []
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
     results, problems = parse_and_validate(raw, expected, builder.cfg)
+    # нарушение: объект назван в тексте сегмента, а маркера [OBJ_N] в промпте нет
+    misses = _object_marker_misses(results, builder, objects)
+    problems = problems + [Problem(n, f"нет маркера объекта {rid}") for n, rid, _ in misses]
     final: dict = {n: results[n] for n in expected if _is_clean(results, n, problems)}
     bad = [n for n in expected if n not in final]
     extras = [p for p in problems if p.num is not None and p.num not in set(expected)]
@@ -641,6 +659,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
             res2, prob2 = parse_and_validate(raw2, list(rb.nums), builder.cfg)
+            misses2 = _object_marker_misses(res2, builder, objects)
+            prob2 = prob2 + [Problem(n, f"нет маркера объекта {rid}") for n, rid, _ in misses2]
             for n in rb.nums:
                 if _is_clean(res2, n, prob2):
                     final[n] = res2[n]
@@ -651,6 +671,11 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                          "; ".join(p.reason for p in problems if p.num == n) or "нарушение формата"
                 if best is None:
                     best = PromptResult(n, "")
+                # маркер объекта так и не появился после повтора: предупреждение с номером и именем объекта
+                for mn, rid, name in misses2:
+                    if mn == n:
+                        log.warning("Сегмент %d: в тексте назван объект «%s», но маркер [%s] в промпте не записан "
+                                    "даже после повторного запроса.", n, name, rid)
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
     return final
 
@@ -673,6 +698,52 @@ def _normalize_appearance(text: str) -> str:
     return ", and ".join(out)
 
 
+def _text_has_term(rec: dict, text: str) -> bool:
+    """Есть ли в тексте имя, псевдоним или ключевое слово записи. Совпадение целыми словами, без учёта регистра.
+    Одна и та же логика для фильтра батча (batch_descriptions) и для проверки маркеров объектов."""
+    name = str(rec.get("name") or "").strip()
+    terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
+    for term in terms:
+        term = str(term).strip()
+        if term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.IGNORECASE):
+            return True
+    return False
+
+
+def _all_descriptions(records: list) -> dict:
+    """{ID: внешность} по всем записям файла, у которых есть id и внешность. Нужен для замены id в тексте
+    промпта: в отличие от batch_descriptions, здесь нет фильтра по тексту батча."""
+    out: dict = {}
+    for rec in records:
+        rid = str(rec.get("id") or "").strip()
+        appearance = _normalize_appearance(rec.get("appearance") or "")
+        if rid and appearance:
+            out[rid] = appearance
+    return out
+
+
+def _object_marker_misses(results: dict, builder, objects: list) -> list:
+    """Нарушения маркера объекта: список (номер сегмента, id объекта, имя) для каждого объекта, чьё имя,
+    псевдоним или ключевое слово есть в собственном тексте сегмента, если в его промпте нет маркера [OBJ_N].
+    Смотрится только текст самого сегмента (не контекст). Персонажи не проверяются. Выключается
+    константой OBJECT_MARKER_CHECK. Проверяется сырой ответ Gemini, до замены маркеров на описания."""
+    if not OBJECT_MARKER_CHECK or not objects:
+        return []
+    out = []
+    for n in sorted(results):
+        seg = builder.by_num.get(n)
+        seg_text = (seg.text or "") if seg else ""
+        prompt = results[n].prompt
+        for rec in objects:
+            rid = str(rec.get("id") or "").strip()
+            if not rid.startswith("OBJ_") or not _text_has_term(rec, seg_text):
+                continue
+            if re.search(r"(?<!\w)" + re.escape(rid) + r"(?!\w)", prompt):
+                continue
+            out.append((n, rid, str(rec.get("name") or "").strip()))
+    return out
+
+
 def batch_descriptions(records: list, batch_text: str) -> dict:
     """{ID: внешность} для записей персонажей и объектов, чьё имя, псевдоним или ключевое слово есть в тексте батча.
 
@@ -687,22 +758,20 @@ def batch_descriptions(records: list, batch_text: str) -> dict:
         appearance = _normalize_appearance(rec.get("appearance") or "")
         if not rid or not name or not appearance:
             continue
-        terms = [name, *(rec.get("aliases") or []), *(rec.get("keywords") or [])]
-        for term in terms:
-            term = str(term).strip()
-            if term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", batch_text, re.IGNORECASE):
-                out[rid] = appearance
-                break
+        if _text_has_term(rec, batch_text):
+            out[rid] = appearance
     return out
 
 
 def marker_instruction(ids: list) -> str:
-    """Одно предложение для пользовательского сообщения батча: маркер пишется как id в квадратных скобках.
+    """Инструкция для пользовательского сообщения батча: маркер пишется как id в квадратных скобках.
 
     В списке только id (CHAR_N, OBJ_N); имена персонажей и объектов в маркеры не входят."""
     return ("Where one of these characters or objects appears, write the marker [ID] in place of it, where ID is "
             "the id exactly as listed: [CHAR_1] for a person, [OBJ_2] for an object. Use only these ids: "
-            + ", ".join(ids) + ".")
+            + ", ".join(ids) + ". "
+            "If the name of one of these objects appears in the segment text, the prompt must contain that "
+            "object's marker and must not describe the object in its own words.")
 
 
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
@@ -735,19 +804,31 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     out: dict = {}
     for batch in builder.batches(builder.wanted):
         if characters is None:
-            batch_desc, note = desc, ""
+            batch_desc, note, batch_objects, resolve_map = desc, "", [], desc
         else:
             # H3: в запрос батча идут только описания персонажей, найденных в его сегментах или контексте
             batch_desc = batch_descriptions(characters, batch.user)
             note = ("\n\n" + marker_instruction(sorted(batch_desc))) if batch_desc else ""
             if note:
                 batch = replace(batch, user=batch.user + note)
-        batch_res = _run_batch(transport, model, builder, batch, note)
+            # проверка маркеров: только объекты, чьи маркеры объявлены в этом батче (иначе маркер не записать)
+            batch_objects = [rec for rec in characters
+                             if str(rec.get("id") or "").strip() in batch_desc
+                             and str(rec.get("id") or "").strip().startswith("OBJ_")]
+            # замена id в тексте промпта идёт по всем записям файла, не только по батчу
+            resolve_map = _all_descriptions(characters)
+        batch_res = _run_batch(transport, model, builder, batch, note, objects=batch_objects)
         for r in batch_res.values():
-            r.prompt, unresolved = resolve_markers(r.prompt, batch_desc)
+            r.prompt, unresolved = resolve_markers(r.prompt, resolve_map)
             if unresolved:
                 r.needs_review = True
                 reason = "; ".join(f"маркер персонажа без описания: {n}" for n in unresolved)
+                r.review_reason = "; ".join(x for x in (r.review_reason, reason) if x)
+            # id, оставшийся в тексте после замены (в том числе неизвестный), ставит needs_review
+            left = list(dict.fromkeys(_LEFT_ID_RX.findall(r.prompt)))
+            if left:
+                r.needs_review = True
+                reason = "; ".join(f"в тексте остался id: {x}" for x in left)
                 r.review_reason = "; ".join(x for x in (r.review_reason, reason) if x)
             # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
             if r.prompt.strip():

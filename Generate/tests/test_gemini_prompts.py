@@ -663,3 +663,107 @@ def test_generate_prompts_preset_none_unchanged(tmp_path):
     t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
     res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
     assert [r.prompt for r in res] == ["A baker lifts a tray at dawn."] * 2
+
+
+# ---------------------------------------------------------------- id в промпте и маркеры объектов
+
+REC_ANNA = {"id": "CHAR_1", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+            "appearance": "a woman in her thirties"}
+REC_HOUSE = {"id": "OBJ_2", "name": "HOUSE", "aliases": [], "keywords": ["house"],
+             "appearance": "a brick house", "owner": "CHAR_1"}
+NO_MARKER = "A woman in a grey coat enters a brick house on a quiet street."
+
+
+def test_bare_and_bracketed_char_ids_become_description(tmp_path):
+    # голый CHAR_1 в начале предложения и [CHAR_1] в середине: оба заменяются описанием
+    segs = [seg(1, "Anna walks in.")]
+    t = FakeTransport([[{"segment_index": 1,
+                         "prompt": "CHAR_1 walks in a quiet street at dawn. Then [CHAR_1] waves."}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA])
+    assert res[0].prompt == ("A woman in her thirties walks in a quiet street at dawn. "
+                             "Then a woman in her thirties waves.")
+    assert res[0].needs_review is False
+
+
+def test_unknown_id_left_in_text_sets_needs_review(tmp_path):
+    # CHAR_99 нет в файле персонажей: остаётся в тексте и помечает промпт needs_review
+    segs = [seg(1, "Anna walks in.")]
+    t = FakeTransport([[{"segment_index": 1, "prompt": "CHAR_99 walks in a quiet street at dawn."}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA])
+    assert res[0].needs_review is True
+    assert res[0].prompt.startswith("CHAR_99")
+    assert "CHAR_99" in res[0].review_reason
+
+
+def test_object_named_in_segment_without_marker_retry_adds_it(tmp_path):
+    # объект назван в сегменте, маркера нет: повторный запрос батча, во втором ответе маркер есть
+    segs = [seg(1, "Anna enters the house.")]
+    t = FakeTransport([
+        [{"segment_index": 1, "prompt": NO_MARKER}],
+        [{"segment_index": 1, "prompt": "[CHAR_1] enters [OBJ_2] on a quiet street at dawn."}],
+    ])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA, REC_HOUSE])
+    assert len(t.calls) == 2
+    assert "[OBJ_2]" in t.calls[1]["user"]
+    assert res[0].prompt == "A woman in her thirties enters a brick house on a quiet street at dawn."
+    assert res[0].needs_review is False
+
+
+def test_object_still_missing_after_retry_flags_and_logs(tmp_path, caplog):
+    # маркера нет и после повтора: needs_review и предупреждение с номером сегмента и именем объекта
+    segs = [seg(1, "Anna enters the house.")]
+    t = FakeTransport([[{"segment_index": 1, "prompt": NO_MARKER}],
+                       [{"segment_index": 1, "prompt": NO_MARKER}]])
+    with caplog.at_level(logging.WARNING):
+        res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA, REC_HOUSE])
+    assert len(t.calls) == 2
+    assert res[0].needs_review is True
+    assert "OBJ_2" in res[0].review_reason
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("Сегмент 1" in m and "HOUSE" in m for m in warnings), warnings
+
+
+def test_object_not_named_in_segment_no_violation(tmp_path):
+    # объект есть в батче только через описание персонажа; в тексте сегмента его имени нет
+    segs = [seg(1, "Anna walks in a quiet street.")]
+    t = FakeTransport([[{"segment_index": 1,
+                         "prompt": "A woman in a grey coat walks in a quiet street at dawn."}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA, REC_HOUSE])
+    assert len(t.calls) == 1
+    assert res[0].needs_review is False
+
+
+def test_object_named_only_in_context_not_checked(tmp_path):
+    # имя объекта есть только в соседнем сегменте (контекст): проверяется текст самого сегмента
+    segs = [seg(1, "Anna walks in."), seg(2, "The house is empty.")]
+    t = FakeTransport([[{"segment_index": 1,
+                         "prompt": "A woman in a grey coat walks in a quiet street at dawn."}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA, REC_HOUSE])
+    assert len(t.calls) == 1
+    assert res[0].needs_review is False
+
+
+def test_character_named_once_without_marker_not_flagged(tmp_path):
+    # персонажи проверкой маркеров не проверяются, даже если имя названо в сегменте
+    segs = [seg(1, "Anna walks in a quiet street.")]
+    t = FakeTransport([[{"segment_index": 1,
+                         "prompt": "A woman in a grey coat walks in a quiet street at dawn."}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA])
+    assert len(t.calls) == 1
+    assert res[0].needs_review is False
+
+
+def test_object_check_switched_off(tmp_path, monkeypatch):
+    # OBJECT_MARKER_CHECK = False: тот же случай, что в test_object_named_in_segment_without_marker_retry_adds_it
+    monkeypatch.setattr(gp, "OBJECT_MARKER_CHECK", False)
+    segs = [seg(1, "Anna enters the house.")]
+    t = FakeTransport([[{"segment_index": 1, "prompt": NO_MARKER}]])
+    res = generate_prompts(segs, [1], make_cfg(tmp_path), t, "m", characters=[REC_ANNA, REC_HOUSE])
+    assert len(t.calls) == 1
+    assert res[0].needs_review is False
+
+
+def test_marker_instruction_says_object_name_needs_marker():
+    text = gp.marker_instruction(["CHAR_1", "OBJ_2"])
+    assert "the prompt must contain that object's marker" in text
+    assert "must not describe the object in its own words" in text
