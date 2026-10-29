@@ -539,6 +539,28 @@ def _check_new_objects(items: list, objects: list, new_chars: list) -> None:
         seen_new.append((owner_id, keys, item["name"]))
 
 
+# Предел длины сырого ответа модели в отладочном журнале (символов); дальше текст обрезается.
+RAW_LOG_MAX_CHARS = 12000
+
+
+def _raw_for_log(raw: Any) -> str:
+    """Текст сырого ответа модели для отладочного журнала: одна строка, не длиннее RAW_LOG_MAX_CHARS.
+
+    Не строка (например None) выводится через repr, сбой repr не роняет запись. Полная длина берётся до
+    обрезки и пишется в конце обрезанного текста. Переводы строк заменяются на два символа «\\n», чтобы
+    запись занимала одну строку debug.log. Результат только для журнала: парсеру передаётся исходный ответ."""
+    try:
+        text = raw if isinstance(raw, str) else repr(raw)
+    except Exception:  # noqa: BLE001 - журнал не должен ронять разбор окна
+        return "<ответ не удалось вывести>"
+    full_length = len(text)
+    text = text[:RAW_LOG_MAX_CHARS]
+    text = text.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+    if full_length > RAW_LOG_MAX_CHARS:
+        text += f"… [обрезано, всего {full_length} символов]"
+    return text
+
+
 def _ask_window(client: Any, model: str, text: str, characters: list, objects: list,
                 first: int, last: int) -> tuple:
     """Один запрос на окно: проверка ответа и слияние. Возвращает (characters, objects).
@@ -557,8 +579,15 @@ def _ask_window(client: Any, model: str, text: str, characters: list, objects: l
     for attempt in (1, 2):
         pending: list = []
         raw = client.generate_json(model, system, user, WINDOW_SCHEMA)
+        # Сырой ответ модели пишется до разбора и для каждой попытки, принятой или отвергнутой (только в файл).
+        log.debug("Окно сегментов %s..%s, попытка %d из 2: сырой ответ модели: %s",
+                  first, last, attempt, _raw_for_log(raw))
         try:
-            extracted = _check_reply(parse_window_reply(raw, text), characters, objects, pending)
+            parsed = parse_window_reply(raw, text)
+            # Число записей до проверки: видно, был ли пустой или отсутствующий список objects (только в файл).
+            log.debug("Окно сегментов %s..%s, попытка %d из 2: разобрано до проверки: персонажей %d, объектов %d.",
+                      first, last, attempt, len(parsed["characters"]), len(parsed["objects"]))
+            extracted = _check_reply(parsed, characters, objects, pending)
             new_chars = merge_characters(characters, extracted["characters"], pending)
             _check_new_objects(extracted["objects"], objects, new_chars)
         except ValueError as exc:

@@ -954,3 +954,117 @@ def test_instruction_has_physical_object_trigger_sentence():
                "a document or a palace) is listed when it is central to what happens in the window: "
                "people travel on it, use it, hand it over, lose it, seize it, or the events take place in it.")
     assert trigger in instr
+
+
+# ---------------------------------------------------------------------------
+# Отладочный журнал: сырой ответ модели и число записей до проверки (уровень DEBUG)
+# ---------------------------------------------------------------------------
+
+_WINDOW_TEXT = "Anna and Bob walk to the house."
+_RAW_MARK = "сырой ответ модели"
+_COUNT_MARK = "разобрано до проверки"
+
+
+def _debug_messages(caplog, mark):
+    return [r.getMessage() for r in caplog.records if r.name == "Generate.character_file" and mark in r.getMessage()]
+
+
+def test_raw_record_logs_empty_objects_list(caplog):
+    # A3: ответ с пустым списком objects попадает в сырой журнал с тем же текстом
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    reply = json.dumps({"characters": [{"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                                        "appearance": "woman in her thirties"}], "objects": []})
+    cf._ask_window(ScriptClient([reply]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 1
+    assert '"objects": []' in msgs[0]
+
+
+def test_raw_record_logs_reply_without_objects_key(caplog):
+    # A3: при отсутствии ключа objects в сыром журнале нет слова objects
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    reply = GOOD_ANNA  # в этом ответе ключа objects нет
+    cf._ask_window(ScriptClient([reply]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 1
+    assert "objects" not in msgs[0]
+
+
+def test_long_reply_is_capped_and_parse_result_unchanged(caplog):
+    # A3: длинный ответ обрезается в журнале, а результат разбора тот же, что без журнала
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    plain = json.dumps({"characters": [{"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                                        "appearance": "woman in her thirties"}], "objects": []})
+    padded = json.dumps({"characters": [{"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                                         "appearance": "woman in her thirties"}], "objects": [],
+                         "pad": "x" * 13000})
+    assert len(padded) > cf.RAW_LOG_MAX_CHARS
+    result_padded = cf._ask_window(ScriptClient([padded]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 1
+    msg = msgs[0]
+    assert "[обрезано, всего" in msg
+    assert f"всего {len(padded)} символов]" in msg
+    assert msg.endswith(f"… [обрезано, всего {len(padded)} символов]")
+    assert padded[:cf.RAW_LOG_MAX_CHARS] in msg
+    result_plain = cf._ask_window(ScriptClient([plain]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    assert result_padded == result_plain
+
+
+def test_raw_record_is_one_line_when_reply_has_newlines(caplog):
+    # A3: перевод строки в ответе попадает в запись как два символа \n, сама запись без переводов строк
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    reply = json.dumps({"characters": [{"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
+                                        "appearance": "woman in her thirties"}], "objects": []}, indent=2)
+    assert "\n" in reply
+    cf._ask_window(ScriptClient([reply]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 1
+    assert "\n" not in msgs[0]
+    assert "\\n" in msgs[0]
+
+
+def test_rejected_then_accepted_attempts_log_two_raw_records(caplog):
+    # A3: отвергнутая и принятая попытки дают две сырые записи с номерами 1 и 2
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    cf._ask_window(ScriptClient(["не json", GOOD_ANNA]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 2
+    assert "попытка 1 из 2: сырой ответ модели: не json" in msgs[0]
+    assert "попытка 2 из 2: сырой ответ модели:" in msgs[1]
+
+
+def test_count_record_has_two_characters_and_one_object(caplog):
+    # A3: запись до проверки: персонажей 2, объектов 1
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    reply = json.dumps({
+        "characters": [
+            {"id": "", "name": "ANNA", "aliases": [], "keywords": ["Anna"], "appearance": "woman in her thirties"},
+            {"id": "", "name": "BOB", "aliases": [], "keywords": ["Bob"], "appearance": "man in his forties"},
+        ],
+        "objects": [
+            {"id": "", "name": "HOUSE", "aliases": [], "keywords": ["house"],
+             "appearance": "two-storey brick house", "owner": ""},
+        ],
+    })
+    cf._ask_window(ScriptClient([reply]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _COUNT_MARK)
+    assert len(msgs) == 1
+    assert msgs[0].endswith("разобрано до проверки: персонажей 2, объектов 1.")
+
+
+def test_count_record_not_written_when_parse_fails(caplog):
+    # A3: при ошибке разбора записи о числе нет (ошибку покрывает предупреждение о повторе)
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    cf._ask_window(ScriptClient(["не json", GOOD_ANNA]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _COUNT_MARK)
+    assert len(msgs) == 1  # только принятая вторая попытка
+
+
+def test_non_string_reply_does_not_raise_and_is_logged(caplog):
+    # A3: None не роняет журнал; запись пишется через repr, затем повтор принимается
+    caplog.set_level(logging.DEBUG, logger="Generate.character_file")
+    cf._ask_window(ScriptClient([None, GOOD_ANNA]), "m", _WINDOW_TEXT, [], [], 1, 2)
+    msgs = _debug_messages(caplog, _RAW_MARK)
+    assert len(msgs) == 2
+    assert "попытка 1 из 2: сырой ответ модели: None" in msgs[0]
