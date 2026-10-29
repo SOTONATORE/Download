@@ -32,8 +32,8 @@ WINDOW_SEC = 60.0
 CHARS_PER_TOKEN = 3          # консервативная оценка входа
 MAX_WAIT_SEC = 120.0         # потолок одной паузы после 429
 TRANSIENT_STATUSES = frozenset({500, 503, 504})  # сеть: HTTP-статуса нет (status None)
-TRANSIENT_ATTEMPTS = 20      # неудачных попыток подряд на одной модели; после последней прогон останавливается
-TRANSIENT_PAUSE_SEC = 30.0   # пауза перед каждой повторной попыткой (если в ответе нет retry_after)
+TRANSIENT_ATTEMPTS = 60      # неудачных попыток подряд на одной модели; после последней прогон останавливается
+TRANSIENT_PAUSE_SEC = 10.0   # пауза перед каждой повторной попыткой (если в ответе нет retry_after)
 
 
 def is_transient(err: gp.GeminiRuntimeError) -> bool:

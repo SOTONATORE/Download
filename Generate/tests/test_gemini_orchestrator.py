@@ -274,7 +274,7 @@ def test_503_then_success_same_model_one_warning(tmp_path, caplog):
     t = FakeTransport([unavail(), ok([1, 2])])
     state = run(tmp_path, t, [1, 2], clock=clock)
     assert t.calls == [M1, M1]
-    assert clock.sleeps == [30.0]
+    assert clock.sleeps == [10.0]
     assert state["model"] == M1 and read(tmp_path / "prompts.json")["model"] == M1
     warnings = [r for r in caplog.records
                 if r.name == "Generate.gemini_orchestrator" and r.levelno == logging.WARNING]
@@ -286,7 +286,7 @@ def test_five_503_then_success_stays_on_same_model(tmp_path):
     t = FakeTransport([unavail() for _ in range(5)] + [ok([1, 2]), ok([3, 4])])
     state = run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
     assert t.calls == [M1] * 7                        # переключения на M2 нет
-    assert clock.sleeps == [30.0] * 5
+    assert clock.sleeps == [10.0] * 5
     assert state["model"] == M1
 
 
@@ -304,45 +304,45 @@ def test_success_resets_attempt_counter(tmp_path):
     t = FakeTransport(replies)
     run(tmp_path, t, [1, 2, 3, 4], clock=clock, cfg=cfg(tmp_path, batch_size=2))
     assert t.calls == [M1] * 11
-    assert clock.sleeps == [30.0] * 9
+    assert clock.sleeps == [10.0] * 9
 
 
-def test_503_on_every_attempt_stops_after_20_on_one_model(tmp_path, monkeypatch, caplog):
+def test_503_on_every_attempt_stops_after_60_on_one_model(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv(ENV_NAME, TESTKEY)
     caplog.set_level(logging.DEBUG)
     clock = FakeClock()
-    t = FakeTransport([unavail() for _ in range(20)])
+    t = FakeTransport([unavail() for _ in range(60)])
     with pytest.raises(GeminiRuntimeError) as ei:
         run(tmp_path, t, [1], clock=clock)
     e = ei.value
-    assert t.calls == [M1] * 20                       # ни одного вызова другой модели
+    assert t.calls == [M1] * 60                       # ни одного вызова другой модели
     assert e.exit_code == 3 and e.status == 503 and e.code == "UNAVAILABLE" and not e.daily_quota
-    assert "не ответила за 20 попыток подряд" in str(e) and "прогон остановлен" in str(e)
-    assert clock.sleeps == [30.0] * 19
+    assert "не ответила за 60 попыток подряд" in str(e) and "прогон остановлен" in str(e)
+    assert clock.sleeps == [10.0] * 59
     assert TESTKEY not in str(e) and TESTKEY not in caplog.text
     assert not (tmp_path / "prompts.json").exists()   # ни одного батча не готово: файл не создан
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1 and errors[0].startswith(f"Модель {M1}: 20 попыток подряд без ответа")
+    assert len(errors) == 1 and errors[0].startswith(f"Модель {M1}: 60 попыток подряд без ответа")
     warnings = [r.getMessage() for r in caplog.records
                 if r.name == "Generate.gemini_orchestrator" and r.levelno == logging.WARNING]
-    assert len(warnings) == 19 and "попытка 20 из 20" in warnings[-1]
+    assert len(warnings) == 59 and "попытка 60 из 60" in warnings[-1]
 
 
 def test_last_status_kept_on_final_failure_for_network(tmp_path):
-    t = FakeTransport([net_fail() for _ in range(20)])
+    t = FakeTransport([net_fail() for _ in range(60)])
     with pytest.raises(GeminiRuntimeError) as ei:
         run(tmp_path, t, [1])
     assert ei.value.status is None and "сбой сети" in str(ei.value)
 
 
-def test_pauses_are_fixed_30s(tmp_path):
+def test_pauses_are_fixed_10s(tmp_path):
     clock = FakeClock()
     t = FakeTransport([unavail() for _ in range(4)] + [ok([1])])
     run(tmp_path, t, [1], clock=clock)
-    assert clock.sleeps == [30.0] * 4
+    assert clock.sleeps == [10.0] * 4
 
 
-@pytest.mark.parametrize("retry_after, expected", [(2.5, [2.5]), (500.0, [30.0])])
+@pytest.mark.parametrize("retry_after, expected", [(2.5, [2.5]), (500.0, [10.0])])
 def test_transient_pause_honours_retry_after_capped(tmp_path, retry_after, expected):
     clock = FakeClock()
     t = FakeTransport([GeminiRuntimeError("тест", status=503, retry_after=retry_after), ok([1])])
@@ -354,36 +354,36 @@ def test_default_models_is_only_gemini_35():
     assert go.DEFAULT_MODELS == ("gemini-3.5-flash-lite",)
 
 
-def test_transient_on_every_attempt_is_20_calls_then_raise(tmp_path):
-    t = FakeTransport([unavail() for _ in range(20)])   # 21-й вызов дал бы IndexError, а не GeminiRuntimeError
+def test_transient_on_every_attempt_is_60_calls_then_raise(tmp_path):
+    t = FakeTransport([unavail() for _ in range(60)])   # 61-й вызов дал бы IndexError, а не GeminiRuntimeError
     with pytest.raises(GeminiRuntimeError) as ei:
         run(tmp_path, t, [1], models=go.DEFAULT_MODELS)
-    assert len(t.calls) == 20 and set(t.calls) == {"gemini-3.5-flash-lite"}
+    assert len(t.calls) == 60 and set(t.calls) == {"gemini-3.5-flash-lite"}
     assert ei.value.status == 503
 
 
-def test_each_of_19_pauses_is_30s(tmp_path):
+def test_each_of_19_pauses_is_10s(tmp_path):
     clock = FakeClock()
     t = FakeTransport([unavail() for _ in range(19)] + [ok([1])])
     run(tmp_path, t, [1], clock=clock, models=go.DEFAULT_MODELS)
-    assert clock.sleeps == [30.0] * 19
+    assert clock.sleeps == [10.0] * 19
 
 
-@pytest.mark.parametrize("retry_after, expected", [(5.0, 5.0), (300.0, 30.0)])
-def test_retry_after_used_and_capped_at_30(tmp_path, retry_after, expected):
+@pytest.mark.parametrize("retry_after, expected", [(5.0, 5.0), (300.0, 10.0)])
+def test_retry_after_used_and_capped_at_10(tmp_path, retry_after, expected):
     clock = FakeClock()
     t = FakeTransport([GeminiRuntimeError("тест", status=503, retry_after=retry_after), ok([1])])
     run(tmp_path, t, [1], clock=clock, models=go.DEFAULT_MODELS)
     assert clock.sleeps == [expected]
 
 
-def test_success_on_attempt_7_resets_counter_then_20_more_allowed(tmp_path):
+def test_success_on_attempt_7_resets_counter_then_60_more_allowed(tmp_path):
     clock = FakeClock()
-    t = FakeTransport([unavail() for _ in range(6)] + [ok([1])] + [unavail() for _ in range(20)])
+    t = FakeTransport([unavail() for _ in range(6)] + [ok([1])] + [unavail() for _ in range(60)])
     with pytest.raises(GeminiRuntimeError) as ei:
         run(tmp_path, t, [1, 2], clock=clock, cfg=cfg(tmp_path, batch_size=1), models=go.DEFAULT_MODELS)
-    assert len(t.calls) == 27 and set(t.calls) == {"gemini-3.5-flash-lite"}   # 6 + 1 + 20
-    assert clock.sleeps == [30.0] * 25                                         # 6 + 19
+    assert len(t.calls) == 67 and set(t.calls) == {"gemini-3.5-flash-lite"}   # 6 + 1 + 60
+    assert clock.sleeps == [10.0] * 65                                         # 6 + 59
     assert ei.value.status == 503
 
 
@@ -410,7 +410,7 @@ def test_network_error_is_transient_fake_transport(tmp_path):
     clock = FakeClock()
     t = FakeTransport([net_fail(), ok([1])])
     run(tmp_path, t, [1], clock=clock)
-    assert t.calls == [M1, M1] and clock.sleeps == [30.0]
+    assert t.calls == [M1, M1] and clock.sleeps == [10.0]
 
 
 def test_network_error_from_real_transport_is_retried(tmp_path, monkeypatch):
@@ -428,7 +428,7 @@ def test_network_error_from_real_transport_is_retried(tmp_path, monkeypatch):
     real = gp.RealTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
     clock = FakeClock()
     run(tmp_path, real, [1], clock=clock)
-    assert len(seen) == 2 and clock.sleeps == [30.0]
+    assert len(seen) == 2 and clock.sleeps == [10.0]
     assert TESTKEY not in (tmp_path / "prompts.json").read_text(encoding="utf-8")
 
 
