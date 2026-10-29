@@ -865,3 +865,74 @@ def test_merge_characters_without_pending_list_writes_no_log_and_same_data(caplo
     assert out == [dict(ANNA, id="CHAR_1", appearance=new)]
     assert not any("appearance updated" in m for m in caplog.messages)
     assert cf.merge_characters(chars, extracted, pending=[]) == out
+
+
+# ---------------------------------------------------------------------------
+# Сводка принятого ответа окна и имя в предупреждении о формате (часть 2, 3)
+# ---------------------------------------------------------------------------
+
+
+def _count_lines(caplog):
+    return [m for m in caplog.messages if "в ответе персонажей" in m]
+
+
+def test_accepted_window_count_line_has_four_numbers(caplog):
+    # два персонажа (ANNA новая, BOB известна) и один новый объект: строка сводки с четырьмя числами
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna and Bob walk to the house.")]
+    existing = _existing(characters=[dict(BOB, id="CHAR_2")], segs=segs)
+    reply = _reply(_c("ANNA", "woman in her thirties"),
+                   _c("BOB", "man in his forties", rid="CHAR_2"),
+                   objects=[_obj("HOUSE", "ANNA", "a brick house")])
+    _run_window(segs, [reply], existing)
+    assert _count_lines(caplog) == [
+        "Окно сегментов 1..1: в ответе персонажей 2, объектов 1, новых персонажей 1, новых объектов 1."
+    ]
+
+
+def test_reply_without_objects_key_counts_zero_objects(caplog):
+    # ответ без ключа objects: в строке сводки объектов 0
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks in.")]
+    existing = _existing(segs=segs)
+    reply = json.dumps({"characters": [_c("ANNA", "woman in her thirties")]})
+    _run_window(segs, [reply], existing)
+    assert _count_lines(caplog) == [
+        "Окно сегментов 1..1: в ответе персонажей 1, объектов 0, новых персонажей 1, новых объектов 0."
+    ]
+
+
+def test_rejected_first_attempt_count_line_is_for_accepted_attempt_only(caplog):
+    # первая попытка (1 персонаж, 2 одинаковых новых объекта) отвергнута; вторая принята (1 персонаж, 0 объектов).
+    # Строка должна быть одна и с числами принятой попытки, а не отвергнутой.
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")], segs=segs)
+    dup_objects = [_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")]
+    bad = _reply(_c("ANNA", "a woman in her thirties", rid="CHAR_1"), objects=dup_objects)
+    good = _reply(_c("ANNA", "a woman in her thirties", rid="CHAR_1"))
+    _, client = _run_window(segs, [bad, good], existing)
+    assert len(client.calls) == 2
+    assert _count_lines(caplog) == [
+        "Окно сегментов 1..1: в ответе персонажей 1, объектов 0, новых персонажей 0, новых объектов 0."
+    ]
+
+
+def test_window_rejected_twice_writes_no_count_line(caplog):
+    # оба ответа отвергнуты: строки сводки окна нет
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")], segs=segs)
+    dup_objects = [_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")]
+    bad = _reply(_c("ANNA", "a woman in her thirties", rid="CHAR_1"), objects=dup_objects)
+    client = ScriptClient([bad, bad])
+    with pytest.raises(cf.CharacterWindowError):
+        cf.build_character_file(segs, client, existing)
+    assert _count_lines(caplog) == []
+
+
+def test_invalid_name_format_warning_contains_the_name(caplog):
+    # имя «Bob Smith!» не проходит формат маркера: предупреждение содержит само имя
+    caplog.set_level(logging.WARNING, logger="Generate.character_file")
+    cf.parse_window_reply(_reply(_c("Bob Smith!", "a man in his forties")), "Bob Smith! walks.")
+    assert "Имя «Bob Smith!» (персонаж) не подходит по формату маркера, запись пропущена." in caplog.messages

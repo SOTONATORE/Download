@@ -179,7 +179,7 @@ def _parse_items(items: list, low: str, what: str, *, owner: bool) -> list:
             owner_name = raw_owner.strip()
         nm = name.strip().upper()
         if not _is_valid_name(nm):
-            log.warning("Имя (%s) не подходит по формату маркера, запись пропущена.", what)
+            log.warning("Имя «%s» (%s) не подходит по формату маркера, запись пропущена.", name, what)
             continue
         app = appearance.strip()
         if not app:
@@ -561,6 +561,11 @@ def _ask_window(client: Any, model: str, text: str, characters: list, objects: l
             continue
         new_objs = merge_objects(objects, extracted["objects"], new_chars, pending)
         _flush_pending(pending)
+        # Сводка принятого ответа окна: что вернула модель (только в файл, не ключевое событие консоли).
+        log.info("Окно сегментов %s..%s: в ответе персонажей %d, объектов %d, новых персонажей %d, новых объектов %d.",
+                 first, last, len(extracted["characters"]), len(extracted["objects"]),
+                 sum(1 for c in extracted["characters"] if c["id"] == ""),
+                 sum(1 for o in extracted["objects"] if o["id"] == ""))
         return new_chars, new_objs
     if isinstance(last_error, _EmptyNewAppearance):
         log.error("Окно сегментов %s..%s: запись «%s» без внешности после повтора, прогон остановлен.",
