@@ -207,7 +207,7 @@ def test_same_name_objects_with_different_owners_stay_separate():
 
 def test_same_name_objects_without_owner_are_separate_new_records():
     # раньше два объекта с одним именем без владельца сливались по имени; теперь id решает, новая ли запись.
-    # Повтор имени внутри одного ответа не ловится (см. открытые вопросы в отчёте).
+    # merge_objects сам повторы имён не проверяет; повтор имени внутри одного ответа ловит путь окна (_check_new_objects).
     out = cf.merge_objects([], [_obj("KEY", None, "small brass key"),
                                 _obj("KEY", None, "brass key")], [])
     assert [o["id"] for o in out] == ["OBJ_1", "OBJ_2"]
@@ -420,7 +420,9 @@ def test_existing_record_changed_appearance_is_stored_and_logged(caplog):
     # раньше внешность известной записи не менялась; теперь новая возвращённая внешность записывается (6a)
     caplog.set_level(logging.INFO, logger="Generate.character_file")
     new = "a woman in her thirties with short dark hair and a scar on her left cheek"
-    out = cf.merge_characters([dict(ANNA, id="CHAR_1")], [_item("ANNA", new, rid="CHAR_1")])
+    pending: list = []
+    out = cf.merge_characters([dict(ANNA, id="CHAR_1")], [_item("ANNA", new, rid="CHAR_1")], pending=pending)
+    cf._flush_pending(pending)  # в окне строка пишется после принятия; здесь вызов имитирует принятие
     assert out[0]["appearance"] == new
     assert ("appearance updated: CHAR_1 ANNA: A woman in her thirties with short dark hair. -> " + new
             ) in caplog.messages
@@ -550,8 +552,10 @@ def test_changed_appearance_of_known_record_updated_through_window(monkeypatch, 
 def test_one_changed_record_does_not_touch_other_known_record(caplog):
     caplog.set_level(logging.INFO, logger="Generate.character_file")
     chars = [dict(ANNA, id="CHAR_1"), dict(BOB, id="CHAR_2")]
+    pending: list = []
     out = cf.merge_characters(chars, [_c("ANNA", "a woman in her thirties with short dark hair and a scar", rid="CHAR_1"),
-                                      _c("BOB", BOB["appearance"], rid="CHAR_2")])
+                                      _c("BOB", BOB["appearance"], rid="CHAR_2")], pending=pending)
+    cf._flush_pending(pending)  # в окне строка пишется после принятия; здесь вызов имитирует принятие
     assert out[0]["appearance"] == "a woman in her thirties with short dark hair and a scar"
     assert out[1]["appearance"] == BOB["appearance"]
     assert [m for m in caplog.messages if "appearance updated" in m] == [
@@ -759,11 +763,13 @@ def test_three_record_events_reach_run_debug_log_file(tmp_path):
     handlers, note = log_setup.setup_logging("INFO", str(tmp_path))
     try:
         assert note is None
+        pending: list = []
         cf.merge_characters([dict(ANNA, id="CHAR_1")],
-                            [_item("ANNA", "a woman in her forties with grey hair", rid="CHAR_1")])
+                            [_item("ANNA", "a woman in her forties with grey hair", rid="CHAR_1")], pending=pending)
         cf.merge_objects([], [_obj("HOUSE", "NOBODY", "two-storey brick house")], [dict(ANNA, id="CHAR_1")])
         cf._check_reply({"characters": [_item("CARL", "a man in his fifties", rid="CHAR_9")], "objects": []},
-                        [dict(ANNA, id="CHAR_1")], [])
+                        [dict(ANNA, id="CHAR_1")], [], pending)
+        cf._flush_pending(pending)  # строки пишутся после принятия окна; здесь вызов имитирует принятие
     finally:
         log_setup.teardown_logging(handlers)
         logging.getLogger().setLevel(prev_level)
@@ -780,10 +786,12 @@ def test_three_record_events_reach_run_debug_log_file(tmp_path):
 def test_record_events_are_not_console_key_events(caplog):
     # 3b: события не помечены как ключевые, а INFO-строка «appearance updated» консоль не пропускает
     caplog.set_level(logging.INFO, logger="Generate.character_file")
-    cf.merge_characters([dict(ANNA, id="CHAR_1")], [_item("ANNA", "a woman in her forties", rid="CHAR_1")])
+    pending: list = []
+    cf.merge_characters([dict(ANNA, id="CHAR_1")], [_item("ANNA", "a woman in her forties", rid="CHAR_1")], pending=pending)
     cf.merge_objects([], [_obj("HOUSE", "NOBODY", "two-storey brick house")], [dict(ANNA, id="CHAR_1")])
     cf._check_reply({"characters": [_item("CARL", "a man in his fifties", rid="CHAR_9")], "objects": []},
-                    [dict(ANNA, id="CHAR_1")], [])
+                    [dict(ANNA, id="CHAR_1")], [], pending)
+    cf._flush_pending(pending)  # строки пишутся после принятия окна; здесь вызов имитирует принятие
     events = [r for r in caplog.records if r.name == "Generate.character_file"]
     assert len(events) == 3
     for r in events:
@@ -791,3 +799,69 @@ def test_record_events_are_not_console_key_events(caplog):
     info = [r for r in events if r.levelno == logging.INFO]
     assert len(info) == 1 and info[0].getMessage().startswith("appearance updated: ")
     assert log_setup.ConsoleFilter().filter(info[0]) is False
+
+
+# ---------------------------------------------------------------------------
+# Строки «appearance updated» пишутся только за принятое окно (2b)
+# ---------------------------------------------------------------------------
+
+_OLD_ANNA_LINE = "appearance updated: CHAR_1 ANNA: A woman in her thirties with short dark hair. -> "
+
+
+def _appearance_lines(caplog):
+    return [m for m in caplog.messages if m.startswith("appearance updated: ")]
+
+
+def test_accepted_window_writes_appearance_updated_once(caplog):
+    # принятое окно меняет внешность известной записи: строка в логе ровно одна
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")], segs=segs)
+    reply = _reply(_c("ANNA", "a woman in her thirties with a scar", rid="CHAR_1"))
+    record, client = _run_window(segs, [reply], existing)
+    assert len(client.calls) == 1
+    assert record["characters"][0]["appearance"] == "a woman in her thirties with a scar"
+    assert _appearance_lines(caplog) == [_OLD_ANNA_LINE + "a woman in her thirties with a scar"]
+
+
+def test_rejected_first_attempt_logs_only_accepted_attempt_change(caplog):
+    # первая попытка меняет внешность ANNA, затем падает на дубле новых объектов (_check_new_objects);
+    # вторая попытка меняет её на другое значение. В логе должна остаться только вторая смена.
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")], segs=segs)
+    dup_objects = [_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")]
+    bad = _reply(_c("ANNA", "a woman in her thirties with a scar", rid="CHAR_1"), objects=dup_objects)
+    good = _reply(_c("ANNA", "a woman in her thirties with grey eyes", rid="CHAR_1"))
+    record, client = _run_window(segs, [bad, good], existing)
+    assert len(client.calls) == 2
+    assert record["characters"][0]["appearance"] == "a woman in her thirties with grey eyes"
+    assert _appearance_lines(caplog) == [_OLD_ANNA_LINE + "a woman in her thirties with grey eyes"]
+
+
+def test_window_rejected_twice_writes_no_appearance_updated_and_stores_nothing(caplog):
+    # оба ответа окна меняют внешность и падают на дубле: строк «appearance updated» нет, окно не сохранено
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    segs = [Segment(1, 0, 1000, "Anna walks to the house.")]
+    existing = _existing(characters=[dict(ANNA, id="CHAR_1")], segs=segs)
+    dup_objects = [_obj("HOUSE", "ANNA", "two-storey house"), _obj("HOUSE", "ANNA", "wooden cabin")]
+    bad = _reply(_c("ANNA", "a woman in her thirties with a scar", rid="CHAR_1"), objects=dup_objects)
+    written = []
+    client = ScriptClient([bad, bad])
+    with pytest.raises(cf.CharacterWindowError):
+        cf.build_character_file(segs, client, existing, on_window=written.append)
+    assert len(client.calls) == 2
+    assert written == []
+    assert _appearance_lines(caplog) == []
+
+
+def test_merge_characters_without_pending_list_writes_no_log_and_same_data(caplog):
+    # прямой вызов без списка отложенных строк: строки лога нет, результат тот же, что был раньше
+    caplog.set_level(logging.INFO, logger="Generate.character_file")
+    new = "a woman in her thirties with a scar"
+    chars = [dict(ANNA, id="CHAR_1")]
+    extracted = [_item("ANNA", new, rid="CHAR_1")]
+    out = cf.merge_characters(chars, extracted)
+    assert out == [dict(ANNA, id="CHAR_1", appearance=new)]
+    assert not any("appearance updated" in m for m in caplog.messages)
+    assert cf.merge_characters(chars, extracted, pending=[]) == out

@@ -331,9 +331,10 @@ def _dedupe_aliases(name: str, aliases: list) -> list:
     return list(dict.fromkeys(a for a in aliases if a.upper() != name.upper()))
 
 
-def _merge_known(rec: dict, item: dict) -> None:
+def _merge_known(rec: dict, item: dict, pending: Optional[list] = None) -> None:
     """Существующая запись (id из окна): ключевые слова и псевдонимы дописываются. Внешность меняется, только если
-    возвращённая отличается от записанной (6a); при изменении пишется строка лога «appearance updated».
+    возвращённая отличается от записанной (6a); при изменении в pending добавляется строка лога
+    «appearance updated» (писать её будет _flush_pending, когда окно принято). При pending=None строка не пишется.
     Имя, id и владелец записи не меняются (6d)."""
     for k in item["keywords"]:
         if k not in rec["keywords"]:
@@ -347,18 +348,26 @@ def _merge_known(rec: dict, item: dict) -> None:
     new = item["appearance"].strip()
     if _same_appearance(old, new):
         return
-    log.info("appearance updated: %s %s: %s -> %s", rec["id"], rec["name"], str(old).strip(), new)
+    if pending is not None:
+        pending.append((logging.INFO, f"appearance updated: {rec['id']} {rec['name']}: {str(old).strip()} -> {new}"))
     rec["appearance"] = new
 
 
-def merge_characters(characters: list, extracted: list) -> list:
+def _flush_pending(pending: list) -> None:
+    """Пишет отложенные строки лога в порядке добавления, с их уровнем и текстом. Вызывается, когда окно принято."""
+    for level, message in pending:
+        log.log(level, message)
+
+
+def merge_characters(characters: list, extracted: list, pending: Optional[list] = None) -> list:
     """Сливает разобранные элементы окна в список записей. Чистая функция, Gemini не вызывается.
 
     Правила:
     - известная запись ищется по id (6d), её имя и id не меняются, внешность меняется по правилу 6a;
     - новая запись (id пустой строкой) получает очередной CHAR_N и внешность из ответа с заглавной первой
       буквой, без точки в конце (6c);
-    - единственный побочный эффект — строки лога."""
+    - единственный побочный эффект — строки лога «appearance updated», которые добавляются в pending и пишутся
+      только после принятия окна; при pending=None не пишется ничего."""
     out = copy.deepcopy(characters)
     _assign_ids(out, "CHAR")
     for rec in out:
@@ -370,7 +379,7 @@ def merge_characters(characters: list, extracted: list) -> list:
         if item["id"]:
             rec = by_id.get(item["id"])
             if rec is not None:
-                _merge_known(rec, item)
+                _merge_known(rec, item, pending)
             continue
         rec = {"id": _new_id(out, "CHAR"), "name": item["name"],
                "aliases": _dedupe_aliases(item["name"], item["aliases"]),
@@ -392,13 +401,14 @@ def _owner_index(characters: list) -> dict:
     return index
 
 
-def merge_objects(objects: list, extracted: list, characters: list) -> list:
+def merge_objects(objects: list, extracted: list, characters: list, pending: Optional[list] = None) -> list:
     """Сливает разобранные объекты окна в список записей. Чистая функция, Gemini не вызывается.
 
-    Известный объект ищется по id (6d); его владелец, имя и id не меняются, внешность меняется по правилу 6a.
-    Новый объект (id пустой строкой) получает очередной OBJ_N. Владелец — id персонажа из characters, найденный
-    по имени, псевдониму или id (6e). Имя, которого нет среди персонажей, даёт владельца None и лог
-    «owner not found, set to null: <имя объекта>»; пустая строка даёт None без записи в лог."""
+    Известный объект ищется по id (6d); его владелец, имя и id не меняются, внешность меняется по правилу 6a
+    (строка «appearance updated» идёт в pending, как у персонажей). Новый объект (id пустой строкой) получает
+    очередной OBJ_N. Владелец — id персонажа из characters, найденный по имени, псевдониму или id (6e). Имя,
+    которого нет среди персонажей, даёт владельца None и лог «owner not found, set to null: <имя объекта>»;
+    пустая строка даёт None без записи в лог."""
     out = copy.deepcopy(objects)
     _assign_ids(out, "OBJ")
     for rec in out:
@@ -412,7 +422,7 @@ def merge_objects(objects: list, extracted: list, characters: list) -> list:
         if item["id"]:
             rec = by_id.get(item["id"])
             if rec is not None:
-                _merge_known(rec, item)
+                _merge_known(rec, item, pending)
             continue
         owner = None
         if item.get("owner"):
@@ -459,27 +469,28 @@ class EmptyAppearanceError(CharacterWindowError):
         self.last = last
 
 
-def _keep_known_ids(items: list, known: list, what: str) -> list:
+def _keep_known_ids(items: list, known: list, what: str, pending: Optional[list] = None) -> list:
     """Оставляет новые записи (id пустой строкой) и записи с id из этого окна. Остальные отбрасываются с записью
-    в лог: «id not in window, dropped: <id> <имя>» (2b)."""
+    в лог: «id not in window, dropped: <id> <имя>» (2b). Строка не пишется сразу, а добавляется в pending
+    (до проверки окна); при pending=None не пишется вовсе."""
     ids = {r.get("id") for r in known}
     out = []
     for item in items:
         if item["id"] == "" or item["id"] in ids:
             out.append(item)
-        else:
-            log.warning("id not in window, dropped: %s %s", item["id"], item["name"])
+        elif pending is not None:
+            pending.append((logging.WARNING, f"id not in window, dropped: {item['id']} {item['name']}"))
     return out
 
 
-def _check_reply(parsed: dict, characters: list, objects: list) -> dict:
+def _check_reply(parsed: dict, characters: list, objects: list, pending: Optional[list] = None) -> dict:
     """Проверка разобранного ответа по известным записям. Неизвестный id отбрасывается (_keep_known_ids).
     Новая запись персонажа (id пустой), чьё имя или псевдоним совпадает с известным персонажем, — ошибка ответа
     (2d): такая запись уже есть и должна вернуться с её id. Два новых персонажа с одним именем в одном ответе
     — тоже ошибка (2b). Проверка объектов по владельцу здесь не делается: владелец известен только после
     слияния персонажей, см. _check_new_objects."""
-    chars = _keep_known_ids(parsed["characters"], characters, "персонаж")
-    objs = _keep_known_ids(parsed["objects"], objects, "объект")
+    chars = _keep_known_ids(parsed["characters"], characters, "персонаж", pending)
+    objs = _keep_known_ids(parsed["objects"], objects, "объект", pending)
     seen_new: list = []
     for item in chars:
         if item["id"] != "":
@@ -529,22 +540,27 @@ def _ask_window(client: Any, model: str, text: str, characters: list, objects: l
     объекта — id после слияния). Нарушение — ещё один запрос (всего два). Если второй
     ответ тоже не прошёл, то при пустой внешности новой записи выходит EmptyAppearanceError, иначе
     CharacterWindowError. Слияние выполняется только для ответа, прошедшего проверку. Ошибки транспорта
-    (GeminiRuntimeError) не перехватываются: квоту и сбои сети обрабатывает ManagedTransport."""
+    (GeminiRuntimeError) не перехватываются: квоту и сбои сети обрабатывает ManagedTransport.
+
+    Строки лога «appearance updated» и «id not in window» копятся в pending отдельно для каждой попытки и пишутся
+    только после принятия ответа; отвергнутая попытка своих строк не пишет."""
     system = build_character_instructions()
     user = _window_request(text, characters, objects)
     last_error: Optional[ValueError] = None
     for attempt in (1, 2):
+        pending: list = []
         raw = client.generate_json(model, system, user, WINDOW_SCHEMA)
         try:
-            extracted = _check_reply(parse_window_reply(raw, text), characters, objects)
-            new_chars = merge_characters(characters, extracted["characters"])
+            extracted = _check_reply(parse_window_reply(raw, text), characters, objects, pending)
+            new_chars = merge_characters(characters, extracted["characters"], pending)
             _check_new_objects(extracted["objects"], objects, new_chars)
         except ValueError as exc:
             last_error = exc
             log.warning("Окно сегментов %s..%s: ответ не прошёл проверку (%s), попытка %d из 2.",
                         first, last, exc, attempt)
             continue
-        new_objs = merge_objects(objects, extracted["objects"], new_chars)
+        new_objs = merge_objects(objects, extracted["objects"], new_chars, pending)
+        _flush_pending(pending)
         return new_chars, new_objs
     if isinstance(last_error, _EmptyNewAppearance):
         log.error("Окно сегментов %s..%s: запись «%s» без внешности после повтора, прогон остановлен.",
