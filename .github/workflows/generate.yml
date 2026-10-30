@@ -57,6 +57,16 @@ on:
           - "zimage_turbo"
           - "none"
         default: "zimage_turbo"
+      video_percent:
+        description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
+        required: false
+        type: number
+        default: 100
+      intro_seconds:
+        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
+        required: false
+        type: number
+        default: 10
       preset:
         description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
