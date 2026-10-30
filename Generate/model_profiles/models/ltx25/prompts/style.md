@@ -87,6 +87,8 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - **Logos** are unreliable. Do not request logos or brand marks. **(recommendation)** Also avoid naming brands and real, named people; describe a generic person or object instead.
 - **(recommendation)** Do not put spoken lines in quotation marks. Quoted text is treated as speech and would make characters talk. Narration is added elsewhere. Describe only what is visible.
 
+Describe people and objects in the frame directly, as they are seen or named in the segment text. Do not invent details that the segment text does not support.
+
 ## 9. Things not to do
 
 - Abstract or internal states without a visual ("freedom", "uncertainty", "she feels hopeless"). Use visible physical cues and concrete scenes.
