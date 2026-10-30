@@ -21,9 +21,11 @@ from typing import Any, Callable, Optional, Protocol
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
+    from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
+    from frame_rules import rephrase_note  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -260,6 +262,10 @@ def _format_segment_block(seg: Segment, sentences: list, by_segment: dict) -> st
         lines.append("Before (context only): " + " ".join(x.text for x in reversed(before)))
     if after:
         lines.append("After (context only): " + " ".join(x.text for x in after))
+    # Правило перефразирования добавляется к блоку сегмента, только если нужно (шаг 4).
+    note = rephrase_note(text)
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
