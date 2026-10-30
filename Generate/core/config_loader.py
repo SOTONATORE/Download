@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
-    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "profile_exists",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
@@ -389,3 +389,12 @@ def load_profile_frame_rule(profile: str) -> dict:
         raise GeminiInputError(
             f"В профиле {profile}/profile.yaml не задано правило кадров («frame_rule»).")
     return dict(rule)
+
+
+def load_profile_type(profile_name: str) -> str:
+    """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
+    value = _read_profile(profile_name).get("type", "video")
+    if value not in ("video", "image"):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml тип «type» должен быть video или image.")
+    return value

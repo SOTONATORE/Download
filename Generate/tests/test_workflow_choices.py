@@ -26,9 +26,20 @@ def _choice(name):
     return set(inp["options"]), inp["default"]
 
 
+def _profile_type(folder):
+    # Тип профиля из profile.yaml; если поля нет, профиль считается видео (как в коде)
+    path = folder / "profile.yaml"
+    if not path.is_file():
+        return "video"
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("type", "video")
+
+
 def test_model_profile_options_match_model_folders():
     options, default = _choice("model_profile")
-    folders = {p.name for p in MODELS_DIR.iterdir() if p.is_dir()}
+    # Сверяем только видео-профили; профили изображений проверяет test_zimage_profile.py
+    folders = {p.name for p in MODELS_DIR.iterdir()
+               if p.is_dir() and _profile_type(p) == "video"}
     assert options == folders
     assert options == {"ltx25"}
     assert default in options

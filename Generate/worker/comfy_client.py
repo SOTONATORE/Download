@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import secrets
 import time
 from typing import Any, Optional
@@ -17,6 +18,9 @@ log = logging.getLogger("Generate.worker.comfy_client")
 DEFAULT_BASE_URL = "http://127.0.0.1:8188"
 DEFAULT_TIMEOUT = 600.0
 REQUIRED_BINDINGS = ("prompt", "num_frames", "seed", "filename_prefix")
+# Для профиля изображения num_frames не нужен: он не требуется и не подставляется
+IMAGE_REQUIRED_BINDINGS = ("prompt", "seed", "filename_prefix")
+PROFILE_TYPES = ("video", "image")
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".gif")
 OUTPUT_KINDS = ("videos", "gifs", "images")
 
@@ -67,6 +71,14 @@ def new_second_pass_seed() -> int:
     return secrets.randbelow(SECOND_PASS_SEED_LIMIT)
 
 
+def profile_type() -> str:
+    """Тип профиля из переменной WORKER_PROFILE_TYPE (задаёт запуск воркера); не задана — «video»."""
+    value = os.environ.get("WORKER_PROFILE_TYPE", "").strip() or "video"
+    if value not in PROFILE_TYPES:
+        raise ComfyError(f"Неизвестный тип профиля в WORKER_PROFILE_TYPE: «{value}».")
+    return value
+
+
 def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frames: int,
                     seed: int, filename_prefix: str,
                     extra_inputs: Optional[dict] = None,
@@ -79,12 +91,16 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
     second_seed: сид нешифрованного (не привязанного) RandomNoise, то есть второго прохода;
     None = новый случайный сид. Привязанный сид (первый проход) задаётся только через bindings.
     """
-    missing = [k for k in REQUIRED_BINDINGS if k not in bindings]
+    is_image = profile_type() == "image"
+    required = IMAGE_REQUIRED_BINDINGS if is_image else REQUIRED_BINDINGS
+    missing = [k for k in required if k not in bindings]
     if missing:
         raise ComfyError("В привязках не хватает обязательных полей: " + ", ".join(missing) + ".")
     graph = copy.deepcopy(workflow_graph)
-    values = {"prompt": prompt, "num_frames": int(num_frames), "seed": int(seed),
-              "filename_prefix": filename_prefix}
+    values = {"prompt": prompt, "seed": int(seed), "filename_prefix": filename_prefix}
+    if not is_image:
+        # Для видео число кадров подставляется, как и раньше; для изображения не подставляется
+        values["num_frames"] = int(num_frames)
     for name, value in values.items():
         _set_input(graph, bindings[name], name, value)
     for name, value in (extra_inputs or {}).items():
