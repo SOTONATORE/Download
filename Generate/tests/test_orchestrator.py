@@ -321,7 +321,9 @@ class Rig:
                   worker_token=token, poll_interval_sec=10.0, work_dir=self.work_dir,
                   worker_build=VALID_BUILD)
         kw.update(orch_kw)
-        segs = [types.SimpleNamespace(num=n) for n in nums]
+        # Фейковые сегменты SRT с полями srt_parser.Segment; SRT в тестах нет, поля по формуле.
+        segs = [types.SimpleNamespace(num=n, start_ms=(n - 1) * 5000, end_ms=n * 5000 - 500, text=f"s{n}")
+                for n in nums]
         self.orc = orch.Orchestrator(
             segs, tmp_path / "missing.txt", None, None, self.store, self.vast, object(),
             self.prompts_path, http_client=self.http, clock=self.clock, sleep=self.clock.sleep, **kw)
@@ -1459,7 +1461,9 @@ def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilo
 
     clock = FakeClock()
     http = httpx.Client(transport=httpx.MockTransport(handler))
-    segs = [types.SimpleNamespace(num=n) for n in range(1, 6)]
+    # Фейковые сегменты SRT с полями srt_parser.Segment; SRT в тестах нет, поля по формуле.
+    segs = [types.SimpleNamespace(num=n, start_ms=(n - 1) * 5000, end_ms=n * 5000 - 500, text=f"s{n}")
+            for n in range(1, 6)]
     orc_kw = dict(repo="owner/repo", run_id="pilot-test", profile="ltx25", docker_image="comfy:img",
                   poll_interval_sec=10.0, silent_host_timeout_min=1, pilot=True,
                   pilot_start_cmd=pilot_start_cmd, work_dir=tmp_path / "work")

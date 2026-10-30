@@ -1291,7 +1291,7 @@ class Orchestrator:
 
     def _split_for_run(self, missing: list) -> dict:
         """STEP 3b: VIDEO_MODEL, VIDEO_PERCENT, INTRO_SECONDS из окружения; Gemini через тот же обёрточный транспорт."""
-        video_model = os.environ.get("VIDEO_MODEL", "") or "ltx25"
+        video_model = os.environ.get("VIDEO_MODEL", "") or DEFAULT_MODEL_PROFILE
         try:
             video_percent = float(os.environ.get("VIDEO_PERCENT", "") or "100")
             intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
