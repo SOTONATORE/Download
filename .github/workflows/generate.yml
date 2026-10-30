@@ -49,6 +49,20 @@ on:
         options:
           - "ltx25"
         default: "ltx25"
+      video_model:
+        description: "Видео-модель: ltx25 = включена; none = видео не генерируется. Варианты сверяются с профилями без поля type (видео)"
+        type: choice
+        options:
+          - "ltx25"
+          - "none"
+        default: "ltx25"
+      photo_model:
+        description: "Фото-модель: zimage_turbo = включена; none = фото не генерируется. Варианты сверяются с профилями type: image"
+        type: choice
+        options:
+          - "zimage_turbo"
+          - "none"
+        default: "zimage_turbo"
       preset:
         description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
@@ -129,8 +143,20 @@ jobs:
       # вывод окна шагов (INFO, после маскирования секретов), копируется в артефакт шагом «Collect run log».
       # Подробный журнал (DEBUG и сырой обмен с Vast) пишется отдельно: run/debug.log в артефакте запуска.
       RUN_LOG: /tmp/generate-run.log
+      # выбор моделей (none = модель выключена); шаги читают их из env, пропуск шагов — условием if
+      VIDEO_MODEL: ${{ inputs.video_model }}
+      PHOTO_MODEL: ${{ inputs.photo_model }}
 
     steps:
+      # S2b: самый первый шаг, до аренды карт и до любых вызовов Gemini.
+      # Если обе модели выключены, работать нечему: шаг падает с ненулевым кодом.
+      - name: Check model choice
+        run: |
+          if [ "$VIDEO_MODEL" = "none" ] && [ "$PHOTO_MODEL" = "none" ]; then
+            echo "Обе модели выключены (video_model=none, photo_model=none). Выберите хотя бы одну модель."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -177,7 +203,9 @@ jobs:
           # PID нужен шагу остановки; журнал наблюдателя пишется в файл и попадает в RUN_LOG при остановке
           echo "WATCH_PID=$!" >> "$GITHUB_ENV"
 
+      # S2c: при video_model=none видео не генерируем: карты не арендуются, промпты не пишутся
       - name: Run generation
+        if: env.VIDEO_MODEL != 'none'
         env:
           GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
