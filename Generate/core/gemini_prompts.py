@@ -22,10 +22,12 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .srt_parser import Segment
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
+    from .prompt_check import MAX_REWORK_ATTEMPTS, find_problems, rework_remark  # проверка промптов (шаг 6)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
+    from prompt_check import MAX_REWORK_ATTEMPTS, find_problems, rework_remark  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -589,6 +591,40 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
+def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
+                     res: PromptResult) -> PromptResult:
+    """Проверка запрещённых типов кадра и маркеров в готовом промпте (шаг 6).
+
+    Нарушение: до MAX_REWORK_ATTEMPTS переписываний этого одного промпта тем же вызовом Gemini.
+    Если нарушение осталось после последней попытки, прогон останавливается с ошибкой.
+    Этот цикл отдельный: повтор при сбоях сети живёт в gemini_orchestrator, повтор за стиль — в _run_batch.
+    Текст промпта в сообщение об ошибке не попадает.
+    """
+    text = res.prompt
+    problems = find_problems(text)
+    attempt = 0
+    while problems and attempt < MAX_REWORK_ATTEMPTS:
+        attempt += 1
+        user = (f"Prompt for segment_index {res.num}: {text}\n\n"
+                + rework_remark(problems)
+                + f"\n\nReturn only the JSON array with one item: segment_index {res.num}.")
+        raw = transport.generate_json(model, builder.system, user, builder.schema)
+        results, _ = parse_and_validate(raw, [res.num], builder.cfg)
+        new_text = results[res.num].prompt if res.num in results else ""
+        if new_text.strip():
+            text = new_text
+        problems = find_problems(text)
+    if problems:
+        # GeminiRuntimeError со status=None: сбой-класс, который cli уже обрабатывает; повтор на транспорте
+        # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.
+        raise GeminiRuntimeError(
+            f"Сегмент {res.num}: в промпте остались запрещённые типы кадра или маркеры "
+            f"после {attempt} переписываний: {'; '.join(problems)}. Прогон остановлен."
+        )
+    res.prompt = text
+    return res
+
+
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest) -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult."""
     expected = list(batch.nums)
@@ -621,6 +657,10 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 if best is None:
                     best = PromptResult(n, "")
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
+    # шаг 6: проверка до прикрепления стиля в generate_prompts (текст стиля сам содержит слова вроде «documents»)
+    for n in list(final):
+        if final[n].prompt.strip():
+            final[n] = _check_forbidden(transport, model, builder, final[n])
     return final
 
 
