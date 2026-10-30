@@ -222,6 +222,19 @@ class GeminiSpy:
         return state
 
 
+class _ValueTransport:
+    """Фейк транспорта Gemini для оценки video_value (STEP 3b): 50 на каждый пропущенный номер.
+
+    Ответ только по пропущенным номерам из rig.missing: лишний id parse_value_response отвергает.
+    """
+
+    def __init__(self, rig) -> None:
+        self._rig = rig
+
+    def generate_json(self, model, system, user, schema) -> str:
+        return json.dumps([{"id": n, "video_value": 50} for n in self._rig.missing])
+
+
 class FakeWorker:
     """HTTP-воркер: POST /task, GET /task/{id}, GET /file/{id}, POST /ack/{id}."""
 
@@ -325,7 +338,7 @@ class Rig:
         segs = [types.SimpleNamespace(num=n, start_ms=(n - 1) * 5000, end_ms=n * 5000 - 500, text=f"s{n}")
                 for n in nums]
         self.orc = orch.Orchestrator(
-            segs, tmp_path / "missing.txt", None, None, self.store, self.vast, object(),
+            segs, tmp_path / "missing.txt", None, None, self.store, self.vast, _ValueTransport(self),
             self.prompts_path, http_client=self.http, clock=self.clock, sleep=self.clock.sleep, **kw)
 
     def run(self):
