@@ -126,7 +126,6 @@ jobs:
               fail("секрет для Gemini не задан в настройках репозитория")
 
           # Журнал как в cli.py: консоль и файл <ART_DIR>/run/debug.log на уровне GEN_LOG_LEVEL (пусто = INFO).
-          # Без этой настройки INFO-строки персонажей (appearance updated) не попадают никуда.
           log_level = os.environ.get("GEN_LOG_LEVEL", "").strip() or "INFO"
           if log_level not in ("INFO", "DEBUG"):
               fail("GEN_LOG_LEVEL допускает только значения INFO и DEBUG")
@@ -340,7 +339,7 @@ jobs:
           say(f"Проверка пройдена: промптов {len(rows)}")
           PY
 
-      - name: Загрузка prompts.json и файла персонажей
+      - name: Загрузка prompts.json и журнала
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -348,7 +347,5 @@ jobs:
           # run/debug.log — журнал проверки (ART_DIR шага выше); лежит в той же папке артефакта, что и файлы выше.
           path: |
             prompts.json
-            characters.json
-            characters.partial.json
             verify-artifact/run/debug.log
           if-no-files-found: warn
