@@ -12,9 +12,9 @@ from Generate.core.srt_parser import Segment
 GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
-# Эталон: системная инструкция ltx25 ДО фазы E2 (код до слоя пресета), снято с исходного дерева.
-BASELINE_BYTES = 16007
-BASELINE_SHA256 = "df7351ffd49270bfed51b1b768340f43f48152fd30256928fa82621d44454f1b"
+# Эталон: системная инструкция ltx25 ДО фазы E2 (код до слоя пресета), пересчитано после правки style.md.
+BASELINE_BYTES = 16168
+BASELINE_SHA256 = "bece7c1d709ffee13cb921a43b216a68a778754fbc1cdaea38323a94c9b40107"
 
 
 @pytest.fixture
