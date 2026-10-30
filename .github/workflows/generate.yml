@@ -226,6 +226,9 @@ jobs:
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
+          # STEP 3b: распределение видео/фото (distribution.json); читает оркестратор до промптов
+          VIDEO_PERCENT: ${{ inputs.video_percent }}
+          INTRO_SECONDS: ${{ inputs.intro_seconds }}
           PRESET: ${{ inputs.preset }}
           GPU_NAME: ${{ inputs.gpu_name }}
           MIN_PRICE: ${{ inputs.min_price_per_hour }}
