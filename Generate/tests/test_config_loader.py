@@ -116,7 +116,7 @@ def test_generate_workflow_defaults_match_config_default():
     assert inputs["rental_type"]["type"] == "choice"
     assert inputs["rental_type"]["default"] in inputs["rental_type"]["options"]
     # входы выбора: model_profile (только ltx25) и preset (none и test; test — заглушка presets/prompts/test.md)
-    assert inputs["model_profile"]["type"] == "choice" and inputs["model_profile"]["options"] == ["ltx25"]
+    assert "model_profile" not in inputs
     assert inputs["preset"]["type"] == "choice" and inputs["preset"]["options"] == ["none", "test"]
     assert inputs["preset"]["default"] == "none" and cfg.preset == "none"
 

@@ -35,14 +35,11 @@ def _profile_type(folder):
     return data.get("type", "video")
 
 
-def test_model_profile_options_match_model_folders():
-    options, default = _choice("model_profile")
-    # Сверяем только видео-профили; профили изображений проверяет test_zimage_profile.py
-    folders = {p.name for p in MODELS_DIR.iterdir()
-               if p.is_dir() and _profile_type(p) == "video"}
-    assert options == folders
-    assert options == {"ltx25"}
-    assert default in options
+def test_no_model_profile_input_and_video_profile_from_video_model():
+    # Входа model_profile больше нет: профиль видео выводится из video_model в env job
+    assert "model_profile" not in _dispatch_inputs()
+    job_env = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["generate"]["env"]
+    assert job_env["VIDEO_PROFILE"] == "${{ inputs.video_model != 'none' && inputs.video_model || 'ltx25' }}"
 
 
 def test_preset_options_match_preset_files():
