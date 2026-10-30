@@ -51,7 +51,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, profile_dir, profile_exists)
+        load_profile_number, load_profile_type, profile_dir, profile_exists)
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
@@ -65,7 +65,7 @@ except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, profile_dir, profile_exists)
+        load_profile_number, load_profile_type, profile_dir, profile_exists)
     from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
     from model_constants import PRESET_NONE  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
@@ -313,7 +313,14 @@ def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
-    if not os.path.isfile(style_file):
+    # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
+    if load_profile_type(profile) == "image":
+        if not os.path.isfile(style_file):
+            raise GeminiInputError(
+                f"Ошибка входных данных: для профиля {profile} (type: image) "
+                f"не найден файл стиля: {style_file}")
+    elif not os.path.isfile(style_file):
+        # профили video и без поля type: прежняя подмена на профиль по умолчанию
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
     return cls(style_file=style_file, batch_size=batch_size, preset=preset)
 
