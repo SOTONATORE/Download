@@ -50,3 +50,47 @@ def test_preset_options_match_preset_files():
     files = {p.stem for p in PRESETS_DIR.glob("*.md")} - NOT_PRESETS
     assert options == {"none"} | files
     assert default in options
+
+
+# S2a–S2d: выбор видео- и фото-модели в generate.yml
+
+FAIL_FAST_MESSAGE = (
+    "Обе модели выключены (video_model=none, photo_model=none). "
+    "Выберите хотя бы одну модель."
+)
+
+
+def _profile_folders(wanted_type):
+    # Папки профилей с нужным типом; без поля type профиль считается видео (как в коде)
+    return {p.name for p in MODELS_DIR.iterdir()
+            if p.is_dir() and _profile_type(p) == wanted_type}
+
+
+def test_model_inputs_have_expected_options():
+    video_options, _ = _choice("video_model")
+    photo_options, _ = _choice("photo_model")
+    assert video_options == {"ltx25", "none"}
+    assert photo_options == {"zimage_turbo", "none"}
+
+
+def test_model_inputs_have_expected_defaults():
+    _, video_default = _choice("video_model")
+    _, photo_default = _choice("photo_model")
+    assert video_default == "ltx25"
+    assert photo_default == "zimage_turbo"
+
+
+def test_model_input_options_match_profile_types():
+    # Без «none» варианты должны совпадать с профилями на диске своего типа
+    video_options, _ = _choice("video_model")
+    photo_options, _ = _choice("photo_model")
+    assert video_options - {"none"} == _profile_folders("video")
+    assert photo_options - {"none"} == _profile_folders("image")
+
+
+def test_fail_fast_step_contains_russian_message():
+    steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["generate"]["steps"]
+    # Проверка стоит первым шагом job, до Checkout и до аренды карт
+    first_run = steps[0].get("run", "")
+    assert FAIL_FAST_MESSAGE in first_run
+    assert "exit 1" in first_run
