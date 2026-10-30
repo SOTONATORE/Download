@@ -1,0 +1,7 @@
+{
+  "prompt": { "node_id": "57:27", "field": "text" },
+  "seed": { "node_id": "57:3", "field": "seed" },
+  "width": { "node_id": "57:13", "field": "width" },
+  "height": { "node_id": "57:13", "field": "height" },
+  "filename_prefix": { "node_id": "9", "field": "filename_prefix" }
+}
