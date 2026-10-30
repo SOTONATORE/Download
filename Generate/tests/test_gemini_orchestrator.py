@@ -8,7 +8,6 @@ import socket
 
 import pytest
 
-from Generate.core import character_file as cf
 from Generate.core import gemini_orchestrator as go
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, PromptConfig
@@ -78,24 +77,10 @@ def rpm429(retry_after=7.0):
     return GeminiRuntimeError("лимит в минуту", status=429, code="RESOURCE_EXHAUSTED", retry_after=retry_after)
 
 
-def write_characters(out_dir, hash_value, names=("ANNA",)):
-    """Пишет characters.json в формате character_file (записи name, aliases, keywords, appearance)."""
-    chars = [{"name": n, "aliases": [], "keywords": [], "appearance": f"Adult, {n.lower()} test trait."}
-             for n in names]
-    out = pathlib.Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "characters.json").write_text(
-        json.dumps({"srt_hash": hash_value, "characters": chars}, ensure_ascii=False), encoding="utf-8")
-
-
-def run(tmp_path, transport, wanted, segments=None, clock=None, path=None, *, with_characters=True, **kw):
-    """with_characters=True (по умолчанию): рядом с prompts.json лежит characters.json с совпадающим srt_hash,
-    шаг персонажей не делает запросов. Тесты самого шага персонажей передают with_characters=False."""
+def run(tmp_path, transport, wanted, segments=None, clock=None, path=None, **kw):
     clock = clock or FakeClock()
     path = path or tmp_path / "prompts.json"
     segments = segments or segs()
-    if with_characters:
-        write_characters(pathlib.Path(path).parent, srt_hash(segments))
     kw.setdefault("models", (M1, M2))
     kw.setdefault("clock", clock.now)
     kw.setdefault("sleep", clock.sleep)
@@ -454,47 +439,6 @@ def test_transient_errors_leave_no_key_or_prompt_text_in_logs(tmp_path, monkeypa
     assert "HTTP 503, код UNAVAILABLE" in caplog.text
 
 
-# ------------------------------------------------------- шаг персонажей (сбой останавливает прогон)
-
-def char_reply(name="ANNA"):
-    # новая запись: id пустой строкой, внешность — строка (new_traits и conflicts удалены из схемы)
-    return {"characters": [{"id": "", "name": name, "aliases": [], "keywords": [],
-                            "appearance": "woman in her thirties"}]}
-
-
-def test_character_quota_stops_run_keeps_partial(tmp_path, monkeypatch):
-    # with_characters=False: шаг персонажей сам делает запросы. Два окна по два сегмента.
-    monkeypatch.setattr(cf, "WINDOW_SEGMENTS", 2)
-    t = FakeTransport([char_reply(), quota(), quota()])  # окно 1 готово, окно 2: квота на обеих моделях
-    with pytest.raises(go.CharacterStepError) as ei:
-        run(tmp_path, t, [1, 2, 3, 4], with_characters=False, cfg=cfg(tmp_path, batch_size=2))
-    e = ei.value
-    assert isinstance(e, GeminiRuntimeError) and e.exit_code == 3
-    assert e.daily_quota and e.status == 429 and e.code == "RESOURCE_EXHAUSTED"
-    assert "characters.partial.json" in str(e)
-    assert t.calls == [M1, M1, M2]                              # промптов запрошено не было
-    assert not (tmp_path / "prompts.json").exists()             # ни одного промпта не записано
-    assert not (tmp_path / "characters.json").exists()
-    partial = read(tmp_path / "characters.partial.json")        # готовое окно сохранено
-    assert partial["finished"] == [{"first": 1, "last": 2}]
-    assert [c["name"] for c in partial["characters"]] == ["ANNA"]
-
-
-def test_next_run_resumes_characters_then_prompts(tmp_path, monkeypatch):
-    monkeypatch.setattr(cf, "WINDOW_SEGMENTS", 2)
-    with pytest.raises(go.CharacterStepError):
-        run(tmp_path, FakeTransport([char_reply(), quota(), quota()]), [1, 2, 3, 4],
-            with_characters=False, cfg=cfg(tmp_path, batch_size=2))
-    t = FakeTransport([char_reply("BORIS"), ok([1, 2, 3, 4])])  # второе окно, затем промпты
-    run(tmp_path, t, [1, 2, 3, 4], with_characters=False)
-    assert t.calls == [M1, M1]
-    chars = read(tmp_path / "characters.json")
-    assert chars["srt_hash"] == srt_hash(segs())
-    assert [c["name"] for c in chars["characters"]] == ["ANNA", "BORIS"]
-    assert not (tmp_path / "characters.partial.json").exists()
-    assert sorted(map(int, read(tmp_path / "prompts.json")["prompts"])) == [1, 2, 3, 4]
-
-
 # ------------------------------------------------------------------- лимитер
 
 def test_15_rpm_throttling():
@@ -629,47 +573,3 @@ def test_success_logs_model_time_and_attempts_without_prompt_text(tmp_path, capl
     assert any(l.startswith(f"Модель {M1}: ответ получен за") and "сбоев подряд до этого: 1" in l
                for l in lines)
     assert "A wide shot" not in caplog.text
-
-
-# ------------------------------------------------------------------ часть B/C: id и объекты в промптах
-
-class RecordingFake(FakeTransport):
-    """FakeTransport, который запоминает тексты запросов (пользовательские сообщения)."""
-
-    def __init__(self, replies):
-        super().__init__(replies)
-        self.users = []
-
-    def generate_json(self, model, system, user, schema):
-        self.users.append(user)
-        return super().generate_json(model, system, user, schema)
-
-
-def test_objects_reach_prompt_stage_and_markers_resolved(tmp_path):
-    segments = [Segment(1, 0, 1000, "Anna puts the key on the table.")]
-    record = {
-        "srt_hash": srt_hash(segments),
-        "characters": [{"id": "CHAR_1", "name": "ANNA", "aliases": [], "keywords": ["Anna"],
-                        "appearance": "a woman in her thirties"}],
-        "objects": [{"id": "OBJ_1", "name": "KEY", "aliases": [], "keywords": ["key"], "owner": "CHAR_1",
-                     "appearance": "a small brass key"}],
-    }
-    (tmp_path / "characters.json").write_text(json.dumps(record), encoding="utf-8")
-    t = RecordingFake([[{"segment_index": 1, "prompt": "[CHAR_1] puts [OBJ_1] on the table."}]])
-    run(tmp_path, t, [1], segments=segments, with_characters=False)
-    e = read(tmp_path / "prompts.json")["prompts"]["1"]
-    assert e["prompt"] == "A woman in her thirties puts a small brass key on the table."
-    assert "CHAR_1" in t.users[0] and "OBJ_1" in t.users[0]   # id попадают в инструкцию о маркерах
-    assert "a small brass key" not in t.users[0]              # описание в запрос не идёт
-    assert t.calls == [M1]
-
-
-def test_cached_file_without_ids_is_migrated_during_run(tmp_path):
-    segments = segs(2)
-    write_characters(tmp_path, srt_hash(segments))           # старый формат: без id и без objects
-    t = FakeTransport([ok([1, 2])])
-    run(tmp_path, t, [1, 2], segments=segments, with_characters=False)
-    stored = read(tmp_path / "characters.json")
-    assert stored["srt_hash"] == srt_hash(segments)
-    assert [c["id"] for c in stored["characters"]] == ["CHAR_1"]
-    assert stored["objects"] == []
