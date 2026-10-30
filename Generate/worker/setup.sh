@@ -13,6 +13,8 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
+# Репозиторий весов Z-Image (Comfy-Org). Используется только для профиля zimage_turbo; для LTX не применяется.
+HF_ZIMAGE_BASE_URL="https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main"
 
 # ComfyUI запускает bootstrap.sh (шаг 4б), порт 18188 задаётся COMFYUI_ARGS в env карты (SPEC 8.5). setup.sh только ждёт его на порту 18188 (стоковый путь образа через supervisor на Vast в ssh-режиме не работает).
 COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
@@ -33,8 +35,13 @@ WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
 
 SERVER_PID=""
 
-# Счётчик файлов модели для строк лога: «[1/5] ...»
-MODEL_FILES_TOTAL=5
+# Счётчик файлов модели для строк лога: «[1/5] ...». Зависит от профиля: ltx25 — 5 файлов, zimage_turbo — 3.
+# MODEL_PROFILE не задан — профиль ltx25 (как раньше).
+if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
+    MODEL_FILES_TOTAL=3
+else
+    MODEL_FILES_TOTAL=5
+fi
 MODEL_FILE_INDEX=0
 MODEL_PATHS=()
 # 1, если какая-либо загрузка весов не удалась: сервер воркера остаётся запущен, ComfyUI не ждём
@@ -91,22 +98,35 @@ ensure_downloader() {
     fi
 }
 
-# Загрузка одного файла модели в фоне: start_download <подкаталог в репозитории и в models/> <имя файла>
+# Загрузка одного файла модели в фоне:
+# start_download <локальный подкаталог в models/> <имя файла> [путь в репозитории HF] [базовый URL HF]
+# Без третьего и четвёртого аргумента URL строится как раньше: HF_BASE_URL/<подкаталог>/<имя файла> (LTX).
 start_download() {
     MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
     MODEL_PATHS+=("${COMFY_MODELS_DIR}/$1/$2")
-    download_model "${MODEL_FILE_INDEX}" "$1" "$2" &
+    download_model "${MODEL_FILE_INDEX}" "$1" "$2" "${3:-}" "${4:-}" &
     DL_PIDS+=("$!")
 }
 
-# Тело загрузки одного файла (выполняется в фоновом процессе): download_model <номер> <подкаталог> <имя файла>
+# Тело загрузки одного файла (выполняется в фоновом процессе):
+# download_model <номер> <локальный подкаталог> <имя файла> [путь в репозитории HF] [базовый URL HF]
+# Локальная папка всегда ${COMFY_MODELS_DIR}/<локальный подкаталог>. Если задан путь в репозитории,
+# URL = <базовый URL>/<путь в репозитории>; иначе URL = <базовый URL>/<подкаталог>/<имя файла>.
+# Базовый URL по умолчанию — HF_BASE_URL (LTX), поэтому вызовы LTX без пятого аргумента не меняются.
 download_model() {
     local idx="$1"
     local subdir="$2"
     local name="$3"
+    local repo_path="${4:-}"
+    local base="${5:-${HF_BASE_URL}}"
     local target_dir="${COMFY_MODELS_DIR}/${subdir}"
     local path="${target_dir}/${name}"
-    local url="${HF_BASE_URL}/${subdir}/${name}"
+    local url
+    if [ -n "${repo_path}" ]; then
+        url="${base}/${repo_path}"
+    else
+        url="${base}/${subdir}/${name}"
+    fi
     local tag="[${idx}/${MODEL_FILES_TOTAL}]"
     local tool="aria2"
     local rc
@@ -243,7 +263,8 @@ rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}"
 log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
 
 # --- 1. Проверка токена и инструментов ---
-if [ -z "${HF_TOKEN:-}" ]; then
+# Токен нужен только для LTX (репозиторий Lightricks закрыт). Z-Image (Comfy-Org) открыт, токен не требуется.
+if [ "${MODEL_PROFILE:-ltx25}" != "zimage_turbo" ] && [ -z "${HF_TOKEN:-}" ]; then
     log "ОШИБКА: Не задана переменная окружения HF_TOKEN. Репозиторий Lightricks/LTX-2.5 закрыт (gated), скачивание весов невозможно."
     exit 1
 fi
@@ -254,6 +275,15 @@ ensure_downloader
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
 # stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
+# Тип профиля для воркера (comfy_client.py читает WORKER_PROFILE_TYPE) выводится здесь из MODEL_PROFILE:
+# zimage_turbo — image, остальные — video. Значение должно совпадать с полем type в profile.yaml каждого профиля.
+if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
+    WORKER_PROFILE_TYPE="image"
+else
+    WORKER_PROFILE_TYPE="video"
+fi
+export WORKER_PROFILE_TYPE
+log "Тип профиля для воркера: ${WORKER_PROFILE_TYPE}."
 python3 "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
@@ -266,13 +296,21 @@ else
     log "ComfyUI пока не отвечает: он запущен на шаге 4б bootstrap и грузится параллельно с весами."
 fi
 
-# --- 3. Загрузка модульных файлов модели LTX-2.5: все пять запускаются параллельно ---
+# --- 3. Загрузка файлов модели: zimage_turbo — три файла Z-Image, иначе — пять файлов LTX-2.5, параллельно ---
 log "Запускаю параллельную загрузку весов: ${MODEL_FILES_TOTAL} файлов."
-start_download "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
-start_download "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
-start_download "vae" "ltx-2.5-video-vae-bf16.safetensors"
-start_download "vae" "ltx-2.5-audio-vae-bf16.safetensors"
-start_download "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
+    # Z-Image: три файла из репозитория Comfy-Org; путь в репозитории и базовый URL передаются явно
+    start_download "diffusion_models" "z_image_turbo_bf16.safetensors" "split_files/diffusion_models/z_image_turbo_bf16.safetensors" "${HF_ZIMAGE_BASE_URL}"
+    start_download "text_encoders" "qwen_3_4b.safetensors" "split_files/text_encoders/qwen_3_4b.safetensors" "${HF_ZIMAGE_BASE_URL}"
+    start_download "vae" "ae.safetensors" "split_files/vae/ae.safetensors" "${HF_ZIMAGE_BASE_URL}"
+else
+    # LTX-2.5: вызовы без изменений (три аргумента, URL от HF_BASE_URL)
+    start_download "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+    start_download "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+    start_download "vae" "ltx-2.5-video-vae-bf16.safetensors"
+    start_download "vae" "ltx-2.5-audio-vae-bf16.safetensors"
+    start_download "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+fi
 wait_downloads
 for dl_pid in "${DL_PIDS[@]}"; do
     if ! wait "${dl_pid}"; then
@@ -290,7 +328,7 @@ if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
     log "Сервер воркера завершился (код ${EXIT_CODE})."
     exit "${EXIT_CODE}"
 fi
-log "Все файлы модели LTX-2.5 на месте."
+log "Все файлы модели на месте (профиль ${MODEL_PROFILE:-ltx25})."
 
 # Перезапуск ComfyUI не более одного раза: только если он отвечал до конца последней загрузки (мог не увидеть все файлы)
 if [ "${COMFY_UP_EARLY}" -eq 1 ]; then
