@@ -43,9 +43,12 @@ def fake_cls(monkeypatch):
 def test_zimage_style_file_checks():
     assert ZIMAGE_STYLE.is_file()
     text = ZIMAGE_STYLE.read_text(encoding="utf-8")
-    assert len(text.encode("utf-8")) < 2048
+    assert len(text.encode("utf-8")) < 4096
     assert "1920" in text or "16:9" in text
     assert "no text" in text.lower()
+    # запрещённые в промпте вещи должны быть перечислены в разделе Avoid
+    assert "metaphor" in text.lower()
+    assert "8K" in text
 
 
 def test_zimage_style_body_has_no_forbidden_ru_stems():
