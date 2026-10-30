@@ -43,12 +43,6 @@ on:
         description: "Минимальный баланс Vast.ai для старта (USD); не меньше бюджета, ниже = запуск не стартует"
         type: string
         default: "2.0"
-      model_profile:
-        description: "Профиль модели: имя папки в Generate/model_profiles/models/ (сейчас доступна ltx25)"
-        type: choice
-        options:
-          - "ltx25"
-        default: "ltx25"
       video_model:
         description: "Видео-модель: ltx25 = включена; none = видео не генерируется. Варианты сверяются с профилями без поля type (видео)"
         type: choice
@@ -146,6 +140,8 @@ jobs:
       # выбор моделей (none = модель выключена); шаги читают их из env, пропуск шагов — условием if
       VIDEO_MODEL: ${{ inputs.video_model }}
       PHOTO_MODEL: ${{ inputs.photo_model }}
+      # профиль видео берётся из video_model (ltx25); при none запасной профиль ltx25, видео-шаги всё равно пропускаются
+      VIDEO_PROFILE: ${{ inputs.video_model != 'none' && inputs.video_model || 'ltx25' }}
 
     steps:
       # S2b: самый первый шаг, до аренды карт и до любых вызовов Gemini.
@@ -219,7 +215,7 @@ jobs:
           MAX_CARDS: ${{ inputs.max_cards }}
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
-          MODEL_PROFILE: ${{ inputs.model_profile }}
+          MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
           PRESET: ${{ inputs.preset }}
           GPU_NAME: ${{ inputs.gpu_name }}
           MIN_PRICE: ${{ inputs.min_price_per_hour }}
@@ -417,7 +413,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          MODEL_PROFILE: ${{ inputs.model_profile }}
+          MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
