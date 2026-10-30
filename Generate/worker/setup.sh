@@ -328,7 +328,11 @@ if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
     log "Сервер воркера завершился (код ${EXIT_CODE})."
     exit "${EXIT_CODE}"
 fi
-log "Все файлы модели на месте (профиль ${MODEL_PROFILE:-ltx25})."
+if [ -z "${MODEL_PROFILE:-}" ] || [ "${MODEL_PROFILE}" = "ltx25" ]; then
+    log "Все файлы модели LTX-2.5 на месте."
+else
+    log "Все файлы модели на месте (профиль ${MODEL_PROFILE})."
+fi
 
 # Перезапуск ComfyUI не более одного раза: только если он отвечал до конца последней загрузки (мог не увидеть все файлы)
 if [ "${COMFY_UP_EARLY}" -eq 1 ]; then

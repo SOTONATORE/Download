@@ -129,8 +129,13 @@ _KEY_BY_NODE = {"UNETLoader": "unet_name", "CLIPLoader": "clip_name",
 
 def test_setup_download_names_equal_workflow_and_profile_names():
     text = SETUP.read_text(encoding="utf-8")
-    setup_pairs = set(re.findall(r'^start_download "([^"]+)" "([^"]+)"', text, re.M))
-    assert len(setup_pairs) == 5  # MODEL_FILES_TOTAL=5 в setup.sh
+    profile_files = _yaml(PROFILE)["model_files"]
+    ltx_names = set(profile_files.values())
+    # вызовы start_download могут стоять с отступом (блоки if/else); Z-Image отсекаем по именам профиля
+    all_pairs = re.findall(r'^[ \t]*start_download "([^"]+)" "([^"]+)"', text, re.M)
+    setup_pairs = {(d, f) for d, f in all_pairs if f in ltx_names}
+    assert len(setup_pairs) == len(profile_files) == 5  # MODEL_FILES_TOTAL=5 в setup.sh
+    assert {name for _, name in setup_pairs} == ltx_names
     graph_pairs = set()
     for node in _json(WORKFLOW).values():
         cls = node.get("class_type")
