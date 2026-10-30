@@ -44,6 +44,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
                             mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from .missing import parse_missing
+    from .segment_split import all_photo, select_video_segments, to_segments
+    from .video_value import score_segments, write_distribution
     from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
     from . import ssh_probe
@@ -62,6 +64,8 @@ except ImportError:  # pragma: no cover
     from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from missing import parse_missing  # type: ignore
+    from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
+    from video_value import score_segments, write_distribution  # type: ignore
     from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
@@ -488,7 +492,51 @@ REPORT_FILENAME = "summary.md"
 FILES_LIST_NAME = "FILES.txt"
 LOG_BUNDLE_NAME = "run-logs.zip"
 MISSING_FILENAME = "missing.txt"
+DISTRIBUTION_FILENAME = "distribution.json"  # STEP 3b: распределение видео/фото
 SERVICE_DIR = "service"
+
+
+# STEP 3b: схема ответа Gemini для оценки video_value (список объектов {"id", "video_value"}).
+VALUE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "video_value": {"type": "integer"}},
+        "required": ["id", "video_value"],
+    },
+}
+
+
+def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_seconds,
+                  send, distribution_path) -> dict:
+    """STEP 3b: распределение видео/фото для номеров из missing.txt, до любых промптов.
+
+    video_model == "none": все сегменты в фото, send не вызывается.
+    иначе: оценка video_value через send (Gemini), затем select_video_segments.
+    Ошибка оценки останавливает запуск: запасного значения по умолчанию нет.
+    distribution_path None: файл не пишется, распределение всё равно считается и записывается в журнал.
+    """
+    segs = to_segments(srt_segments, missing)
+    if video_model == "none":
+        values = {}
+        result = all_photo(segs)
+    else:
+        try:
+            values = score_segments(segs, send)
+        except ValueError as exc:
+            raise gp.GeminiRuntimeError(
+                f"Оценка video_value через Gemini не удалась: {exc} Запуск остановлен, запасного значения нет."
+            ) from None
+        result = select_video_segments(segs, values, video_percent, intro_seconds)
+    if distribution_path is not None:
+        write_distribution(distribution_path, result, segs, values)
+        log.info("Распределение записано в файл: %s.", distribution_path)
+    else:
+        log.warning("Папка артефакта не задана: распределение записано только в журнал.")
+    log.info("Распределение видео/фото: видео %d сегментов, фото %d сегментов; "
+             "бюджет видео %.1f с, видео %.1f с.",
+             len(result["video"]), len(result["photo"]), result["budget_seconds"], result["video_seconds"])
+    return result
 
 
 class ReleaseStartError(gp.GeminiInputError):
@@ -1241,6 +1289,26 @@ class Orchestrator:
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
 
+    def _split_for_run(self, missing: list) -> dict:
+        """STEP 3b: VIDEO_MODEL, VIDEO_PERCENT, INTRO_SECONDS из окружения; Gemini через тот же обёрточный транспорт."""
+        video_model = os.environ.get("VIDEO_MODEL", "") or "ltx25"
+        try:
+            video_percent = float(os.environ.get("VIDEO_PERCENT", "") or "100")
+            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
+        except ValueError:
+            raise gp.GeminiInputError("VIDEO_PERCENT и INTRO_SECONDS должны быть числами.") from None
+        send = None
+        if video_model != "none":
+            opts = self.gemini_options
+            managed = go.ManagedTransport(
+                self.gemini_transport, opts.get("models", go.DEFAULT_MODELS),
+                rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
+                rpd_limit=opts.get("rpd_limit", 500))
+            send = lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA)  # noqa: E731
+        dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if self._artifact else None
+        return split_for_run(self.segments, missing, video_model=video_model, video_percent=video_percent,
+                             intro_seconds=intro_seconds, send=send, distribution_path=dist_path)
+
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
         self._t0 = self.clock()
@@ -1254,6 +1322,7 @@ class Orchestrator:
             if not missing:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
+            self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
             if self.limit_clips > 0:
                 missing = missing[: self.limit_clips]
                 log.info("Пробный прогон: берём первые %d номеров.", len(missing))

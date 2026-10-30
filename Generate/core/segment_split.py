@@ -134,3 +134,20 @@ def all_photo(segments: Sequence[Segment]) -> dict:
         "video_seconds": 0.0,
         "intro_seconds_used": 0,
     }
+
+
+def to_segments(srt_segments, missing_nums) -> list[Segment]:
+    """Переводит srt_parser.Segment (num, start_ms, end_ms, text) в Segment этого модуля.
+
+    Оставляет только номера из missing_nums; id = num, start и end переводятся из миллисекунд в секунды.
+    Бросает ValueError, если пропущенного номера нет в SRT.
+    """
+    by_num = {s.num: s for s in srt_segments}
+    wanted = sorted(set(missing_nums))
+    absent = [n for n in wanted if n not in by_num]
+    if absent:
+        raise ValueError("Номера из missing.txt отсутствуют в SRT: " + ", ".join(map(str, absent)) + ".")
+    return [
+        Segment(id=s.num, start=s.start_ms / 1000, end=s.end_ms / 1000, text=s.text)
+        for s in (by_num[n] for n in wanted)
+    ]
