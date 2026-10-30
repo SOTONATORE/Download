@@ -72,14 +72,12 @@ def test_generate_only_missing_and_keep_others(tmp_path):
     existing = {"srt_hash": srt_hash(segs), "model": "m", "profile": "ltx25",
                 "prompts": {str(n): _ready(n, f"old {n}") for n in (1, 2, 4, 5)}}
     path.write_text(json.dumps(existing), encoding="utf-8")
-    # первый ответ: записи персонажей (окно одно, персонажей нет); второй: промпт сегмента 3
-    t = RecordingTransport([json.dumps({"characters": []}),
-                            json.dumps([{"segment_index": 3, "prompt": GOOD_PROMPT}])])
+    t = RecordingTransport([json.dumps([{"segment_index": 3, "prompt": GOOD_PROMPT}])])
     go.generate_and_store(segs, [1, 2, 3, 4, 5], cfg(tmp_path), t, path, profile="ltx25", timing=TIMING,
                           clock=lambda: 1000.0, sleep=lambda s: None)
-    assert len(t.users) == 2
-    assert "segment_index: 3\n" in t.users[1]
-    assert "segment_index: 1\n" not in t.users[1]
+    assert len(t.users) == 1
+    assert "segment_index: 3\n" in t.users[0]
+    assert "segment_index: 1\n" not in t.users[0]
     data = json.loads(path.read_text(encoding="utf-8"))
     assert list(data["prompts"]) == ["1", "2", "3", "4", "5"]
     for n in (1, 2, 4, 5):
