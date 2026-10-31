@@ -22,7 +22,11 @@ REQUIRED_BINDINGS = ("prompt", "num_frames", "seed", "filename_prefix")
 IMAGE_REQUIRED_BINDINGS = ("prompt", "seed", "filename_prefix")
 PROFILE_TYPES = ("video", "image")
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".gif")
+# Файлы изображений для профиля типа image (фото): берутся, только если видео в результате нет
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 OUTPUT_KINDS = ("videos", "gifs", "images")
+# Тип профиля, назначенный после переключения модели (set_profile_type); None — брать из окружения
+_profile_type_override: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +75,18 @@ def new_second_pass_seed() -> int:
     return secrets.randbelow(SECOND_PASS_SEED_LIMIT)
 
 
+def set_profile_type(value: Optional[str]) -> None:
+    """Запоминает тип профиля после переключения модели на карте. None — снова брать из окружения."""
+    global _profile_type_override
+    if value is not None and value not in PROFILE_TYPES:
+        raise ComfyError(f"Неизвестный тип профиля: «{value}».")
+    _profile_type_override = value
+
+
 def profile_type() -> str:
-    """Тип профиля из переменной WORKER_PROFILE_TYPE (задаёт запуск воркера); не задана — «video»."""
+    """Тип профиля: сохранённый set_profile_type; иначе WORKER_PROFILE_TYPE (задаёт запуск воркера); иначе «video»."""
+    if _profile_type_override is not None:
+        return _profile_type_override
     value = os.environ.get("WORKER_PROFILE_TYPE", "").strip() or "video"
     if value not in PROFILE_TYPES:
         raise ComfyError(f"Неизвестный тип профиля в WORKER_PROFILE_TYPE: «{value}».")
@@ -137,8 +151,8 @@ def _error_text(entry: dict) -> str:
     return "причина не указана"
 
 
-def extract_output_path(entry: dict) -> str:
-    """Путь («подпапка/имя» или «имя») первого видеофайла из outputs записи истории."""
+def _find_output_path(entry: dict, extensions: tuple) -> Optional[str]:
+    """Первый файл с одним из расширений в outputs записи истории (порядок узлов и видов как раньше)."""
     outputs = entry.get("outputs") or {}
     for node_id in sorted(outputs, key=str):
         node_out = outputs[node_id]
@@ -147,10 +161,23 @@ def extract_output_path(entry: dict) -> str:
         for kind in OUTPUT_KINDS:
             for item in node_out.get(kind) or []:
                 name = item.get("filename") if isinstance(item, dict) else None
-                if name and name.lower().endswith(VIDEO_EXTENSIONS):
+                if name and name.lower().endswith(extensions):
                     sub = item.get("subfolder") or ""
                     return f"{sub}/{name}" if sub else name
-    raise ComfyExecutionError("ComfyUI завершил задачу, но видеофайл в результатах не найден.")
+    return None
+
+
+def extract_output_path(entry: dict) -> str:
+    """Путь («подпапка/имя» или «имя») результата из outputs записи истории.
+
+    Сначала ищется видео (как раньше: для видеозаписи результат не меняется). Если видео нет,
+    берётся изображение (фото-профиль). Если нет ни того, ни другого, — ошибка.
+    """
+    for extensions in (VIDEO_EXTENSIONS, IMAGE_EXTENSIONS):
+        found = _find_output_path(entry, extensions)
+        if found is not None:
+            return found
+    raise ComfyExecutionError("ComfyUI завершил задачу, но файл результата не найден.")
 
 
 # ---------------------------------------------------------------------------
