@@ -361,10 +361,11 @@ class OfferFilter:
     min_vram_gb: float = 0.0
     # Нижняя граница цены отсекает подозрительно дешёвые (нерабочие) хосты.
     min_price: float = 0.35
-    max_price: float = 0.55
+    max_price: float = 1.00
     min_reliability: float = 0.95
     min_inet_mbps: float = 800.0
-    interruptible: bool = True
+    # по умолчанию обычная аренда (как rental_type в config.default.yaml); прерываемая — только явно
+    interruptible: bool = False
     verified: bool = False
     # Потолок цены трафика, USD за ТБ. Проверка клиентская, в обе стороны (см. INET_*_FIELD).
     max_inet_price_per_tb: float = 4.1

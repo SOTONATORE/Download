@@ -104,6 +104,18 @@ def format_run_body(kind: str, run_id: str) -> str:
 # Абстрактное хранилище (SPEC 0.2)
 # ---------------------------------------------------------------------------
 
+
+# фото (STEP 7, блок B2): файл фото «{num}.png»; распознаётся наряду с шаблоном клипа
+PHOTO_FILENAME_TEMPLATE = "{num}.png"
+
+
+def _clip_num_any(name: str, template: str):
+    """Номер клипа по имени файла: по шаблону видео или по шаблону фото (naming.py не меняется)."""
+    num = parse_clip_num(name, template)
+    if num is None:
+        num = parse_clip_num(name, PHOTO_FILENAME_TEMPLATE)
+    return num
+
 @dataclass
 class ReleaseInfo:
     tag: str
@@ -347,7 +359,7 @@ class ReleaseUploader:
     def _absorb(self, rel: ReleaseInfo, done: set) -> None:
         self._counts[rel.tag] = len(rel.assets)
         for name in rel.assets:
-            num = parse_clip_num(name, self.template)
+            num = _clip_num_any(name, self.template)
             if num is not None:
                 done.add(num)
                 self.asset_tags[name] = rel.tag
@@ -417,7 +429,7 @@ class ReleaseUploader:
         """Загружает клип в активную часть клип-релиза; False, если номер уже загружен."""
         self._ensure_prepared()
         name = os.path.basename(path)
-        num = parse_clip_num(name, self.template)
+        num = _clip_num_any(name, self.template)
         if num is None:
             raise GeminiInputError(f"Имя файла не соответствует шаблону клипа: {name}")
         if num in self.done:
@@ -444,7 +456,7 @@ class ReleaseUploader:
             raise GeminiInputError(
                 "Служебные файлы некуда загрузить: не задан идентификатор запуска (run_id)."
             )
-        if parse_clip_num(name, self.template) is not None:
+        if _clip_num_any(name, self.template) is not None:
             raise GeminiInputError(f"Клип не относится к служебному релизу: {name}")
         if name == LINKS_FILENAME:
             raise GeminiInputError(f"{LINKS_FILENAME} загружается в итоговый релиз, не в служебный.")
@@ -491,5 +503,5 @@ class ReleaseUploader:
 
         Пустая строка, если клипов нет (SPEC 9.4)."""
         names = sorted(self.asset_tags,
-                       key=lambda n: (parse_clip_num(n, self.template) or 0, n))
+                       key=lambda n: (_clip_num_any(n, self.template) or 0, n))
         return create_generated_links(repo, self.tag, names, self.asset_tags)

@@ -10,6 +10,29 @@ if [ -z "${COMFY_DIR}" ]; then
     exit 1
 fi
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Профиль модели и его список весов лежат в model_profiles/models/<MODEL_PROFILE>/ (weights.json, profile.yaml).
+# Читает их core/weights_plan.py: новая модель = новая папка, без правок этого файла. По умолчанию ltx25.
+PROFILE_DIR="${REPO_DIR}/model_profiles/models/${MODEL_PROFILE:-ltx25}"
+META="$(python3 "${REPO_DIR}/core/weights_plan.py" meta "${PROFILE_DIR}")" || { echo "[setup] ОШИБКА: профиль модели не читается: ${PROFILE_DIR} (код 1)."; exit 1; }
+# Проверка описания весов профиля (META из weights_plan.py meta): ровно три строки, значения по форме.
+# Пустой или битый вывод — остановка с понятной ошибкой, а не тихий пропуск загрузки.
+META_OK=1
+if [ "$(printf '%s\n' "${META}" | wc -l)" -ne 3 ]; then META_OK=0; fi
+if [ "${META_OK}" = 1 ]; then
+    META_L1="$(printf '%s\n' "${META}" | sed -n 1p)"
+    META_L2="$(printf '%s\n' "${META}" | sed -n 2p)"
+    META_L3="$(printf '%s\n' "${META}" | sed -n 3p)"
+    [[ "${META_L1}" =~ ^type=(video|image)$ ]] || META_OK=0
+    [[ "${META_L2}" =~ ^needs_token=[01]$ ]] || META_OK=0
+    [[ "${META_L3}" =~ ^files_total=[1-9][0-9]*$ ]] || META_OK=0
+fi
+if [ "${META_OK}" != 1 ]; then
+    echo "[setup] ОШИБКА: описание весов профиля некорректно: ${PROFILE_DIR} (код 1)."
+    exit 1
+fi
+MODEL_TYPE="$(printf '%s\n' "${META}" | sed -n 's/^type=//p')"
+NEED_TOKEN="$(printf '%s\n' "${META}" | sed -n 's/^needs_token=//p')"
+MODEL_FILES_TOTAL="$(printf '%s\n' "${META}" | sed -n 's/^files_total=//p')"
 export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
@@ -33,8 +56,7 @@ WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
 
 SERVER_PID=""
 
-# Счётчик файлов модели для строк лога: «[1/5] ...»
-MODEL_FILES_TOTAL=5
+# Счётчик файлов модели для строк лога «[1/N] ...»: MODEL_FILES_TOTAL взят из weights.json выше.
 MODEL_FILE_INDEX=0
 MODEL_PATHS=()
 # 1, если какая-либо загрузка весов не удалась: сервер воркера остаётся запущен, ComfyUI не ждём
@@ -49,6 +71,14 @@ COMFY_UP_EARLY=0
 log() {
     echo "[setup] $*"
 }
+
+# Переменные, которые нужны общему загрузчику весов (weights_download.sh), задаются до его source.
+# Остальные (COMFY_MODELS_DIR, HF_BASE_URL, MODEL_FILES_TOTAL и т.д.) уже заданы выше.
+HF_TOKEN="${HF_TOKEN:-}"
+
+# Загрузка весов (start_download, download_model, wait_downloads, comfy_answers) вынесена в общий файл (шаг W2).
+# Тот же файл использует switch_profile.sh при переключении профиля. Файл только объявляет функции.
+source "${REPO_DIR}/worker/weights_download.sh"
 
 stop_processes() {
     log "Получен сигнал завершения, останавливаю процессы..."
@@ -89,106 +119,6 @@ ensure_downloader() {
         ARIA2_MODE="curl"
         log "aria2c недоступен, загрузка через curl"
     fi
-}
-
-# Загрузка одного файла модели в фоне: start_download <подкаталог в репозитории и в models/> <имя файла>
-start_download() {
-    MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
-    MODEL_PATHS+=("${COMFY_MODELS_DIR}/$1/$2")
-    download_model "${MODEL_FILE_INDEX}" "$1" "$2" &
-    DL_PIDS+=("$!")
-}
-
-# Тело загрузки одного файла (выполняется в фоновом процессе): download_model <номер> <подкаталог> <имя файла>
-download_model() {
-    local idx="$1"
-    local subdir="$2"
-    local name="$3"
-    local target_dir="${COMFY_MODELS_DIR}/${subdir}"
-    local path="${target_dir}/${name}"
-    local url="${HF_BASE_URL}/${subdir}/${name}"
-    local tag="[${idx}/${MODEL_FILES_TOTAL}]"
-    local tool="aria2"
-    local rc
-    local size
-
-    mkdir -p "${target_dir}"
-
-    # Файл считается готовым, только если он непустой и нет контрольного файла незавершённой загрузки aria2
-    if [ -s "${path}" ] && [ ! -f "${path}.aria2" ]; then
-        log "${tag} Файл уже существует, пропускаю: ${subdir}/${name}"
-        return 0
-    fi
-
-    log "${tag} Начинаю загрузку: ${subdir}/${name}"
-    if [ "${ARIA2_MODE}" = "curl" ]; then
-        tool="curl"
-        # У curl нет контрольного файла aria2: на время загрузки ставим свой «.aria2», чтобы прерванный файл
-        # не принимался за готовый. Заголовок Authorization читается из process substitution (токен не в argv).
-        : > "${path}.aria2"
-        # Вывод curl (ошибки) идёт в bootstrap.log с префиксом «[file=<имя>] » (sed -u: построчно).
-        curl -sS -L --fail --retry 3 -C - -o "${path}" \
-            -H @<(printf 'Authorization: Bearer %s\n' "${HF_TOKEN}") "${url}" 2>&1 \
-            | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"
-        rc="${PIPESTATUS[0]}"
-        if [ "${rc}" -eq 0 ]; then
-            rm -f "${path}.aria2"
-        fi
-    else
-        # --summary-interval=10: строка прогресса (процент, скорость) каждые 10 с.
-        # --console-log-level=warn снят: прогресс виден в логе. Служебные строки aria2 (в т.ч. адреса
-        # перенаправлений) идут в bootstrap.log и через его хвост в GET /logs; query-часть адресов
-        # там заменяется на «?***» (server.py, strip_url_queries).
-        # Заголовок Authorization идёт во входном файле aria2 (process substitution): токен не
-        # попадает в аргументы процесса и не пишется на диск (SPEC 0.1, п. 3). Проверено локально
-        # aria2c 1.37 на заглушке сервера; на живой карте UNVERIFIED.
-        # Каждая строка вывода aria2c получает префикс «[file=<имя>] » (sed -u: построчно), строки идут
-        # в bootstrap.log. Так параллельные загрузки различимы в мониторе (core/weights_log.py).
-        aria2c \
-            -x 16 -s 16 -k 1M -c --summary-interval=10 \
-            -i <(printf '%s\n' "${url}" "  header=Authorization: Bearer ${HF_TOKEN}" \
-                 "  dir=${target_dir}" "  out=${name}") 2>&1 \
-            | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"
-        rc="${PIPESTATUS[0]}"
-    fi
-
-    if [ "${rc}" -ne 0 ] || [ ! -s "${path}" ] || [ -f "${path}.aria2" ]; then
-        log "${tag} ОШИБКА: не удалось загрузить файл ${subdir}/${name} (код ${tool} ${rc})."
-        return 1
-    fi
-    size=$(stat -c %s "${path}" 2>/dev/null || echo "?")
-    log "${tag} Файл успешно загружен: ${subdir}/${name} (${size} байт)"
-}
-
-# ComfyUI отвечает 200 на 18188 (короткая проверка, без ожидания)
-comfy_answers() {
-    curl -sf -m 5 -o /dev/null "${COMFY_READY_URL}"
-}
-
-# Ждёт все фоновые загрузки. Пока они идут, раз в секунду проверяет 18188. COMFY_UP_EARLY=1 ставится,
-# только если ответ 200 пришёл, когда последняя загрузка ещё не завершилась.
-wait_downloads() {
-    local seen pid alive
-    while :; do
-        seen=0
-        if [ "${COMFY_UP_EARLY}" -eq 0 ] && comfy_answers; then
-            seen=1
-        fi
-        alive=0
-        for pid in "${DL_PIDS[@]}"; do
-            if kill -0 "${pid}" 2>/dev/null; then
-                alive=1
-                break
-            fi
-        done
-        if [ "${alive}" -eq 0 ]; then
-            break
-        fi
-        if [ "${seen}" -eq 1 ]; then
-            COMFY_UP_EARLY=1
-        fi
-        sleep 1
-    done
 }
 
 # Перезапуск ComfyUI один раз, как шаг 4б bootstrap.sh: останавливаем PID из COMFY_PID_FILE, запускаем заново.
@@ -243,7 +173,8 @@ rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}"
 log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
 
 # --- 1. Проверка токена и инструментов ---
-if [ -z "${HF_TOKEN:-}" ]; then
+# Токен нужен, если в weights.json профиля стоит needs_token: true (LTX: репозиторий Lightricks закрыт). Z-Image открыт.
+if [ "${NEED_TOKEN}" = "1" ] && [ -z "${HF_TOKEN:-}" ]; then
     log "ОШИБКА: Не задана переменная окружения HF_TOKEN. Репозиторий Lightricks/LTX-2.5 закрыт (gated), скачивание весов невозможно."
     exit 1
 fi
@@ -254,6 +185,10 @@ ensure_downloader
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
 # stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
+# Тип профиля для воркера (comfy_client.py читает WORKER_PROFILE_TYPE) берётся из profile.yaml через weights_plan.py meta.
+WORKER_PROFILE_TYPE="${MODEL_TYPE}"
+export WORKER_PROFILE_TYPE
+log "Тип профиля для воркера: ${WORKER_PROFILE_TYPE}."
 python3 "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
@@ -266,13 +201,34 @@ else
     log "ComfyUI пока не отвечает: он запущен на шаге 4б bootstrap и грузится параллельно с весами."
 fi
 
-# --- 3. Загрузка модульных файлов модели LTX-2.5: все пять запускаются параллельно ---
+# --- 3. Загрузка файлов модели: список из weights.json профиля (через weights_plan.py files), файлы параллельно ---
 log "Запускаю параллельную загрузку весов: ${MODEL_FILES_TOTAL} файлов."
-start_download "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
-start_download "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
-start_download "vae" "ltx-2.5-video-vae-bf16.safetensors"
-start_download "vae" "ltx-2.5-audio-vae-bf16.safetensors"
-start_download "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+# Строки: подкаталог, имя, путь в репо HF (пусто для LTX), базовый URL, разделитель TAB.
+# Ошибка чтения списка — выход с кодом 1. Поля разбираются по TAB вручную: read с IFS=TAB схлопнул бы пустое поле.
+ROWS="$(python3 "${REPO_DIR}/core/weights_plan.py" files "${PROFILE_DIR}")" || exit 1
+# Проверка списка весов (ROWS из weights_plan.py files): не пуст, число строк = MODEL_FILES_TOTAL,
+# в каждой строке ровно четыре поля через TAB (три табуляции), подкаталог и имя не пустые.
+ROWS_OK=1
+if [ -z "${ROWS}" ]; then ROWS_OK=0; fi
+if [ "${ROWS_OK}" = 1 ] && [ "$(printf '%s\n' "${ROWS}" | wc -l)" -ne "${MODEL_FILES_TOTAL}" ]; then ROWS_OK=0; fi
+if [ "${ROWS_OK}" = 1 ]; then
+    while IFS= read -r chk; do
+        chk_tabs="$(printf '%s' "${chk}" | tr -cd '\t' | wc -c)"
+        if [ "${chk_tabs}" -ne 3 ]; then ROWS_OK=0; break; fi
+        chk_sub="${chk%%$'\t'*}"; chk_rest="${chk#*$'\t'}"; chk_name="${chk_rest%%$'\t'*}"
+        if [ -z "${chk_sub}" ] || [ -z "${chk_name}" ]; then ROWS_OK=0; break; fi
+    done <<< "${ROWS}"
+fi
+if [ "${ROWS_OK}" != 1 ]; then
+    echo "[setup] ОШИБКА: список весов профиля некорректен: ${PROFILE_DIR} (код 1)."
+    exit 1
+fi
+while IFS= read -r line; do
+    sub="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+    name="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    rp="${rest%%$'\t'*}"; base="${rest#*$'\t'}"
+    start_download "${sub}" "${name}" "${rp}" "${base}"
+done <<< "${ROWS}"
 wait_downloads
 for dl_pid in "${DL_PIDS[@]}"; do
     if ! wait "${dl_pid}"; then
@@ -290,7 +246,11 @@ if [ "${WEIGHTS_FAILED}" -eq 1 ]; then
     log "Сервер воркера завершился (код ${EXIT_CODE})."
     exit "${EXIT_CODE}"
 fi
-log "Все файлы модели LTX-2.5 на месте."
+if [ -z "${MODEL_PROFILE:-}" ] || [ "${MODEL_PROFILE}" = "ltx25" ]; then
+    log "Все файлы модели LTX-2.5 на месте."
+else
+    log "Все файлы модели на месте (профиль ${MODEL_PROFILE})."
+fi
 
 # Перезапуск ComfyUI не более одного раза: только если он отвечал до конца последней загрузки (мог не увидеть все файлы)
 if [ "${COMFY_UP_EARLY}" -eq 1 ]; then

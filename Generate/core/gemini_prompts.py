@@ -20,8 +20,14 @@ from typing import Any, Callable, Optional, Protocol
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
+    from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
+    from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
+    from .prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # проверка промптов (шаг 6)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
+    from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
+    from frame_rules import rephrase_note  # type: ignore
+    from prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -75,11 +81,13 @@ class GeminiRuntimeError(GeminiError):
 
 @dataclass
 class PromptConfig:
-    style_file: str                  # путь к prompt_styles/<модель>.md (из профиля)
-    style_brief: str = ""            # краткое описание стиля/сюжета от пользователя
+    style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
+    media: str                       # тип промпта: "video" или "image"; без значения по умолчанию
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
+    # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
+    preset: str = PRESET_NONE
 
 
 @dataclass(frozen=True)
@@ -257,6 +265,10 @@ def _format_segment_block(seg: Segment, sentences: list, by_segment: dict) -> st
         lines.append("Before (context only): " + " ".join(x.text for x in reversed(before)))
     if after:
         lines.append("After (context only): " + " ".join(x.text for x in after))
+    # Правило перефразирования добавляется к блоку сегмента, только если нужно (шаг 4).
+    note = rephrase_note(text)
+    if note:
+        lines.append(note)
     return "\n".join(lines)
 
 
@@ -304,12 +316,67 @@ def response_schema(response_format: Any) -> dict:
             "items": {"type": "object", "properties": props, "required": list(props)}}
 
 
+# Пресеты: файлы presets/prompts/<имя>.md рядом с профилями моделей. README в этой папке — описание,
+# не пресет (в списке выбора GitHub его нет), поэтому имя README запрещено.
+PRESETS_DIR = Path(__file__).resolve().parent.parent / "model_profiles" / "presets" / "prompts"
+_PRESET_RESERVED = {"README"}
+
+
+def read_preset(preset: str) -> str:
+    """Текст пресета (USER_ONLY вырезан). Общая проверка для cli (до аренды) и для системной инструкции.
+    Ошибка — GeminiInputError с текстом на русском: имя недопустимо, файла нет или он пуст."""
+    if not re.fullmatch(PROFILE_NAME_PATTERN, preset or "") or preset in _PRESET_RESERVED:
+        raise GeminiInputError("Недопустимое имя пресета: допустимы латинские буквы, цифры, «_» и «-», "
+                               "кроме README.")
+    path = PRESETS_DIR / f"{preset}.md"
+    if not path.is_file():
+        raise GeminiInputError(f"Пресет «{preset}» не найден: нет файла presets/prompts/{preset}.md.")
+    try:
+        text = strip_user_only(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        raise GeminiInputError(f"Пресет «{preset}» не удалось прочитать: presets/prompts/{preset}.md.") from None
+    if not text:
+        raise GeminiInputError(f"Пресет «{preset}» пуст: в файле presets/prompts/{preset}.md нет текста.")
+    return text
+
+
+def attach_style(prompt: str, style_text: str) -> str:
+    """Дописывает текст стиля в конец готового промпта через «. ». Пустой стиль — промпт без изменений."""
+    if not style_text:
+        return prompt
+    return prompt.rstrip().rstrip(".") + ". " + style_text
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
+    if cfg.media == "video":
+        kind = "text-to-video prompt"
+        camera_rules = (
+            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+            "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
+            "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
+            "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
+            "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
+            "the move ends (for a static camera: what the frame holds on).\n"
+        )
+    elif cfg.media == "image":
+        kind = "text-to-image prompt, one still frame"
+        camera_rules = (
+            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+            "or camera or lens equipment; camera or lens equipment is forbidden.\n"
+            "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
+            "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
+            "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
+            "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n"
+        )
+    else:
+        raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     parts = [
         "# Task\n"
         "You receive subtitle segments of a narrated video. For every segment write ONE "
-        "text-to-video prompt, in English, that visually illustrates what the segment says, "
+        + kind + ", in English, that visually illustrates what the segment says, "
         "following the style guide below. Use the Sentence, Before and After lines only to "
         "understand the meaning; the >>marked<< part is the passage to illustrate.\n\n"
         "# Output contract\n"
@@ -324,17 +391,16 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
         "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
-        "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
-        "the move ends (for a static camera: what the frame holds on).\n"
+        + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
         "- Before returning, check each prompt against the self-check checklist at the end of "
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
-    brief = (cfg.style_brief or "").strip()
-    if brief:
-        parts.append("# Style brief from the user\n" + brief)
+    # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
+    if cfg.preset != PRESET_NONE:
+        read_preset(cfg.preset)
     return "\n\n".join(parts)
 
 
@@ -343,6 +409,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_config(cfg: PromptConfig) -> None:
+    if cfg.media not in ("video", "image"):
+        raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     if cfg.batch_size < 1:
         raise GeminiInputError("batch_size должен быть не меньше 1.")
     if cfg.max_prompt_chars < 1:
@@ -414,7 +482,7 @@ def _garbage_reason(prompt: str) -> str:
     return ""
 
 
-# Проверка стиля по правилам ltx25.md: отрицания, кавычки, keyword spam, эмоциональные метки.
+# Проверка стиля по правилам models/<профиль>/prompts/style.md: отрицания, кавычки, keyword spam, эмоциональные метки.
 # Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 _STYLE_RULES = [
@@ -426,9 +494,10 @@ _STYLE_RULES = [
      "стиль: кавычки",
      "Remove quotation marks and any spoken or written words."),
     (re.compile(r"\b(?:4k|8k|uhd|masterpiece|trending|ultra[- ]detailed|highly detailed|"
-                r"photorealistic|hyperrealistic)\b", re.I),
+                r"photorealistic|hyperrealistic|render\s+(?:engine|farm)|rendered|octane|unreal[ -]engine)\b", re.I),
      "стиль: keyword spam",
-     "Remove quality keywords such as 4k, masterpiece, trending, ultra detailed."),
+     "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
+     "render, octane, unreal engine."),
     (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
@@ -436,6 +505,16 @@ _STYLE_RULES = [
      "стиль: эмоциональная метка",
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
+    (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
+                r"lens|shot\s+on\s+(?:a\s+|an\s+)?(?:camera|film)|aperture|focal\s+length)\b", re.I),
+     "стиль: кино и камера",
+     "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
+     "aperture, focal length, shot on. Describe only the scene and its one camera move."),
+    (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
+                r"stickmen?|pixel\s+art)\b", re.I),
+     "стиль: художественная техника",
+     "Remove art-medium words such as illustration, cartoon, anime, watercolor, oil painting, sketch, "
+     "stickman, pixel art. Describe the real scene instead."),
 ]
 _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
@@ -536,6 +615,48 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
+def _find_all_problems(text: str, cfg: PromptConfig) -> list:
+    """Нарушения промпта: запрещённые типы кадра и маркеры; для фото ещё движение камеры."""
+    problems = find_problems(text)
+    if cfg.media == "image":
+        problems += [f"движение камеры: «{m}»" for m in find_camera_motion(text)]
+    return list(dict.fromkeys(problems))
+
+
+def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
+                     res: PromptResult) -> PromptResult:
+    """Проверка запрещённых типов кадра и маркеров в готовом промпте (шаг 6).
+
+    Нарушение: до MAX_REWORK_ATTEMPTS переписываний этого одного промпта тем же вызовом Gemini.
+    Если нарушение осталось после последней попытки, прогон останавливается с ошибкой.
+    Этот цикл отдельный: повтор при сбоях сети живёт в gemini_orchestrator, повтор за стиль — в _run_batch.
+    Текст промпта в сообщение об ошибке не попадает.
+    """
+    text = res.prompt
+    problems = _find_all_problems(text, builder.cfg)
+    attempt = 0
+    while problems and attempt < MAX_REWORK_ATTEMPTS:
+        attempt += 1
+        user = (f"Prompt for segment_index {res.num}: {text}\n\n"
+                + rework_remark(problems)
+                + f"\n\nReturn only the JSON array with one item: segment_index {res.num}.")
+        raw = transport.generate_json(model, builder.system, user, builder.schema)
+        results, _ = parse_and_validate(raw, [res.num], builder.cfg)
+        new_text = results[res.num].prompt if res.num in results else ""
+        if new_text.strip():
+            text = new_text
+        problems = _find_all_problems(text, builder.cfg)
+    if problems:
+        # GeminiRuntimeError со status=None: сбой-класс, который cli уже обрабатывает; повтор на транспорте
+        # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.
+        raise GeminiRuntimeError(
+            f"Сегмент {res.num}: в промпте остались запрещённые типы кадра или маркеры "
+            f"после {attempt} переписываний: {'; '.join(problems)}. Прогон остановлен."
+        )
+    res.prompt = text
+    return res
+
+
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest) -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult."""
     expected = list(batch.nums)
@@ -568,6 +689,10 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 if best is None:
                     best = PromptResult(n, "")
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
+    # шаг 6: проверка до прикрепления стиля в generate_prompts (текст стиля сам содержит слова вроде «documents»)
+    for n in list(final):
+        if final[n].prompt.strip():
+            final[n] = _check_forbidden(transport, model, builder, final[n])
     return final
 
 
@@ -583,11 +708,18 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     on_batch(results): необязательный колбэк. Вызывается после каждого готового батча (с учётом
     retry), до начала следующего; results: list[PromptResult] этого батча по возрастанию номера,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
-    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее."""
+    отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
+    """
     builder = _Builder(segments, wanted_nums, cfg)
+    # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
+    style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
     out: dict = {}
     for batch in builder.batches(builder.wanted):
         batch_res = _run_batch(transport, model, builder, batch)
+        for r in batch_res.values():
+            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+            if r.prompt.strip():
+                r.prompt = attach_style(r.prompt, style_text)
         out.update(batch_res)
         if on_batch is not None:
             on_batch([batch_res[n] for n in batch.nums])

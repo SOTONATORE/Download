@@ -561,3 +561,11 @@ def test_gh_process_gets_exactly_gh_env_names_and_no_project_secrets():
         assert name not in env
     for value in ("vast-canary-111", "gemini-canary-222", "hf-canary-333", "worker-canary-444", "ghs-other-XYZ-000"):
         assert value not in env.values()
+
+
+# --- фото (STEP 7, блок B2): имена файлов фото распознаются наряду с клипами ---------------------
+def test_clip_num_any_accepts_photo_and_video_names():
+    assert ra._clip_num_any("12.png", "{num}.mp4") == 12
+    assert ra._clip_num_any("12.mp4", "{num}.mp4") == 12
+    assert ra._clip_num_any("prompts.json", "{num}.mp4") is None
+    assert ra.PHOTO_FILENAME_TEMPLATE == "{num}.png"

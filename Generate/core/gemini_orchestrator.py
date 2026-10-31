@@ -27,13 +27,13 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger("Generate.gemini_orchestrator")
 
-DEFAULT_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+DEFAULT_MODELS = ("gemini-3.5-flash-lite",)
 WINDOW_SEC = 60.0
 CHARS_PER_TOKEN = 3          # консервативная оценка входа
-MAX_WAIT_SEC = 120.0         # потолок одной паузы (после 429 и при временной ошибке)
+MAX_WAIT_SEC = 120.0         # потолок одной паузы после 429
 TRANSIENT_STATUSES = frozenset({500, 503, 504})  # сеть: HTTP-статуса нет (status None)
-TRANSIENT_ATTEMPTS = 5       # попыток на один запрос на одной модели, потом смена модели
-TRANSIENT_PAUSES_SEC = (3.0, 6.0, 12.0, 24.0)    # паузы перед 2-й..5-й попыткой
+TRANSIENT_ATTEMPTS = 60      # неудачных попыток подряд на одной модели; после последней прогон останавливается
+TRANSIENT_PAUSE_SEC = 10.0   # пауза перед каждой повторной попыткой (если в ответе нет retry_after)
 
 
 def is_transient(err: gp.GeminiRuntimeError) -> bool:
@@ -51,10 +51,12 @@ def _describe(status: Optional[int], code: str) -> str:
     return f"HTTP {status}" + (f", код {code}" if code else "")
 
 
-def _transient_wait(err: gp.GeminiRuntimeError, attempt: int) -> float:
-    """Пауза после неудачной попытки номер attempt (1..4): retry_after из ответа или график, не больше MAX_WAIT_SEC."""
-    base = err.retry_after if err.retry_after is not None else TRANSIENT_PAUSES_SEC[attempt - 1]
-    return min(max(float(base), 0.0), MAX_WAIT_SEC)
+def _transient_wait(err: gp.GeminiRuntimeError) -> float:
+    """Пауза перед следующей попыткой: TRANSIENT_PAUSE_SEC; если в ответе есть retry_after, берётся он,
+    но не меньше 1 с и не больше TRANSIENT_PAUSE_SEC."""
+    if err.retry_after is None:
+        return TRANSIENT_PAUSE_SEC
+    return min(max(float(err.retry_after), 1.0), TRANSIENT_PAUSE_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +102,8 @@ class RateLimiter:
 # ---------------------------------------------------------------------------
 
 class ManagedTransport:
-    """Обёртка над transport.generate_json: лимитер, счётчик RPD, смена модели, повтор при RPM,
-    повтор временных ошибок (500/503/504, сеть) с last-resort сменой модели.
+    """Обёртка над transport.generate_json: лимитер, счётчик RPD, смена модели только при суточной квоте,
+    повтор при RPM, повтор временных ошибок (500/503/504, сеть) на той же модели без смены.
 
     Аргумент model, который передаёт generate_prompts, игнорируется: модель выбирает цепочка.
     """
@@ -126,7 +128,6 @@ class ManagedTransport:
         self._limiters = {m: RateLimiter(rpm_limit, tpm_limit, clock, sleep) for m in self._models}
         self._used = {m: int((rpd_used or {}).get(m, 0)) for m in self._models}
         self._exhausted: set = set()
-        self._transient_failed: set = set()        # модели, снятые на остаток прогона после 5 временных ошибок
         self._last_transient: tuple = (None, "")   # (status, code) последней временной ошибки
         self.active_model: str = self._models[0]
 
@@ -135,7 +136,7 @@ class ManagedTransport:
         return dict(self._used)
 
     def _usable(self, m: str) -> bool:
-        if m in self._exhausted or m in self._transient_failed:
+        if m in self._exhausted:
             return False
         if self._used[m] >= self._rpd_limit:
             self._exhausted.add(m)
@@ -143,11 +144,12 @@ class ManagedTransport:
             return False
         return True
 
-    def _transient_exhausted(self) -> gp.GeminiRuntimeError:
+    def _transient_exhausted(self, model: str) -> gp.GeminiRuntimeError:
+        """Ошибка после TRANSIENT_ATTEMPTS неудачных попыток подряд на модели; тело ответа в сообщение не входит."""
         status, code = self._last_transient
         return gp.GeminiRuntimeError(
-            f"Сервис Gemini временно недоступен на всех моделях цепочки: по {TRANSIENT_ATTEMPTS} "
-            f"попыток на каждой, последняя ошибка: {_describe(status, code)}. "
+            f"Модель {model} не ответила за {TRANSIENT_ATTEMPTS} попыток подряд (около 10 минут), "
+            f"прогон остановлен; последняя ошибка: {_describe(status, code)}. "
             "Прогресс сохранён; повторите запуск позже",
             status=status, code=code)
 
@@ -159,8 +161,6 @@ class ManagedTransport:
                 log.warning("Переключение на запасную модель: %s.", m)
             self.active_model = m
             return m
-        if self._transient_failed:
-            raise self._transient_exhausted()
         raise gp.GeminiRuntimeError(
             "Суточная квота исчерпана у всех моделей цепочки; прогресс сохранён, "
             "повторите запуск после сброса квоты.",
@@ -173,7 +173,7 @@ class ManagedTransport:
         tries_model = None
         while True:
             m = self._pick_model()
-            if m != tries_model:   # на каждой модели свои 5 попыток, в том числе после смены по квоте
+            if m != tries_model:   # счётчик обнуляется при смене модели (по суточной квоте)
                 tries, tries_model = 0, m
             self._limiters[m].acquire(tokens)
             self._used[m] += 1
@@ -206,21 +206,15 @@ class ManagedTransport:
                 tries += 1
                 self._last_transient = (e.status, e.code)
                 if tries < TRANSIENT_ATTEMPTS:
-                    wait = _transient_wait(e, tries)
+                    wait = _transient_wait(e)
                     log.warning("Модель %s: временная ошибка (%s), пауза %.1f с (попытка %d из %d).",
                                 m, _describe(e.status, e.code), wait, tries + 1, TRANSIENT_ATTEMPTS)
                     self._sleep(wait)
                     continue
-                # 5 неудач подряд: модель снимается на остаток прогона, переход на следующую
-                self._transient_failed.add(m)
-                nxt = next((x for x in self._models if self._usable(x)), None)
-                if nxt is None:
-                    raise self._transient_exhausted() from None
-                log.warning("Модель %s: %d попыток подряд с временной ошибкой (%s), переход на модель %s "
-                            "на остаток прогона.", m, TRANSIENT_ATTEMPTS, _describe(e.status, e.code), nxt)
-                # active_model ставим здесь, чтобы _pick_model не дублировал строку «Переключение»
-                self.active_model = nxt
-                continue
+                # последняя попытка неудачна: модель не меняется, прогон останавливается
+                log.error("Модель %s: %d попыток подряд без ответа (%s), прогон остановлен.",
+                          m, TRANSIENT_ATTEMPTS, _describe(e.status, e.code))
+                raise self._transient_exhausted(m) from None
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +273,18 @@ def load_state(path, segments: list, profile: str) -> dict:
 
 
 def _has_prompt(entry) -> bool:
-    return (isinstance(entry, dict) and entry.get("status") == "ready"
-            and bool(str(entry.get("prompt", "")).strip()))
+    if not isinstance(entry, dict):
+        return False
+    num_frames = entry.get("num_frames")
+    return (entry.get("status") == "ready"
+            and bool(str(entry.get("prompt", "")).strip())
+            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
+            and num_frames > 0)
+
+
+def missing_segments(prompts: dict, wanted: list) -> list:
+    """Номера из wanted, у которых в prompts нет готового промпта (по возрастанию). Чистая функция."""
+    return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
 def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, inner_transport,
@@ -308,7 +312,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         raise gp.GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
 
     prompts = state["prompts"]
-    pending = [n for n in wanted if not _has_prompt(prompts.get(str(n)))]
+    pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
     if not pending:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state

@@ -41,9 +41,9 @@
 - Шаг «Finalize release» не включён: пилот не пишет в Release.
 - `permissions`: `packages: read` убран, `contents: write` заменён на `read`.
 - Отдельная группа `concurrency` (`pilot-comfyui`). Пилот не блокирует и не отменяет `generate`.
-- Таймаут задания 360 мин, как в `generate.yml`. Внутренние сроки пилота (молчание 20 мин, жизнь карты 90 мин) берутся из конфига.
+- Таймаут задания 360 мин, как в `generate.yml`. Внутренние сроки пилота (молчание 20 мин) берутся из конфига.
 - Входы, которые пилот не использует (`srt_path`, `missing_path`, `limit_clips`, `release_tag`, `max_cards`,
-  `model_profile`, `style_brief`), в pilot-файл не включены. CLI получает для них значения по умолчанию из конфига.
+  `model_profile`), в pilot-файл не включены. CLI получает для них значения по умолчанию из конфига.
 
 ## 3. Что не удалось проверить без живых вызовов (UNVERIFIED)
 
@@ -138,6 +138,8 @@
 Пилотный env: `GEN_LOG_LEVEL`, `COMFYUI_ARGS` (те же аргументы, что у воркера) и `PORTAL_CONFIG=localhost:18188:18188:/:ComfyUI` (оставлено намеренно). Порта в пилотном env нет: ни `-p 18188:18188`, ни `-p 8000:8000` не публикуются. Ключей `OPEN_BUTTON_*` и токенов в нём нет. Onstart пилота запускает `Generate/worker/pilot_start.sh` из коммита (`cli.pilot_onstart_cmd`); вывод на карте пишется в `/opt/pilot/onstart.log`.
 
 ### 7.2. Результаты пробы и маркеры
+
+Текущее использование `onstart`: пилот передаёт команду старта (`pilot_start_cmd`) в `create_instance` параметром `onstart` (`core/orchestrator.py`, `_rent_one`), воркер получает свою команду через `_worker_onstart` (строка 404), а проба и копия лога идут через `core/ssh_probe.py` (команда `onstart_log`).
 
 Проба: `GET /system_stats` через SSH-туннель: локальный порт туннеля → `127.0.0.1:18188` карты (`_probe_pilot_tunnel`). Проба начинается, когда карта `running` и известен адрес SSH; ключ `18188/tcp` в `ports` не нужен.
 

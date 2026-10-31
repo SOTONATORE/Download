@@ -222,6 +222,19 @@ class GeminiSpy:
         return state
 
 
+class _ValueTransport:
+    """Фейк транспорта Gemini для оценки video_value (STEP 3b): 50 на каждый пропущенный номер.
+
+    Ответ только по пропущенным номерам из rig.missing: лишний id parse_value_response отвергает.
+    """
+
+    def __init__(self, rig) -> None:
+        self._rig = rig
+
+    def generate_json(self, model, system, user, schema) -> str:
+        return json.dumps([{"id": n, "video_value": 50} for n in self._rig.missing])
+
+
 class FakeWorker:
     """HTTP-воркер: POST /task, GET /task/{id}, GET /file/{id}, POST /ack/{id}."""
 
@@ -321,9 +334,11 @@ class Rig:
                   worker_token=token, poll_interval_sec=10.0, work_dir=self.work_dir,
                   worker_build=VALID_BUILD)
         kw.update(orch_kw)
-        segs = [types.SimpleNamespace(num=n) for n in nums]
+        # Фейковые сегменты SRT с полями srt_parser.Segment; SRT в тестах нет, поля по формуле.
+        segs = [types.SimpleNamespace(num=n, start_ms=(n - 1) * 5000, end_ms=n * 5000 - 500, text=f"s{n}")
+                for n in nums]
         self.orc = orch.Orchestrator(
-            segs, tmp_path / "missing.txt", None, None, self.store, self.vast, object(),
+            segs, tmp_path / "missing.txt", None, None, self.store, self.vast, _ValueTransport(self),
             self.prompts_path, http_client=self.http, clock=self.clock, sleep=self.clock.sleep, **kw)
 
     def run(self):
@@ -1459,7 +1474,9 @@ def _pilot_orc(tmp_path, monkeypatch, *, vast, status=200, probe_urls=None, pilo
 
     clock = FakeClock()
     http = httpx.Client(transport=httpx.MockTransport(handler))
-    segs = [types.SimpleNamespace(num=n) for n in range(1, 6)]
+    # Фейковые сегменты SRT с полями srt_parser.Segment; SRT в тестах нет, поля по формуле.
+    segs = [types.SimpleNamespace(num=n, start_ms=(n - 1) * 5000, end_ms=n * 5000 - 500, text=f"s{n}")
+            for n in range(1, 6)]
     orc_kw = dict(repo="owner/repo", run_id="pilot-test", profile="ltx25", docker_image="comfy:img",
                   poll_interval_sec=10.0, silent_host_timeout_min=1, pilot=True,
                   pilot_start_cmd=pilot_start_cmd, work_dir=tmp_path / "work")
@@ -1976,7 +1993,8 @@ def test_bid_margin_comes_from_constructor_parameter(tmp_path, monkeypatch):
 
 def test_bid_above_max_price_is_skipped_before_request(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.54)])
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=[make_offer(1, 11, price=0.54)],
+              offer_filter=vc.OfferFilter(max_price=0.55))   # лимит явно: умолчание теперь 1.00
     assert rig.orc._rent_one(rig.clock.now) == "retry"
     assert rig.vast.created == []                               # запрос аренды не отправлен
     assert "Предложение 1 пропущено" in caplog.text
@@ -1985,7 +2003,8 @@ def test_bid_above_max_price_is_skipped_before_request(tmp_path, monkeypatch, ca
 
 def test_skipped_offer_falls_through_to_next_affordable_offer(tmp_path, monkeypatch):
     offers = [make_offer(1, 11, price=0.54), make_offer(2, 22, price=0.3)]
-    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), offers=offers,
+              offer_filter=vc.OfferFilter(max_price=0.55))   # лимит явно: умолчание теперь 1.00
     assert rig.orc._rent_one(rig.clock.now, offers=offers) == "ok"
     assert len(rig.vast.created) == 1
     assert rig.vast.created[0]["bid_price"] == 0.33             # взято второе предложение: 0.3 + 0.03
@@ -2085,13 +2104,13 @@ def test_probe_has_no_comfy_port_state(tmp_path, monkeypatch):
     assert not hasattr(orch, "COMFY_PORT") and not hasattr(orch, "_probe_comfy")
 
 
-def test_ssh_and_portal_are_noted_once_per_run(tmp_path, monkeypatch, caplog):
+def test_portal_is_noted_once_per_run_and_ssh_not_logged(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
     slot = _slot_with_url(rig)
     rig.orc._probe_ready(slot)
     rig.orc._probe_ready(slot)
-    assert caplog.text.count("SSH-проверка не реализована (SPEC 8.2)") == 1
+    assert "SSH-проверка не реализована" not in caplog.text   # фаза A: строки про SSH в журнале нет
     assert caplog.text.count("проверка через портал не реализована") == 1
 
 
@@ -2300,6 +2319,66 @@ def test_booting_card_with_url_pulls_logs_and_weights_see_them(tmp_path, monkeyp
     rig.orc._pull_due_logs(rig.clock.now)
     assert any(u.endswith("/logs") for u in rig.worker.urls)
     assert "Начинаю загрузку" in caplog.text
+
+
+def test_monitor_name_follows_card_role(tmp_path, monkeypatch):
+    """Имя модели монитора — профиль текущей роли карты: видео — видеопрофиль, фото — фото-профиль."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="zimage_turbo", photo_profile="zimage_photo")
+    slot = _ready_slot(rig, 1, instance_id=500)
+    slot.role = "video"
+    assert rig.orc._monitor(slot).model_name == "zimage_turbo"
+    slot.monitor = None
+    slot.role = "photo"
+    assert rig.orc._monitor(slot).model_name == "zimage_photo"
+
+
+def test_switch_progress_reaches_run_log_and_switch_monitor_closes(tmp_path, monkeypatch, caplog):
+    """Во время переключения строки воркера доходят до журнала с именем целевой модели; монитор закрыт на «завершено»."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="zimage_turbo", photo_profile="zimage_photo")
+    slot = _ready_slot(rig, 1, instance_id=500)
+    slot.role = "photo"
+    monkeypatch.setattr(rig.orc, "_call", lambda *a, **k: None)     # POST /profile принят, сеть не нужна
+    rig.orc._start_switch(slot, "video", rig.clock.now)
+    assert slot.state == "switching"
+    assert slot.monitor.model_name == "zimage_turbo"                # целевая роль video: видеопрофиль
+    rig.worker.logs_text = (f"[switch] Шаг 1: переключение на видео\n"
+                            f"[setup] [1/1] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 10MiB/1000MiB(1%) CN:16 DL:1MiB ETA:40s]\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert "Веса zimage_turbo: начало загрузки" in caplog.text
+    class _Ready:
+        def json(self):
+            return {"switch": "ready"}
+    monkeypatch.setattr(rig.orc._http, "request", lambda *a, **k: _Ready())
+    rig.clock.sleep(60.0)
+    rig.orc._poll_switch(slot, rig.clock.now)
+    assert slot.state == "ready" and slot.monitor is None
+    text = caplog.text
+    i0 = text.index("переключение на роль")
+    i1 = text.index("[switch] Шаг 1")
+    i2 = text.index("переключение завершено")
+    assert i0 < i1 < i2
+
+
+def test_card_with_complete_weight_stage_is_not_retired_on_speed(tmp_path, monkeypatch, caplog):
+    """Все файлы этапа на 100%: скорость за активное время не снимает карту."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=7)
+    rig.worker.logs_text = (f"[setup] [1/1] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 0MiB/1000MiB(0%) CN:16 DL:1MiB ETA:40s]\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig.clock.sleep(60.0)
+    rig.worker.logs_text = "[#2089b0 10MiB/1000MiB(1%) CN:16 DL:1MiB ETA:40s]\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig.clock.sleep(60.0)
+    rig.worker.logs_text = (f"[#2089b0 1000MiB/1000MiB(100%) CN:16 DL:1MiB ETA:40s]\n"
+                            f"[setup] [1/1] Файл успешно загружен: {SETUP_FILE} ({1000 * 1024 ** 2} байт)\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert rig.orc._slots.get(1) is slot
+    assert "скорость загрузки весов ниже порога" not in caplog.text
+    assert "этап завершён, все файлы 100%" in caplog.text
 
 
 def test_booting_card_without_url_is_not_pulled(tmp_path, monkeypatch):
@@ -2638,3 +2717,130 @@ def test_price_window_lines_carry_console_flag(tmp_path, monkeypatch, caplog):
         recs = [r for r in caplog.records if marker in r.getMessage()]
         assert len(recs) == 1, marker
         assert all(getattr(recs[0], k, None) == v for k, v in orch.KEY_EVENT_EXTRA.items()), marker
+
+
+# ---------------------------------------------------------------------------
+# STEP 7, блок A: профиль модели в окружении карты; результат распределения сохраняется, диспетчеризация та же
+# ---------------------------------------------------------------------------
+
+def test_card_env_carries_model_profile_video(tmp_path, monkeypatch):
+    # карта получает профиль модели из окружения: MODEL_PROFILE == профиль запуска
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="ltx25")
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    env = rig.vast.created[0]["env"]
+    assert env["MODEL_PROFILE"] == "ltx25"
+
+
+def test_card_env_carries_new_profile_name(tmp_path, monkeypatch):
+    # имя профиля без папки в репозитории доходит до карты без правок кода
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="testmodel")
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    env = rig.vast.created[0]["env"]
+    assert env["MODEL_PROFILE"] == "testmodel"
+
+
+def test_pilot_env_has_no_model_profile(tmp_path, monkeypatch):
+    # пилот: ключа MODEL_PROFILE нет, остальные ключи пилотного окружения прежние
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    orc = _pilot_orc(tmp_path, monkeypatch, vast=vast)
+    assert orc._rent_one(orc.clock()) == "ok"
+    env = vast.created[0]["env"]
+    assert "MODEL_PROFILE" not in env
+    assert set(env) == {"GEN_LOG_LEVEL", "COMFYUI_ARGS", "PORTAL_CONFIG"}
+
+
+def test_split_is_stored_and_dispatch_unchanged(tmp_path, monkeypatch):
+    # VIDEO_MODEL=none: распределение уходит в фото целиком, Gemini не вызывается;
+    # результат сохраняется в self._split, а отправка по-прежнему идёт по всем номерам в очередь видео
+    monkeypatch.setenv("VIDEO_MODEL", "none")
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2))
+    summary = rig.run()
+    assert rig.orc._split is not None
+    assert rig.orc._split["video"] == []
+    assert rig.orc._split["photo"] == [1, 2]
+    assert summary.exit_code == 0
+    assert rig.worker.acked == [1, 2]
+
+
+# --- фото (STEP 7, блок B2): чистые функции и выбор профиля по роли ------------------------------
+# Переключение карты и маршрут POST /profile фейковый воркер не отвечает, поэтому проверяются чистые функции.
+def test_switch_target_idle_card_with_empty_photo_queue_asks_video():
+    assert orch._switch_target("photo", 3, 0, True) == "video"
+
+
+def test_switch_target_idle_video_card_asks_photo():
+    assert orch._switch_target("video", 0, 2, True) == "photo"
+
+
+def test_switch_target_both_queues_empty_means_no_switch():
+    assert orch._switch_target("photo", 0, 0, True) is None
+
+
+def test_switch_target_without_photo_profile_never_switches():
+    assert orch._switch_target("video", 0, 5, False) is None
+    assert orch._switch_target("photo", 5, 0, False) is None
+
+
+def test_photo_entry_with_num_frames_one_is_ready():
+    assert orch.PHOTO_NUM_FRAMES == 1
+    assert orch._prompt_ready({"status": "ready", "prompt": "кошка", "num_frames": 1}) is True
+
+
+def test_photo_card_uses_photo_profile_in_rent_env():
+    o = orch.Orchestrator.__new__(orch.Orchestrator)   # без конструктора: нужны только поля выбора профиля
+    o.profile = "ltx25"
+    o.photo_profile = "zimage_turbo"
+    assert o._profile_for_role("photo") == "zimage_turbo"
+    assert o._profile_for_role("video") == "ltx25"
+
+
+# --- план ролей по распределению: фото может ещё не быть в очереди на первом вызове ---------------
+def _role_orc(split, *, photo=(), video=()):
+    o = orch.Orchestrator.__new__(orch.Orchestrator)  # без конструктора: нужны только поля выбора роли
+    o.photo_profile = "zimage_turbo"
+    o._role_plan = None
+    o._plan_idx = 0
+    o._split = split
+    o._photo_nums = set((split or {}).get("photo", []))
+    o._photo_queue = deque(photo)
+    o._video_queue = deque(video)
+    o._desired = lambda now: 1  # одна карта: план зависит только от распределения и очередей
+    return o
+
+
+def test_plan_one_card_photo_first_when_split_known_and_queues_empty():
+    o = _role_orc({"photo": [2], "video": [1]})
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_plan_one_card_video_when_split_has_no_photo_nums():
+    o = _role_orc({"photo": [], "video": [1, 2]})
+    assert o._next_role(0.0) == "video"
+    assert o._role_plan == ["video"]
+
+
+def test_plan_photo_first_when_photo_clip_is_missing_from_queue():
+    # исходная ошибка: видеоклип уже в очереди, фото ещё нет; план строится по распределению, а не по очередям
+    o = _role_orc({"photo": [2], "video": [1]}, video=[1])
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_plan_not_fixed_while_split_is_unknown_then_built_once_split_known():
+    o = _role_orc(None, video=[1])
+    assert o._next_role(0.0) == "video"  # запасное значение по длине очередей: фото 0 < видео 1
+    assert o._role_plan is None          # план не зафиксирован, пока распределения нет
+    o._split = {"photo": [2], "video": [1]}
+    o._photo_nums = {2}
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_fallback_by_queue_lengths_applies_after_plan_is_exhausted():
+    o = _role_orc({"photo": [2], "video": [1]}, photo=[2], video=[1, 3])
+    o._role_plan = ["photo"]
+    o._plan_idx = 1  # план из одной карты уже израсходован
+    assert o._next_role(0.0) == "video"  # фото 1 < видео 2
+    o._photo_queue = deque([2, 4, 6])
+    assert o._next_role(0.0) == "photo"  # фото 3 >= видео 2

@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,12 +29,13 @@ from urllib.parse import parse_qs
 
 try:
     from Generate.worker.comfy_client import (
-        ComfyClient, ComfyError, inject_workflow)
+        ComfyClient, ComfyError, inject_workflow, new_second_pass_seed, set_profile_type)
     from Generate.worker.comfy_output import (
         COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT)
     from Generate.worker.telemetry import SystemSampler, TelemetrySampler
 except ImportError:  # запуск прямо на карте, без пакета Generate
-    from worker.comfy_client import ComfyClient, ComfyError, inject_workflow
+    from worker.comfy_client import (
+        ComfyClient, ComfyError, inject_workflow, new_second_pass_seed, set_profile_type)
     from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT
     from worker.telemetry import SystemSampler, TelemetrySampler
 
@@ -48,6 +50,27 @@ DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or "/opt/workspace
 MAX_BODY_BYTES = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
+
+# Переключение профиля на идле карты (POST /profile, шаг W4)
+# Корень репозитория Generate: папка на уровень выше worker/. Профили лежат в model_profiles/models/<имя>/.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODELS_ROOT_DEFAULT = REPO_ROOT / "model_profiles" / "models"
+SWITCH_SCRIPT_DEFAULT = REPO_ROOT / "worker" / "switch_profile.sh"
+WEIGHTS_PLAN_DEFAULT = REPO_ROOT / "core" / "weights_plan.py"
+# Имя профиля: тот же шаблон, что PROFILE_NAME_PATTERN в core/model_constants.py. Воркер не импортирует core:
+# на карте пакета core может не быть. Значения должны совпадать; test_worker_switch.py сверяет их.
+PROFILE_NAME_PATTERN = r"[A-Za-z0-9_\-]+"
+_RE_PROFILE_NAME = re.compile(PROFILE_NAME_PATTERN)
+# Профиль по умолчанию при старте: то же значение, что в setup.sh (${MODEL_PROFILE:-ltx25}) и core/model_constants.py
+DEFAULT_MODEL_PROFILE = "ltx25"
+MODEL_PROFILE_ENV = "MODEL_PROFILE"
+# Файлы папки профиля, без которых переключение не начинается
+PROFILE_REQUIRED_FILES = ("profile.yaml", "workflow.json", "bindings.json")
+SWITCH_BUSY_TEXT = "Воркер занят задачей или есть непринятые клипы: переключение модели сейчас невозможно."
+SWITCH_RUNNING_TEXT = "Переключение модели уже выполняется."
+SWITCH_STATES = ("idle", "switching", "ready", "failed", "refused")
+# Коды выхода switch_profile.sh: 3 — отказ до каких-либо изменений (карта продолжает работать), 1 — сбой после удаления
+SWITCH_EXIT_REFUSED = 3
 
 # Логи (SPEC 8.4, 10): уровень из GEN_LOG_LEVEL, буфер для GET /logs (без вытеснения строк, этап 9в)
 LOG_LEVEL_ENV = "GEN_LOG_LEVEL"
@@ -585,6 +608,7 @@ class _Task:
     error: Optional[str] = None
     path: Optional[Path] = None
     size_bytes: Optional[int] = None
+    second_seed: Optional[int] = None  # сид второго прохода этого клипа (первый проход = seed)
     acked: bool = False
     lines: Deque[str] = field(default_factory=collections.deque)  # журнал клипа целиком, без хвоста (этап 9в)
 
@@ -605,6 +629,24 @@ def _scrub(task: "_Task", text: str) -> str:
     return mask_secrets(text)
 
 
+class SwitchingError(Exception):
+    """Воркер переключает модель: новые клипы не принимаются."""
+
+
+def switch_refusal(manager: Any) -> Optional[str]:
+    """Причина отказа в переключении или None, если переключение можно начать.
+
+    Решение принимается только при простое: нет задач в очереди и в работе, нет непринятых клипов,
+    и переключение ещё не идёт. Вызывать под блокировкой менеджера (TaskManager.begin_switch),
+    чтобы между проверкой и переключением новый клип не успел попасть в очередь.
+    """
+    if manager.is_switching():
+        return SWITCH_RUNNING_TEXT
+    if manager.busy() or manager.unacked_count() > 0:
+        return SWITCH_BUSY_TEXT
+    return None
+
+
 class TaskManager:
     """Последовательно выполняет задачи через ComfyUI (одна карта = один клип за раз)."""
 
@@ -622,7 +664,9 @@ class TaskManager:
         self.task_timeout = task_timeout
         self._on_event = on_event  # снимок телеметрии при старте и конце клипа; не должен мешать задаче
         self._tasks: Dict[str, _Task] = {}
-        self._lock = threading.Lock()
+        # RLock: switch_refusal вызывает busy() и unacked_count() уже под блокировкой (begin_switch)
+        self._lock = threading.RLock()
+        self._switching = False  # идёт переключение профиля: новые клипы отклоняются (503)
         self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
 
@@ -648,6 +692,30 @@ class TaskManager:
         with self._lock:
             return any(t.state in ("queued", "running") for t in self._tasks.values())
 
+    def is_switching(self) -> bool:
+        with self._lock:
+            return self._switching
+
+    def begin_switch(self) -> Optional[str]:
+        """Атомарно: если простой, ставит «переключается» и возвращает None; иначе текст отказа."""
+        with self._lock:
+            reason = switch_refusal(self)
+            if reason is None:
+                self._switching = True
+            return reason
+
+    def end_switch(self, workflow: dict, bindings: dict) -> None:
+        """Переключение прошло: новые workflow и привязки ставятся под блокировкой, приём клипов снова открыт."""
+        with self._lock:
+            self.workflow = workflow
+            self.bindings = bindings
+            self._switching = False
+
+    def abort_switch(self) -> None:
+        """Переключение не удалось: workflow и привязки прежние, приём клипов снова открыт."""
+        with self._lock:
+            self._switching = False
+
     def _open_task_locked(self, num: int) -> Optional[_Task]:
         """Задача этого клипа, ещё не подтверждённая и не завершившаяся ошибкой (SPEC 8.1, идемпотентность)."""
         for task in self._tasks.values():
@@ -661,6 +729,8 @@ class TaskManager:
         Проверка идёт до лимита очереди: повтор не должен получить 429 из-за собственной задачи."""
         received = _clock_text()
         with self._lock:
+            if self._switching:
+                raise SwitchingError()
             existing = self._open_task_locked(num)
             if existing is not None:
                 task_id = existing.task_id
@@ -687,7 +757,8 @@ class TaskManager:
                 return None
             return {"state": task.state, "stage": task.stage,
                     "log_tail": "\n".join(task.lines),
-                    "size_bytes": task.size_bytes, "error": task.error}
+                    "size_bytes": task.size_bytes, "error": task.error,
+                    "seed_first": task.seed, "seed_second": task.second_seed}
 
     def file_info(self, task_id: str) -> Optional[Tuple[Path, int]]:
         """(путь, размер) готового и не подтверждённого файла, иначе None."""
@@ -772,12 +843,16 @@ class TaskManager:
         try:
             self._set(task, "running", "подстановка параметров в workflow")
             prefix = f"clip_{task.num}_{task.task_id[:8]}"
+            second_seed = new_second_pass_seed()
+            with self._lock:
+                task.second_seed = second_seed
             graph = inject_workflow(self.workflow, self.bindings, task.prompt,
-                                    task.num_frames, task.seed, prefix, self.extra_inputs)
+                                    task.num_frames, task.seed, prefix, self.extra_inputs,
+                                    second_seed=second_seed)
             self._set(task, "running", "постановка в очередь ComfyUI")
             started = time.monotonic()
-            log.info("Клип %d: старт рендера в %s (id %s).",
-                     task.num, _clock_text(), task.task_id[:8])
+            log.info("Клип %d: старт рендера в %s (id %s), сид первого прохода %d, сид второго прохода %d.",
+                     task.num, _clock_text(), task.task_id[:8], task.seed, second_seed)
             prompt_id = self.comfy.queue_prompt(graph)
             self._set(task, "running", "генерация в ComfyUI")
             rel = self.comfy.wait_for_completion(prompt_id, timeout=self.task_timeout)
@@ -812,6 +887,17 @@ class TaskManager:
 # ---------------------------------------------------------------------------
 # HTTP-слой
 # ---------------------------------------------------------------------------
+
+class SwitchFailed(Exception):
+    """Переключение профиля не удалось: текст причины на русском, без токенов и адресов с токеном."""
+
+
+def validate_profile_name(value: Any) -> Optional[str]:
+    """Текст ошибки для имени профиля или None, если имя допустимо (проверка до любых действий)."""
+    if not isinstance(value, str) or not _RE_PROFILE_NAME.fullmatch(value):
+        return "Имя профиля должно содержать только латинские буквы, цифры, «_» и «-»."
+    return None
+
 
 def _validate_payload(data: Any) -> Tuple[int, str, int, int]:
     if not isinstance(data, dict):
@@ -885,6 +971,8 @@ def _make_handler(app: "WorkerApp") -> type:
                     return self._get_logs()
                 if path == "/task" and method == "POST":
                     return self._post_task()
+                if path == "/profile" and method == "POST":
+                    return self._post_profile()
                 m = _RE_TASK.match(path)
                 if m and method == "GET":
                     return self._get_task(m.group(1))
@@ -903,7 +991,7 @@ def _make_handler(app: "WorkerApp") -> type:
                 except OSError:
                     pass
                 return
-            known = path in ("/health", "/task", LOGS_PATH) or _RE_TASK.match(path) \
+            known = path in ("/health", "/task", "/profile", LOGS_PATH) or _RE_TASK.match(path) \
                 or _RE_FILE.match(path) or _RE_ACK.match(path)
             self._drain_body()
             if known:
@@ -932,11 +1020,17 @@ def _make_handler(app: "WorkerApp") -> type:
             except (ComfyError, AttributeError, TypeError, ValueError) as exc:
                 log.error("Проверка состояния ComfyUI не пройдена: %s.", type(exc).__name__)
             # до файла готовности ok всегда false: веса и ComfyUI ещё не проверены setup.sh (SPEC 8.1)
-            body = {"ok": bool(ok and app.is_ready()), "gpu": gpu, "vram_free": vram_free,
-                    "busy": app.manager.busy()}
+            # во время переключения профиля ok всегда false: карта не готова принимать клипы (шаг W4)
+            # во время переключения и после его сбоя ok всегда false (сбой: карта заменяется, шаг W3)
+            body = {"ok": bool(ok and app.is_ready() and app.switch_state not in ("switching", "failed")),
+                    "gpu": gpu, "vram_free": vram_free,
+                    "busy": app.manager.busy(),
+                    "profile": app.profile_name, "switch": app.switch_state}
             reason = app.failure_reason()
             if reason:  # только при отказе весов: при обычном ожидании ответ прежний (SPEC 8.1)
                 body["reason"] = reason
+            if app.switch_state == "failed" and app.switch_reason:
+                body["switch_reason"] = app.switch_reason
             self._json(200, body)
 
         def _get_logs(self) -> None:
@@ -990,11 +1084,38 @@ def _make_handler(app: "WorkerApp") -> type:
                 msg = str(exc) if isinstance(exc, ValueError) and not isinstance(
                     exc, (json.JSONDecodeError, UnicodeDecodeError)) else "Тело запроса — некорректный JSON."
                 return self._error(400, msg)
+            if app.switch_state == "failed":  # сбой переключения: карта больше не принимает клипы
+                return self._error(503, "Воркер не готов: переключение модели не удалось, карту нужно заменить.")
             try:
                 task_id = app.manager.submit(num, prompt, num_frames, seed)
             except BacklogFullError:
                 return self._error(429, "Очередь заполнена, ожидается скачивание готовых клипов")
+            except SwitchingError:
+                return self._error(503, "Воркер переключает модель, повторите запрос позже.")
             self._json(200, {"task_id": task_id})
+
+        def _post_profile(self) -> None:
+            """POST /profile {"profile": "<имя>"}: принять переключение (202), отказ 400/409."""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._error(400, "Некорректный заголовок Content-Length.")
+            if length <= 0:
+                return self._error(400, "Пустое тело запроса.")
+            if length > MAX_BODY_BYTES:
+                return self._error(413, "Тело запроса слишком большое.")
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                return self._error(400, "Тело запроса — некорректный JSON.")
+            if not isinstance(data, dict):
+                return self._error(400, "Тело запроса должно быть JSON-объектом.")
+            error = validate_profile_name(data.get("profile"))
+            if error is not None:
+                return self._error(400, error)
+            status, body = app.request_switch(data["profile"])
+            self._json(status, body)
 
         def _get_task(self, task_id: str) -> None:
             snap = app.manager.snapshot(task_id)
@@ -1076,7 +1197,11 @@ class WorkerApp:
                  ready_flag: Optional[str] = None,
                  bootstrap_log_path: Optional[str] = None,
                  template_log_path: Optional[str] = None,
-                 log_dir: Optional[str] = None) -> None:
+                 log_dir: Optional[str] = None,
+                 profile_name: Optional[str] = None,
+                 models_root: Any = None,
+                 switch_script: Any = None,
+                 weights_plan_script: Any = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -1098,6 +1223,13 @@ class WorkerApp:
                                           check_interval=telemetry_interval_check)
         self.manager = TaskManager(comfy, workflow, bindings, output_dir, extra_inputs,
                                    max_unacked, task_timeout, on_event=self.telemetry.notify)
+        # Профиль модели (POST /profile, шаг W4): стартовый из MODEL_PROFILE, по умолчанию ltx25 (как в setup.sh)
+        self.profile_name = profile_name or os.environ.get(MODEL_PROFILE_ENV) or DEFAULT_MODEL_PROFILE
+        self.models_root = Path(models_root) if models_root else MODELS_ROOT_DEFAULT
+        self.switch_script = Path(switch_script) if switch_script else SWITCH_SCRIPT_DEFAULT
+        self.weights_plan_script = Path(weights_plan_script) if weights_plan_script else WEIGHTS_PLAN_DEFAULT
+        self.switch_state = "idle"     # idle, switching, ready, failed, refused (SWITCH_STATES)
+        self.switch_reason = ""
         self.deadman = DeadManSwitch(idle_timeout_seconds,
                                      on_idle_timeout or self._default_shutdown,
                                      check_interval)
@@ -1125,6 +1257,132 @@ class WorkerApp:
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
         self._serve_thread: Optional[threading.Thread] = None
+
+    @property
+    def profile_dir(self) -> Path:
+        return self.models_root / self.profile_name
+
+    def request_switch(self, name: str) -> Tuple[int, dict]:
+        """Принимает переключение: (код ответа, тело). Отказ не трогает веса и ComfyUI.
+
+        Порядок проверок: имя, папка профиля, простой карты (begin_switch под блокировкой менеджера).
+        Простой и отсутствие новых клипов гарантируются тем, что begin_switch ставит флаг переключения
+        атомарно с проверкой, а submit под той же блокировкой отказывает (503), пока флаг стоит.
+        """
+        error = validate_profile_name(name)
+        if error is not None:
+            return 400, {"error": error}
+        new_dir = self.models_root / name
+        if not new_dir.is_dir() or any(not (new_dir / fname).is_file() for fname in PROFILE_REQUIRED_FILES):
+            return 400, {"error": "Папка профиля не найдена или в ней нет profile.yaml, workflow.json или bindings.json."}
+        reason = self.manager.begin_switch()
+        if reason is not None:
+            return 409, {"error": reason}
+        self.switch_reason = ""
+        self.switch_state = "switching"
+        threading.Thread(target=self._run_switch, args=(name, new_dir),
+                         name="profile-switch", daemon=True).start()
+        log.info("Переключение профиля на «%s» принято.", name)
+        return 202, {"profile": name, "switch": "switching"}
+
+    def _run_switch(self, name: str, new_dir: Path) -> None:
+        """Фон: проверить новый профиль, запустить switch_profile.sh, при успехе сменить workflow и привязки.
+
+        Новые workflow и привязки читаются до запуска скрипта: если файлы битые, веса не трогаются.
+        Смена workflow и привязок идёт под блокировкой менеджера (end_switch) и только при простое.
+        """
+        old_dir = self.profile_dir
+        try:
+            try:
+                info = self._read_profile_meta(new_dir)
+                workflow = _load_json_file(str(new_dir / "workflow.json"), "workflow")
+                bindings = _load_json_file(str(new_dir / "bindings.json"), "привязки")
+            except (SwitchFailed, ValueError, ComfyError) as exc:
+                # до запуска скрипта веса не тронуты: это отказ, карта продолжает работать
+                self._switch_refused(str(exc))
+                return
+            rc, script_line = self._run_switch_script(old_dir, new_dir)
+            if rc == SWITCH_EXIT_REFUSED:
+                self._switch_refused(script_line or "скрипт отказал в переключении.")
+                return
+            if rc != 0:
+                raise SwitchFailed(script_line or f"скрипт переключения завершился с кодом {rc}.")
+            set_profile_type(info["type"])
+            self.manager.end_switch(workflow, bindings)
+            self.profile_name = name
+            self.switch_state = "ready"
+            log.info("Переключение профиля на «%s» выполнено.", name)
+        except (SwitchFailed, ValueError, ComfyError) as exc:
+            self._switch_failed(str(exc))
+        except Exception as exc:  # без подробностей: тип ошибки, не текст
+            self._switch_failed(f"внутренняя ошибка переключения: {type(exc).__name__}.")
+        finally:
+            # «переключается» не должно остаться навсегда, даже если обработчик выше сам дал сбой
+            if self.switch_state == "switching":
+                self._switch_failed("переключение завершилось без результата.")
+
+    def _switch_refused(self, reason: str) -> None:
+        """Отказ до изменений: workflow, профиль и приём клипов прежние, карта остаётся в работе."""
+        self.manager.abort_switch()
+        self.switch_reason = mask_secrets(reason)
+        self.switch_state = "refused"
+        log.warning("Переключение профиля отклонено: %s", self.switch_reason)
+
+    def _switch_failed(self, reason: str) -> None:
+        """Сбой после удаления весов: карта не готова, /task отказывает, orchestrator заменит карту."""
+        self.manager.abort_switch()
+        self.switch_reason = mask_secrets(reason)
+        self.switch_state = "failed"
+        log.error("Переключение профиля не удалось: %s", self.switch_reason)
+
+    def _read_profile_meta(self, new_dir: Path) -> dict:
+        """Тип профиля из weights_plan.py meta (строки type=..., needs_token=..., files_total=...)."""
+        proc = subprocess.run([sys.executable, str(self.weights_plan_script), "meta", str(new_dir)],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise SwitchFailed("описание весов нового профиля не читается.")
+        values = {}
+        for line in proc.stdout.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key] = value
+        if values.get("type") not in ("image", "video"):
+            raise SwitchFailed("в описании нового профиля неизвестный тип.")
+        return {"type": values["type"]}
+
+    @staticmethod
+    def _weights_base_url(new_dir: Path) -> str:
+        """base_url из weights.json нового профиля (нужен, если HF_BASE_URL не задан в окружении)."""
+        try:
+            with open(new_dir / "weights.json", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return ""
+        base = data.get("base_url") if isinstance(data, dict) else None
+        return base if isinstance(base, str) else ""
+
+    def _switch_env(self, new_dir: Path) -> dict:
+        """Окружение для switch_profile.sh: унаследованное от setup.sh, плюс то, что setup.sh не экспортирует."""
+        env = dict(os.environ)
+        comfy_dir = env.get("COMFY_DIR", "")
+        if not env.get("COMFY_MODELS_DIR") and comfy_dir:
+            env["COMFY_MODELS_DIR"] = os.path.join(comfy_dir, "models")
+        if not env.get("HF_BASE_URL"):
+            env["HF_BASE_URL"] = self._weights_base_url(new_dir)
+        env.setdefault("WORKER_BOOTSTRAP_LOG", DEFAULT_BOOTSTRAP_LOG)
+        return env
+
+    def _run_switch_script(self, old_dir: Path, new_dir: Path) -> Tuple[int, str]:
+        """Запуск switch_profile.sh: (код выхода, последняя строка «[switch]» — причина или пусто)."""
+        proc = subprocess.run(["bash", str(self.switch_script), str(old_dir), str(new_dir)],
+                              env=self._switch_env(new_dir), capture_output=True, text=True)
+        out_lines = (proc.stdout or "").splitlines()
+        for line in out_lines:
+            log.info("%s", line)  # строки скрипта уже без токенов; маска формата дополнительно применяется
+        for line in (proc.stderr or "").splitlines()[-5:]:
+            log.warning("%s", line)
+        last = next((line for line in reversed(out_lines) if line.startswith("[switch]")), "")
+        return proc.returncode, last
 
     def is_ready(self) -> bool:
         """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""

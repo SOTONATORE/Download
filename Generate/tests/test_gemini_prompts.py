@@ -12,13 +12,14 @@ import pytest
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import (
     GeminiInputError, GeminiRuntimeError, PromptConfig, RealTransport,
-    build_requests, generate_prompts, merge_segments_into_sentences,
+    attach_style, build_requests, generate_prompts, merge_segments_into_sentences,
     parse_and_validate, strip_user_only,
 )
 from Generate.core.srt_parser import Segment
+from Generate.core.frame_rules import REPHRASE_RULE_EN
 
 GEN = pathlib.Path(__file__).resolve().parent.parent
-LTX_STYLE = GEN / "model_profiles" / "prompt_styles" / "ltx25.md"
+LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 # Имя переменной окружения собрано из частей (структурный тест запрещает литерал в коде).
 ENV_NAME = "GEN_" + "GEMINI_API_KEY"
 TESTKEY = "TESTKEY-12345"
@@ -53,9 +54,9 @@ def make_cfg(tmp_path, **kw):
                      "<!-- USER_ONLY_END -->\n# Style guide\nWrite one paragraph.\n",
                      encoding="utf-8")
     kw.setdefault("style_file", str(style))
-    kw.setdefault("style_brief", "dusty medieval chronicle")
     kw.setdefault("max_prompt_chars", 300)
     kw.setdefault("batch_size", 10)
+    kw.setdefault("media", "video")
     return PromptConfig(**kw)
 
 
@@ -139,7 +140,6 @@ def test_strip_user_only_synthetic(tmp_path):
     system = build_requests(make_segments(), [1], cfg)[0].system
     assert "USER_ONLY" not in system and "SECRET-NOTE" not in system
     assert "Write one paragraph." in system
-    assert "dusty medieval chronicle" in system
 
 
 def test_strip_user_only_real_style_file():
@@ -282,7 +282,7 @@ def test_runtime_error_propagates(tmp_path):
 # ---------------------------------------------------------------- parse_and_validate
 
 def _pv(raw, nums, **kw):
-    cfg = PromptConfig(style_file="x", **kw)
+    cfg = PromptConfig(style_file="x", media="video", **kw)
     return parse_and_validate(raw if isinstance(raw, str) else json.dumps(raw), nums, cfg)
 
 
@@ -391,6 +391,16 @@ def test_system_has_hard_rules(tmp_path):
     system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
     assert "# Hard rules for every prompt" in system
     assert "Exactly one camera move" in system
+
+
+def test_system_instruction_without_brief_ends_with_style_guide(tmp_path):
+    # без описания стиля от пользователя: блок «Style brief» не добавляется,
+    # системная инструкция заканчивается фиксированной частью и style.md (без USER_ONLY)
+    system = build_requests(make_segments(), [1], make_cfg(tmp_path))[0].system
+    style = strip_user_only((tmp_path / "style.md").read_text(encoding="utf-8"))
+    assert "Style brief from the user" not in system   # заголовок удалённого блока; «## Style brief» в style.md остаётся
+    assert system.count("# Style guide\n") == style.count("# Style guide\n") + 1
+    assert system.endswith("\n\n# Style guide\n" + style)
 
 
 # ---------------------------------------------------------------- RealTransport и ключ
@@ -581,3 +591,107 @@ def test_module_does_not_import_download():
         else:
             continue
         assert "Download" not in roots and "generate_queries" not in roots
+
+
+# ---------------------------------------------------------------- стиль пресета
+
+def test_attach_style_empty_returns_prompt_unchanged():
+    assert attach_style("A man walks.", "") == "A man walks."
+    assert attach_style("A man walks", "") == "A man walks"
+
+
+def test_attach_style_appends_with_dot_space():
+    assert attach_style("A man walks.", "test") == "A man walks. test"
+    assert attach_style("A man walks", "test") == "A man walks. test"
+
+
+def test_attach_style_no_double_dot():
+    assert attach_style("A man walks..", "test") == "A man walks. test"
+
+
+def test_generate_prompts_with_preset_ends_with_style(tmp_path, monkeypatch):
+    presets = tmp_path / "prompts"
+    presets.mkdir()
+    (presets / "test.md").write_text("test\n", encoding="utf-8")
+    monkeypatch.setattr(gp, "PRESETS_DIR", presets)
+    cfg = make_cfg(tmp_path, preset="test")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn. test"] * 2
+    assert "# Preset" not in t.calls[0]["system"]
+
+
+def test_generate_prompts_preset_none_unchanged(tmp_path):
+    cfg = make_cfg(tmp_path, preset="none")
+    t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
+    res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
+    assert [r.prompt for r in res] == ["A baker lifts a tray at dawn."] * 2
+
+
+# ---------------------------------------------------------------- media: видео и фото
+
+def test_image_instruction_is_still_frame(tmp_path):
+    text = gp.build_system_instruction(make_cfg(tmp_path, media="image"))
+    assert "text-to-image" in text
+    assert "still frame" in text
+    assert "text-to-video" not in text
+    assert "Exactly one camera move" not in text
+    assert "Never describe camera movement" in text
+
+
+def test_video_instruction_keeps_camera_move(tmp_path):
+    text = gp.build_system_instruction(make_cfg(tmp_path, media="video"))
+    assert "text-to-video" in text
+    assert "Exactly one camera move" in text
+    assert "camera movement is the only camera wording allowed" in text
+
+
+def test_media_image_is_accepted(tmp_path):
+    gp._check_config(make_cfg(tmp_path, media="image"))
+
+
+def test_unknown_media_raises(tmp_path):
+    with pytest.raises(gp.GeminiInputError):
+        gp._check_config(make_cfg(tmp_path, media="audio"))
+
+
+# ---------------------------------------------------------------- правило «not X, but Y» и перефразирование
+
+CONTRAST_RULE_TEXT = ('- When the text contrasts two things ("not X, but Y", "not X, rather Y"), show only Y, '
+                      'as a visible action or scene. Never describe X and never use a negation to refer to it.')
+
+
+def test_contrast_rule_in_video_and_image_instructions(tmp_path):
+    for media in ("video", "image"):
+        text = gp.build_system_instruction(make_cfg(tmp_path, media=media))
+        assert CONTRAST_RULE_TEXT in text
+
+
+PAPER_RULE_TEXT = "No paper, papers, letters, passports, forms or documents of any kind"
+
+
+def test_paper_rule_in_video_and_image_instructions(tmp_path):
+    for media in ("video", "image"):
+        text = gp.build_system_instruction(make_cfg(tmp_path, media=media))
+        assert PAPER_RULE_TEXT in text
+
+
+ASPECT_RULE_TEXT = "No aspect ratios, frame sizes, widescreen or framing terms"
+
+
+def test_aspect_rule_in_video_and_image_instructions(tmp_path):
+    for media in ("video", "image"):
+        text = gp.build_system_instruction(make_cfg(tmp_path, media=media))
+        assert ASPECT_RULE_TEXT in text
+
+
+def test_segment_with_forbidden_word_gets_rephrase_note(tmp_path):
+    segs = [seg(1, "Passports were stamped for exile, not return.")]
+    req = build_requests(segs, [1], make_cfg(tmp_path))[0]
+    assert REPHRASE_RULE_EN in req.user
+
+
+def test_segment_without_forbidden_word_has_no_rephrase_note(tmp_path):
+    segs = [seg(1, "A formal dinner in a palace hall.")]
+    req = build_requests(segs, [1], make_cfg(tmp_path))[0]
+    assert REPHRASE_RULE_EN not in req.user

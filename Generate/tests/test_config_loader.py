@@ -33,12 +33,14 @@ def _assert_rejected(raw: dict, *fragments: str) -> GeminiInputError:
 def test_default_file_loads_and_matches_spec_values():
     cfg = cl.load_config()
     assert cfg.gemini_models == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
-    assert cfg.gemini_batch_size == 100
+    assert cfg.gemini_batch_size == 50
     assert cfg.disk_gb == 100
     assert cfg.silent_host_timeout_min == 20
     assert cfg.worker_idle_timeout_min == 2
     assert cfg.max_cards == 1
     assert cfg.limit_clips == 0
+    assert cfg.max_price_per_hour == 1.0
+    assert cfg.min_inet_mbps == 800
     assert cfg.job_deadline_min == 330
     assert cfg.gpu_max_sec is None          # берётся из профиля модели
     assert cl.load_profile_number(cfg.model_profile, "gpu_max_sec") == 10.0
@@ -97,11 +99,33 @@ def test_verified_missing_key_defaults_to_true():
     assert default is True
 
 
+def test_generate_workflow_defaults_match_config_default():
+    """Входы generate.yml по умолчанию совпадают с config.default.yaml (C1): менять одно место без другого нельзя."""
+    path = cl.DEFAULT_CONFIG_PATH.parent.parent / ".github" / "workflows" / "generate.yml"
+    wf = yaml.safe_load(path.read_text(encoding="utf-8"))
+    inputs = (wf.get("on") or wf.get(True))["workflow_dispatch"]["inputs"]   # PyYAML читает ключ on как True
+    cfg = cl.load_config()
+    assert inputs["limit_clips"]["default"] == "0" and cfg.limit_clips == 0
+    assert inputs["max_price_per_hour"]["default"] == "1.00" and cfg.max_price_per_hour == 1.0
+    assert inputs["min_inet_mbps"]["default"] == "800" and cfg.min_inet_mbps == 800
+    assert inputs["rental_type"]["default"] == "on-demand" and cfg.rental_type == "on-demand"
+    # типы входов не менялись: числовые строки остаются строками, выбор остаётся выбором
+    assert inputs["limit_clips"]["type"] == "string"
+    assert inputs["max_price_per_hour"]["type"] == "string"
+    assert inputs["min_inet_mbps"]["type"] == "string"
+    assert inputs["rental_type"]["type"] == "choice"
+    assert inputs["rental_type"]["default"] in inputs["rental_type"]["options"]
+    # входы выбора: model_profile (только ltx25) и preset (none и test; test — заглушка presets/prompts/test.md)
+    assert "model_profile" not in inputs
+    assert inputs["preset"]["type"] == "choice" and inputs["preset"]["options"] == ["none", "test"]
+    assert inputs["preset"]["default"] == "none" and cfg.preset == "none"
+
+
 # ---------------------------------------------------------------- rental_type (режим аренды)
 
-def test_rental_type_default_file_is_interruptible_and_derives_flag():
+def test_rental_type_default_file_is_on_demand_and_derives_flag():
     cfg = cl.load_config()
-    assert cfg.rental_type == "interruptible" and cfg.interruptible is True
+    assert cfg.rental_type == "on-demand" and cfg.interruptible is False
 
 
 def test_rental_type_on_demand_derives_interruptible_false():
@@ -352,9 +376,8 @@ def test_file_with_bad_value_is_rejected(tmp_path):
 # ---------------------------------------------------------------- входы (overrides)
 
 def test_overrides_replace_file_values_and_none_is_ignored():
-    cfg = cl.load_config(overrides={"max_cards": 2, "style_brief": "стиль", "disk_gb": None})
+    cfg = cl.load_config(overrides={"max_cards": 2, "disk_gb": None})
     assert cfg.max_cards == 2
-    assert cfg.style_brief == "стиль"
     assert cfg.disk_gb == 100               # None = «не задано», остаётся из файла
 
 

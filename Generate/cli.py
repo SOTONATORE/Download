@@ -50,8 +50,10 @@ from Generate.core.srt_parser import SrtError, parse_srt, srt_hash
 try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
-        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
-    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError
+        DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
+        load_profile_number, load_profile_type, profile_dir, profile_exists)
+    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
+    from Generate.core.model_constants import PRESET_NONE
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
@@ -62,8 +64,10 @@ try:  # пакетный и «плоский» импорт
 except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
-        DEFAULT_CONFIG_PATH, Config, load_config, load_profile_number)
-    from gemini_prompts import GeminiInputError, GeminiRuntimeError  # type: ignore
+        DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
+        load_profile_number, load_profile_type, profile_dir, profile_exists)
+    from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
+    from model_constants import PRESET_NONE  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
@@ -86,11 +90,11 @@ LOG_LEVELS = ("INFO", "DEBUG")
 DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
-STYLE_DIR = "Generate/model_profiles/prompt_styles"
-# запасной стиль, если файла стиля для профиля нет (прежнее поведение)
-FALLBACK_STYLE_PROFILE = "ltx25"
-# значения по умолчанию, которых нет в config.default.yaml (описаны в профиле модели и SPEC 5)
-TIMING_FRAME_RULE = {"kind": "8k+1"}
+STYLE_DIR = "Generate/model_profiles/models"
+# файлы, без которых профиль модели не запускается (проверяются до аренды, см. _check_profile_and_preset)
+PROFILE_REQUIRED_FILES = ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md")
+# запасной профиль, если профиля или файла стиля для выбранного профиля нет (прежнее поведение)
+FALLBACK_STYLE_PROFILE = DEFAULT_MODEL_PROFILE
 # наблюдатель heartbeat (SPEC 8.3 а): пороги по умолчанию и формат времени в файле heartbeat
 WATCH_DEFAULT_SILENCE_SEC = 120
 WATCH_DEFAULT_CHECK_SEC = 30
@@ -257,22 +261,110 @@ def _load_cfg(path: Optional[str], overrides: Optional[dict] = None) -> tuple[Op
         return None, EXIT_INPUT
 
 
+def _frame_rule_for(profile: str) -> Optional[dict]:
+    # профиль типа image (фото): правила кадров нет и запасной профиль не подставляется (STEP 7, блок B2)
+    if profile_exists(profile) and load_profile_type(profile) == "image":
+        return None
+    # правило кадров берётся из profile.yaml выбранного профиля; если профиля нет, из запасного
+    # (прежнее поведение: тот же 8k+1)
+    src = profile if profile_exists(profile) else FALLBACK_STYLE_PROFILE
+    return load_profile_frame_rule(src)
+
+
 def _build_timing(cfg: Config, profile: str):
+    frame_rule = _frame_rule_for(profile)
+    if frame_rule is None:
+        return None  # профиль фото: тайминг не строится (STEP 7, блок B2)
     cls = _find_symbol("TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
     # gpu_max_sec в конфиге может быть null: тогда берётся из профиля модели
     gpu_max = (cfg.gpu_max_sec if cfg.gpu_max_sec is not None
                else load_profile_number(profile, "gpu_max_sec"))
-    return cls(fps=cfg.fps, frame_rule=dict(TIMING_FRAME_RULE),
+    return cls(fps=cfg.fps, frame_rule=frame_rule,
                clip_min_sec=cfg.clip_min_sec, clip_max_sec=cfg.clip_max_sec,
                gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
 
 
-def _build_prompt_config(profile: str, style_brief: str, batch_size: int):
+def _check_photo_profile(photo_profile: str) -> Optional[int]:
+    """Профиль фото (--photo-profile): папка с profile.yaml и тип image. Иначе — ошибка входа (STEP 7, блок B2).
+
+    Возвращает None, если всё на месте; иначе печатает сообщение на русском и возвращает EXIT_INPUT.
+    """
+    try:
+        folder = profile_dir(photo_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if not folder.is_dir() or not (folder / "profile.yaml").is_file():
+        _err(f"Ошибка входных данных: профиль фото «{photo_profile}» не найден: нет папки "
+             f"models/{photo_profile}/ или файла profile.yaml.")
+        return EXIT_INPUT
+    try:
+        ptype = load_profile_type(photo_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if ptype != "image":
+        _err(f"Ошибка входных данных: профиль фото «{photo_profile}» имеет тип «{ptype}»; "
+             f"для фото нужен профиль с type: image.")
+        return EXIT_INPUT
+    return None
+
+
+def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
+    """Проверка входов профиля модели и пресета ДО поиска цен и любого вызова Vast (вход run).
+
+    Профиль: папка Generate/model_profiles/models/<профиль>/ должна существовать и содержать
+    PROFILE_REQUIRED_FILES. Пресет: «none» допустим всегда; иначе нужен непустой файл пресета
+    (проверка та же, что при сборке системной инструкции: read_preset).
+    Возвращает None, если всё на месте; иначе печатает сообщение на русском и возвращает EXIT_INPUT.
+    """
+    try:
+        folder = profile_dir(model_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if not folder.is_dir():
+        _err(f"Ошибка входных данных: профиль модели «{model_profile}» не найден: нет папки "
+             f"models/{model_profile}/.")
+        return EXIT_INPUT
+    missing = [name for name in PROFILE_REQUIRED_FILES if not (folder / name).is_file()]
+    if missing:
+        _err(f"Ошибка входных данных: профиль модели «{model_profile}» неполный: нет файлов "
+             f"{', '.join(missing)}.")
+        return EXIT_INPUT
+    if preset == PRESET_NONE:
+        return None
+    try:
+        read_preset(preset)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    return None
+
+
+def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
-    style_file = f"{STYLE_DIR}/{profile}.md"
-    if not os.path.isfile(style_file):
-        style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}.md"
-    return cls(style_file=style_file, style_brief=style_brief, batch_size=batch_size)
+    # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
+    try:
+        profile_lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        profile_lines = []
+    media = next((ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'")
+                  for ln in profile_lines if ln.startswith("type:")), None)
+    if media not in ("video", "image"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml не задан тип «type» (video или image).")
+    style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
+    # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
+    if load_profile_type(profile) == "image":
+        if not os.path.isfile(style_file):
+            raise GeminiInputError(
+                f"Ошибка входных данных: для профиля {profile} (type: image) "
+                f"не найден файл стиля: {style_file}")
+    elif not os.path.isfile(style_file):
+        # профили video и без поля type: прежняя подмена на профиль по умолчанию
+        style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
+    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
 
 
 def _gemini_options(cfg: Config) -> dict:
@@ -356,8 +448,8 @@ def _print_summary(s) -> None:
     print(f"  уже было в Release: {g('skipped_done')}")
     print(f"  арендовано карт: {g('cards_rented')}")
     print(f"  уничтожено карт: {g('destroyed_cards')}")
-    print(f"  среднее время рендера клипа, с: {avg:.1f}" if avg > 0
-          else "  среднее время рендера клипа, с: нет данных")
+    print(f"  среднее время клипа от отправки до выгрузки, с: {avg:.1f}" if avg > 0
+          else "  среднее время клипа от отправки до выгрузки, с: нет данных")
     print(f"  потрачено, USD: {float(g('spent_usd', 0.0)):.2f}")
     if g("deadline_reached", False):
         print("  достигнут срок задания: новые клипы не брались")
@@ -419,7 +511,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "budget_limit_usd": args.budget_limit,
         "min_balance_usd": args.min_balance_usd,
         "model_profile": args.model_profile,
-        "style_brief": args.style_brief,
+        "preset": args.preset,
         "gpu_name": args.gpu_name,
         "min_price_per_hour": args.min_price_per_hour,
         "max_price_per_hour": args.max_price_per_hour,
@@ -452,10 +544,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     except BadHostsError as e:
         _err(f"Ошибка входных данных: {e}")
         return EXIT_INPUT
+    # профиль модели и пресет: до клиентов Vast/Gemini, поиска цен и аренды (одна проверка, см. docstring)
+    input_code = _check_profile_and_preset(cfg.model_profile, cfg.preset)
+    if input_code is not None:
+        return input_code
+    # видеопрофиль должен иметь тип video: фото задаются отдельно через --photo-profile
+    try:
+        video_type = load_profile_type(cfg.model_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if video_type != "video":
+        _err(f"Ошибка входных данных: видеопрофиль «{cfg.model_profile}» имеет тип «{video_type}»; "
+             f"фото задаются через --photo-profile.")
+        return EXIT_INPUT
+    photo_profile = getattr(args, "photo_profile", None) or None
+    if photo_profile is not None:
+        input_code = _check_photo_profile(photo_profile)
+        if input_code is not None:
+            return input_code
 
     try:
         timing = _build_timing(cfg, cfg.model_profile)
-        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.style_brief, cfg.gemini_batch_size)
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
+        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+                            if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         transport = None if _pilot_mode(args) else _make_transport()
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
@@ -502,6 +615,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             transport,
             args.prompts_path,
             max_cards=cfg.max_cards,
+            photo_profile=photo_profile,
+            photo_prompt_cfg=photo_prompt_cfg,
             budget_limit_usd=cfg.budget_limit_usd,
             limit_clips=cfg.limit_clips,
             repo=args.repo,
@@ -1022,6 +1137,234 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     return EXIT_RUNTIME if pub.failures else EXIT_OK
 
 
+# --- проверка промптов (workflow verify_gemini) -----------------------------
+# Подготовка промптов как в cmd_run, но без Vast, релиза и воркера: тот же build_prompts,
+# то же распределение (plan_split), те же профили и тайминг (_build_timing, _build_prompt_config).
+
+VERIFY_REWORK_RE = re.compile(r"Prompt for segment_index (\d+):")
+_FORBIDDEN_TAG = "запрещённый тип кадра"
+_LEFTOVER_TAG = "незаполненный маркер"
+
+
+class _ReworkCounter:
+    """Прозрачная обёртка транспорта: запоминает номера, которые переписывал шаг 6 (find_problems).
+
+    Повтор шага 6 отправляется с текстом «Prompt for segment_index N: ...». Обёртка только читает
+    запрос; ответ и поведение конвейера не меняются.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.rework_nums: set = set()
+
+    def generate_json(self, model, system, user, schema) -> str:
+        m = VERIFY_REWORK_RE.match(user or "")
+        if m:
+            self.rework_nums.add(int(m.group(1)))
+        return self._inner.generate_json(model, system, user, schema)
+
+
+@dataclass
+class PreparedPrompts:
+    state: dict            # содержимое prompts.json после генерации
+    missing: list          # номера, которые проверялись (после лимита), по возрастанию
+    video_nums: list
+    photo_nums: list
+    ready_video: int
+    ready_photo: int
+    rework_video: int
+    rework_photo: int
+    failures: list         # (номер, тип, причина) для промптов, которые не готовы
+    problems: list         # строки о нарушениях; при любой строке job завершается с кодом 1
+    report_md: str         # отчёт на русском для report.md и сводки
+
+
+def _failure_reason(num: int, entry, errors: list) -> str:
+    if isinstance(entry, dict) and entry.get("error"):
+        return str(entry["error"])
+    for text in errors:
+        if f"Сегмент {num}:" in text:
+            return text
+    if not isinstance(entry, dict):
+        return "нет записи в prompts.json"
+    if not str(entry.get("prompt", "")).strip():
+        return "промпт пуст"
+    return f"статус «{entry.get('status')}»"
+
+
+def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
+    """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
+    from Generate.core.prompt_check import find_problems
+    from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
+
+    ready = forbidden = leftover = frames_bad = 0
+    not_ready: list = []
+    problems: list = []
+    for n in nums:
+        entry = prompts.get(str(n))
+        if not _prompt_ready(entry):
+            not_ready.append(n)
+            continue
+        ready += 1
+        for p in find_problems(entry["prompt"]):
+            if p.startswith(_FORBIDDEN_TAG):
+                forbidden += 1
+                problems.append(f"{label} клип {n}: {p}")
+            elif p.startswith(_LEFTOVER_TAG):
+                leftover += 1
+                problems.append(f"{label} клип {n}: {p}")
+        want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
+        if entry.get("num_frames") != want:
+            frames_bad += 1
+            problems.append(f"{label} клип {n}: num_frames {entry.get('num_frames')!r}, по правилу {want!r}")
+    return ready, forbidden, leftover, frames_bad, not_ready, problems
+
+
+def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
+    v, ph = counts["video"], counts["photo"]
+    lines = [
+        "## Проверка Gemini: отчёт",
+        "",
+        f"- Видео-профиль: {prep_args['video_profile'] if prep_args['video_model'] != 'none' else 'выключен'}",
+        f"- Фото-профиль: {prep_args['photo_profile'] or 'выключен'}",
+        f"- Проверено сегментов: {len(prep_args['missing'])}",
+        f"- Видео-сегментов: {len(counts['video_nums'])}, фото-сегментов: {len(counts['photo_nums'])}",
+        f"- Готово промптов: видео {v['ready']}, фото {ph['ready']}",
+        f"- Переписано проверкой (запрещённые типы кадра и маркеры): видео {v['rework']}, фото {ph['rework']}",
+        f"- Не готово промптов: {len(failures)}",
+        "",
+        "### Проверка запрещённых слов и маркеров",
+        f"- Видео: запрещённых типов кадра {v['forbidden']}, незаполненных маркеров {v['leftover']}",
+        f"- Фото: запрещённых типов кадра {ph['forbidden']}, незаполненных маркеров {ph['leftover']}",
+        "",
+        "### Проверка num_frames",
+        f"- Видео: несовпадений с правилом кадров профиля {v['frames_bad']}",
+        f"- Фото: несовпадений с num_frames = {ph['frames_rule']}: {ph['frames_bad']}",
+    ]
+    if failures:
+        lines += ["", "### Не готовые промпты", "", "| Клип | Тип | Причина |", "|---|---|---|"]
+        lines += [f"| {n} | {kind} | {reason} |" for n, kind, reason in failures]
+    return "\n".join(lines) + "\n"
+
+
+def limit_by_type(video_nums, photo_nums, limit) -> list:
+    """Лимит проверки по типам: ceil(limit/2) видео и floor(limit/2) фото, каждый вид по порядку номеров.
+
+    limit <= 0 = все номера. Если одного из видов нет, берутся первые limit номеров другого вида.
+    Результат объединяется по порядку номеров (в SRT номера идут по времени).
+    """
+    video = sorted(video_nums)
+    photo = sorted(photo_nums)
+    if limit <= 0:
+        return sorted(video + photo)
+    if not photo:
+        return video[:limit]
+    if not video:
+        return photo[:limit]
+    return sorted(video[: math.ceil(limit / 2)] + photo[: limit // 2])
+
+
+def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
+    """Подготовка промптов как у cmd_run до поиска карт: профили, пресет, распределение, промпты, проверка.
+
+    Не создаёт клиентов Vast и релиза, не арендует карты. Входы (args):
+      srt, missing, prompts_path, artifact_dir (пусто = распределение только в журнале),
+      video_model (ltx25 или none; none = видео выключено), video_profile (профиль видео для cfg),
+      photo_profile (None = фото выключено), video_percent, intro_seconds, limit_clips, preset.
+    Бросает GeminiInputError с текстом на русском при неверном входе.
+    """
+    from Generate.core import orchestrator as orch_mod
+    from Generate.core import prompt_pipeline as pp
+    from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES
+    from Generate.core.missing import parse_missing
+    from Generate.core.timing import compute_timings
+
+    video_model = args.video_model
+    photo_profile = args.photo_profile or None
+    if video_model == "none" and photo_profile is None:
+        raise GeminiInputError("Ошибка входных данных: видео и фото выключены, проверять нечего.")
+    if _check_profile_and_preset(args.video_profile, args.preset) is not None:
+        raise GeminiInputError("Ошибка входных данных: профиль или пресет не прошли проверку (см. сообщение выше).")
+    if load_profile_type(args.video_profile) != "video":
+        raise GeminiInputError(f"Ошибка входных данных: видеопрофиль «{args.video_profile}» не имеет типа video.")
+    if photo_profile is not None and _check_photo_profile(photo_profile) is not None:
+        raise GeminiInputError("Ошибка входных данных: профиль фото не прошёл проверку (см. сообщение выше).")
+
+    cfg, code = _load_cfg(None, {"limit_clips": args.limit_clips, "model_profile": args.video_profile,
+                                 "preset": args.preset})
+    if code is not None:
+        raise GeminiInputError("Ошибка входных данных: конфигурация не загружена (см. сообщение выше).")
+    segments = parse_srt(args.srt)
+    missing = list(parse_missing(args.missing, segments))
+    if not missing:
+        raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
+
+    timing = _build_timing(cfg, args.video_profile)
+    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
+    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+                 if photo_profile is not None else None)
+    counting = _ReworkCounter(_make_transport())
+    gemini_options = _gemini_options(cfg)
+
+    # распределение до промптов, как в _run_body: по всем номерам, потом лимит
+    dist_path = Path(args.artifact_dir) / orch_mod.DISTRIBUTION_FILENAME if args.artifact_dir else None
+    split = orch_mod.plan_split(
+        segments, missing, video_model=video_model, video_percent=float(args.video_percent),
+        intro_seconds=float(args.intro_seconds), transport=counting, gemini_options=gemini_options,
+        photo_on=photo_profile is not None, distribution_path=dist_path)
+    if cfg.limit_clips > 0:
+        if photo_profile is not None:
+            # лимит по типам после распределения: половина видео, половина фото
+            missing = limit_by_type(split["video"], split["photo"], cfg.limit_clips)
+        else:
+            missing = missing[: cfg.limit_clips]
+
+    # номера фото: из распределения (так задумано для проверки); см. отчёт о расхождении с генерацией
+    photo_nums = set(split["photo"]) if photo_profile is not None else set()
+    run = pp.build_prompts(
+        missing, segments=segments, photo_nums=photo_nums, cfg=prompt_cfg, profile=args.video_profile,
+        timing=timing, photo_profile=photo_profile, photo_cfg=photo_cfg, transport=counting,
+        gemini_options=gemini_options, prompts_path=args.prompts_path)
+
+    expected_frames = {}
+    if timing is not None:
+        try:
+            expected_frames = {t.num: t.num_frames for t in compute_timings(
+                segments, timing.fps, timing.frame_rule, timing.clip_min_sec, timing.clip_max_sec,
+                timing.gpu_max_sec, timing.tail_pad_sec)}
+        except ValueError as e:
+            raise GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
+
+    prompts = run.state.get("prompts", {})
+    video_nums = [n for n in missing if n not in photo_nums]
+    photo_list = [n for n in missing if n in photo_nums]
+    v = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
+                 _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
+    p = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
+                 _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
+    failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
+                + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
+    failures.sort(key=lambda row: row[0])
+    rework_video = len(counting.rework_nums & set(video_nums))
+    rework_photo = len(counting.rework_nums & set(photo_list))
+
+    counts = {
+        "video_nums": video_nums, "photo_nums": photo_list,
+        "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
+                  "frames_bad": v["frames_bad"], "rework": rework_video},
+        "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
+                  "frames_bad": p["frames_bad"], "rework": rework_photo, "frames_rule": PHOTO_NUM_FRAMES},
+    }
+    prep_args = {"video_model": video_model, "video_profile": args.video_profile,
+                 "photo_profile": photo_profile, "missing": missing}
+    problems = v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+    report = _verify_report(prep_args, counts, failures)
+    return PreparedPrompts(
+        state=run.state, missing=missing, video_nums=video_nums, photo_nums=photo_list,
+        ready_video=v["ready"], ready_photo=p["ready"], rework_video=rework_video, rework_photo=rework_photo,
+        failures=failures, problems=problems, report_md=report)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--srt", default=DEFAULT_SRT,
@@ -1057,8 +1400,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="минимальный кредит Vast.ai для старта, USD; по умолчанию из конфига")
     run_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
-    run_p.add_argument("--style-brief", default=None,
-                       help="общее описание стиля/мира; по умолчанию из конфига")
+    run_p.add_argument("--preset", default="none",
+                       help="пресет профиля; none = без пресета (файл пресета проверяется до аренды)")
+    run_p.add_argument("--photo-profile", default=None,
+                       help="профиль фото (type: image); по умолчанию фото не делаются")
     run_p.add_argument("--repo", default="",
                        help="репозиторий owner/name (передаётся явно)")
     run_p.add_argument("--run-id", default="",

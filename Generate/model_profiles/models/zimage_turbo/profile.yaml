@@ -1,0 +1,36 @@
+# Generate/model_profiles/models/zimage_turbo/profile.yaml
+# Профиль модели Z-Image-Turbo (фото-пайплайн). Всё, что зависит от модели, живёт только здесь.
+
+name: zimage_turbo
+
+# Тип результата: одиночное изображение, а не видео-клип
+type: image
+
+# Итоговый размер кадра (16:9, YouTube). Подставляется в узел 57:13 через привязки width и height
+width: 1920
+height: 1080
+
+# Граф ComfyUI (API-формат) и подстановки значений
+workflow:
+  file: "Generate/model_profiles/models/zimage_turbo/workflow.json"
+  bindings_file: "Generate/model_profiles/models/zimage_turbo/bindings.json"
+  # Нода, отдающая результат (SaveImage), и тип результата
+  output: {node_id: "9", type: image}
+
+# Файл с инструкцией для Gemini под эту модель (создаётся отдельным шагом)
+prompt_style: "Generate/model_profiles/models/zimage_turbo/prompts/style.md"
+
+# Параметры, зашитые в граф (для справки; меняются правкой графа)
+params:
+  cfg: 1.0                       # KSampler (57:3): cfg
+  steps: 8                       # KSampler (57:3): steps
+  sampler: "res_multistep"       # KSampler (57:3): sampler_name
+  scheduler: "simple"            # KSampler (57:3): scheduler
+  shift: 3                       # ModelSamplingAuraFlow (57:11): shift
+  resolution: "1920x1080"        # EmptySD3LatentImage (57:13)
+
+# Имена файлов весов. Граф workflow.json содержит те же имена.
+model_files:
+  unet: "z_image_turbo_bf16.safetensors"
+  clip: "qwen_3_4b.safetensors"
+  vae: "ae.safetensors"

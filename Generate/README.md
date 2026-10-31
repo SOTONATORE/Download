@@ -10,7 +10,7 @@
 - `worker/` — код, который едет на карту: HTTP-сервис, клиент ComfyUI, Dockerfile и скрипты установки.
 - `tests/` — тесты pytest, без сети и ключей.
 - `tools/` — диагностические скрипты, которые только читают данные (например, `vast_probe.py`).
-- `model_profiles/` — профили видеомодели (`ltx25.yaml`), графы ComfyUI в `workflows/` и инструкции для Gemini в `prompt_styles/`.
+- `model_profiles/` — профили видеомодели: `models/<имя>/` с `profile.yaml`, графом `workflow.json`, привязками `bindings.json` и инструкцией для Gemini `prompts/style.md`; `presets/` — пресеты (фаза E, пока пусто).
 - `cli.py` — точка входа: `python -m Generate.cli check | run | kill-cards`.
 - `config.default.yaml` — значения по умолчанию (раздел 3 SPEC).
 

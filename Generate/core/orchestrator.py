@@ -44,7 +44,12 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
                             mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from .missing import parse_missing
+    from .segment_split import all_photo, select_video_segments, to_segments
+    from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
+    from .video_value import score_segments, write_distribution
+    from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
+    from .card_roles import plan_card_roles
     from . import ssh_probe
     from .release_adapter import (  # noqa: F401
         CARD_DIAGNOSTIC_FILES, LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
@@ -57,10 +62,15 @@ except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import weights_log as wl  # type: ignore
+    from card_roles import plan_card_roles  # type: ignore
     from budget import BudgetError, BudgetTracker  # type: ignore
     from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from missing import parse_missing  # type: ignore
+    from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
+    from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
+    from video_value import score_segments, write_distribution  # type: ignore
+    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
     import ssh_probe  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
@@ -145,7 +155,6 @@ READY_REASON = "воркер не готов"
 WEIGHTS_FAILED_REASON = "weights_failed"
 WEIGHTS_FAILED_RETIRE = "загрузка весов не удалась"
 ACCEPT_REASON = "задача не принята"
-SSH_NOT_IMPLEMENTED = "SSH-проверка не реализована (SPEC 8.2)"
 PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
@@ -188,6 +197,7 @@ SSH_DIAG_FILE = "ssh_diag.log"  # SSH-диагностика карты, доп�
 # Сколько ответов опроса подряд с «экземпляр не найден» (VastInstanceNotFound) терпим, прежде чем снять
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
 NOT_FOUND_LIMIT = 10
+SWITCH_TIMEOUT_SEC = 900.0  # переключение модели на карте: дольше — карта снимается (STEP 7, блок B2)
 NOT_FOUND_REASON = "экземпляр не найден в Vast"
 
 # Шаблоны маскирования текста с карты живут в core/log_setup.py (mask_remote_text): один список на журнал и на _mask_remote.
@@ -221,7 +231,7 @@ class RunSummary:
     cleanup_ok: bool = True
     cards_rented: int = 0
     destroyed_cards: int = 0   # карты, уничтоженные в этом запуске (по ходу и при уборке)
-    avg_render_sec: float = 0.0  # среднее время рендера клипа: от отправки до выдачи, с
+    avg_render_sec: float = 0.0  # среднее время клипа от отправки до выгрузки, с (не время рендера)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -282,21 +292,15 @@ class _CardSlot:
     ssh_diag_at: Optional[float] = None  # время последнего тика SSH-диагностики; None: тиков ещё не было
     ext_values: tuple = ()            # внешние адреса карты (публичный IP, HostPort); только в памяти, маска ssh_diag.log
     ssh_diag_tick: int = 0            # число выполненных тиков SSH-диагностики
+    role: str = "video"               # роль карты: video или photo (STEP 7, блок B2)
+    profile: str = ""                 # профиль, на котором карта работает сейчас
+    switch_role: str = ""             # роль, в которую карта переключается (состояние switching)
+    switch_since: float = 0.0         # момент отправки POST /profile
 
     @property
     def started(self) -> bool:
         """Старт карты начался: Vast показал «loading» или «created» (SPEC 8.2)."""
         return self.saw_loading or self.saw_created
-
-
-def _prompt_ready(entry) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    num_frames = entry.get("num_frames")
-    return (entry.get("status") == "ready"
-            and bool(str(entry.get("prompt", "")).strip())
-            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
-            and num_frames > 0)
 
 
 def _has_start_marker(text: str) -> bool:
@@ -400,6 +404,20 @@ def _valid_worker_build(value) -> bool:
     return isinstance(value, str) and WORKER_BUILD_RE.fullmatch(value) is not None
 
 
+def _switch_target(role: str, video_len: int, photo_len: int, photo_on: bool):
+    """Чистая функция: в какую роль переключить простаивающую карту, или None (STEP 7, блок B2, O5).
+
+    Переключение только когда очередь своей роли пуста, а очередь другой роли не пуста и фото включено.
+    """
+    if not photo_on:
+        return None
+    own_len = photo_len if role == "photo" else video_len
+    other_len = video_len if role == "photo" else photo_len
+    if own_len == 0 and other_len > 0:
+        return "video" if role == "photo" else "photo"
+    return None
+
+
 def _worker_onstart(worker_build: str) -> str:
     """Команда onstart карты воркера (SPEC 8.1, вариант A).
 
@@ -459,25 +477,6 @@ def _ports_mapping(raw: dict) -> Optional[dict]:
     return ports if isinstance(ports, dict) else None
 
 
-def _external_values(info: InstanceInfo) -> tuple:
-    """Внешние адреса карты Vast: публичный IP и все HostPort из поля ports (SPEC 0.1, правило портов).
-
-    Значения только в памяти: передаются mask_external при записи ssh_diag.log; не выводятся и не пишутся.
-    """
-    raw = getattr(info, "raw", None) or {}
-    values = []
-    ip = raw.get("public_ipaddr")
-    if ip:
-        values.append(str(ip))
-    ports = _ports_mapping(raw) or {}
-    for mapped in ports.values():
-        if isinstance(mapped, list):
-            for entry in mapped:
-                if isinstance(entry, dict) and entry.get("HostPort"):
-                    values.append(str(entry["HostPort"]))
-    return tuple(values)
-
-
 def _internal_ports_view(raw: dict) -> Optional[dict]:
     """Поле ports для instance.json: только внутренние порты 8000 и 18188, значения заменены на «***».
 
@@ -506,7 +505,92 @@ REPORT_FILENAME = "summary.md"
 FILES_LIST_NAME = "FILES.txt"
 LOG_BUNDLE_NAME = "run-logs.zip"
 MISSING_FILENAME = "missing.txt"
+DISTRIBUTION_FILENAME = "distribution.json"  # STEP 3b: распределение видео/фото
 SERVICE_DIR = "service"
+
+
+# STEP 3b: схема ответа Gemini для оценки video_value (список объектов {"id", "video_value"}).
+VALUE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}, "video_value": {"type": "integer"}},
+        "required": ["id", "video_value"],
+    },
+}
+
+
+def make_value_sender(transport, gemini_options: dict):
+    """Отправитель запроса оценки video_value через ManagedTransport (лимитер, цепочка моделей)."""
+    opts = gemini_options
+    managed = go.ManagedTransport(
+        transport, opts.get("models", go.DEFAULT_MODELS),
+        rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
+        rpd_limit=opts.get("rpd_limit", 500))
+    return lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA)  # noqa: E731
+
+
+def _all_video(segs, intro_seconds) -> dict:
+    """Только видео-профиль (фото нет): все сегменты в видео, оценка Gemini не нужна (STEP 3b, V1).
+
+    Ключи те же, что у select_video_segments; бюджет и видео-секунды считаются по сегментам.
+    """
+    ordered = sorted(segs, key=lambda s: (s.start, s.id))
+    total = sum(s.duration for s in ordered)
+    return {
+        "video": [s.id for s in ordered],
+        "photo": [],
+        "budget_seconds": total,
+        "video_seconds": total,
+        "intro_seconds_used": intro_seconds,
+    }
+
+
+def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_seconds,
+                  send, distribution_path, photo_on=True) -> dict:
+    """STEP 3b: распределение видео/фото для номеров из missing.txt, до любых промптов.
+
+    video_model == "none": все сегменты в фото, send не вызывается.
+    photo_on False (фото-профиля нет): все сегменты в видео, send не вызывается.
+    иначе: оценка video_value через send (Gemini), затем select_video_segments.
+    Ошибка оценки останавливает запуск: запасного значения по умолчанию нет.
+    distribution_path None: файл не пишется, распределение всё равно считается и записывается в журнал.
+    """
+    segs = to_segments(srt_segments, missing)
+    if video_model == "none":
+        values = {}
+        result = all_photo(segs)
+    elif not photo_on:
+        values = {}
+        result = _all_video(segs, intro_seconds)
+    else:
+        try:
+            values = score_segments(segs, send)
+        except ValueError as exc:
+            raise gp.GeminiRuntimeError(
+                f"Оценка video_value через Gemini не удалась: {exc} Запуск остановлен, запасного значения нет."
+            ) from None
+        result = select_video_segments(segs, values, video_percent, intro_seconds)
+    if distribution_path is not None:
+        write_distribution(distribution_path, result, segs, values)
+        log.info("Распределение записано в файл: %s.", distribution_path)
+    else:
+        log.warning("Папка артефакта не задана: распределение записано только в журнал.")
+    log.info("Распределение видео/фото: видео %d сегментов, фото %d сегментов; "
+             "бюджет видео %.1f с, видео %.1f с.",
+             len(result["video"]), len(result["photo"]), result["budget_seconds"], result["video_seconds"])
+    return result
+
+
+def plan_split(srt_segments, missing, *, video_model, video_percent, intro_seconds, transport,
+               gemini_options: dict, photo_on: bool, distribution_path) -> dict:
+    """Единое правило распределения для запуска и для проверки: оценка Gemini только при обоих видах."""
+    send = None
+    if video_model != "none" and photo_on:
+        send = make_value_sender(transport, gemini_options)
+    return split_for_run(srt_segments, missing, video_model=video_model, video_percent=video_percent,
+                         intro_seconds=intro_seconds, send=send, distribution_path=distribution_path,
+                         photo_on=photo_on)
 
 
 class ReleaseStartError(gp.GeminiInputError):
@@ -768,6 +852,8 @@ class Orchestrator:
         rent_estimate_sec: float = 1800.0,
         http_timeout_sec: float = 60.0,
         log_level: str = "INFO",
+        photo_profile: Optional[str] = None,   # профиль фото (type: image); None: фото не делаются
+        photo_prompt_cfg=None,                 # настройки промптов для фото
         clock: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], None]] = None,
         stop_event: Optional[threading.Event] = None,
@@ -825,6 +911,9 @@ class Orchestrator:
         self.vast = vast_client
         self.gemini_transport = gemini_transport
         self.prompts_path = Path(prompts_path)
+        # фото (STEP 7, блок B2): без photo_profile поведение прежнее, все номера — видео
+        self.photo_profile = photo_profile or None
+        self.photo_prompt_cfg = photo_prompt_cfg
 
         self.max_cards = int(max_cards)
         self.job_deadline_min = job_deadline_min
@@ -914,7 +1003,12 @@ class Orchestrator:
         self._uploader: Optional[ReleaseUploader] = None
         self._state: dict = {"prompts": {}}
         self._prompts: dict = self._state["prompts"]
-        self._queue: deque = deque()
+        self._video_queue: deque = deque()
+        self._photo_queue: deque = deque()   # очередь фото (пуста без photo_profile)
+        self._photo_nums: set = set()        # номера фото из распределения (STEP 3b)
+        self._role_plan = None               # роли первых карт запуска (plan_card_roles), один раз
+        self._plan_idx = 0
+        self._split = None  # результат распределения видео/фото (STEP 7, блок A): только журнал и состояние запуска
         self._slots: dict = {}
         self._gens: dict = {}
         self._attempts: dict = {}
@@ -996,38 +1090,44 @@ class Orchestrator:
     def _monitor(self, slot: _CardSlot):
         """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой.
 
+        Имя модели в строках — профиль текущей роли карты (_profile_for_role), а не профиль запуска.
         Подробные строки идут в журнал без метки консоли (только файл run/debug.log). В консоль попадают
-        три вида строк (console): начало этапа (раз за запуск), шаг процентов «карта N: Веса <ключ> X%»
-        и «Веса <ключ> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
+        три вида строк (console): начало этапа (раз за запуск), шаг процентов «карта N: Веса <модель> X%»
+        и «Веса <модель> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
         """
         if slot.monitor is None:
-            profile_key = self.profile or "ltx25"
-
-            def emit(text: str, warn: bool = False, _slot=slot) -> None:
-                msg = f"{_card_name(_slot, cap=True)}: {text}"
-                if warn:
-                    log.warning("%s", msg)
-                else:
-                    log.info("%s", msg)
-
-            def console(kind: str, pct: int = 0, _slot=slot) -> None:
-                if kind == "start":
-                    if self._weights_start_noted:
-                        return
-                    self._weights_start_noted = True
-                    log.info("Веса %s начало загрузки", profile_key, extra=KEY_EVENT_EXTRA)
-                elif kind == "progress":
-                    log.info("карта %d: Веса %s %d%%", _slot.instance_id, profile_key, pct,
-                             extra=KEY_EVENT_EXTRA)
-                elif kind == "loaded":
-                    log.info("Веса %s загружены", profile_key, extra=KEY_EVENT_EXTRA)
-
-            slot.monitor = wl.WeightsMonitor(
-                clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
-                speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
-                stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec,
-                console=console, profile_key=profile_key)
+            slot.monitor = self._make_monitor(slot, self._profile_for_role(slot.role))
         return slot.monitor
+
+    def _make_monitor(self, slot: _CardSlot, model_name: str):
+        """Монитор этапа загрузки весов с именем модели model_name; этап начинается сейчас (start_stage)."""
+
+        def emit(text: str, warn: bool = False, _slot=slot) -> None:
+            msg = f"{_card_name(_slot, cap=True)}: {text}"
+            if warn:
+                log.warning("%s", msg)
+            else:
+                log.info("%s", msg)
+
+        def console(kind: str, pct: int = 0, _slot=slot) -> None:
+            if kind == "start":
+                if self._weights_start_noted:
+                    return
+                self._weights_start_noted = True
+                log.info("Веса %s начало загрузки", model_name, extra=KEY_EVENT_EXTRA)
+            elif kind == "progress":
+                log.info("карта %d: Веса %s %d%%", _slot.instance_id, model_name, pct,
+                         extra=KEY_EVENT_EXTRA)
+            elif kind == "loaded":
+                log.info("Веса %s загружены", model_name, extra=KEY_EVENT_EXTRA)
+
+        mon = wl.WeightsMonitor(
+            clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
+            speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
+            stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec,
+            console=console, model_name=model_name)
+        mon.start_stage(model_name, self.clock())
+        return mon
 
     def _pull_card_logs(self, slot: _CardSlot, *, final: bool, timeout: float = LOGS_TIMEOUT_SEC) -> bool:
         """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
@@ -1073,7 +1173,7 @@ class Orchestrator:
         из цикла: цикл продолжается, уничтожение не задерживается.
         """
         for slot in list(self._slots.values()):
-            if slot.state not in ("booting", "ready") or not slot.url:  # C1: booting с адресом тоже
+            if slot.state not in ("booting", "switching", "ready") or not slot.url:  # C1: booting с адресом тоже; switching — строки переключения
                 continue
             if slot.log_pulled is not None and now - slot.log_pulled < LOG_PULL_INTERVAL_SEC:
                 continue
@@ -1082,7 +1182,8 @@ class Orchestrator:
                 self._pull_card_logs(slot, final=False)
                 if slot.weights_reason and self._slots.get(slot.index) is slot:
                     reason, slot.weights_reason = slot.weights_reason, None
-                    self._retire_bad(slot, reason)
+                    if slot.state != "switching":  # при переключении стоп по весам не ставится: решает таймаут переключения
+                        self._retire_bad(slot, reason)
             except Exception as exc:  # выгрузка логов не должна ронять конвейер
                 self._warn_card(slot, f"logs:{type(exc).__name__}", "Не удалось получить логи карты %d: %s.",
                                 slot.instance_id, type(exc).__name__, now=now)
@@ -1259,6 +1360,20 @@ class Orchestrator:
     def _info(self, msg: str) -> None:
         log.info("%s", msg)
 
+    def _split_for_run(self, missing: list) -> dict:
+        """STEP 3b: VIDEO_MODEL, VIDEO_PERCENT, INTRO_SECONDS из окружения; Gemini через тот же обёрточный транспорт."""
+        video_model = os.environ.get("VIDEO_MODEL", "") or DEFAULT_MODEL_PROFILE
+        try:
+            video_percent = float(os.environ.get("VIDEO_PERCENT", "") or "100")
+            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
+        except ValueError:
+            raise gp.GeminiInputError("VIDEO_PERCENT и INTRO_SECONDS должны быть числами.") from None
+        dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if self._artifact else None
+        return plan_split(self.segments, missing, video_model=video_model, video_percent=video_percent,
+                          intro_seconds=intro_seconds, transport=self.gemini_transport,
+                          gemini_options=self.gemini_options, photo_on=bool(self.photo_profile),
+                          distribution_path=dist_path)
+
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
         self._t0 = self.clock()
@@ -1272,6 +1387,13 @@ class Orchestrator:
             if not missing:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
+            self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
+            # STEP 7, блок B2: номера фото берём из распределения сразу, до _generate (build_prompts читает их там)
+            self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
+            if not getattr(self, "_video_queue", None):
+                self._video_queue = deque()  # очередь видео: пустая до _work
+            if not getattr(self, "_photo_queue", None):
+                self._photo_queue = deque()  # очередь фото: пустая до _work
             if self.limit_clips > 0:
                 missing = missing[: self.limit_clips]
                 log.info("Пробный прогон: берём первые %d номеров.", len(missing))
@@ -1350,7 +1472,7 @@ class Orchestrator:
             f"- уже было в Release: {summary.skipped_done}",
             f"- арендовано карт: {summary.cards_rented}",
             f"- уничтожено карт: {summary.destroyed_cards}",
-            f"- среднее время клипа, с: {summary.avg_render_sec:.1f}",
+            f"- среднее время клипа от отправки до выгрузки, с: {summary.avg_render_sec:.1f}",
             f"- потрачено, USD: {summary.spent_usd:.4f}",
             f"- код завершения (до загрузки отчёта): {summary.exit_code}",
         ]
@@ -1379,7 +1501,7 @@ class Orchestrator:
             if pub.failures:  # E4: частичный итог, каждая ошибка уже записана одной строкой
                 summary.exit_code = EXIT_PARTIAL
         log.info("Итог: готово %d из %d, ошибок %d, не начато %d, арендовано карт %d, "
-                 "уничтожено карт %d, среднее время клипа %.1f с, потрачено %.4f USD, код %d.",
+                 "уничтожено карт %d, среднее время клипа от отправки до выгрузки %.1f с, потрачено %.4f USD, код %d.",
                  summary.completed, summary.total_needed, summary.failed, summary.pending,
                  summary.cards_rented, summary.destroyed_cards, summary.avg_render_sec,
                  summary.spent_usd, summary.exit_code, extra=KEY_EVENT_EXTRA)
@@ -1624,26 +1746,15 @@ class Orchestrator:
             log.warning("PILOT: onstart.log не скопирован: %s.", type(exc).__name__)
 
     # --- промпты -------------------------------------------------------------
-    def _read_state(self) -> dict:
-        try:
-            state = json.loads(self.prompts_path.read_text(encoding="utf-8"))
-            if isinstance(state, dict) and isinstance(state.get("prompts"), dict):
-                return state
-        except (OSError, ValueError):
-            pass
-        return {"prompts": {}}
-
     def _generate(self, needed: list) -> list:
-        try:
-            state = go.generate_and_store(
-                self.segments, needed, self.cfg, self.gemini_transport, self.prompts_path,
-                profile=self.profile, timing=self.timing_params, **self.gemini_options)
-        except gp.GeminiRuntimeError as exc:
-            log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)
-            state = self._read_state()
-        self._state = state
-        self._prompts = state.setdefault("prompts", {})
-        ready = [n for n in needed if _prompt_ready(self._prompts.get(str(n)))]
+        # один конвейер для видео и фото (prompt_pipeline.build_prompts); проверку вызывает тот же путь
+        run = build_prompts(
+            needed, segments=self.segments, photo_nums=self._photo_nums, cfg=self.cfg, profile=self.profile,
+            timing=self.timing_params, photo_profile=self.photo_profile, photo_cfg=self.photo_prompt_cfg,
+            transport=self.gemini_transport, gemini_options=self.gemini_options, prompts_path=self.prompts_path)
+        self._state = run.state
+        self._prompts = self._state.setdefault("prompts", {})
+        ready = run.ready
         for n in needed:
             if n not in ready:
                 self._failed.add(n)
@@ -1668,8 +1779,60 @@ class Orchestrator:
     def _inflight(self) -> int:
         return sum(1 for s in self._slots.values() if s.task is not None)
 
+    @property
+    def _queue(self) -> deque:
+        """Видеоочередь под прежним именем: тесты и прежний код читают и задают её без изменений."""
+        return self._video_queue
+
+    @_queue.setter
+    def _queue(self, value) -> None:
+        self._video_queue = value
+
+    def _queue_for_role(self, role: str) -> deque:
+        # объект может быть построен без __init__ (тесты): читаем очереди с запасным значением;
+        # если очереди фото нет, клип идёт в видеоочередь, как при отсутствии photo_profile
+        photo = getattr(self, "_photo_queue", None)
+        video = getattr(self, "_video_queue", None)
+        return photo if role == "photo" and photo is not None else video
+
+    def _queue_of(self, num: int) -> deque:
+        # номера фото читаются с запасным значением: без них все номера идут в видеоочередь (как при __init__)
+        photo_nums = getattr(self, "_photo_nums", frozenset())
+        photo = getattr(self, "_photo_queue", None)
+        video = getattr(self, "_video_queue", None)
+        return photo if num in photo_nums and photo is not None else video
+
+    def _profile_for_role(self, role: str) -> str:
+        # профили читаются с запасным значением: без __init__ фото-профиля нет, видеопрофиль — по умолчанию
+        photo_profile = getattr(self, "photo_profile", None)
+        if role == "photo" and photo_profile:
+            return photo_profile
+        return getattr(self, "profile", None) or DEFAULT_MODEL_PROFILE
+
+    def _next_role(self, now: float) -> str:
+        """Роль новой карты: первые карты по плану plan_card_roles, дальше по длине очередей."""
+        if self.photo_profile is None:
+            return "video"
+        if self._role_plan is None:
+            if self._split is None:
+                # распределение ещё не известно: план не фиксируем, иначе он построится по пустым очередям;
+                # возвращаем запасное значение по длине очередей, план будет построен при следующем вызове
+                return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
+            n = self._desired(now)
+            # роли плана берём из распределения (self._split), а не из очередей: фото может быть ещё не в очереди
+            photo_on = bool(self._photo_nums) if self.photo_profile else False
+            video_on = bool((self._split or {}).get("video", []))
+            self._role_plan = ([t[0] for t in plan_card_roles(n, photo_on, video_on)]
+                               if n >= 1 and (photo_on or video_on) else [])
+        if self._plan_idx < len(self._role_plan):
+            return self._role_plan[self._plan_idx]
+        return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
+
     def _work(self, ready: list) -> None:
-        self._queue = deque(ready)
+        # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
+        self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
+        self._video_queue = deque(n for n in ready if n not in self._photo_nums)
+        self._photo_queue = deque(n for n in ready if n in self._photo_nums)
         drain_since: Optional[float] = None
         while True:
             if self._stop.is_set():
@@ -1702,7 +1865,6 @@ class Orchestrator:
             stopping = stopping or self._oom_stopped
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
-            self._pull_ssh_diag(now)
             self._heartbeat(now)
 
             inflight = self._inflight()
@@ -1713,7 +1875,7 @@ class Orchestrator:
                     log.error("Время дозаливки вышло: незавершённых клипов %d.", inflight)
                     break
             else:
-                if not self._queue and inflight == 0:
+                if not self._video_queue and not self._photo_queue and inflight == 0:
                     break
                 self._maybe_rent(now)
                 if self._rent_exhausted and not self._slots:
@@ -1725,7 +1887,7 @@ class Orchestrator:
 
     # --- аренда --------------------------------------------------------------
     def _desired(self, now: float) -> int:
-        remaining = len(self._queue) + self._inflight()
+        remaining = len(self._video_queue) + len(self._photo_queue) + self._inflight()
         if remaining <= 0:
             return 0
         avg = sum(self._durations) / len(self._durations) if self._durations else self.render_estimate
@@ -1735,8 +1897,9 @@ class Orchestrator:
 
     # --- окно сбора цен (SPEC 8.2, v0.6) ---------------------------------------
     def _scan_wanted(self) -> bool:
-        return (not self.pilot and not self._scan_done and self._cards_rented == 0
-                and self.scan_sec > 0)
+        # окно только для прерываемой аренды (ставка bid меняется); при on-demand цена фиксирована
+        return (not self.pilot and self.offer_filter.interruptible and not self._scan_done
+                and self._cards_rented == 0 and self.scan_sec > 0)
 
     def _scan_open(self, now: float) -> None:
         self._scan_started = now
@@ -1810,7 +1973,16 @@ class Orchestrator:
                 return
             offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
-            res = self._rent_one(now, offers)
+            role = self._next_role(now)
+            vq_len, pq_len = len(self._video_queue), len(self._photo_queue)  # очереди на момент выбора роли
+            res = self._rent_one(now, offers, role=role)
+            if res == "ok":
+                # одна строка журнала на созданную карту; при повторе аренды карты нет и строки нет
+                log.info("роль карты %d: %s; очередь видео %d, фото %d; план роли по распределению: photo_on=%s, video_on=%s",
+                         self._plan_idx + 1, role, vq_len, pq_len,
+                         bool(self._photo_nums) if self.photo_profile else False,
+                         bool((self._split or {}).get("video", [])))
+                self._plan_idx += 1
             offers = None  # остальные аренды этого же прохода идут обычным поиском (без паузы)
             if res in ("stop", "exhausted"):
                 return
@@ -1831,7 +2003,7 @@ class Orchestrator:
                     "машины %s, предложений в этом поиске %d.",
                     ", ".join(str(i) for i in ids), len(listed))
 
-    def _rent_one(self, now: float, offers: Optional[list] = None) -> str:
+    def _rent_one(self, now: float, offers: Optional[list] = None, role: str = "video") -> str:
         if self._stop.is_set():
             return "stop"
         if self._rent_requests >= self.max_rent_tries:
@@ -1900,6 +2072,8 @@ class Orchestrator:
                 "WORKER_BUILD": self.worker_build,  # номер коммита: первая строка логов воркера (SPEC 8.4)
                 "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
                 "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
+                # профиль модели: карта берёт его из окружения, новая модель не требует правок кода
+                "MODEL_PROFILE": self._profile_for_role(role),
                 # аргументы ComfyUI образа vastai/comfy (SPEC 8.5): порт 18188, без автозапуска браузера
                 "COMFYUI_ARGS": COMFYUI_ARGS,
                 f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
@@ -1932,7 +2106,8 @@ class Orchestrator:
         slot = _CardSlot(index, gen, inst_id, offer.machine_id,
                          price, now, offer_id=offer.offer_id,
                          bid_requested=offer.is_interruptible,
-                         dph_search=offer.dph_total)
+                         dph_search=offer.dph_total,
+                         role=role, profile=self._profile_for_role(role))
         self._slots[index] = slot
         self._cards_rented += 1
         mode = "прерываемая, ставка bid" if offer.is_interruptible else "обычная"
@@ -2220,12 +2395,6 @@ class Orchestrator:
         if info is not None and self._is_outbid(info):
             self._retire_outbid(slot)
             return
-        if info is not None and info.ssh_host and info.ssh_port:
-            # адрес SSH для диагностики: только в памяти карты (SPEC 0.1, F01); в файлы и журнал не пишется
-            slot.ssh_host = info.ssh_host
-            slot.ssh_port = info.ssh_port
-        if info is not None:
-            slot.ext_values = _external_values(info)  # внешние значения для маски ssh_diag.log, только в памяти
         if slot.state == "booting":
             # правила (б) зависания и (в) лимита этапа весов (SPEC 8.2)
             reason = self._monitor(slot).check()
@@ -2292,6 +2461,10 @@ class Orchestrator:
         if slot.net_fail >= MAX_NET_FAILS:
             self._retire(slot, "воркер недоступен", bad=True)
             return
+        if slot.state == "switching":
+            # карта переключается: задач нет, опрос только /health
+            self._poll_switch(slot, now)
+            return
         if slot.state != "ready":
             return
         if slot.task is not None:
@@ -2299,12 +2472,18 @@ class Orchestrator:
         if self._slots.get(slot.index) is not slot or slot.task is not None:
             return
         stopping = stopping or self._oom_stopped  # нехватка видеопамяти уже на этом шаге: новые клипы не берутся
-        if not stopping and self._queue:
+        if not stopping and self._queue_for_role(slot.role):
             if not slot.accepted and self._accept_timed_out(slot, now):
                 return
             self._dispatch(slot, now)
-        elif stopping or not self._queue:
-            self._retire(slot, "работы для карты больше нет")
+            return
+        # очередь своей роли пуста: карта простаивает и переключается на работу другой роли (если есть)
+        target = None if stopping else _switch_target(
+            slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
+        if target is not None:
+            self._start_switch(slot, target, now)
+            return
+        self._retire(slot, "работы для карты больше нет")
 
     # --- воркер ----------------------------------------------------------------
     def _call(self, slot: _CardSlot, method: str, path: str, payload: Optional[dict] = None):
@@ -2318,11 +2497,10 @@ class Orchestrator:
         return resp
 
     def _note_unimplemented(self) -> None:
-        """SSH и портал не проверяются в 6б (SPEC 8.2, 13.1): одна строка на запуск."""
+        """Портал не проверяется в 6б (SPEC 8.2, 13.1): одна строка на запуск."""
         if self._probe_notes_logged:
             return
         self._probe_notes_logged = True
-        log.info("%s.", SSH_NOT_IMPLEMENTED)
         log.info("%s.", PORTAL_NOT_IMPLEMENTED)
 
     def _probe_ready(self, slot: _CardSlot) -> bool:
@@ -2545,13 +2723,63 @@ class Orchestrator:
                 return slot
         return None
 
+    def _start_switch(self, slot: _CardSlot, target: str, now: float) -> None:
+        """Переключение простаивающей карты на профиль другой роли (STEP 7, блок B2, O5). Задач у карты нет."""
+        profile = self._profile_for_role(target)
+        try:
+            self._call(slot, "POST", "/profile", {"profile": profile})
+        except _WorkerNetError:
+            slot.state = "failed"  # сбой связи при отправке — неудачная попытка переключения
+            self._retire(slot, "переключение модели не удалось")
+            return
+        except _WorkerHttpError as exc:
+            slot.state = "failed"
+            self._retire(slot, "переключение отклонено" if exc.status == 409 else "переключение модели не удалось")
+            return
+        slot.state = "switching"
+        slot.switch_role = target
+        slot.switch_since = now
+        slot.monitor = self._make_monitor(slot, profile)  # монитор переключения: модель целевой роли; закрывается на «переключение завершено»
+        log.info("%s: переключение на роль «%s» (профиль «%s») запрошено.",
+                 _card_name(slot, cap=True), target, profile, extra=KEY_EVENT_EXTRA)
+
+    def _poll_switch(self, slot: _CardSlot, now: float) -> None:
+        """Опрос GET /health во время переключения: ready — роль сменена; refused/failed/таймаут — карта снимается."""
+        if now - slot.switch_since >= SWITCH_TIMEOUT_SEC:
+            slot.state = "failed"
+            self._retire(slot, "переключение модели не удалось")
+            return
+        try:
+            resp = self._http.request("GET", f"{slot.url}/health", headers=self._headers,
+                                      timeout=self.http_timeout)
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            slot.net_fail += 1
+            return
+        slot.net_fail = 0
+        switch = data.get("switch") if isinstance(data, dict) else None
+        if switch == "ready":
+            slot.role = slot.switch_role
+            slot.profile = self._profile_for_role(slot.role)
+            slot.state = "ready"
+            slot.monitor = None  # монитор переключения закрыт
+            log.info("%s: переключение завершено, роль «%s».", _card_name(slot, cap=True), slot.role,
+                     extra=KEY_EVENT_EXTRA)
+        elif switch == "refused":
+            slot.state = "failed"
+            self._retire(slot, "переключение отклонено")
+        elif switch == "failed":
+            slot.state = "failed"
+            self._retire(slot, "переключение модели не удалось")
+        # idle и switching: ждём следующего опроса
+
     def _requeue_free(self, num: int) -> None:
         """Клип возвращается в состояние free: в очередь, если он не done, не назначен и уже не в очереди."""
-        if num in self._done or num in self._failed or num in self._queue or self._assigned_slot(num):
+        if num in self._done or num in self._failed or num in self._queue_of(num) or self._assigned_slot(num):
             return
         if self._attempts.get(num, 0) > 0:
             self._attempts[num] -= 1
-        self._queue.appendleft(num)
+        self._queue_of(num).appendleft(num)
 
     def _fail_clip(self, num: int, reason: str) -> None:
         if num in self._done or self._assigned_slot(num) is not None:
@@ -2564,8 +2792,8 @@ class Orchestrator:
         else:
             log.warning("Клип %d: неудачная попытка %d из %d (%s), возвращён в очередь.",
                         num, used, MAX_ATTEMPTS, reason)
-            if num not in self._queue:
-                self._queue.append(num)
+            if num not in self._queue_of(num):
+                self._queue_of(num).append(num)
 
     def _clip_label(self, num: int) -> str:
         """Метка клипа в строках начала, готовности и ошибки (P2): номер из missing.txt и место в этом запуске."""
@@ -2597,7 +2825,7 @@ class Orchestrator:
                  extra=CONSOLE_SKIP_EXTRA)
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
-        num = self._queue.popleft()
+        num = self._queue_for_role(slot.role).popleft()
         owner = self._assigned_slot(num)
         if owner is not None or num in self._done:
             # повторный POST /task для назначенного клипа создал бы дубль на воркере (SPEC 8.2, 13.1 п. 3)
@@ -2606,7 +2834,7 @@ class Orchestrator:
             return
         entry = self._prompts.get(str(num))
         entry = entry if isinstance(entry, dict) else {}
-        num_frames = entry.get("num_frames")
+        num_frames = PHOTO_NUM_FRAMES if slot.role == "photo" else entry.get("num_frames")
         if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
             # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
             self._attempts[num] = MAX_ATTEMPTS
@@ -2618,7 +2846,7 @@ class Orchestrator:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:
             slot.net_fail += 1
-            self._queue.appendleft(num)
+            self._queue_for_role(slot.role).appendleft(num)
             self._warn_card(slot, f"post_task:{num}:{exc}", "Воркер %s не принял клип %d (сбой связи: %s).",
                             _card_name(slot), num, exc)
             return
@@ -2685,7 +2913,8 @@ class Orchestrator:
 
     def _finish_clip(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
-        path = os.path.join(self._tmp, clip_filename(task.num, self.width, self.template))
+        name = f"{task.num}.png" if slot.role == "photo" else clip_filename(task.num, self.width, self.template)
+        path = os.path.join(self._tmp, name)
         reason = ""
         try:
             self._download(slot, task.id, path)

@@ -52,7 +52,6 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 3. **Subject.** For people: age, hair, clothing, distinguishing features. Express emotion with physical cues ("her jaw tightens and she looks away"), never with labels like "sad" or "confused". Give each person one consistent outfit; do not combine conflicting garments (a suit and an overcoat) unless the layering is stated clearly.
 4. **Action.** The core action as a natural sequence from beginning to end, moment to moment. If you want a pause, write it ("she pauses", "a beat of silence"); the model will not invent one.
 5. **Camera.** How and when the camera moves, described relative to the subject (follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, handheld, static frame). Say how the subject appears after the movement ends ("the camera pushes in until her face fills the frame"). **(recommendation)** Always finish the camera sentence with the end state, also for a static frame ("the frame holds on the crown").
-6. **Style.** Optional, one short phrase: film characteristics (film grain, shallow depth of field), a genre or look (documentary, film noir, painterly, claymation) when the brief asks for it.
 
 ## 4. Length
 
@@ -80,7 +79,6 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - Light: pick one logic (natural sunlight, golden hour, neon glow, flickering candles, dramatic shadows, backlight, rim light).
 - Colour: name a palette (vibrant, muted, monochromatic, high contrast, warm amber).
 - Texture and atmosphere: rough stone, worn fabric, glossy surfaces; fog, rain, dust, smoke, particles.
-- Style words only when useful and only a few (documentary, film noir, painterly, claymation, film grain). If the project provides a style brief, apply it consistently in every prompt.
 
 ## 8. People, faces, text, logos
 
@@ -88,6 +86,8 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - **On-screen text is unreliable** (spelling and consistency across frames are not guaranteed). Do not include readable text, captions, signs with words, subtitles, numbers, dates or titles in the frame. Do not quote the subtitle text as on-screen text. If the passage mentions a sign or a date, show something else that carries the idea.
 - **Logos** are unreliable. Do not request logos or brand marks. **(recommendation)** Also avoid naming brands and real, named people; describe a generic person or object instead.
 - **(recommendation)** Do not put spoken lines in quotation marks. Quoted text is treated as speech and would make characters talk. Narration is added elsewhere. Describe only what is visible.
+
+Describe people and objects in the frame directly, as they are seen or named in the segment text. Do not invent details that the segment text does not support.
 
 ## 9. Things not to do
 
@@ -101,6 +101,8 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - **(recommendation)** Mood and atmosphere words used as description: thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, cinematic, "quiet stillness". Show them as visible cues or concrete objects instead.
 - **(recommendation)** Sound details (a click, a hum, a whisper, an echo). Sound is not described in this pipeline; show it as visible motion.
 - **(recommendation)** Commentary, apologies, alternatives, or explanations around the prompt.
+- **(recommendation)** Paper, papers, letters, passports, forms and documents as visible objects. If the segment text names them, show the activity or the place instead, without readable text.
+- **(recommendation)** Aspect ratios, frame sizes and framing terms (for example 16:9, widescreen, framing). Do not name any format of the picture.
 
 ## 10. Bad / Good pairs
 
@@ -112,7 +114,7 @@ Good: A wide shot of a crowd on a hillside at sunrise, people lifting their face
 
 **2. Negations**
 Bad: An empty street with no cars, no people, nothing blurry, don't show any signs.
-Good: A static wide shot of a quiet cobblestone street in early morning, shuttered shopfronts on both sides and thin mist hanging above the stones. Cool blue light, a single lamp still glowing at the far end. A scrap of paper drifts slowly across the cobbles in the breeze.
+Good: A static wide shot of a quiet cobblestone street in early morning, shuttered shopfronts on both sides and thin mist hanging above the stones. Cool blue light, a single lamp still glowing at the far end. A fallen leaf drifts slowly across the cobbles in the breeze.
 
 **3. No camera**
 Bad: A man in an office working at a computer.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -324,3 +325,39 @@ def test_outbid_while_booting_still_retires_without_bad_host(tmp_path, monkeypat
     assert 1 in rig.orc._bad_offers
     assert 11 not in rig.orc._bad_machines                 # не «карта остановлена хостом» (bad=True)
     assert list(tmp_path.rglob("bad_hosts.txt")) == []
+
+
+# ---------------------------------------------------------------------------
+# f. Окно сбора цен только для прерываемой аренды (C2)
+# ---------------------------------------------------------------------------
+
+def test_on_demand_skips_price_window_and_searches_once(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    offer = make_offer(1, 11, price=0.3)
+    offer.is_interruptible = False                          # обычная аренда: поле price не уходит
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), scan_sec=40, scan_step_sec=20,
+              offer_filter=vc.OfferFilter(interruptible=False))
+    vast = _use_vast(rig, _SpyVast([offer], rig.events, rig.clock))
+    now = rig.clock.now
+    rig.orc._queue = deque([1])                             # как в run(): очередь не пуста, иначе _desired = 0
+
+    rig.orc._maybe_rent(now)
+
+    assert rig.orc._scan_started is None                    # окно не открывалось
+    assert len(vast.searches) == 1                          # один поиск предложения, без цикла ожидания
+    assert vast.offer_ids() == [1]                          # аренда по найденному предложению остаётся
+    assert not any("Окно сбора цен" in r.getMessage() for r in caplog.records)
+
+
+def test_interruptible_still_enters_price_window(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), scan_sec=40, scan_step_sec=20,
+              offer_filter=vc.OfferFilter(interruptible=True))
+    vast = _use_vast(rig, _SpyVast([make_offer(1, 11, price=0.3)], rig.events, rig.clock))
+    now = rig.clock.now
+
+    rig.orc._maybe_rent(now)
+
+    assert rig.orc._scan_started == now                     # окно открыто, как и раньше
+    assert len(vast.searches) == 1                          # первый шаг опроса при открытии окна
+    assert any("Окно сбора цен открыто" in r.getMessage() for r in caplog.records)

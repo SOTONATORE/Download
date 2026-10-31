@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover - плоский импорт
 
 GEN = pathlib.Path(__file__).resolve().parents[1]
 CORE_DIR = GEN / "core"
-STYLE_FILE = str(GEN / "model_profiles" / "prompt_styles" / "ltx25.md")
+STYLE_FILE = str(GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md")
 DATA_SRT = GEN / "tests" / "data" / "final.srt"
 
 SECRET = "TESTKEY-12345"
@@ -190,7 +190,7 @@ def test_gemini_prompt_generation_is_clean(caplog, capsys):
         return httpx.Response(200, json=_gemini_envelope(body))
 
     transport = RealTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
-    results = generate_prompts(SEGMENTS, [1], PromptConfig(style_file=STYLE_FILE),
+    results = generate_prompts(SEGMENTS, [1], PromptConfig(media="video", style_file=STYLE_FILE),
                                transport, "gemini-test-model")
     assert results and seen
     out = capsys.readouterr()
@@ -204,7 +204,7 @@ def test_gemini_http_error_is_clean(caplog, capsys):
 
     transport = RealTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
     with pytest.raises(GeminiRuntimeError) as ei:
-        generate_prompts(SEGMENTS, [1], PromptConfig(style_file=STYLE_FILE),
+        generate_prompts(SEGMENTS, [1], PromptConfig(media="video", style_file=STYLE_FILE),
                          transport, "gemini-test-model")
     assert ei.value.status == 429
     out = capsys.readouterr()
@@ -217,7 +217,7 @@ def test_gemini_network_error_is_clean(caplog, capsys):
 
     transport = RealTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
     with pytest.raises(GeminiRuntimeError) as ei:
-        generate_prompts(SEGMENTS, [1], PromptConfig(style_file=STYLE_FILE),
+        generate_prompts(SEGMENTS, [1], PromptConfig(media="video", style_file=STYLE_FILE),
                          transport, "gemini-test-model")
     out = capsys.readouterr()
     assert_clean(exc_text(ei.value), caplog.text, out.out, out.err)

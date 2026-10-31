@@ -9,7 +9,7 @@
 |---|---|
 | `segments` | `list[Segment]` из `srt_parser` по ПОЛНОМУ SRT |
 | `wanted_nums` | номера из `missing.txt` (дубли убираются, порядок по возрастанию) |
-| `cfg: PromptConfig` | `style_file` (путь к `prompt_styles/<модель>.md` из профиля), `style_brief`, `max_prompt_chars` (1500), `batch_size` (20), `response_format` (по умолчанию `[{"segment_index": int, "prompt": str}]`; значения: типы Python или строки `"int"`/`"str"`) |
+| `cfg: PromptConfig` | `style_file` (путь к `models/<профиль>/prompts/style.md` из профиля), `max_prompt_chars` (1500), `batch_size` (20), `response_format` (по умолчанию `[{"segment_index": int, "prompt": str}]`; значения: типы Python или строки `"int"`/`"str"`) |
 | `transport` | объект с методом `generate_json(model, system, user, schema) -> str` (`GeminiTransport`) |
 | `model` | API-ID модели, параметром. В коде не зашит |
 
@@ -76,7 +76,7 @@
 
 - `timing: TimingParams(fps, frame_rule, clip_min_sec, clip_max_sec, gpu_max_sec, tail_pad_sec)`: параметры для `timing.compute_timings` (считаются по ПОЛНОМУ SRT).
 - `inner_transport`: `RealTransport` или заглушка; оборачивается в `ManagedTransport`.
-- `DEFAULT_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")`. `gemini_models` в `config.default.yaml` пока пуст, значения нужно передавать из конфига.
+- `DEFAULT_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")`. `gemini_models` в `config.default.yaml` задан двумя моделями: `gemini-3.5-flash-lite` и `gemini-3.1-flash-lite`; значение обязательно, нужна хотя бы одна запись.
 - Возвращает итоговое состояние (то, что лежит в `prompts.json`).
 
 ## Порядок работы

@@ -29,26 +29,26 @@ import yaml
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .gemini_prompts import GeminiInputError
-    from .weights_log import speed_threshold_mbps
+    from .model_constants import DEFAULT_MODEL_PROFILE, PROFILE_NAME_PATTERN, speed_threshold_mbps
 except ImportError:  # pragma: no cover
     from gemini_prompts import GeminiInputError  # type: ignore
-    from weights_log import speed_threshold_mbps  # type: ignore
+    from model_constants import (  # type: ignore
+        DEFAULT_MODEL_PROFILE, PROFILE_NAME_PATTERN, speed_threshold_mbps)
 
 __all__ = [
-    "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN",
-    "parse_config", "load_config", "load_profile_number",
+    "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = GENERATE_DIR / "config.default.yaml"
 MODEL_PROFILES_DIR = GENERATE_DIR / "model_profiles"
-
 # Лимит GitHub Actions на одно задание, минут (generate.yml: timeout-minutes: 360).
 ACTIONS_JOB_LIMIT_MIN = 360
 
 # Подстроки имён ключей: если неизвестный ключ похож на секрет, сообщаем об этом отдельно.
 _SECRET_NAME_HINTS = ("api_key", "apikey", "token", "secret", "password")
-_PROFILE_NAME_PATTERN = r"[A-Za-z0-9_\-]+"
+_PROFILE_NAME_PATTERN = PROFILE_NAME_PATTERN
 # Режимы аренды карт Vast (rental_type): прерываемая (bid) и обычная (on-demand).
 RENTAL_TYPES = ("interruptible", "on-demand")
 
@@ -68,7 +68,6 @@ class Config:
     # --- имена файлов и текст ---
     filename_template: str = _rule(nonempty=True, contains="{num}")
     clip_name_width: int = _rule(ge=0)
-    style_brief: str = _rule()
 
     # --- Gemini ---
     gemini_models: list[str] = _rule(min_items=1)
@@ -80,6 +79,9 @@ class Config:
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,
                                hint="допустимы латинские буквы, цифры, «_» и «-»")
+    # пресет профиля: имя проверяется здесь; наличие файла проверяет cli до аренды (presets/prompts/)
+    preset: str = _rule(pattern=_PROFILE_NAME_PATTERN,
+                        hint="допустимы латинские буквы, цифры, «_» и «-»")
     fps: int = _rule(ge=1)
     clip_min_sec: float = _rule(gt=0)
     clip_max_sec: float = _rule(gt=0)
@@ -348,19 +350,51 @@ def load_config(path: Optional[Path | str] = None,
     return parse_config(raw, source=label)
 
 
-def load_profile_number(profile: str, key: str) -> float:
-    """Положительное число из профиля модели: Generate/model_profiles/<profile>.yaml."""
+def profile_dir(profile: str) -> Path:
+    """Папка профиля модели: Generate/model_profiles/models/<profile>/ (имя проверяется)."""
     if not re.fullmatch(_PROFILE_NAME_PATTERN, profile or ""):
         raise GeminiInputError("Недопустимое имя профиля модели.")
-    path = MODEL_PROFILES_DIR / f"{profile}.yaml"
+    return MODEL_PROFILES_DIR / "models" / profile
+
+
+def profile_exists(profile: str) -> bool:
+    """Есть ли файл profile.yaml у профиля модели."""
+    return (profile_dir(profile) / "profile.yaml").is_file()
+
+
+def _read_profile(profile: str) -> dict:
+    path = profile_dir(profile) / "profile.yaml"
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise GeminiInputError(f"Профиль модели не найден: {profile}.yaml") from None
+        raise GeminiInputError(f"Профиль модели не найден: {profile}/profile.yaml") from None
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        raise GeminiInputError(f"Профиль модели не удалось прочитать: {profile}.yaml") from None
-    value = data.get(key) if isinstance(data, dict) else None
+        raise GeminiInputError(f"Профиль модели не удалось прочитать: {profile}/profile.yaml") from None
+    return data if isinstance(data, dict) else {}
+
+
+def load_profile_number(profile: str, key: str) -> float:
+    """Положительное число из профиля модели: Generate/model_profiles/models/<profile>/profile.yaml."""
+    value = _read_profile(profile).get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise GeminiInputError(
-            f"В профиле {profile}.yaml не задан положительный параметр «{key}».")
+            f"В профиле {profile}/profile.yaml не задан положительный параметр «{key}».")
     return float(value)
+
+
+def load_profile_frame_rule(profile: str) -> dict:
+    """Правило кадров из профиля модели (ключ frame_rule), например {«kind»: «8k+1»}."""
+    rule = _read_profile(profile).get("frame_rule")
+    if not isinstance(rule, dict) or not isinstance(rule.get("kind"), str):
+        raise GeminiInputError(
+            f"В профиле {profile}/profile.yaml не задано правило кадров («frame_rule»).")
+    return dict(rule)
+
+
+def load_profile_type(profile_name: str) -> str:
+    """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
+    value = _read_profile(profile_name).get("type", "video")
+    if value not in ("video", "image"):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml тип «type» должен быть video или image.")
+    return value

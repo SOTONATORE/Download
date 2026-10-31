@@ -3,9 +3,11 @@
 # Всё, что зависит от модели, живёт только здесь.
 
 name: ltx25
+type: video  # тип результата: видеоклип (не одиночное изображение)
 
 # Допустимое число кадров: 8k+1 (9, 17, 25, ... 97 ...). Не проверено по документации модели.
-frame_rule: {kind: "8k+1", min_frames: 9}
+# min_frames не задан: код берёт 1 (как и раньше, решение владельца, вариант B).
+frame_rule: {kind: "8k+1"}
 
 # Параметры тайминга и вывода
 fps: 24
@@ -17,13 +19,13 @@ target_resolution: "1920x1080"   # итоговый размер после Imag
 
 # Граф ComfyUI (API-формат) и подстановки значений
 workflow:
-  file: "Generate/model_profiles/workflows/ltx25.json"
-  bindings_file: "Generate/model_profiles/workflows/ltx25_bindings.json"
+  file: "Generate/model_profiles/models/ltx25/workflow.json"
+  bindings_file: "Generate/model_profiles/models/ltx25/bindings.json"
   # Нода, отдающая результат (SaveVideo), и тип результата
   output: {node_id: "1", type: video}
 
 # Файл с инструкцией для Gemini под эту модель
-prompt_style: "Generate/model_profiles/prompt_styles/ltx25.md"
+prompt_style: "Generate/model_profiles/models/ltx25/prompts/style.md"
 
 # Параметры, зашитые в граф (для справки; меняются правкой графа)
 params:
@@ -31,3 +33,12 @@ params:
   resolution: "1152x640"         # первый проход 576x320, апскейл x2
   sampler: "euler_ancestral"
   quantization: "int8-convrot"   # ltx-2.5-22b-distilled int8
+
+# Имена файлов весов. Граф workflow.json и список загрузки setup.sh содержат те же имена;
+# тест tests/test_model_profile.py сверяет их.
+model_files:
+  unet: "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+  clip: "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+  vae_video: "ltx-2.5-video-vae-bf16.safetensors"
+  vae_audio: "ltx-2.5-audio-vae-bf16.safetensors"
+  latent_upscaler: "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"

@@ -126,7 +126,7 @@ def test_wait_execution_error():
 def test_wait_no_video_in_outputs():
     done = {"p3": {"status": {"status_str": "success", "completed": True}, "outputs": {}}}
     with make_client(lambda r: httpx.Response(200, json=done)) as c, \
-            pytest.raises(cc.ComfyExecutionError, match="видеофайл"):
+            pytest.raises(cc.ComfyExecutionError, match="файл результата не найден"):
         c.wait_for_completion("p3", timeout=5, poll_interval=0)
 
 
@@ -146,3 +146,37 @@ def test_context_manager_closes_owned_client():
         pass
     assert not ext.is_closed
     ext.close()
+
+
+# --- фото-результат и тип профиля (шаг W1) ---
+
+def test_extract_output_path_video_only_unchanged():
+    entry = {"outputs": {"9": {"gifs": [{"filename": "clip.mp4", "subfolder": "v"}]}}}
+    assert cc.extract_output_path(entry) == "v/clip.mp4"
+
+
+def test_extract_output_path_returns_png_when_only_image():
+    entry = {"outputs": {"9": {"images": [{"filename": "photo_1.png", "subfolder": "photos"}]}}}
+    assert cc.extract_output_path(entry) == "photos/photo_1.png"
+
+
+def test_extract_output_path_prefers_video_when_both():
+    entry = {"outputs": {"9": {"images": [{"filename": "still.png"}],
+                               "gifs": [{"filename": "clip.mp4", "subfolder": "v"}]}}}
+    assert cc.extract_output_path(entry) == "v/clip.mp4"
+
+
+def test_extract_output_path_error_when_neither_video_nor_image():
+    entry = {"outputs": {"9": {"images": [{"filename": "notes.txt"}]}}}
+    with pytest.raises(cc.ComfyExecutionError, match="файл результата не найден"):
+        cc.extract_output_path(entry)
+
+
+def test_profile_type_uses_value_set_by_set_profile_type(monkeypatch):
+    monkeypatch.setenv("WORKER_PROFILE_TYPE", "video")
+    try:
+        cc.set_profile_type("image")
+        assert cc.profile_type() == "image"
+    finally:
+        cc.set_profile_type(None)
+    assert cc.profile_type() == "video"

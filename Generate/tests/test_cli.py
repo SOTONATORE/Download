@@ -3,6 +3,7 @@ import json
 import logging
 import pathlib
 import re
+import shutil
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -12,6 +13,8 @@ import pytest
 from Generate import cli
 from Generate.core import vast_client
 from Generate.core.srt_parser import parse_srt, srt_hash
+from Generate.core import config_loader as _config_loader
+from Generate.core import gemini_prompts as _gemini_prompts
 
 DATA = pathlib.Path(__file__).resolve().parent / "data" / "final.srt"
 VAST_KEY_ENV = "GEN_" + "VAST_API_KEY"
@@ -167,7 +170,7 @@ def run_env(monkeypatch):
     FakeVast.credit_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
-                        lambda profile, brief, batch_size: ("CFG", profile, brief))
+                        lambda profile, batch_size, preset="none": ("CFG", profile, batch_size))
     monkeypatch.setattr(cli, "_make_transport", lambda: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
@@ -215,14 +218,14 @@ def test_run_success(capsys, run_env, missing_file):
     code = cli.main(_run_args(DATA, missing_file, "--repo", "o/r", "--run-id", "77",
                               "--limit-clips", "3", "--max-cards", "2",
                               "--budget-limit", "1.5", "--release-tag", "v1",
-                              "--model-profile", "ltx25", "--style-brief", "стиль",
+                              "--model-profile", "ltx25",
                               "--prompts-path", "p.json"))
     out = capsys.readouterr().out
     assert code == 0
     assert "Итоги запуска" in out
     (args, kwargs), = run_env.calls
     assert args[1] == str(missing_file)
-    assert args[2] == ("CFG", "ltx25", "стиль")
+    assert args[2] == ("CFG", "ltx25", 50)   # gemini_batch_size из config.default.yaml
     assert args[3] == "TIMING"
     assert args[4] == ("STORE", "o/r")
     assert isinstance(args[5], FakeVast)
@@ -270,10 +273,11 @@ def test_run_default_offer_filter(capsys, run_env, missing_file):
     assert isinstance(f, cli.OfferFilter)
     assert f.gpu_name == "RTX 5090"
     assert f.min_price == 0.35
-    assert f.max_price == 0.55
+    assert f.max_price == 1.0
     assert f.min_reliability == 0.90
-    assert f.min_inet_mbps == 500.0
+    assert f.min_inet_mbps == 800.0
     assert f.max_inet_price_per_tb == 4.1
+    assert f.interruptible is False                 # rental_type по умолчанию on-demand
 
 
 def test_run_custom_offer_filter(capsys, run_env, missing_file):
@@ -314,6 +318,14 @@ def test_run_verified_zero_from_config_reaches_offer_filter(capsys, run_env, mis
     assert cli.main(_run_args(DATA, missing_file, "--config", str(cfg))) == 0
     _, kwargs = run_env.calls[0]
     assert kwargs["offer_filter"].verified is False
+
+
+# ---------------------------------------------------------------- --preset (вход workflow)
+
+def test_preset_defaults_to_none_and_reaches_config(loaded_cfgs, run_env, missing_file):
+    assert cli.build_parser().parse_args(["run"]).preset == "none"
+    cli.main(_run_args(DATA, missing_file))
+    assert loaded_cfgs[-1].preset == "none"
 
 
 # ---------------------------------------------------------------- --verified (вход workflow)
@@ -1145,3 +1157,157 @@ def test_pilot_onstart_refuses_bad_sha(sha):
 def test_pilot_onstart_refuses_bad_repo(repo):
     with pytest.raises(ValueError):
         cli.pilot_onstart_cmd(PILOT_SHA, repo)
+
+
+def test_cli_summary_average_label_says_what_is_measured(capsys):
+    cli._print_summary(SimpleNamespace(avg_render_sec=12.34))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: 12.3" in out
+    assert "рендера" not in out
+    cli._print_summary(SimpleNamespace(avg_render_sec=0.0))
+    out = capsys.readouterr().out
+    assert "  среднее время клипа от отправки до выгрузки, с: нет данных" in out
+
+
+# ---------------------------------------------------------------- проверка профиля и пресета до аренды (фаза E2)
+
+@pytest.fixture
+def tmp_profiles(tmp_path, monkeypatch):
+    """Корень профилей и папка пресетов — временные; реальные папки не меняются."""
+    root = tmp_path / "profiles"
+    (root / "models").mkdir(parents=True)
+    # профиль ltx25 копируется из репозитория (до подмены корня): проверка профиля проходит,
+    # и тесты доходят до проверки пресета
+    shutil.copytree(_config_loader.MODEL_PROFILES_DIR / "models" / "ltx25",
+                    root / "models" / "ltx25")
+    presets = tmp_path / "presets"
+    presets.mkdir()
+    monkeypatch.setattr(_config_loader, "MODEL_PROFILES_DIR", root)
+    monkeypatch.setattr(_gemini_prompts, "PRESETS_DIR", presets)
+    return SimpleNamespace(root=root, presets=presets)
+
+
+def _complete_profile(root, name):
+    folder = root / "models" / name
+    (folder / "prompts").mkdir(parents=True)
+    for rel in ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md"):
+        (folder / rel).write_text("{}", encoding="utf-8")
+    return folder
+
+
+def test_check_builtin_profile_and_none_is_ok():
+    assert cli._check_profile_and_preset("ltx25", "none") is None
+
+
+def test_check_unknown_profile_is_input_error(capsys):
+    assert cli._check_profile_and_preset("nope", "none") == cli.EXIT_INPUT
+    err = capsys.readouterr().err
+    assert "профиль модели «nope» не найден" in err and "Traceback" not in err
+
+
+def test_check_incomplete_profile_is_input_error(capsys, tmp_profiles):
+    folder = tmp_profiles.root / "models" / "half"
+    (folder / "prompts").mkdir(parents=True)
+    (folder / "profile.yaml").write_text("{}", encoding="utf-8")
+    assert cli._check_profile_and_preset("half", "none") == cli.EXIT_INPUT
+    err = capsys.readouterr().err
+    assert "неполный" in err
+    for name in ("workflow.json", "bindings.json", "prompts/style.md"):
+        assert name in err
+
+
+def test_check_complete_temp_profile_is_ok(tmp_profiles):
+    _complete_profile(tmp_profiles.root, "full")
+    assert cli._check_profile_and_preset("full", "none") is None
+
+
+def test_check_preset_missing_is_input_error(capsys, tmp_profiles):
+    assert cli._check_profile_and_preset("ltx25", "nope") == cli.EXIT_INPUT
+    assert "Пресет «nope» не найден" in capsys.readouterr().err
+
+
+def test_check_preset_empty_is_input_error(capsys, tmp_profiles):
+    (tmp_profiles.presets / "empty.md").write_text("\n", encoding="utf-8")
+    assert cli._check_profile_and_preset("ltx25", "empty") == cli.EXIT_INPUT
+    assert "пуст" in capsys.readouterr().err
+
+
+def test_check_preset_present_is_ok(tmp_profiles):
+    (tmp_profiles.presets / "pz.md").write_text("текст пресета", encoding="utf-8")
+    assert cli._check_profile_and_preset("ltx25", "pz") is None
+
+
+def test_run_unknown_profile_stops_before_vast(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--model-profile", "nope"))
+    cap = capsys.readouterr()
+    assert code == cli.EXIT_INPUT
+    assert "профиль модели «nope» не найден" in cap.err and "Traceback" not in cap.err
+    assert run_env.calls == [] and FakeVast.instances == []
+
+
+def test_run_missing_preset_stops_before_vast(capsys, run_env, missing_file):
+    code = cli.main(_run_args(DATA, missing_file, "--preset", "nope"))
+    cap = capsys.readouterr()
+    assert code == cli.EXIT_INPUT
+    assert "Пресет «nope» не найден" in cap.err and "Traceback" not in cap.err
+    assert run_env.calls == [] and FakeVast.instances == []
+
+
+def test_preset_reaches_prompt_config(capsys, run_env, missing_file, monkeypatch, tmp_profiles):
+    (tmp_profiles.presets / "pz.md").write_text("текст пресета", encoding="utf-8")
+    seen = []
+
+    def fake_build(profile, batch_size, preset="none"):
+        seen.append(preset)
+        return ("CFG",)
+
+    monkeypatch.setattr(cli, "_build_prompt_config", fake_build)
+    code = cli.main(_run_args(DATA, missing_file, "--preset", "pz"))
+    assert code == cli.EXIT_OK
+    assert seen == ["pz"]
+
+
+def test_build_prompt_config_carries_preset_field():
+    cfg = cli._build_prompt_config("ltx25", 20, "none")
+    assert cfg.preset == "none" and cfg.batch_size == 20
+
+
+# --- фото (STEP 7, блок B2): правило кадров и проверка --photo-profile ---------------------------
+def test_frame_rule_for_image_profile_is_none():
+    assert cli._frame_rule_for("zimage_turbo") is None
+
+
+def test_frame_rule_for_video_profile_keeps_ltx_rule():
+    assert cli._frame_rule_for("ltx25") == {"kind": "8k+1"}
+
+
+def test_photo_profile_validator_rejects_video_type(tmp_path, monkeypatch, capsys):
+    folder = tmp_path / "vidonly"
+    folder.mkdir()
+    (folder / "profile.yaml").write_text("type: video\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "profile_dir", lambda name: folder)
+    monkeypatch.setattr(cli, "load_profile_type", lambda name: "video")
+    assert cli._check_photo_profile("vidonly") == cli.EXIT_INPUT
+    out = capsys.readouterr()
+    assert "image" in out.out + out.err
+
+
+# --- лимит проверки по типам: limit_by_type ------------------------------------------------------
+VIDEO6 = [1, 2, 3, 4, 5, 6]
+PHOTO6 = [7, 8, 9, 10, 11, 12]
+
+
+def test_limit_by_type_even_limit_takes_half_of_each():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 4) == [1, 2, 7, 8]
+
+
+def test_limit_by_type_odd_limit_gives_extra_to_video():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 5) == [1, 2, 3, 7, 8]
+
+
+def test_limit_by_type_zero_gives_all():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 0) == sorted(VIDEO6 + PHOTO6)
+
+
+def test_limit_by_type_without_photo_takes_first_video():
+    assert cli.limit_by_type(VIDEO6, [], 3) == [1, 2, 3]
