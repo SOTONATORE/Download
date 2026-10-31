@@ -1806,15 +1806,25 @@ class Orchestrator:
         self._video_queue = value
 
     def _queue_for_role(self, role: str) -> deque:
-        return self._photo_queue if role == "photo" else self._video_queue
+        # объект может быть построен без __init__ (тесты): читаем очереди с запасным значением;
+        # если очереди фото нет, клип идёт в видеоочередь, как при отсутствии photo_profile
+        photo = getattr(self, "_photo_queue", None)
+        video = getattr(self, "_video_queue", None)
+        return photo if role == "photo" and photo is not None else video
 
     def _queue_of(self, num: int) -> deque:
-        return self._photo_queue if num in self._photo_nums else self._video_queue
+        # номера фото читаются с запасным значением: без них все номера идут в видеоочередь (как при __init__)
+        photo_nums = getattr(self, "_photo_nums", frozenset())
+        photo = getattr(self, "_photo_queue", None)
+        video = getattr(self, "_video_queue", None)
+        return photo if num in photo_nums and photo is not None else video
 
     def _profile_for_role(self, role: str) -> str:
-        if role == "photo" and self.photo_profile:
-            return self.photo_profile
-        return self.profile or DEFAULT_MODEL_PROFILE
+        # профили читаются с запасным значением: без __init__ фото-профиля нет, видеопрофиль — по умолчанию
+        photo_profile = getattr(self, "photo_profile", None)
+        if role == "photo" and photo_profile:
+            return photo_profile
+        return getattr(self, "profile", None) or DEFAULT_MODEL_PROFILE
 
     def _next_role(self, now: float) -> str:
         """Роль новой карты: первые карты по плану plan_card_roles, дальше по длине очередей."""
