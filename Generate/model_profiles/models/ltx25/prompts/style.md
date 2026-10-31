@@ -101,6 +101,7 @@ Describe people and objects in the frame directly, as they are seen or named in 
 - **(recommendation)** Mood and atmosphere words used as description: thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, cinematic, "quiet stillness". Show them as visible cues or concrete objects instead.
 - **(recommendation)** Sound details (a click, a hum, a whisper, an echo). Sound is not described in this pipeline; show it as visible motion.
 - **(recommendation)** Commentary, apologies, alternatives, or explanations around the prompt.
+- **(recommendation)** Paper, papers, letters, passports, forms and documents as visible objects. If the segment text names them, show the activity or the place instead, without readable text.
 
 ## 10. Bad / Good pairs
 

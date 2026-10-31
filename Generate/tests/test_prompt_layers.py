@@ -12,10 +12,10 @@ from Generate.core.srt_parser import Segment
 GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
-# длина базы изменена правилом «not X, but Y» в системной инструкции видео (шаг: противопоставление); прежнее значение 16168.
-BASELINE_BYTES = 16340
-# хеш базы изменён вместе с длиной (правило «not X, but Y» в системной инструкции видео); прежнее значение bece7c1d709f…4c9b40107.
-BASELINE_SHA256 = "154078120fdb357cba51b04102732d7b29037b5a177182013e73ee7ede0f3dfa"
+# база обновлена после добавления правила про бумагу в системную инструкцию видео: прежнее значение 16340 байт, новое 16724.
+BASELINE_BYTES = 16724
+# хеш базы обновлён вместе с длиной: прежнее значение 154078120fdb…0f3dfa, новое 89f41a72fbeb…7684b5.
+BASELINE_SHA256 = "89f41a72fbeb9a8fe14c8bf6fcf72126f94e0230a8363f5ad693e27eca7684b5"
 
 
 @pytest.fixture

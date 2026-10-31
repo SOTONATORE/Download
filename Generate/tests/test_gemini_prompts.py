@@ -667,6 +667,15 @@ def test_contrast_rule_in_video_and_image_instructions(tmp_path):
         assert CONTRAST_RULE_TEXT in text
 
 
+PAPER_RULE_TEXT = "No paper, papers, letters, passports, forms or documents of any kind"
+
+
+def test_paper_rule_in_video_and_image_instructions(tmp_path):
+    for media in ("video", "image"):
+        text = gp.build_system_instruction(make_cfg(tmp_path, media=media))
+        assert PAPER_RULE_TEXT in text
+
+
 def test_segment_with_forbidden_word_gets_rephrase_note(tmp_path):
     segs = [seg(1, "Passports were stamped for exile, not return.")]
     req = build_requests(segs, [1], make_cfg(tmp_path))[0]

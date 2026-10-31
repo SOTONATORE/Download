@@ -26,6 +26,7 @@ FORBIDDEN_IMAGE_WORDS_EN = (
     "newspaper",
     "id card",
     "passport",
+    "paper",  # бумага: листы, записи, бумажные документы
     "form",
     "spreadsheet",
 )

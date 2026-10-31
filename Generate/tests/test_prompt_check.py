@@ -60,6 +60,16 @@ def test_newspaper_is_forbidden():
     assert find_problems("A newspaper lying on a chair.")
 
 
+def test_paper_is_forbidden():
+    problems = find_problems("Stacked papers lie on the desk of the room.")
+    assert len(problems) == 1
+    assert "paper" in problems[0].lower()
+
+
+def test_bread_is_not_forbidden():
+    assert find_problems("The bread is baked every morning.") == []
+
+
 def test_flag_is_forbidden():
     assert find_problems("Two soldiers hold a flag above the gate.")
 

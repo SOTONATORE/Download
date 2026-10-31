@@ -355,6 +355,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
             "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
             "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
             "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
             "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
             "the move ends (for a static camera: what the frame holds on).\n"
         )
@@ -364,6 +365,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
             "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
             "or camera or lens equipment; camera or lens equipment is forbidden.\n"
             "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
             "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
             "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n"
         )
