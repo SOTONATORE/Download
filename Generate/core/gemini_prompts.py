@@ -22,12 +22,12 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .srt_parser import Segment
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
-    from .prompt_check import MAX_REWORK_ATTEMPTS, find_problems, rework_remark  # проверка промптов (шаг 6)
+    from .prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # проверка промптов (шаг 6)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
-    from prompt_check import MAX_REWORK_ATTEMPTS, find_problems, rework_remark  # type: ignore
+    from prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # type: ignore
 
 log = logging.getLogger("Generate.gemini_prompts")
 
@@ -82,6 +82,7 @@ class GeminiRuntimeError(GeminiError):
 @dataclass
 class PromptConfig:
     style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
+    media: str                       # тип промпта: "video" или "image"; без значения по умолчанию
     max_prompt_chars: int = 1500
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
@@ -348,10 +349,28 @@ def attach_style(prompt: str, style_text: str) -> str:
 
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
+    if cfg.media == "video":
+        kind = "text-to-video prompt"
+        camera_rules = (
+            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+            "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
+            "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
+            "the move ends (for a static camera: what the frame holds on).\n"
+        )
+    elif cfg.media == "image":
+        kind = "text-to-image prompt, one still frame"
+        camera_rules = (
+            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+            "or camera or lens equipment; camera or lens equipment is forbidden.\n"
+            "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
+            "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n"
+        )
+    else:
+        raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     parts = [
         "# Task\n"
         "You receive subtitle segments of a narrated video. For every segment write ONE "
-        "text-to-video prompt, in English, that visually illustrates what the segment says, "
+        + kind + ", in English, that visually illustrates what the segment says, "
         "following the style guide below. Use the Sentence, Before and After lines only to "
         "understand the meaning; the >>marked<< part is the passage to illustrate.\n\n"
         "# Output contract\n"
@@ -366,10 +385,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
         "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
-        "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-        "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
-        "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
-        "the move ends (for a static camera: what the frame holds on).\n"
+        + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
         "- Before returning, check each prompt against the self-check checklist at the end of "
@@ -387,6 +403,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_config(cfg: PromptConfig) -> None:
+    if cfg.media not in ("video", "image"):
+        raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     if cfg.batch_size < 1:
         raise GeminiInputError("batch_size должен быть не меньше 1.")
     if cfg.max_prompt_chars < 1:
@@ -591,6 +609,14 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
+def _find_all_problems(text: str, cfg: PromptConfig) -> list:
+    """Нарушения промпта: запрещённые типы кадра и маркеры; для фото ещё движение камеры."""
+    problems = find_problems(text)
+    if cfg.media == "image":
+        problems += [f"движение камеры: «{m}»" for m in find_camera_motion(text)]
+    return list(dict.fromkeys(problems))
+
+
 def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
                      res: PromptResult) -> PromptResult:
     """Проверка запрещённых типов кадра и маркеров в готовом промпте (шаг 6).
@@ -601,7 +627,7 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
     Текст промпта в сообщение об ошибке не попадает.
     """
     text = res.prompt
-    problems = find_problems(text)
+    problems = _find_all_problems(text, builder.cfg)
     attempt = 0
     while problems and attempt < MAX_REWORK_ATTEMPTS:
         attempt += 1
@@ -613,7 +639,7 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
         new_text = results[res.num].prompt if res.num in results else ""
         if new_text.strip():
             text = new_text
-        problems = find_problems(text)
+        problems = _find_all_problems(text, builder.cfg)
     if problems:
         # GeminiRuntimeError со status=None: сбой-класс, который cli уже обрабатывает; повтор на транспорте
         # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.

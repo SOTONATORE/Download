@@ -344,6 +344,16 @@ def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
 
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
+    # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
+    try:
+        profile_lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        profile_lines = []
+    media = next((ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'")
+                  for ln in profile_lines if ln.startswith("type:")), None)
+    if media not in ("video", "image"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml не задан тип «type» (video или image).")
     style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
     # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
     if load_profile_type(profile) == "image":
@@ -354,7 +364,7 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     elif not os.path.isfile(style_file):
         # профили video и без поля type: прежняя подмена на профиль по умолчанию
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
-    return cls(style_file=style_file, batch_size=batch_size, preset=preset)
+    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
 
 
 def _gemini_options(cfg: Config) -> dict:

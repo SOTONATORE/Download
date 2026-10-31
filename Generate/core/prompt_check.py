@@ -79,3 +79,34 @@ def rework_remark(problems: list) -> str:
         "(for example a map becomes a landscape or a city view without labels). "
         "Output only the rewritten prompt."
     )
+
+
+# Слова движения камеры (английские, совпадение целым словом, без учёта регистра).
+CAMERA_MOTION_WORDS = frozenset({
+    "pan", "pans", "panning", "zoom", "zooms", "zooming", "track", "tracks", "tracking",
+    "dolly", "dollies", "tilt", "tilts", "tilting", "push", "pushes", "pushing",
+    "pull", "pulls", "pulling", "rotate", "rotates", "rotating", "move", "moves", "moving",
+    "follow", "follows", "following", "slide", "slides", "sliding", "glide", "glides", "gliding",
+})
+# Слова-якоря: движение засчитывается, только если оно рядом с «camera» или «frame».
+CAMERA_ANCHOR_WORDS = frozenset({"camera", "frame"})
+CAMERA_MOTION_WINDOW = 3  # в пределах трёх слов от якоря, в любом порядке
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def find_camera_motion(text: str) -> list:
+    """Фрагменты текста, где слово движения стоит рядом с «camera» или «frame». Текст не меняется."""
+    words = [(m.group(0).lower(), m.start(), m.end()) for m in _WORD_RE.finditer(text or "")]
+    found = []
+    for i, (word, _, _) in enumerate(words):
+        if word not in CAMERA_ANCHOR_WORDS:
+            continue
+        lo = max(0, i - CAMERA_MOTION_WINDOW)
+        hi = min(len(words), i + CAMERA_MOTION_WINDOW + 1)
+        for j in range(lo, hi):
+            if j != i and words[j][0] in CAMERA_MOTION_WORDS:
+                start = min(words[i][1], words[j][1])
+                end = max(words[i][2], words[j][2])
+                found.append(text[start:end])
+                break
+    return found

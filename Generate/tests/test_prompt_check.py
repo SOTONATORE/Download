@@ -10,6 +10,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiRuntimeError, PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
+    find_camera_motion,
     find_problems,
     rework_remark,
 )
@@ -23,7 +24,7 @@ def seg(num, text):
 def cfg_for(tmp_path):
     style = tmp_path / "style.md"
     style.write_text("# Style guide\nWrite one paragraph.\n", encoding="utf-8")
-    return PromptConfig(style_file=str(style), max_prompt_chars=300, batch_size=10)
+    return PromptConfig(media="video", style_file=str(style), max_prompt_chars=300, batch_size=10)
 
 
 class ScriptedTransport:
@@ -119,3 +120,23 @@ def test_ordinary_sheet_is_allowed():
     # обычное sheet (простыня, лист льда) не входит в запрещённые типы кадров; запрещено только spreadsheet
     assert find_problems("A bed sheet lies on the floor of the room.") == []
     assert find_problems("A sheet of ice covers the lake.") == []
+
+
+# ---------------------------------------------------------------- find_camera_motion (только для фото)
+
+@pytest.mark.parametrize("text", [
+    "The camera slowly zooms toward the bridge.",
+    "The frame tracks along the wall.",
+])
+def test_camera_motion_found(text):
+    assert find_camera_motion(text)
+
+
+@pytest.mark.parametrize("text", [
+    "The path follows the river under a grey sky.",
+    "A rotating wooden wheel stands by the mill.",
+    "The frame of the window is painted white.",
+    "A static camera holds on the empty street.",
+])
+def test_camera_motion_not_found(text):
+    assert find_camera_motion(text) == []

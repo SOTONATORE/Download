@@ -62,6 +62,7 @@ def cfg(tmp_path, **kw):
     kw.setdefault("style_file", str(style))
     kw.setdefault("max_prompt_chars", 300)
     kw.setdefault("batch_size", 10)
+    kw.setdefault("media", "video")
     return PromptConfig(**kw)
 
 

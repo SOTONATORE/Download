@@ -55,6 +55,7 @@ def make_cfg(tmp_path, **kw):
     kw.setdefault("style_file", str(style))
     kw.setdefault("max_prompt_chars", 300)
     kw.setdefault("batch_size", 10)
+    kw.setdefault("media", "video")
     return PromptConfig(**kw)
 
 
@@ -280,7 +281,7 @@ def test_runtime_error_propagates(tmp_path):
 # ---------------------------------------------------------------- parse_and_validate
 
 def _pv(raw, nums, **kw):
-    cfg = PromptConfig(style_file="x", **kw)
+    cfg = PromptConfig(style_file="x", media="video", **kw)
     return parse_and_validate(raw if isinstance(raw, str) else json.dumps(raw), nums, cfg)
 
 
@@ -624,3 +625,30 @@ def test_generate_prompts_preset_none_unchanged(tmp_path):
     t = FakeTransport([ok([1, 3], "A baker lifts a tray at dawn.")])
     res = generate_prompts(make_segments(), [1, 3], cfg, t, "m")
     assert [r.prompt for r in res] == ["A baker lifts a tray at dawn."] * 2
+
+
+# ---------------------------------------------------------------- media: видео и фото
+
+def test_image_instruction_is_still_frame(tmp_path):
+    text = gp.build_system_instruction(make_cfg(tmp_path, media="image"))
+    assert "text-to-image" in text
+    assert "still frame" in text
+    assert "text-to-video" not in text
+    assert "Exactly one camera move" not in text
+    assert "Never describe camera movement" in text
+
+
+def test_video_instruction_keeps_camera_move(tmp_path):
+    text = gp.build_system_instruction(make_cfg(tmp_path, media="video"))
+    assert "text-to-video" in text
+    assert "Exactly one camera move" in text
+    assert "camera movement is the only camera wording allowed" in text
+
+
+def test_media_image_is_accepted(tmp_path):
+    gp._check_config(make_cfg(tmp_path, media="image"))
+
+
+def test_unknown_media_raises(tmp_path):
+    with pytest.raises(gp.GeminiInputError):
+        gp._check_config(make_cfg(tmp_path, media="audio"))
