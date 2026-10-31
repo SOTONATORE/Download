@@ -1807,9 +1807,14 @@ class Orchestrator:
         if self.photo_profile is None:
             return "video"
         if self._role_plan is None:
+            if self._split is None:
+                # распределение ещё не известно: план не фиксируем, иначе он построится по пустым очередям;
+                # возвращаем запасное значение по длине очередей, план будет построен при следующем вызове
+                return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
             n = self._desired(now)
-            photo_on = bool(self._photo_queue)
-            video_on = bool(self._video_queue)
+            # роли плана берём из распределения (self._split), а не из очередей: фото может быть ещё не в очереди
+            photo_on = bool(self._photo_nums) if self.photo_profile else False
+            video_on = bool((self._split or {}).get("video", []))
             self._role_plan = ([t[0] for t in plan_card_roles(n, photo_on, video_on)]
                                if n >= 1 and (photo_on or video_on) else [])
         if self._plan_idx < len(self._role_plan):
@@ -1962,8 +1967,14 @@ class Orchestrator:
             offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
             role = self._next_role(now)
+            vq_len, pq_len = len(self._video_queue), len(self._photo_queue)  # очереди на момент выбора роли
             res = self._rent_one(now, offers, role=role)
             if res == "ok":
+                # одна строка журнала на созданную карту; при повторе аренды карты нет и строки нет
+                log.info("роль карты %d: %s; очередь видео %d, фото %d; план роли по распределению: photo_on=%s, video_on=%s",
+                         self._plan_idx + 1, role, vq_len, pq_len,
+                         bool(self._photo_nums) if self.photo_profile else False,
+                         bool((self._split or {}).get("video", [])))
                 self._plan_idx += 1
             offers = None  # остальные аренды этого же прохода идут обычным поиском (без паузы)
             if res in ("stop", "exhausted"):

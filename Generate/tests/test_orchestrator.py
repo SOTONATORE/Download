@@ -2732,3 +2732,55 @@ def test_photo_card_uses_photo_profile_in_rent_env():
     o.photo_profile = "zimage_turbo"
     assert o._profile_for_role("photo") == "zimage_turbo"
     assert o._profile_for_role("video") == "ltx25"
+
+
+# --- план ролей по распределению: фото может ещё не быть в очереди на первом вызове ---------------
+def _role_orc(split, *, photo=(), video=()):
+    o = orch.Orchestrator.__new__(orch.Orchestrator)  # без конструктора: нужны только поля выбора роли
+    o.photo_profile = "zimage_turbo"
+    o._role_plan = None
+    o._plan_idx = 0
+    o._split = split
+    o._photo_nums = set((split or {}).get("photo", []))
+    o._photo_queue = deque(photo)
+    o._video_queue = deque(video)
+    o._desired = lambda now: 1  # одна карта: план зависит только от распределения и очередей
+    return o
+
+
+def test_plan_one_card_photo_first_when_split_known_and_queues_empty():
+    o = _role_orc({"photo": [2], "video": [1]})
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_plan_one_card_video_when_split_has_no_photo_nums():
+    o = _role_orc({"photo": [], "video": [1, 2]})
+    assert o._next_role(0.0) == "video"
+    assert o._role_plan == ["video"]
+
+
+def test_plan_photo_first_when_photo_clip_is_missing_from_queue():
+    # исходная ошибка: видеоклип уже в очереди, фото ещё нет; план строится по распределению, а не по очередям
+    o = _role_orc({"photo": [2], "video": [1]}, video=[1])
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_plan_not_fixed_while_split_is_unknown_then_built_once_split_known():
+    o = _role_orc(None, video=[1])
+    assert o._next_role(0.0) == "video"  # запасное значение по длине очередей: фото 0 < видео 1
+    assert o._role_plan is None          # план не зафиксирован, пока распределения нет
+    o._split = {"photo": [2], "video": [1]}
+    o._photo_nums = {2}
+    assert o._next_role(0.0) == "photo"
+    assert o._role_plan == ["photo"]
+
+
+def test_fallback_by_queue_lengths_applies_after_plan_is_exhausted():
+    o = _role_orc({"photo": [2], "video": [1]}, photo=[2], video=[1, 3])
+    o._role_plan = ["photo"]
+    o._plan_idx = 1  # план из одной карты уже израсходован
+    assert o._next_role(0.0) == "video"  # фото 1 < видео 2
+    o._photo_queue = deque([2, 4, 6])
+    assert o._next_role(0.0) == "photo"  # фото 3 >= видео 2
