@@ -141,3 +141,66 @@ def test_plan_split_photo_only_never_scores():
         srt_segments(), MISSING, video_model="none", video_percent=100, intro_seconds=10,
         transport=MustNotCall(), gemini_options={}, photo_on=True, distribution_path=None)
     assert result["video"] == [] and result["photo"] == [2, 4]
+
+
+def _orc_for_run(tmp_path, split: dict, photo_profile):
+    """Собирает Orchestrator без __init__; split, разбор missing и запуск замещены.
+
+    Порядок вызовов реальный: _run_body -> _split_for_run -> (фейк _run_inner) -> _generate.
+    Возвращает объект и список множеств, которые видел _generate.
+    """
+    orc = orch.Orchestrator.__new__(orch.Orchestrator)
+    orc.pilot = False
+    orc.missing_path = tmp_path / "missing.txt"
+    orc.segments = []
+    orc.limit_clips = 0
+    orc.work_dir = str(tmp_path)
+    orc.photo_profile = photo_profile
+    orc._tmp = None
+    orc._owns_http = False
+    orc._photo_nums = set()
+    orc._video_queue = orch.deque()
+    orc._photo_queue = orch.deque()
+    orc._split = None
+    seen: list = []
+
+    def fake_generate(needed):
+        seen.append(set(orc._photo_nums))   # что видит _generate в момент вызова
+        return []
+
+    def fake_run_inner(missing):
+        orc._generate(missing)
+        return orch.RunSummary()
+
+    orc._generate = fake_generate
+    orc._run_inner = fake_run_inner
+    orc._split_for_run = lambda missing: split
+    return orc, seen
+
+
+def test_photo_numbers_known_before_generate(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "parse_missing", lambda path, segments: [1, 2, 3, 4])
+    orc, seen = _orc_for_run(tmp_path, {"video": [1, 3], "photo": [2, 4]}, photo_profile="zimage_turbo")
+    orc._run_body()
+    assert seen == [{2, 4}]          # фото-номера уже известны, когда вызывается _generate
+    assert orc._photo_nums == {2, 4}
+
+
+def test_video_only_photo_set_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "parse_missing", lambda path, segments: [1, 2, 3, 4])
+    # photo_profile None: даже если split содержит фото-номера, множество пустое (как раньше)
+    orc, seen = _orc_for_run(tmp_path, {"video": [1, 2, 3, 4], "photo": [2, 4]}, photo_profile=None)
+    assert orc._photo_nums == set()  # до запуска
+    orc._run_body()
+    assert seen == [set()]           # до _generate
+    assert orc._photo_nums == set()  # после запуска
+
+
+def test_partition_same_for_generate_and_verify_rule(tmp_path, monkeypatch):
+    monkeypatch.setattr(orch, "parse_missing", lambda path, segments: [1, 2, 3, 4])
+    split = {"video": [1, 3], "photo": [2, 4]}
+    orc, seen = _orc_for_run(tmp_path, split, photo_profile="zimage_turbo")
+    orc._run_body()
+    # множество, по которому строится генерация, равно списку фото из распределения
+    assert seen == [set(split["photo"])]
+    assert orc._photo_nums == set(split["photo"])

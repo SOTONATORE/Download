@@ -1381,6 +1381,12 @@ class Orchestrator:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
             self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
+            # STEP 7, блок B2: номера фото берём из распределения сразу, до _generate (build_prompts читает их там)
+            self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
+            if not getattr(self, "_video_queue", None):
+                self._video_queue = deque()  # очередь видео: пустая до _work
+            if not getattr(self, "_photo_queue", None):
+                self._photo_queue = deque()  # очередь фото: пустая до _work
             if self.limit_clips > 0:
                 missing = missing[: self.limit_clips]
                 log.info("Пробный прогон: берём первые %d номеров.", len(missing))
