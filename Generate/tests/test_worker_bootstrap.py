@@ -279,6 +279,8 @@ def test_setup_readiness_timeout_exits_nonzero_in_russian_and_no_flag(tmp_path):
     quick.write_text(SETUP.read_text(encoding="utf-8").replace(
         "COMFY_TIMEOUT_SEC=180", "COMFY_TIMEOUT_SEC=0", 1), encoding="utf-8")
     env = _setup_env(tmp_path, bin_dir, comfy)
+    # REPO_DIR: копия setup.sh лежит в tmp_path, поэтому путь к папке Generate задаём явно
+    env["REPO_DIR"] = str(Path(__file__).resolve().parents[1])
     proc = subprocess.run(["/bin/bash", str(quick)], env=env, capture_output=True, text=True,
                           timeout=120, cwd=str(tmp_path))
     assert proc.returncode != 0
@@ -401,7 +403,8 @@ with open(os.path.join(opts["dir"], name), "wb") as fh:
 mark("end")
 """)
     _write_exec(bin_dir / "curl", "#!/bin/sh\nexit 0\n")
-    _write_exec(bin_dir / "python3", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка
+    # python3: вызовы weights_plan.py идут в настоящий интерпретатор, остальные сразу завершаются с 0
+    _write_exec(bin_dir / "python3", f"#!/bin/sh\ncase \"$*\" in *weights_plan.py*) exec \"{_REAL_PY}\" \"$@\" ;; esac\nexit 0\n")  # сервер воркера-заглушка
     return bin_dir, times_log
 
 
@@ -446,7 +449,8 @@ esac
 printf '0123456789abcdef' > "$out"
 exit 0
 """)
-    _write_exec(bin_dir / "python3", "#!/bin/sh\nexit 0\n")  # сервер воркера-заглушка
+    # python3: вызовы weights_plan.py идут в настоящий интерпретатор, остальные сразу завершаются с 0
+    _write_exec(bin_dir / "python3", f"#!/bin/sh\ncase \"$*\" in *weights_plan.py*) exec \"{_REAL_PY}\" \"$@\" ;; esac\nexit 0\n")  # сервер воркера-заглушка
     # PATH: заглушки, затем все утилиты системы, кроме aria2c
     tools = tmp_path / "tools"
     tools.mkdir()
