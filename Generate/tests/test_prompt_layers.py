@@ -14,7 +14,8 @@ LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
 # длина базы изменена правилом «not X, but Y» в системной инструкции видео (шаг: противопоставление); прежнее значение 16168.
 BASELINE_BYTES = 16340
-BASELINE_SHA256 = "bece7c1d709ffee13cb921a43b216a68a778754fbc1cdaea38323a94c9b40107"
+# хеш базы изменён вместе с длиной (правило «not X, but Y» в системной инструкции видео); прежнее значение bece7c1d709f…4c9b40107.
+BASELINE_SHA256 = "154078120fdb357cba51b04102732d7b29037b5a177182013e73ee7ede0f3dfa"
 
 
 @pytest.fixture
