@@ -18,7 +18,7 @@ Write one paragraph, with no lists. Make it detailed enough to specify compositi
 
 # 3. Composition
 
-Show the subject named in the segment text in a historically plausible late Ottoman setting (1900 to 1922), in 16:9 framing, with one main subject lit by natural light. Keep the subject, the number of subjects, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
+Show the subject named in the segment text in a historically plausible late Ottoman setting (1900 to 1922), with one main subject lit by natural light. Keep the subject, the number of subjects, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
 
 # 4. Style
 
@@ -26,7 +26,7 @@ Photographic realism with an archival look and muted colours. No cartoon or pain
 
 # 5. Avoid
 
-No text, letters, numbers, logos or signs. No maps, documents or flags anywhere in the frame. No paper or papers either. No close-up faces unless the segment text names a person. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions.
+No text, letters, numbers, logos or signs. No maps, documents or flags anywhere in the frame. No paper or papers either. No close-up faces unless the segment text names a person. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions. No aspect ratio, widescreen or framing terms, and no blank sheets or sheets of paper.
 
 # 6. Output
 

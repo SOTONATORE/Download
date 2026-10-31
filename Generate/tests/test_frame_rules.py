@@ -24,6 +24,7 @@ POSITIVE = [
     "A spreadsheet with budget figures on a desk.",
     "A stack of papers lies on the desk.",
     "A letter lies on the table.",
+    "A blank sheet lies on the table.",
 ]
 
 # Тексты без запрещённых типов: правило не должно сработать.

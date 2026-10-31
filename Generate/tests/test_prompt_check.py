@@ -166,3 +166,40 @@ def test_camera_motion_found(text):
 ])
 def test_camera_motion_not_found(text):
     assert find_camera_motion(text) == []
+
+
+# ---------------------------------------------------------------- соотношения сторон и бумажные листы
+
+@pytest.mark.parametrize("text", [
+    "The room is shown in 16:9.",
+    "A widescreen view of the hall.",
+])
+def test_format_terms_are_forbidden(text):
+    problems = find_problems(text)
+    assert len(problems) == 1
+    assert "формат кадра" in problems[0]
+
+
+def test_blank_sheet_is_forbidden():
+    problems = find_problems("A blank sheet lies on the table.")
+    assert len(problems) == 1
+    assert "blank sheet" in problems[0]
+
+
+def test_sheet_of_paper_is_forbidden():
+    # фраза даёт одно сообщение; существующая основа paper даёт второе (сочетание не заменяет основу)
+    problems = find_problems("Writing on a sheet of paper in the study.")
+    assert len(problems) == 2
+    assert any("sheet of paper" in p for p in problems)
+
+
+def test_sheet_of_parchment_gives_phrase_and_stem_problems():
+    # фраза «sheet of parchment» и основа parchment: два разных сообщения, повтор основы схлопывается
+    problems = find_problems("Old parchment on a sheet of parchment.")
+    assert len(problems) == 2
+    assert any("sheet of parchment" in p for p in problems)
+    assert any("parchment" in p and "sheet" not in p for p in problems)
+
+
+def test_sheet_of_ice_is_not_forbidden():
+    assert find_problems("A sheet of ice covers the lake.") == []

@@ -8,9 +8,9 @@
 import re
 
 try:  # пакетный и «плоский» импорт (как в gemini_prompts.py)
-    from .prompt_check import FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative
+    from .prompt_check import FORBIDDEN_IMAGE_PHRASES_EN, FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative
 except ImportError:  # pragma: no cover
-    from prompt_check import FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative  # type: ignore
+    from prompt_check import FORBIDDEN_IMAGE_PHRASES_EN, FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative  # type: ignore
 
 # Совпадение только с начала слова (\b перед основой), без учёта регистра, с любым окончанием.
 # prompt_check.py не содержит готового построителя регулярного выражения для всего списка,
@@ -34,9 +34,17 @@ REPHRASE_RULE_EN = (
 )
 
 
+# Фразы бумажных листов (blank sheet, sheet of paper, sheet of parchment): только точные сочетания, без учёта регистра.
+_PHRASE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in FORBIDDEN_IMAGE_PHRASES_EN) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def needs_rephrase(segment_text: str) -> bool:
-    """True, если в тексте сегмента есть слово запрещённого типа кадра."""
-    return bool(FORBIDDEN_FRAME_RE.search(segment_text or ""))
+    """True, если в тексте сегмента есть слово или фраза запрещённого типа кадра."""
+    text = segment_text or ""
+    return bool(FORBIDDEN_FRAME_RE.search(text)) or bool(_PHRASE_RE.search(text))
 
 
 def rephrase_note(segment_text: str) -> str:

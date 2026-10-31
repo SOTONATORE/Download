@@ -52,6 +52,24 @@ FORBIDDEN_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# бумажные листы: только точные сочетания, слово sheet само по себе разрешено.
+FORBIDDEN_IMAGE_PHRASES_EN = (
+    "blank sheet",
+    "sheet of paper",
+    "sheet of parchment",
+)
+# Точное сочетание целиком, без учёта регистра.
+FORBIDDEN_IMAGE_PHRASE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in FORBIDDEN_IMAGE_PHRASES_EN) + r")\b",
+    re.IGNORECASE,
+)
+
+# форматы кадра и соотношения сторон.
+FORBIDDEN_FORMAT_PATTERNS_EN = re.compile(
+    r"\b\d{1,2}:\d{1,2}\b|\bwidescreen\b|\baspect ratio\b|\bletterbox\b|\bpillarbox\b|\bframing\b",
+    re.IGNORECASE,
+)
+
 # Квадратные метки вида [CHAR_1], [OBJ_2]: в финальном промпте их быть не должно.
 LEFTOVER_MARKERS_RE = re.compile(r"\[[A-Z_]+\d*\]")
 
@@ -65,6 +83,10 @@ def find_problems(prompt: str) -> list:
     problems = []
     for m in FORBIDDEN_IMAGE_RE.finditer(text):
         problems.append(f"запрещённый тип кадра: «{m.group(0)}»")
+    for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text):
+        problems.append(f"запрещённое сочетание: «{m.group(0)}»")
+    for m in FORBIDDEN_FORMAT_PATTERNS_EN.finditer(text):
+        problems.append(f"запрещённый формат кадра: «{m.group(0)}»")
     for m in LEFTOVER_MARKERS_RE.finditer(text):
         problems.append(f"незаполненный маркер: «{m.group(0)}»")
     # одинаковые сообщения (например, «map» дважды) не повторяем
