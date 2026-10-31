@@ -2,7 +2,8 @@
 name: Verify Gemini
 
 # Бесплатная изолированная проверка генерации промптов Gemini.
-# Видеокарты не арендуются, ключ Vast.ai не нужен.
+# Тот же путь подготовки промптов, что у generate.yml (cli.prepare_prompts_only -> build_prompts),
+# но без аренды видеокарт, без Vast.ai и без релиза. Ключ Vast.ai не нужен.
 on:
   workflow_dispatch:
     inputs:
@@ -14,13 +15,31 @@ on:
         description: "Путь к файлу missing"
         type: string
         default: "missing.txt"
-      model_profile:
-        description: "Профиль модели"
-        type: string
+      video_profile:
+        description: "Видео-модель: ltx25 = видео проверяется; none = видео не проверяется. Варианты сверяются с профилями без поля type (видео)"
+        type: choice
+        options:
+          - "ltx25"
+          - "none"
         default: "ltx25"
+      photo_profile:
+        description: "Фото-модель: zimage_turbo = фото проверяется; none = фото не проверяется. Варианты сверяются с профилями type: image"
+        type: choice
+        options:
+          - "zimage_turbo"
+          - "none"
+        default: "none"
+      video_percent:
+        description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
+        type: number
+        default: 100
+      intro_seconds:
+        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
+        type: number
+        default: 10
       limit_clips:
         # GitHub Actions не поддерживает type: integer, поэтому number
-        description: "Лимит сегментов для проверки (0 = все)"
+        description: "0 = все клипы из missing; N > 0 = первые N клипов по возрастанию номера"
         type: number
         default: 3
       preset:
@@ -61,23 +80,31 @@ jobs:
         run: pip install -r Generate/requirements-dev.txt
 
       # Входы передаются через env, а не подстановкой в текст скрипта (SPEC 0.2).
+      # Имена env совпадают с generate.yml; значения выбора профилей выводятся так же, как там.
       - name: Проверка генерации промптов Gemini
         env:
           GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
-          MODEL_PROFILE: ${{ inputs.model_profile }}
+          # выбор моделей (none = модель выключена), как в generate.yml
+          VIDEO_MODEL: ${{ inputs.video_profile }}
+          PHOTO_MODEL: ${{ inputs.photo_profile }}
+          # профиль видео: при none запасной ltx25 (как в generate.yml); профиль фото: пусто при none
+          VIDEO_PROFILE: ${{ inputs.video_profile != 'none' && inputs.video_profile || 'ltx25' }}
+          PHOTO_PROFILE: ${{ inputs.photo_profile != 'none' && inputs.photo_profile || '' }}
+          VIDEO_PERCENT: ${{ inputs.video_percent }}
+          INTRO_SECONDS: ${{ inputs.intro_seconds }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           PRESET: ${{ inputs.preset }}
           # Журнал как у generate.yml (SPEC 10): файл <каталог артефакта>/run/debug.log на уровне GEN_LOG_LEVEL.
-          # Каталог относительный, рядом с prompts.json: тот же артефакт, корень путей prompts.json не меняется.
+          # Все файлы проверки лежат в одном каталоге артефакта.
           ART_DIR: verify-artifact
+          PROMPTS_PATH: verify-artifact/prompts.json
           GEN_LOG_LEVEL: "DEBUG"
         run: |
           python - <<'PY'
+          import argparse
           import importlib
-          import inspect
-          import json
           import logging
           import os
           import sys
@@ -139,213 +166,68 @@ jobs:
           # HTTP-библиотеки на DEBUG оставляем на WARNING, как в cli.py
           for noisy in ("httpx", "httpcore", "urllib3"):
               logging.getLogger(noisy).setLevel(logging.WARNING)
+          if art_dir:
+              os.makedirs(art_dir, exist_ok=True)
           handlers, log_note = setup_logging(log_level, art_dir)
           if log_note:
               say(log_note)
 
-          # generate_and_store находится в Generate/core/gemini_orchestrator.py;
-          # остальные символы ищем по нескольким модулям.
-          generate_and_store = find_symbol(
-              "generate_and_store", ("gemini_orchestrator", "gemini_prompts"))
-          RealTransport = find_symbol(
-              "RealTransport", ("gemini_client", "gemini_transport",
-                                "gemini_orchestrator", "gemini_prompts"))
-          PromptConfig = find_symbol(
-              "PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
-          TimingParams = find_symbol(
-              "TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
-          parse_srt = find_symbol("parse_srt", ("srt_parser",))
-          parse_missing = find_symbol(
-              "parse_missing", ("missing", "srt_parser", "missing_parser"))
-          read_preset = find_symbol("read_preset", ("gemini_prompts",))
-          load_config = find_symbol("load_config", ("config_loader",))
+          video_model = os.environ["VIDEO_MODEL"]
+          photo_model = os.environ["PHOTO_MODEL"]
+          if video_model == "none" and photo_model == "none":
+              fail("видео и фото выключены: проверять нечего")
+          for name in ("SRT_PATH", "MISSING_PATH"):
+              path = os.environ[name]
+              if not os.path.isfile(path):
+                  fail(f"файл не найден: {path}")
 
-          for label, obj in (("generate_and_store", generate_and_store),
-                             ("RealTransport", RealTransport),
-                             ("PromptConfig", PromptConfig),
-                             ("TimingParams", TimingParams),
-                             ("parse_srt", parse_srt)):
-              if obj is None:
-                  fail(f"в проекте не найден символ {label}")
-
-          srt_path = os.environ["SRT_PATH"]
-          missing_path = os.environ["MISSING_PATH"]
-          profile = os.environ["MODEL_PROFILE"]
           try:
               limit = int(float(os.environ.get("LIMIT_CLIPS") or 0))
           except ValueError:
               fail("limit_clips должен быть числом")
-          out_path = "prompts.json"
 
-          if not os.path.isfile(srt_path):
-              fail(f"файл SRT не найден: {srt_path}")
-          if not os.path.isfile(missing_path):
-              fail(f"файл missing не найден: {missing_path}")
+          # Тот же путь, что у cli run: профили, пресет, распределение, промпты (без Vast и релиза).
+          from Generate.cli import prepare_prompts_only
 
-          segments = parse_srt(srt_path)
-          if parse_missing is not None:
-              # Сигнатура: parse_missing(missing_path, segments)
-              missing = list(parse_missing(missing_path, segments))
-          else:
-              with open(missing_path, encoding="utf-8") as fh:
-                  missing = [int(x) for x in fh.read().split() if x.strip().isdigit()]
-          say(f"Загружено сегментов SRT: {len(segments)}")
-          say(f"Номеров в missing: {len(missing)}")
-
-          if limit > 0:
-              missing = missing[:limit]
-              say(f"Применён лимит: проверяем первые {len(missing)} клипов")
-          if not missing:
-              fail("нет клипов для проверки")
-
-          # Аргументы по реальной сигнатуре generate_and_store:
-          # (segments, wanted_nums, cfg, inner_transport, prompts_path, *, profile, timing)
-          style_file = f"Generate/model_profiles/models/{profile}/prompts/style.md"
-          # значение пресета как в cli.py: пусто = «none», иначе передаётся без изменений
-          preset = os.environ.get("PRESET") or "none"
-          # пресет проверяется до первого запроса к Gemini, как при полной генерации (cli.py)
-          if preset != "none":
-              if read_preset is None:
-                  fail("в проекте не найден символ read_preset")
-              try:
-                  read_preset(preset)
-              except Exception as exc:  # noqa: BLE001
-                  fail("пресет не прошёл проверку: " + mask(exc))
-          # размер батча из конфигурации по умолчанию (как load_config(path, overrides) в cli.py, путь не задан)
-          if load_config is None:
-              fail("в проекте не найден символ load_config")
+          ns = argparse.Namespace(
+              srt=os.environ["SRT_PATH"],
+              missing=os.environ["MISSING_PATH"],
+              prompts_path=os.environ["PROMPTS_PATH"],
+              artifact_dir=art_dir,
+              video_model=video_model,
+              video_profile=os.environ["VIDEO_PROFILE"],
+              photo_profile=os.environ.get("PHOTO_PROFILE") or None,
+              video_percent=os.environ.get("VIDEO_PERCENT") or "100",
+              intro_seconds=os.environ.get("INTRO_SECONDS") or "10",
+              limit_clips=limit,
+              preset=os.environ.get("PRESET") or "none",
+          )
           try:
-              batch_size = int(load_config().gemini_batch_size)
+              prep = prepare_prompts_only(ns)
           except Exception as exc:  # noqa: BLE001
-              fail("не удалось прочитать конфигурацию: " + type(exc).__name__ + ": " + mask(exc))
-          try:
-              cfg = PromptConfig(style_file=style_file, batch_size=batch_size, preset=preset)
-          except TypeError as exc:
-              fail("не удалось создать PromptConfig: " + mask(exc))
+              fail("подготовка промптов не удалась: " + type(exc).__name__ + ": " + mask(exc))
 
-          try:
-              timing = TimingParams(
-                  fps=24,
-                  frame_rule={"kind": "8k+1"},
-                  clip_min_sec=2.5,
-                  clip_max_sec=5.0,
-                  gpu_max_sec=10.0,
-                  tail_pad_sec=0.5,
-              )
-          except TypeError as exc:
-              fail("не удалось создать TimingParams: " + mask(exc))
+          with open(os.path.join(art_dir, "report.md"), "w", encoding="utf-8") as fh:
+              fh.write(mask(prep.report_md))
+          summary(prep.report_md)
+          for line in prep.report_md.splitlines():
+              say(line)
 
-          candidates = {
-              "segments": segments,
-              "wanted_nums": missing,
-              "cfg": cfg,
-              "inner_transport": RealTransport(),
-              "prompts_path": out_path,
-              "profile": profile,
-              "timing": timing,
-          }
-
-          params = inspect.signature(generate_and_store).parameters
-          kwargs = {k: v for k, v in candidates.items() if k in params}
-          say("Параметры вызова generate_and_store: " + ", ".join(sorted(kwargs)))
-          required = [n for n, p in params.items()
-                      if p.default is inspect.Parameter.empty
-                      and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
-                      and n not in kwargs]
-          if required:
-              fail("не удалось подобрать обязательные параметры: " + ", ".join(required))
-
-          try:
-              generate_and_store(**kwargs)
-          except Exception as exc:  # noqa: BLE001
-              fail("генерация не удалась: " + type(exc).__name__ + ": " + mask(exc))
-
-          if not os.path.isfile(out_path):
-              fail("файл prompts.json не создан")
-          with open(out_path, encoding="utf-8") as fh:
-              data = json.load(fh)
-
-          # Допускаем список, {"clips": [...]} или словарь по номерам
-          model_used = "не указана"
-          if isinstance(data, dict):
-              model_used = str(data.get("model") or data.get("model_name") or model_used)
-              body = data.get("clips", data.get("prompts", data))
-          else:
-              body = data
-          if isinstance(body, dict):
-              items = []
-              for key, val in body.items():
-                  if isinstance(val, dict):
-                      items.append(dict(val, number=val.get("number", key)))
-          elif isinstance(body, list):
-              items = [x for x in body if isinstance(x, dict)]
-          else:
-              items = []
-
-          by_number = {}
-          for it in items:
-              num = it.get("number", it.get("index", it.get("id")))
-              try:
-                  by_number[int(num)] = it
-              except (TypeError, ValueError):
-                  continue
-              if model_used == "не указана" and it.get("model"):
-                  model_used = str(it["model"])
-
-          problems = []
-          rows = []
-          for num in missing:
-              it = by_number.get(num)
-              if it is None:
-                  problems.append(f"клип {num}: нет в prompts.json")
-                  continue
-              prompt = it.get("prompt")
-              frames = it.get("num_frames")
-              ok_prompt = isinstance(prompt, str) and prompt.strip() != ""
-              ok_frames = (isinstance(frames, int) and not isinstance(frames, bool)
-                           and frames > 0)
-              if not ok_prompt:
-                  problems.append(f"клип {num}: пустой или отсутствует prompt")
-              if not ok_frames:
-                  problems.append(f"клип {num}: num_frames не целое число > 0 ({frames!r})")
-              review = "да" if it.get("needs_review") else "нет"
-              rows.append((num, len(prompt) if ok_prompt else 0,
-                           frames, review))
-
-          summary("## Проверка Gemini")
-          summary()
-          summary(f"- Запрошено клипов: {len(missing)}")
-          summary(f"- Получено промптов: {len(rows)}")
-          summary(f"- Модель: {model_used}")
-          summary(f"- Профиль: {profile}")
-          summary(f"- Итог: {'ОШИБКИ' if problems else 'всё в порядке'}")
-          summary()
-          summary("| Клип | Длина промпта | num_frames | Нужна проверка |")
-          summary("|---|---|---|---|")
-          for num, plen, frames, review in rows:
-              summary(f"| {num} | {plen} | {frames} | {review} |")
-          if problems:
-              summary()
-              summary("### Проблемы")
-              for p in problems:
-                  summary(f"- {p}")
-
-          for num, plen, frames, review in rows:
-              say(f"Клип {num}: промпт {plen} симв., кадров {frames}, проверка: {review}")
-          if problems:
-              for p in problems:
+          if prep.problems or prep.failures:
+              for p in prep.problems:
                   say("ПРОБЛЕМА: " + p)
               sys.exit(1)
-          say(f"Проверка пройдена: промптов {len(rows)}")
+          say(f"Проверка пройдена: промптов {len(prep.missing)}")
           PY
 
-      - name: Загрузка prompts.json и журнала
+      - name: Загрузка prompts.json, distribution.json, отчёта и журнала
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: verify-gemini-files
-          # run/debug.log — журнал проверки (ART_DIR шага выше); лежит в той же папке артефакта, что и файлы выше.
+          # все файлы проверки лежат в каталоге verify-artifact; run/debug.log — журнал проверки
           path: |
-            prompts.json
+            verify-artifact/prompts.json
+            verify-artifact/distribution.json
+            verify-artifact/report.md
             verify-artifact/run/debug.log
-          if-no-files-found: warn
