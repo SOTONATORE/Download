@@ -105,6 +105,7 @@ jobs:
           python - <<'PY'
           import argparse
           import importlib
+          import json
           import logging
           import os
           import sys
@@ -207,10 +208,35 @@ jobs:
           except Exception as exc:  # noqa: BLE001
               fail("подготовка промптов не удалась: " + type(exc).__name__ + ": " + mask(exc))
 
+          # Распределение по всему хронометражу берётся из distribution.json (записан до лимита), а не из выборки.
+          from Generate.core.segment_split import WINDOW_SECONDS
+
+          dist_file = os.path.join(art_dir, "distribution.json")
+          if not os.path.isfile(dist_file):
+              fail("распределение не найдено: " + dist_file)
+          with open(dist_file, encoding="utf-8") as fh:
+              dist_segments = json.load(fh)["segments"]
+          split_video = sum(1 for r in dist_segments if r["mode"] == "video")
+          split_photo = len(dist_segments) - split_video
+          per_window = {}
+          for r in dist_segments:
+              counts = per_window.setdefault(int(r["start"] // WINDOW_SECONDS), [0, 0])
+              counts[0 if r["mode"] == "video" else 1] += 1
+          zero_video = sum(1 for n_video, _ in per_window.values() if n_video == 0)
+          zero_photo = sum(1 for _, n_photo in per_window.values() if n_photo == 0)
+          extra = [
+              f"- Распределение по всему хронометражу: видео {split_video}, фото {split_photo} сегментов",
+              f"- Проверено в выборке: видео {len(prep.video_nums)}, фото {len(prep.photo_nums)} сегментов",
+              f"- Окон {WINDOW_SECONDS} с без видео: {zero_video}, окон без фото: {zero_photo}",
+          ]
+          lines = prep.report_md.splitlines()
+          at = next(i for i, text in enumerate(lines) if text.startswith("- Видео-сегментов:")) + 1
+          report_md = "\n".join(lines[:at] + extra + lines[at:]) + "\n"
+
           with open(os.path.join(art_dir, "report.md"), "w", encoding="utf-8") as fh:
-              fh.write(mask(prep.report_md))
-          summary(prep.report_md)
-          for line in prep.report_md.splitlines():
+              fh.write(mask(report_md))
+          summary(report_md)
+          for line in report_md.splitlines():
               say(line)
 
           if prep.problems or prep.failures:
