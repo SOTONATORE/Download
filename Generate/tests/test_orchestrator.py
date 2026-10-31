@@ -2700,3 +2700,35 @@ def test_split_is_stored_and_dispatch_unchanged(tmp_path, monkeypatch):
     assert rig.orc._split["photo"] == [1, 2]
     assert summary.exit_code == 0
     assert rig.worker.acked == [1, 2]
+
+
+# --- фото (STEP 7, блок B2): чистые функции и выбор профиля по роли ------------------------------
+# Переключение карты и маршрут POST /profile фейковый воркер не отвечает, поэтому проверяются чистые функции.
+def test_switch_target_idle_card_with_empty_photo_queue_asks_video():
+    assert orch._switch_target("photo", 3, 0, True) == "video"
+
+
+def test_switch_target_idle_video_card_asks_photo():
+    assert orch._switch_target("video", 0, 2, True) == "photo"
+
+
+def test_switch_target_both_queues_empty_means_no_switch():
+    assert orch._switch_target("photo", 0, 0, True) is None
+
+
+def test_switch_target_without_photo_profile_never_switches():
+    assert orch._switch_target("video", 0, 5, False) is None
+    assert orch._switch_target("photo", 5, 0, False) is None
+
+
+def test_photo_entry_with_num_frames_one_is_ready():
+    assert orch.PHOTO_NUM_FRAMES == 1
+    assert orch._prompt_ready({"status": "ready", "prompt": "кошка", "num_frames": 1}) is True
+
+
+def test_photo_card_uses_photo_profile_in_rent_env():
+    o = orch.Orchestrator.__new__(orch.Orchestrator)   # без конструктора: нужны только поля выбора профиля
+    o.profile = "ltx25"
+    o.photo_profile = "zimage_turbo"
+    assert o._profile_for_role("photo") == "zimage_turbo"
+    assert o._profile_for_role("video") == "ltx25"

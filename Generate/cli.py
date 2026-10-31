@@ -261,7 +261,10 @@ def _load_cfg(path: Optional[str], overrides: Optional[dict] = None) -> tuple[Op
         return None, EXIT_INPUT
 
 
-def _frame_rule_for(profile: str) -> dict:
+def _frame_rule_for(profile: str) -> Optional[dict]:
+    # профиль типа image (фото): правила кадров нет и запасной профиль не подставляется (STEP 7, блок B2)
+    if profile_exists(profile) and load_profile_type(profile) == "image":
+        return None
     # правило кадров берётся из profile.yaml выбранного профиля; если профиля нет, из запасного
     # (прежнее поведение: тот же 8k+1)
     src = profile if profile_exists(profile) else FALLBACK_STYLE_PROFILE
@@ -269,13 +272,42 @@ def _frame_rule_for(profile: str) -> dict:
 
 
 def _build_timing(cfg: Config, profile: str):
+    frame_rule = _frame_rule_for(profile)
+    if frame_rule is None:
+        return None  # профиль фото: тайминг не строится (STEP 7, блок B2)
     cls = _find_symbol("TimingParams", ("timing", "gemini_prompts", "gemini_orchestrator"))
     # gpu_max_sec в конфиге может быть null: тогда берётся из профиля модели
     gpu_max = (cfg.gpu_max_sec if cfg.gpu_max_sec is not None
                else load_profile_number(profile, "gpu_max_sec"))
-    return cls(fps=cfg.fps, frame_rule=_frame_rule_for(profile),
+    return cls(fps=cfg.fps, frame_rule=frame_rule,
                clip_min_sec=cfg.clip_min_sec, clip_max_sec=cfg.clip_max_sec,
                gpu_max_sec=gpu_max, tail_pad_sec=cfg.tail_pad_sec)
+
+
+def _check_photo_profile(photo_profile: str) -> Optional[int]:
+    """Профиль фото (--photo-profile): папка с profile.yaml и тип image. Иначе — ошибка входа (STEP 7, блок B2).
+
+    Возвращает None, если всё на месте; иначе печатает сообщение на русском и возвращает EXIT_INPUT.
+    """
+    try:
+        folder = profile_dir(photo_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if not folder.is_dir() or not (folder / "profile.yaml").is_file():
+        _err(f"Ошибка входных данных: профиль фото «{photo_profile}» не найден: нет папки "
+             f"models/{photo_profile}/ или файла profile.yaml.")
+        return EXIT_INPUT
+    try:
+        ptype = load_profile_type(photo_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if ptype != "image":
+        _err(f"Ошибка входных данных: профиль фото «{photo_profile}» имеет тип «{ptype}»; "
+             f"для фото нужен профиль с type: image.")
+        return EXIT_INPUT
+    return None
 
 
 def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
@@ -506,10 +538,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     input_code = _check_profile_and_preset(cfg.model_profile, cfg.preset)
     if input_code is not None:
         return input_code
+    # видеопрофиль должен иметь тип video: фото задаются отдельно через --photo-profile
+    try:
+        video_type = load_profile_type(cfg.model_profile)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    if video_type != "video":
+        _err(f"Ошибка входных данных: видеопрофиль «{cfg.model_profile}» имеет тип «{video_type}»; "
+             f"фото задаются через --photo-profile.")
+        return EXIT_INPUT
+    photo_profile = getattr(args, "photo_profile", None) or None
+    if photo_profile is not None:
+        input_code = _check_photo_profile(photo_profile)
+        if input_code is not None:
+            return input_code
 
     try:
         timing = _build_timing(cfg, cfg.model_profile)
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
+        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+                            if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         transport = None if _pilot_mode(args) else _make_transport()
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
@@ -556,6 +605,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             transport,
             args.prompts_path,
             max_cards=cfg.max_cards,
+            photo_profile=photo_profile,
+            photo_prompt_cfg=photo_prompt_cfg,
             budget_limit_usd=cfg.budget_limit_usd,
             limit_clips=cfg.limit_clips,
             repo=args.repo,
@@ -1113,6 +1164,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="профиль модели; по умолчанию из конфига")
     run_p.add_argument("--preset", default="none",
                        help="пресет профиля; none = без пресета (файл пресета проверяется до аренды)")
+    run_p.add_argument("--photo-profile", default=None,
+                       help="профиль фото (type: image); по умолчанию фото не делаются")
     run_p.add_argument("--repo", default="",
                        help="репозиторий owner/name (передаётся явно)")
     run_p.add_argument("--run-id", default="",

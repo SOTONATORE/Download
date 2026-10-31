@@ -1270,3 +1270,23 @@ def test_preset_reaches_prompt_config(capsys, run_env, missing_file, monkeypatch
 def test_build_prompt_config_carries_preset_field():
     cfg = cli._build_prompt_config("ltx25", 20, "none")
     assert cfg.preset == "none" and cfg.batch_size == 20
+
+
+# --- фото (STEP 7, блок B2): правило кадров и проверка --photo-profile ---------------------------
+def test_frame_rule_for_image_profile_is_none():
+    assert cli._frame_rule_for("zimage_turbo") is None
+
+
+def test_frame_rule_for_video_profile_keeps_ltx_rule():
+    assert cli._frame_rule_for("ltx25") == {"kind": "8k+1"}
+
+
+def test_photo_profile_validator_rejects_video_type(tmp_path, monkeypatch, capsys):
+    folder = tmp_path / "vidonly"
+    folder.mkdir()
+    (folder / "profile.yaml").write_text("type: video\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "profile_dir", lambda name: folder)
+    monkeypatch.setattr(cli, "load_profile_type", lambda name: "video")
+    assert cli._check_photo_profile("vidonly") == cli.EXIT_INPUT
+    out = capsys.readouterr()
+    assert "image" in out.out + out.err
