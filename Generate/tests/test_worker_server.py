@@ -256,7 +256,13 @@ def test_health(make_app):
     app, _ = make_app()
     with client_for(app) as c:
         body = c.get("/health").json()
-    assert body == {"ok": True, "gpu": "FakeGPU", "vram_free": 12345, "busy": False}
+    # сравнение по полям, не по всему словарю: новые поля (profile, switch) не ломают тест
+    assert body["ok"] is True
+    assert body["gpu"] == "FakeGPU"
+    assert body["vram_free"] == 12345
+    assert body["busy"] is False
+    assert body["profile"] == "ltx25"
+    assert body["switch"] == "idle"
 
 
 # --- Dead-Man Switch ---
@@ -423,9 +429,21 @@ def test_health_is_false_until_ready_flag_exists(make_app, tmp_path):
     flag = tmp_path / "worker_ready"
     app, _ = make_app(ready_flag=str(flag))
     with client_for(app) as c:
-        assert c.get("/health").json() == {"ok": False, "gpu": "FakeGPU", "vram_free": 12345, "busy": False}
+        body = c.get("/health").json()
+        assert body["ok"] is False
+        assert body["gpu"] == "FakeGPU"
+        assert body["vram_free"] == 12345
+        assert body["busy"] is False
+        assert body["profile"] == "ltx25"
+        assert body["switch"] == "idle"
         flag.write_text("", encoding="utf-8")  # setup.sh создаёт файл после готовности ComfyUI
-        assert c.get("/health").json() == {"ok": True, "gpu": "FakeGPU", "vram_free": 12345, "busy": False}
+        body = c.get("/health").json()
+        assert body["ok"] is True
+        assert body["gpu"] == "FakeGPU"
+        assert body["vram_free"] == 12345
+        assert body["busy"] is False
+        assert body["profile"] == "ltx25"
+        assert body["switch"] == "idle"
 
 
 def test_auth_still_required_before_ready(make_app, tmp_path):
@@ -476,7 +494,9 @@ SETUP_LOG_LINES = [
 
 def test_setup_log_lines_are_parsed_and_reach_logs_unchanged(make_app, tmp_path):
     """B3: строки, которые печатает setup.sh, разбирает weights_log и отдаются в GET /logs без изменений."""
-    text = SETUP_SH.read_text(encoding="utf-8")
+    # строки загрузки вынесены в weights_download.sh (шаг W2)
+    text = (SETUP_SH.read_text(encoding="utf-8") + "\n"
+            + (Path(__file__).resolve().parents[1] / "worker" / "weights_download.sh").read_text(encoding="utf-8"))
     for fragment in ("Начинаю загрузку: ", "Файл успешно загружен: ", "Файл уже существует, пропускаю: ",
                      "ОШИБКА: не удалось загрузить файл ", "Все файлы модели LTX-2.5 на месте.",
                      "(код ", " байт)"):

@@ -85,6 +85,13 @@ def test_switch_allowed_when_idle():
     assert srv.switch_refusal(FakeManager()) is None
 
 
+def test_switch_states_include_refused_and_exit_code_3():
+    """Отказ до изменений (код 3) — отдельное состояние: карта остаётся в работе."""
+    assert "refused" in srv.SWITCH_STATES
+    assert "failed" in srv.SWITCH_STATES
+    assert srv.SWITCH_EXIT_REFUSED == 3
+
+
 def test_begin_switch_is_atomic_and_submit_refused_during_switch():
     manager = srv.TaskManager(comfy=None)
     assert manager.begin_switch() is None
@@ -106,6 +113,54 @@ def test_switch_script_text_has_required_env_check_and_exit_2():
         assert name in text, name
     assert "for var_name in" in text
     assert "exit 2" in text
+
+
+def test_switch_script_preflight_section_exists_and_precedes_removal():
+    """S1: раздел проверок есть, и первое удаление (rm -f) идёт после него."""
+    text = SWITCH.read_text(encoding="utf-8")
+    assert "preflight" in text
+    assert text.index("# --- S1 preflight") < text.index("rm -f")
+
+
+def test_switch_script_order_preflight_removal_download_comfy_start():
+    """Порядок по тексту: проверки, удаление, первый start_download, запуск ComfyUI."""
+    text = SWITCH.read_text(encoding="utf-8")
+    preflight = text.index("# --- S1 preflight")
+    removal = text.index("rm -f")
+    download = text.index('start_download "')
+    comfy_start = text.index('nohup "${COMFY_PYTHON}"')
+    assert preflight < removal < download < comfy_start
+
+
+def test_switch_script_exit_codes_0_1_3_exist():
+    text = SWITCH.read_text(encoding="utf-8")
+    for code in ("exit 0", "exit 1", "exit 3"):
+        assert code in text, code
+
+
+def test_switch_script_refusal_message_and_refuse_before_change():
+    text = SWITCH.read_text(encoding="utf-8")
+    assert "переключение отменено до изменений" in text
+    assert "refuse()" in text
+
+
+def test_switch_script_three_pass_download_loop_and_comfy_attempts():
+    """S3: три прохода загрузки с паузой; S4: три попытки запуска ComfyUI."""
+    text = SWITCH.read_text(encoding="utf-8")
+    assert "DL_PASS_MAX=3" in text
+    assert "DL_PASS=" in text
+    assert "DL_PASS_PAUSE_SEC" in text
+    assert "COMFY_START_ATTEMPTS_MAX=3" in text
+
+
+def test_switch_script_token_printed_only_in_authorization_header():
+    """Строки с HF_TOKEN, которые выводят текст (echo, printf, log), — только заголовок Authorization."""
+    text = SWITCH.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if "HF_TOKEN" not in line or line.lstrip().startswith("#"):
+            continue
+        if re.search(r"\b(echo|printf|log)\b", line):
+            assert "Authorization" in line, line
 
 
 # --- weights_download.sh: при загрузке не выполняется ни одна команда ---

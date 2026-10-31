@@ -126,7 +126,7 @@ def test_wait_execution_error():
 def test_wait_no_video_in_outputs():
     done = {"p3": {"status": {"status_str": "success", "completed": True}, "outputs": {}}}
     with make_client(lambda r: httpx.Response(200, json=done)) as c, \
-            pytest.raises(cc.ComfyExecutionError, match="видеофайл"):
+            pytest.raises(cc.ComfyExecutionError, match="файл результата не найден"):
         c.wait_for_completion("p3", timeout=5, poll_interval=0)
 
 

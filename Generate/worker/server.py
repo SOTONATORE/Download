@@ -68,7 +68,9 @@ MODEL_PROFILE_ENV = "MODEL_PROFILE"
 PROFILE_REQUIRED_FILES = ("profile.yaml", "workflow.json", "bindings.json")
 SWITCH_BUSY_TEXT = "Воркер занят задачей или есть непринятые клипы: переключение модели сейчас невозможно."
 SWITCH_RUNNING_TEXT = "Переключение модели уже выполняется."
-SWITCH_STATES = ("idle", "switching", "ready", "failed")
+SWITCH_STATES = ("idle", "switching", "ready", "failed", "refused")
+# Коды выхода switch_profile.sh: 3 — отказ до каких-либо изменений (карта продолжает работать), 1 — сбой после удаления
+SWITCH_EXIT_REFUSED = 3
 
 # Логи (SPEC 8.4, 10): уровень из GEN_LOG_LEVEL, буфер для GET /logs (без вытеснения строк, этап 9в)
 LOG_LEVEL_ENV = "GEN_LOG_LEVEL"
@@ -1019,7 +1021,8 @@ def _make_handler(app: "WorkerApp") -> type:
                 log.error("Проверка состояния ComfyUI не пройдена: %s.", type(exc).__name__)
             # до файла готовности ok всегда false: веса и ComfyUI ещё не проверены setup.sh (SPEC 8.1)
             # во время переключения профиля ok всегда false: карта не готова принимать клипы (шаг W4)
-            body = {"ok": bool(ok and app.is_ready() and app.switch_state != "switching"),
+            # во время переключения и после его сбоя ok всегда false (сбой: карта заменяется, шаг W3)
+            body = {"ok": bool(ok and app.is_ready() and app.switch_state not in ("switching", "failed")),
                     "gpu": gpu, "vram_free": vram_free,
                     "busy": app.manager.busy(),
                     "profile": app.profile_name, "switch": app.switch_state}
@@ -1081,6 +1084,8 @@ def _make_handler(app: "WorkerApp") -> type:
                 msg = str(exc) if isinstance(exc, ValueError) and not isinstance(
                     exc, (json.JSONDecodeError, UnicodeDecodeError)) else "Тело запроса — некорректный JSON."
                 return self._error(400, msg)
+            if app.switch_state == "failed":  # сбой переключения: карта больше не принимает клипы
+                return self._error(503, "Воркер не готов: переключение модели не удалось, карту нужно заменить.")
             try:
                 task_id = app.manager.submit(num, prompt, num_frames, seed)
             except BacklogFullError:
@@ -1223,7 +1228,7 @@ class WorkerApp:
         self.models_root = Path(models_root) if models_root else MODELS_ROOT_DEFAULT
         self.switch_script = Path(switch_script) if switch_script else SWITCH_SCRIPT_DEFAULT
         self.weights_plan_script = Path(weights_plan_script) if weights_plan_script else WEIGHTS_PLAN_DEFAULT
-        self.switch_state = "idle"     # idle, switching, ready, failed (SWITCH_STATES)
+        self.switch_state = "idle"     # idle, switching, ready, failed, refused (SWITCH_STATES)
         self.switch_reason = ""
         self.deadman = DeadManSwitch(idle_timeout_seconds,
                                      on_idle_timeout or self._default_shutdown,
@@ -1288,12 +1293,20 @@ class WorkerApp:
         """
         old_dir = self.profile_dir
         try:
-            info = self._read_profile_meta(new_dir)
-            workflow = _load_json_file(str(new_dir / "workflow.json"), "workflow")
-            bindings = _load_json_file(str(new_dir / "bindings.json"), "привязки")
-            rc = self._run_switch_script(old_dir, new_dir)
+            try:
+                info = self._read_profile_meta(new_dir)
+                workflow = _load_json_file(str(new_dir / "workflow.json"), "workflow")
+                bindings = _load_json_file(str(new_dir / "bindings.json"), "привязки")
+            except (SwitchFailed, ValueError, ComfyError) as exc:
+                # до запуска скрипта веса не тронуты: это отказ, карта продолжает работать
+                self._switch_refused(str(exc))
+                return
+            rc, script_line = self._run_switch_script(old_dir, new_dir)
+            if rc == SWITCH_EXIT_REFUSED:
+                self._switch_refused(script_line or "скрипт отказал в переключении.")
+                return
             if rc != 0:
-                raise SwitchFailed(f"скрипт переключения завершился с кодом {rc}.")
+                raise SwitchFailed(script_line or f"скрипт переключения завершился с кодом {rc}.")
             set_profile_type(info["type"])
             self.manager.end_switch(workflow, bindings)
             self.profile_name = name
@@ -1303,8 +1316,20 @@ class WorkerApp:
             self._switch_failed(str(exc))
         except Exception as exc:  # без подробностей: тип ошибки, не текст
             self._switch_failed(f"внутренняя ошибка переключения: {type(exc).__name__}.")
+        finally:
+            # «переключается» не должно остаться навсегда, даже если обработчик выше сам дал сбой
+            if self.switch_state == "switching":
+                self._switch_failed("переключение завершилось без результата.")
+
+    def _switch_refused(self, reason: str) -> None:
+        """Отказ до изменений: workflow, профиль и приём клипов прежние, карта остаётся в работе."""
+        self.manager.abort_switch()
+        self.switch_reason = mask_secrets(reason)
+        self.switch_state = "refused"
+        log.warning("Переключение профиля отклонено: %s", self.switch_reason)
 
     def _switch_failed(self, reason: str) -> None:
+        """Сбой после удаления весов: карта не готова, /task отказывает, orchestrator заменит карту."""
         self.manager.abort_switch()
         self.switch_reason = mask_secrets(reason)
         self.switch_state = "failed"
@@ -1347,14 +1372,17 @@ class WorkerApp:
         env.setdefault("WORKER_BOOTSTRAP_LOG", DEFAULT_BOOTSTRAP_LOG)
         return env
 
-    def _run_switch_script(self, old_dir: Path, new_dir: Path) -> int:
+    def _run_switch_script(self, old_dir: Path, new_dir: Path) -> Tuple[int, str]:
+        """Запуск switch_profile.sh: (код выхода, последняя строка «[switch]» — причина или пусто)."""
         proc = subprocess.run(["bash", str(self.switch_script), str(old_dir), str(new_dir)],
                               env=self._switch_env(new_dir), capture_output=True, text=True)
-        for line in (proc.stdout or "").splitlines():
+        out_lines = (proc.stdout or "").splitlines()
+        for line in out_lines:
             log.info("%s", line)  # строки скрипта уже без токенов; маска формата дополнительно применяется
         for line in (proc.stderr or "").splitlines()[-5:]:
             log.warning("%s", line)
-        return proc.returncode
+        last = next((line for line in reversed(out_lines) if line.startswith("[switch]")), "")
+        return proc.returncode, last
 
     def is_ready(self) -> bool:
         """Файл готовности есть (или путь не задан). Его создаёт setup.sh после ответа ComfyUI (SPEC 8.1)."""
