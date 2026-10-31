@@ -49,9 +49,9 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 try:  # пакетный и «плоский» импорт; общие константы — в model_constants (без цикла)
-    from .model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # speed_threshold_mbps: реэкспорт
+    from .model_constants import speed_threshold_mbps  # speed_threshold_mbps: реэкспорт
 except ImportError:  # pragma: no cover
-    from model_constants import DEFAULT_MODEL_PROFILE, speed_threshold_mbps  # type: ignore
+    from model_constants import speed_threshold_mbps  # type: ignore
 
 # --- строки setup.sh: префикс log() «[setup] », индекс «[i/N] » (MODEL_FILES_TOTAL) ---
 _SETUP_PREFIX = r"\[setup\] \[(?P<idx>\d+)/(?P<total>\d+)\] "
@@ -97,6 +97,8 @@ BYTES_PER_MBIT = 125_000.0
 # этапа и замеров не меньше MIN_SAMPLES (правило «решать только по достаточному окну»)
 MIN_WINDOW_SEC = 90.0
 MIN_SAMPLES = 3
+# пауза между замерами длиннее этого не входит в активное время правила скорости (SPEC 8.2)
+ACTIVE_PAUSE_SEC = 120.0
 
 
 def size_to_bytes(text: str) -> float:
@@ -242,7 +244,7 @@ class WeightsMonitor:
     stage_max_sec: float
     # console(вид, проценты): вид «start» (начало этапа), «progress» (шаг процентов), «loaded» (все файлы на месте)
     console: Optional[Callable[..., None]] = None
-    profile_key: str = DEFAULT_MODEL_PROFILE  # ключ профиля модели для строк консоли (не отображаемое имя)
+    model_name: Optional[str] = None  # имя модели для строк журнала и консоли; None — строк веса нет
     min_window_sec: float = MIN_WINDOW_SEC
     min_samples: int = MIN_SAMPLES
     seen_start: bool = False          # первая строка файла уже пришла
@@ -265,6 +267,12 @@ class WeightsMonitor:
     _pending: dict = field(default_factory=dict)      # строки прогресса выгрузки: файл -> (состояние, событие), последняя
     _pull_sampled: bool = False                       # в текущей выгрузке замер уже учтён (одна выгрузка — один замер)
     _unknown_forms: set = field(default_factory=set)  # формы нераспознанных строк, уже записанных в журнал
+    stage_name: str = ""                              # имя этапа (передаётся в start_stage)
+    act_seconds: float = 0.0                          # активное время этапа, с
+    act_bytes: float = 0.0                            # байт за активное время
+    act_last_t: Optional[float] = None                # время последнего замера этапа
+    act_last_bytes: float = 0.0                       # байт в последнем замере
+    complete_noted: bool = False                      # строка «этап завершён» уже записана
 
     def feed(self, lines) -> Optional[str]:
         """Обрабатывает одну выгрузку (ответ GET /logs) по порядку. Возвращает причину снятия (первую) или None.
@@ -288,7 +296,68 @@ class WeightsMonitor:
             reason = self._feed_one(ev, now)
             if reason:
                 return reason
-        return self._flush(now)
+        reason = self._flush(now)
+        self._check_complete()
+        return reason
+
+    def start_stage(self, name: str, now: float) -> None:
+        """Начало этапа загрузки: окно и выборка активного времени начинаются заново (SPEC 8.2).
+
+        Этап — одна загрузка весов карты: первая при запуске и загрузка при переключении роли.
+        Время между этапами (фото, переключение) в скорость этапа не входит.
+        """
+        self.stage_name = name
+        self.stage_started = now
+        self.window_first = None
+        self.window_first_bytes = 0.0
+        self.window_samples = 0
+        self.act_seconds = 0.0
+        self.act_bytes = 0.0
+        self.act_last_t = None
+        self.act_last_bytes = 0.0
+
+    def _log(self, text: str, warn: bool = False) -> None:
+        """Строка журнала монитора: всегда с именем модели. Без имени строк веса нет."""
+        if self.model_name is None:
+            return
+        if text.startswith("Веса: "):
+            text = f"Веса {self.model_name}: " + text[len("Веса: "):]
+        else:
+            text = f"Веса {self.model_name}: {text}"
+        self.log(text, warn)
+
+    def _active_sample(self, now: float) -> None:
+        """Замер для активного времени: интервал до прошлого замера входит, если байт выросло и пауза ≤ ACTIVE_PAUSE_SEC."""
+        cur = self._agg_done()
+        if self.act_last_t is not None:
+            dt = now - self.act_last_t
+            db = cur - self.act_last_bytes
+            if db > 0 and 0 < dt <= ACTIVE_PAUSE_SEC:
+                self.act_seconds += dt
+                self.act_bytes += db
+        self.act_last_t = now
+        self.act_last_bytes = cur
+
+    def active_speed_mbps(self) -> Optional[float]:
+        """Скорость за активное время этапа, Мбит/с; None, пока активного времени нет."""
+        if self.act_seconds <= 0:
+            return None
+        return self.act_bytes / self.act_seconds / BYTES_PER_MBIT
+
+    def _stage_complete(self) -> bool:
+        """Этап завершён: все файлы этапа на 100% или пришла строка «этап загрузки весов завершён»."""
+        if self.stage_done:
+            return True
+        if self.stage_count <= 0 or len(self.resolved) < self.stage_count or not self.files:
+            return False
+        return all(s.total_bytes > 0 and s.done_bytes >= s.total_bytes for s in self.files.values())
+
+    def _check_complete(self) -> None:
+        """Строка «этап завершён, все файлы 100%» — один раз на этап."""
+        if self.complete_noted or not self._stage_complete():
+            return
+        self.complete_noted = True
+        self._log("Веса: этап завершён, все файлы 100%.")
 
     def _console(self, kind: str, pct: int = 0) -> None:
         if self.console is not None:
@@ -318,10 +387,10 @@ class WeightsMonitor:
             if not self.start_noted:
                 self.start_noted = True
                 self._console("start")
-            self.log(f"Веса: начало загрузки {ev.name}.")
+            self._log(f"Веса: начало загрузки {ev.name}.")
             return None
         if ev.kind == "skip":
-            self.log(f"Веса: {ev.name} уже на диске, пропущен.")
+            self._log(f"Веса: {ev.name} уже на диске, пропущен.")
             return None
         if ev.kind == "done":
             key = _key(ev.name)
@@ -333,7 +402,7 @@ class WeightsMonitor:
             state.total_bytes = ev.total_bytes
             self.active.pop(key, None)
             self.last_change = now
-            self.log(f"Веса: {ev.name} загружен ({ev.total_bytes / MIB:.1f} МиБ).")
+            self._log(f"Веса: {ev.name} загружен ({ev.total_bytes / MIB:.1f} МиБ).")
             self._update_percent()
             return None
         if ev.kind == "aria_done":
@@ -349,11 +418,11 @@ class WeightsMonitor:
         if ev.kind == "error":
             self.active.pop(_key(ev.name), None)
             self.last_change = now
-            self.log(f"Веса: ошибка загрузки {ev.name}.", True)
+            self._log(f"Веса: ошибка загрузки {ev.name}.", True)
             return self._reason(REASON_FILE_ERROR + ev.name)
         if ev.kind == "stage_done":
             self.stage_done = True
-            self.log(f"Веса: этап загрузки весов завершён; итого {self._final_total() / MIB:.1f} МиБ; "
+            self._log(f"Веса: этап загрузки весов завершён; итого {self._final_total() / MIB:.1f} МиБ; "
                      f"строк прогресса не распознано: {self.unrecognised}.")
             self._console("loaded")
             return None
@@ -362,10 +431,10 @@ class WeightsMonitor:
             form = _form_key(ev.text)
             if form not in self._unknown_forms:
                 self._unknown_forms.add(form)
-                self.log(f"Веса: строка с прогрессом не разобрана, полный текст для разбора формата: {ev.text}")
+                self._log(f"Веса: строка с прогрессом не разобрана, полный текст для разбора формата: {ev.text}")
             if not self._unknown_warned:
                 self._unknown_warned = True
-                self.log(f"{UNRECOGNISED_WARNING[0].upper()}{UNRECOGNISED_WARNING[1:]}: эти строки не "
+                self._log(f"{UNRECOGNISED_WARNING[0].upper()}{UNRECOGNISED_WARNING[1:]}: эти строки не "
                          f"используются для скорости и зависания; действуют лимит этапа (stage_max_min) "
                          f"и снятие по ошибке файла.", True)
             return None
@@ -398,7 +467,7 @@ class WeightsMonitor:
                 state.last_pct = ev.pct
                 state.last_progress = now
                 self.last_change = now
-                self.log(f"Веса: файл {state.name}: {ev.pct}%, скорость {bytes_per_sec_to_mbps(ev.speed_bps):.0f} "
+                self._log(f"Веса: файл {state.name}: {ev.pct}%, скорость {bytes_per_sec_to_mbps(ev.speed_bps):.0f} "
                          f"Мбит/с (только для журнала).")
         # Замер учитывается ДО строки статуса: иначе на выгрузке, которая набирает окно, статус говорит «окно не набрано».
         if not self._pull_sampled:             # одна выгрузка — один замер окна, сколько бы строк в ней ни было
@@ -407,8 +476,9 @@ class WeightsMonitor:
                 self.window_first = now
                 self.window_first_bytes = self._agg_done()
             self.window_samples += 1
+            self._active_sample(now)
         if changed:
-            self.log(self._status_text(now))
+            self._log(self._status_text(now))
         self._update_percent()
         return self._check_speed(now)
 
@@ -496,23 +566,23 @@ class WeightsMonitor:
     def _note_window(self) -> None:
         if not self.window_note_logged:
             self.window_note_logged = True
-            self.log(WINDOW_WAIT_NOTE)
+            self._log(WINDOW_WAIT_NOTE)
 
     def _check_speed(self, now: float) -> Optional[str]:
-        """Правило (а): скорость всего этапа за окно ниже speed_min_mbps. Решает только полное окно."""
-        if self.reason_sent:
+        """Правило (а): скорость этапа за активное время ниже speed_min_mbps. Не решает, если этап завершён.
+
+        Активное время и замеры ведутся внутри этапа (start_stage); пауза дольше ACTIVE_PAUSE_SEC не входит.
+        """
+        if self.reason_sent or self._stage_complete():
             return None
-        if not self._window_full(now):
+        if self.window_samples < self.min_samples or self.act_seconds < self.min_window_sec:
             self._note_window()
             return None
-        speed = self._window_speed(now)
-        if speed is None:
+        mbps = self.active_speed_mbps()
+        if mbps is None or mbps >= self.speed_min_mbps:
             return None
-        mbps = bytes_per_sec_to_mbps(speed)
-        if mbps >= self.speed_min_mbps:
-            return None
-        self.log(f"Веса: скорость всех файлов за окно {mbps:.0f} Мбит/с ниже порога {self.speed_min_mbps:g} "
-                 f"Мбит/с (окно {now - (self.window_first or now):.0f} с, замеров {self.window_samples}, "
+        self._log(f"Веса: скорость за активное время этапа {mbps:.0f} Мбит/с ниже порога {self.speed_min_mbps:g} "
+                 f"Мбит/с (активное время {self.act_seconds:.0f} с, замеров {self.window_samples}, "
                  f"активных файлов {len(self.active)}).")
         return self._reason(REASON_SPEED)
 
@@ -525,18 +595,18 @@ class WeightsMonitor:
             return None
         now = self.clock()
         if now - self.stage_started >= self.stage_max_sec:
-            self.log(f"Веса: этап загрузки идёт {now - self.stage_started:.0f} с, лимит {self.stage_max_sec:.0f} с.")
+            self._log(f"Веса: этап загрузки идёт {now - self.stage_started:.0f} с, лимит {self.stage_max_sec:.0f} с.")
             return self._reason(REASON_STAGE)
-        if not self._window_full(now):
-            self._note_window()
-            return None
         reason = self._check_speed(now)
         if reason:
             return reason
+        if not self._window_full(now):
+            self._note_window()
+            return None
         # правило (б) считается по каждому файлу: зависший файл снимает карту, даже если другой идёт
         for state in self.active.values():
             idle = now - state.last_progress
             if idle >= self.stall_sec:
-                self.log(f"Веса: {state.name}: прогресс не менялся {idle:.0f} с.")
+                self._log(f"Веса: {state.name}: прогресс не менялся {idle:.0f} с.")
                 return self._reason(REASON_STALL)
         return None

@@ -1090,38 +1090,44 @@ class Orchestrator:
     def _monitor(self, slot: _CardSlot):
         """Монитор загрузки весов карты (SPEC 8.2): создаётся по требованию, у каждой карты свой.
 
+        Имя модели в строках — профиль текущей роли карты (_profile_for_role), а не профиль запуска.
         Подробные строки идут в журнал без метки консоли (только файл run/debug.log). В консоль попадают
-        три вида строк (console): начало этапа (раз за запуск), шаг процентов «карта N: Веса <ключ> X%»
-        и «Веса <ключ> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
+        три вида строк (console): начало этапа (раз за запуск), шаг процентов «карта N: Веса <модель> X%»
+        и «Веса <модель> загружены». Шаги и проценты считает монитор (core/weights_log.py), здесь только вывод.
         """
         if slot.monitor is None:
-            profile_key = self.profile or DEFAULT_MODEL_PROFILE
-
-            def emit(text: str, warn: bool = False, _slot=slot) -> None:
-                msg = f"{_card_name(_slot, cap=True)}: {text}"
-                if warn:
-                    log.warning("%s", msg)
-                else:
-                    log.info("%s", msg)
-
-            def console(kind: str, pct: int = 0, _slot=slot) -> None:
-                if kind == "start":
-                    if self._weights_start_noted:
-                        return
-                    self._weights_start_noted = True
-                    log.info("Веса %s начало загрузки", profile_key, extra=KEY_EVENT_EXTRA)
-                elif kind == "progress":
-                    log.info("карта %d: Веса %s %d%%", _slot.instance_id, profile_key, pct,
-                             extra=KEY_EVENT_EXTRA)
-                elif kind == "loaded":
-                    log.info("Веса %s загружены", profile_key, extra=KEY_EVENT_EXTRA)
-
-            slot.monitor = wl.WeightsMonitor(
-                clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
-                speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
-                stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec,
-                console=console, profile_key=profile_key)
+            slot.monitor = self._make_monitor(slot, self._profile_for_role(slot.role))
         return slot.monitor
+
+    def _make_monitor(self, slot: _CardSlot, model_name: str):
+        """Монитор этапа загрузки весов с именем модели model_name; этап начинается сейчас (start_stage)."""
+
+        def emit(text: str, warn: bool = False, _slot=slot) -> None:
+            msg = f"{_card_name(_slot, cap=True)}: {text}"
+            if warn:
+                log.warning("%s", msg)
+            else:
+                log.info("%s", msg)
+
+        def console(kind: str, pct: int = 0, _slot=slot) -> None:
+            if kind == "start":
+                if self._weights_start_noted:
+                    return
+                self._weights_start_noted = True
+                log.info("Веса %s начало загрузки", model_name, extra=KEY_EVENT_EXTRA)
+            elif kind == "progress":
+                log.info("карта %d: Веса %s %d%%", _slot.instance_id, model_name, pct,
+                         extra=KEY_EVENT_EXTRA)
+            elif kind == "loaded":
+                log.info("Веса %s загружены", model_name, extra=KEY_EVENT_EXTRA)
+
+        mon = wl.WeightsMonitor(
+            clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
+            speed_min_mbps=self.speed_min_mbps, progress_step_pct=self.progress_step_pct,
+            stall_sec=self._stall_sec, stage_max_sec=self._stage_max_sec,
+            console=console, model_name=model_name)
+        mon.start_stage(model_name, self.clock())
+        return mon
 
     def _pull_card_logs(self, slot: _CardSlot, *, final: bool, timeout: float = LOGS_TIMEOUT_SEC) -> bool:
         """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
@@ -1167,7 +1173,7 @@ class Orchestrator:
         из цикла: цикл продолжается, уничтожение не задерживается.
         """
         for slot in list(self._slots.values()):
-            if slot.state not in ("booting", "ready") or not slot.url:  # C1: booting с адресом тоже
+            if slot.state not in ("booting", "switching", "ready") or not slot.url:  # C1: booting с адресом тоже; switching — строки переключения
                 continue
             if slot.log_pulled is not None and now - slot.log_pulled < LOG_PULL_INTERVAL_SEC:
                 continue
@@ -1176,7 +1182,8 @@ class Orchestrator:
                 self._pull_card_logs(slot, final=False)
                 if slot.weights_reason and self._slots.get(slot.index) is slot:
                     reason, slot.weights_reason = slot.weights_reason, None
-                    self._retire_bad(slot, reason)
+                    if slot.state != "switching":  # при переключении стоп по весам не ставится: решает таймаут переключения
+                        self._retire_bad(slot, reason)
             except Exception as exc:  # выгрузка логов не должна ронять конвейер
                 self._warn_card(slot, f"logs:{type(exc).__name__}", "Не удалось получить логи карты %d: %s.",
                                 slot.instance_id, type(exc).__name__, now=now)
@@ -2732,6 +2739,7 @@ class Orchestrator:
         slot.state = "switching"
         slot.switch_role = target
         slot.switch_since = now
+        slot.monitor = self._make_monitor(slot, profile)  # монитор переключения: модель целевой роли; закрывается на «переключение завершено»
         log.info("%s: переключение на роль «%s» (профиль «%s») запрошено.",
                  _card_name(slot, cap=True), target, profile, extra=KEY_EVENT_EXTRA)
 
@@ -2754,6 +2762,7 @@ class Orchestrator:
             slot.role = slot.switch_role
             slot.profile = self._profile_for_role(slot.role)
             slot.state = "ready"
+            slot.monitor = None  # монитор переключения закрыт
             log.info("%s: переключение завершено, роль «%s».", _card_name(slot, cap=True), slot.role,
                      extra=KEY_EVENT_EXTRA)
         elif switch == "refused":

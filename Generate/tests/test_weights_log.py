@@ -41,7 +41,7 @@ def _monitor(clock=None, logs=None, consoles=None, **kw):
     logs = logs if logs is not None else []
     consoles = consoles if consoles is not None else []
     params = dict(speed_check_pct=10, speed_min_mbps=wl.speed_threshold_mbps(800.0), progress_step_pct=10,
-                  stall_sec=180.0, stage_max_sec=1200.0)
+                  stall_sec=180.0, stage_max_sec=1200.0, model_name="zimage_turbo")
     params.update(kw)
     mon = wl.WeightsMonitor(
         clock=clock,
@@ -166,7 +166,7 @@ def test_completion_total_is_sum_of_final_file_sizes():
     mon.feed([f"[setup] [1/2] Файл успешно загружен: {NAME} ({final_a} байт)",
               f"[setup] [2/2] Файл успешно загружен: {VAE_NAME} ({final_b} байт)",
               "[setup] Все файлы модели LTX-2.5 на месте."])
-    done_line = [m for m in logs if m.startswith("Веса: этап загрузки весов завершён")][-1]
+    done_line = [m for m in logs if m.startswith("Веса zimage_turbo: этап загрузки весов завершён")][-1]
     assert f"итого {(final_a + final_b) / MIB:.1f} МиБ" in done_line     # 1500.7 МиБ
     assert "итого 1500.0 МиБ" not in done_line
 
@@ -338,7 +338,7 @@ def test_unprefixed_progress_with_two_active_files_is_ignored():
     mon.feed([_start("vae/a.safetensors", 3, 5), _start("vae/b.safetensors", 4, 5)])
     clock.now += 10
     assert mon.feed([_progress(50)]) is None
-    assert not any("Веса: файл" in m for m in logs)
+    assert not any("Веса zimage_turbo: файл" in m for m in logs)
 
 
 # --- средняя скорость и оставшееся время: фиксированные отметки времени -------------------
@@ -351,13 +351,13 @@ def test_average_and_remaining_use_fixed_timestamps():
     mon.feed([_aria(10, 1000, 1)])                          # окно открыто: замер 1, 10 МиБ
     clock.now = 1050.0
     mon.feed([_aria(50, 1000, 1)])                          # замер 2: окно 40 с — не набрано
-    status_1050 = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    status_1050 = [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     assert "окно не набрано" in status_1050
     assert "осталось: оценка недоступна" in status_1050
     assert "средняя оценка недоступна" in status_1050       # 50 с < 90 с: среднюю не печатаем
     clock.now = 1100.0
     mon.feed([_aria(100, 1000, 1)])                         # замер 3: окно 90 с, полное
-    status_1100 = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    status_1100 = [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     assert "загружено 100.0 из 1000.0 МиБ" in status_1100
     assert "скорость 8 Мбит/с" in status_1100              # (100-10) МиБ / 90 с = 1 МиБ/с
     assert "средняя 8 Мбит/с" in status_1100               # 100 МиБ / 100 с = 1 МиБ/с
@@ -370,7 +370,7 @@ def test_average_is_never_negative_and_remaining_needs_total():
     mon.feed([_start(NAME, 1, 2)])                          # вторая часть этапа ещё не названа
     clock.now = 1020.0
     mon.feed([_aria(20, 1000, 1)])
-    status = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    status = [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     assert "итог неизвестен" in status and "осталось: оценка недоступна" in status
     assert "средняя оценка недоступна" in status             # 20 с < 90 с
     assert "-" not in status.split("средняя")[1].split(",")[0]
@@ -484,13 +484,13 @@ def test_average_is_not_printed_before_90_seconds_and_is_after_them():
     mon.feed([_start(total=1)])
     clock.now = 1005.0
     mon.feed([_aria(2, 1000, 1)])                       # 2 МиБ за 5 с: прежняя формула дала бы ~3 Мбит/с
-    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     clock.now = 1089.0
     mon.feed([_aria(178, 1000, 1)])                     # 89 с от начала этапа: всё ещё до окна
-    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса: этап:")][-1]
+    assert "средняя оценка недоступна" in [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     clock.now = 1090.0
     mon.feed([_aria(180, 1000, 1)])                     # 90 с: 180 МиБ / 90 с = 2 МиБ/с ≈ 17 Мбит/с
-    status = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    status = [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     assert "средняя 17 Мбит/с" in status
     assert "оценка недоступна" not in status.split("средняя")[1].split(",")[0]
 
@@ -505,7 +505,7 @@ def test_one_pull_with_many_lines_is_one_sample_and_causes_no_start_burst():
     assert mon.window_samples == 1                           # одна выгрузка — один замер, а не 500
     assert mon.window_first == 1010.0
     assert mon.window_first_bytes == 500 * MIB               # окно открыто с уже накопленного: всплеска скорости нет
-    assert len([m for m in logs if m.startswith("Веса: файл")]) == 1   # в журнал — последнее значение файла
+    assert len([m for m in logs if m.startswith("Веса zimage_turbo: файл")]) == 1   # в журнал — последнее значение файла
     clock.now = 1020.0
     assert mon.feed([_aria(501, 1000, 1)]) is None
     assert mon.window_samples == 2
@@ -542,9 +542,93 @@ def test_status_line_of_completing_pull_already_shows_speed():
     mon.feed([_aria(50, 1000, 1)])                          # замер 2: 40 с, окно не набрано
     clock.now = 1100.0
     mon.feed([_aria(100, 1000, 1)])                         # замер 3: окно 90 с — набирает окно
-    last = [m for m in logs if m.startswith("Веса: этап:")][-1]
+    last = [m for m in logs if m.startswith("Веса zimage_turbo: этап:")][-1]
     assert "окно не набрано" not in last
     assert "скорость 8 Мбит/с" in last
+
+
+# --- активное время, завершение этапа, имя модели -------------------------------------
+
+def test_active_speed_excludes_600_second_pause():
+    """Пауза 600 с между замерами не входит в активное время.
+
+    1000 с — 0 МиБ; 1010 с — 100 МиБ (+100 МиБ за 10 с); 1610 с — 200 МиБ (пауза 600 с, не считается);
+    1620 с — 300 МиБ (+100 МиБ за 10 с). Активное время 20 с, 200 МиБ: 209715200 / 20 / 125000 ≈ 84 Мбит/с.
+    Без исключения паузы вышло бы 314572800 / 620 / 125000 ≈ 4 Мбит/с.
+    """
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1), _aria(0, 1000, 1)])
+    clock.now = 1010.0
+    mon.feed([_aria(100, 1000, 1)])
+    clock.now = 1610.0
+    mon.feed([_aria(200, 1000, 1)])
+    clock.now = 1620.0
+    mon.feed([_aria(300, 1000, 1)])
+    assert mon.act_seconds == 20.0
+    assert round(mon.active_speed_mbps()) == 84
+    assert mon.check() is None                     # активного времени 20 с < 90 с: решения нет
+
+
+def test_complete_stage_is_not_stopped_on_speed_and_logs_completion_once():
+    """Все файлы на 100%: правило скорости не срабатывает, строка «этап завершён» пишется один раз.
+
+    1000 с — старт и 0 МиБ; 1050 с — 10 МиБ; 1100 с — 1000 МиБ (100%) и строка «успешно загружен».
+    Активное время 100 с, 1000 МиБ: ≈ 84 Мбит/с < 400. Без завершения правило бы сработало.
+    """
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1), _aria(0, 1000, 1)])
+    clock.now = 1050.0
+    mon.feed([_aria(10, 1000, 1)])
+    clock.now = 1100.0
+    reason = mon.feed([_aria(1000, 1000, 1),
+                       f"[setup] [1/1] Файл успешно загружен: {NAME} ({1000 * MIB:.0f} байт)"])
+    assert reason is None
+    assert mon.check() is None
+    clock.now = 1200.0
+    assert mon.feed([]) is None
+    done = [m for m in logs if "этап завершён, все файлы 100%" in m]
+    assert done == ["Веса zimage_turbo: этап завершён, все файлы 100%."], done
+
+
+def test_incomplete_stage_with_slow_active_speed_fires_once_with_reason_speed():
+    """Файл не завершён, скорость за активное время ниже порога: правило срабатывает один раз.
+
+    1000 с — 0 МиБ; 1050 с — 10 МиБ; 1100 с — 20 МиБ. Активное время 100 с: 20 МиБ / 100 с ≈ 1.7 Мбит/с < 400.
+    """
+    mon, clock, logs, consoles = _monitor()
+    clock.now = 1000.0
+    mon.feed([_start(total=1), _aria(0, 1000, 1)])
+    clock.now = 1050.0
+    mon.feed([_aria(10, 1000, 1)])
+    clock.now = 1100.0
+    reason = mon.feed([_aria(20, 1000, 1)])
+    assert reason == wl.REASON_SPEED
+    assert mon.feed([_aria(21, 1000, 1)]) is None   # причину отдают один раз
+    assert mon.check() is None
+    assert sum("ниже порога" in m for m in logs) == 1
+
+
+def test_monitor_without_model_name_writes_no_weight_lines():
+    mon, clock, logs, consoles = _monitor(model_name=None)
+    clock.now = 1000.0
+    mon.feed([_start(total=1), _aria(0, 1000, 1)])
+    clock.now = 1050.0
+    mon.feed([_aria(10, 1000, 1)])
+    assert logs == []
+
+
+def test_monitor_writes_model_name_in_every_weight_line():
+    mon, clock, logs, consoles = _monitor(model_name="zimage_turbo")
+    clock.now = 1000.0
+    mon.feed([_start(total=1), _aria(0, 1000, 1)])
+    clock.now = 1050.0
+    mon.feed([_aria(10, 1000, 1)])
+    clock.now = 1100.0
+    mon.feed([_aria(20, 1000, 1)])
+    assert logs
+    assert all(m.startswith("Веса zimage_turbo") for m in logs), logs
 
 
 # --- запуск как скрипт ----------------------------------------------------------------

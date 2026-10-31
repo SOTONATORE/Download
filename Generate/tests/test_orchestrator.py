@@ -2321,6 +2321,66 @@ def test_booting_card_with_url_pulls_logs_and_weights_see_them(tmp_path, monkeyp
     assert "Начинаю загрузку" in caplog.text
 
 
+def test_monitor_name_follows_card_role(tmp_path, monkeypatch):
+    """Имя модели монитора — профиль текущей роли карты: видео — видеопрофиль, фото — фото-профиль."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="zimage_turbo", photo_profile="zimage_photo")
+    slot = _ready_slot(rig, 1, instance_id=500)
+    slot.role = "video"
+    assert rig.orc._monitor(slot).model_name == "zimage_turbo"
+    slot.monitor = None
+    slot.role = "photo"
+    assert rig.orc._monitor(slot).model_name == "zimage_photo"
+
+
+def test_switch_progress_reaches_run_log_and_switch_monitor_closes(tmp_path, monkeypatch, caplog):
+    """Во время переключения строки воркера доходят до журнала с именем целевой модели; монитор закрыт на «завершено»."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="zimage_turbo", photo_profile="zimage_photo")
+    slot = _ready_slot(rig, 1, instance_id=500)
+    slot.role = "photo"
+    monkeypatch.setattr(rig.orc, "_call", lambda *a, **k: None)     # POST /profile принят, сеть не нужна
+    rig.orc._start_switch(slot, "video", rig.clock.now)
+    assert slot.state == "switching"
+    assert slot.monitor.model_name == "zimage_turbo"                # целевая роль video: видеопрофиль
+    rig.worker.logs_text = (f"[switch] Шаг 1: переключение на видео\n"
+                            f"[setup] [1/1] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 10MiB/1000MiB(1%) CN:16 DL:1MiB ETA:40s]\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert "Веса zimage_turbo: начало загрузки" in caplog.text
+    class _Ready:
+        def json(self):
+            return {"switch": "ready"}
+    monkeypatch.setattr(rig.orc._http, "request", lambda *a, **k: _Ready())
+    rig.clock.sleep(60.0)
+    rig.orc._poll_switch(slot, rig.clock.now)
+    assert slot.state == "ready" and slot.monitor is None
+    text = caplog.text
+    i0 = text.index("переключение на роль")
+    i1 = text.index("[switch] Шаг 1")
+    i2 = text.index("переключение завершено")
+    assert i0 < i1 < i2
+
+
+def test_card_with_complete_weight_stage_is_not_retired_on_speed(tmp_path, monkeypatch, caplog):
+    """Все файлы этапа на 100%: скорость за активное время не снимает карту."""
+    caplog.set_level(logging.INFO)
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    slot = _ready_slot(rig, 1, instance_id=500, machine_id=11, offer_id=7)
+    rig.worker.logs_text = (f"[setup] [1/1] Начинаю загрузку: {SETUP_FILE}\n"
+                            f"[#2089b0 0MiB/1000MiB(0%) CN:16 DL:1MiB ETA:40s]\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig.clock.sleep(60.0)
+    rig.worker.logs_text = "[#2089b0 10MiB/1000MiB(1%) CN:16 DL:1MiB ETA:40s]\n"
+    rig.orc._pull_due_logs(rig.clock.now)
+    rig.clock.sleep(60.0)
+    rig.worker.logs_text = (f"[#2089b0 1000MiB/1000MiB(100%) CN:16 DL:1MiB ETA:40s]\n"
+                            f"[setup] [1/1] Файл успешно загружен: {SETUP_FILE} ({1000 * 1024 ** 2} байт)\n")
+    rig.orc._pull_due_logs(rig.clock.now)
+    assert rig.orc._slots.get(1) is slot
+    assert "скорость загрузки весов ниже порога" not in caplog.text
+    assert "этап завершён, все файлы 100%" in caplog.text
+
+
 def test_booting_card_without_url_is_not_pulled(tmp_path, monkeypatch):
     """C2: без адреса воркера GET /logs не выполняется."""
     rig = Rig(tmp_path, monkeypatch, missing=(1,))
