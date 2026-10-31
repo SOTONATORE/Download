@@ -111,3 +111,11 @@ def test_hook_succeeds_after_one_clean_rework(tmp_path):
     res = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
     assert len(t.calls) == 2
     assert res[0].prompt == CLEAN
+
+
+# ---------------------------------------------------------------- ordinary sheet is allowed
+
+def test_ordinary_sheet_is_allowed():
+    # обычное sheet (простыня, лист льда) не входит в запрещённые типы кадров; запрещено только spreadsheet
+    assert find_problems("A bed sheet lies on the floor of the room.") == []
+    assert find_problems("A sheet of ice covers the lake.") == []

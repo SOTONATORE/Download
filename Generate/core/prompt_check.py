@@ -12,7 +12,7 @@ import re
 # Английские основы. Соответствуют русскому списку frame_rules.py:
 # map = карта, calendar = календарь, document = документ, chart = график, diagram = диаграмма,
 # infographic = инфографика, flag = флаг, coat of arms = герб, emblem = эмблема (герб),
-# newspaper = газета, id card = удостоверение, passport = паспорт, form = формы, sheet = лист.
+# newspaper = газета, id card = удостоверение, passport = паспорт, form = формы, spreadsheet = таблица; обычное sheet не считается.
 FORBIDDEN_IMAGE_WORDS_EN = (
     "map",
     "calendar",
@@ -27,7 +27,7 @@ FORBIDDEN_IMAGE_WORDS_EN = (
     "id card",
     "passport",
     "form",
-    "sheet",
+    "spreadsheet",
 )
 
 # Исключения для основ, которые являются началом обычных слов. «form» входит в «format», «formal»,
