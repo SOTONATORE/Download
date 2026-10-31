@@ -1237,6 +1237,23 @@ def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def limit_by_type(video_nums, photo_nums, limit) -> list:
+    """Лимит проверки по типам: ceil(limit/2) видео и floor(limit/2) фото, каждый вид по порядку номеров.
+
+    limit <= 0 = все номера. Если одного из видов нет, берутся первые limit номеров другого вида.
+    Результат объединяется по порядку номеров (в SRT номера идут по времени).
+    """
+    video = sorted(video_nums)
+    photo = sorted(photo_nums)
+    if limit <= 0:
+        return sorted(video + photo)
+    if not photo:
+        return video[:limit]
+    if not video:
+        return photo[:limit]
+    return sorted(video[: math.ceil(limit / 2)] + photo[: limit // 2])
+
+
 def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     """Подготовка промптов как у cmd_run до поиска карт: профили, пресет, распределение, промпты, проверка.
 
@@ -1286,7 +1303,11 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         intro_seconds=float(args.intro_seconds), transport=counting, gemini_options=gemini_options,
         photo_on=photo_profile is not None, distribution_path=dist_path)
     if cfg.limit_clips > 0:
-        missing = missing[: cfg.limit_clips]
+        if photo_profile is not None:
+            # лимит по типам после распределения: половина видео, половина фото
+            missing = limit_by_type(split["video"], split["photo"], cfg.limit_clips)
+        else:
+            missing = missing[: cfg.limit_clips]
 
     # номера фото: из распределения (так задумано для проверки); см. отчёт о расхождении с генерацией
     photo_nums = set(split["photo"]) if photo_profile is not None else set()

@@ -7,8 +7,9 @@
 - сегменты со start < intro_seconds идут в видео всегда, даже сверх бюджета;
 - остальные делятся на окна по 45 с: окно = floor(start / 45);
 - внутри окна сортировка по video_value по убыванию, затем по start по возрастанию;
-- окна обходятся по времени; сегмент берётся, если укладывается в бюджет,
-  иначе пропускается и проверяется следующий;
+- квота задаётся на каждое окно 45 с: квота окна = суммарная длительность всех сегментов окна
+  * video_percent / 100; вступление, попавшее в окно, занимает часть этой квоты;
+  сегмент берётся, если укладывается в квоту своего окна, иначе пропускается и проверяется следующий;
 - всё невыбранное уходит в фото.
 """
 from __future__ import annotations
@@ -97,19 +98,23 @@ def select_video_segments(
         selected.add(seg.id)
         video_seconds += seg.duration
 
-    # Остальные сегменты по окнам 45 с.
+    # Окна 45 с: все сегменты окна (включая вступление) задают квоту окна.
     windows: dict[int, list[Segment]] = {}
     for seg in ordered:
-        if seg.id in selected:
-            continue
         windows.setdefault(math.floor(seg.start / WINDOW_SECONDS), []).append(seg)
 
     for key in sorted(windows):
-        # По убыванию video_value; при равенстве раньше по времени (start).
-        candidates = sorted(windows[key], key=lambda s: (-video_values[s.id], s.start, s.id))
+        members = windows[key]
+        quota = sum(s.duration for s in members) * video_percent / 100
+        # Вступление в окне уже занимает часть квоты.
+        window_video = sum(s.duration for s in members if s.id in selected)
+        # По убыванию video_value; при равенстве раньше по времени (start), затем по id.
+        candidates = sorted((s for s in members if s.id not in selected),
+                            key=lambda s: (-video_values[s.id], s.start, s.id))
         for seg in candidates:
-            if video_seconds + seg.duration <= budget + _EPS:
+            if window_video + seg.duration <= quota + _EPS:
                 selected.add(seg.id)
+                window_video += seg.duration
                 video_seconds += seg.duration
 
     return {

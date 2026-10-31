@@ -1290,3 +1290,24 @@ def test_photo_profile_validator_rejects_video_type(tmp_path, monkeypatch, capsy
     assert cli._check_photo_profile("vidonly") == cli.EXIT_INPUT
     out = capsys.readouterr()
     assert "image" in out.out + out.err
+
+
+# --- лимит проверки по типам: limit_by_type ------------------------------------------------------
+VIDEO6 = [1, 2, 3, 4, 5, 6]
+PHOTO6 = [7, 8, 9, 10, 11, 12]
+
+
+def test_limit_by_type_even_limit_takes_half_of_each():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 4) == [1, 2, 7, 8]
+
+
+def test_limit_by_type_odd_limit_gives_extra_to_video():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 5) == [1, 2, 3, 7, 8]
+
+
+def test_limit_by_type_zero_gives_all():
+    assert cli.limit_by_type(VIDEO6, PHOTO6, 0) == sorted(VIDEO6 + PHOTO6)
+
+
+def test_limit_by_type_without_photo_takes_first_video():
+    assert cli.limit_by_type(VIDEO6, [], 3) == [1, 2, 3]
