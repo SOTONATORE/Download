@@ -2657,3 +2657,46 @@ def test_price_window_lines_carry_console_flag(tmp_path, monkeypatch, caplog):
         recs = [r for r in caplog.records if marker in r.getMessage()]
         assert len(recs) == 1, marker
         assert all(getattr(recs[0], k, None) == v for k, v in orch.KEY_EVENT_EXTRA.items()), marker
+
+
+# ---------------------------------------------------------------------------
+# STEP 7, блок A: профиль модели в окружении карты; результат распределения сохраняется, диспетчеризация та же
+# ---------------------------------------------------------------------------
+
+def test_card_env_carries_model_profile_video(tmp_path, monkeypatch):
+    # карта получает профиль модели из окружения: MODEL_PROFILE == профиль запуска
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="ltx25")
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    env = rig.vast.created[0]["env"]
+    assert env["MODEL_PROFILE"] == "ltx25"
+
+
+def test_card_env_carries_new_profile_name(tmp_path, monkeypatch):
+    # имя профиля без папки в репозитории доходит до карты без правок кода
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), profile="testmodel")
+    assert rig.orc._rent_one(rig.clock.now) == "ok"
+    env = rig.vast.created[0]["env"]
+    assert env["MODEL_PROFILE"] == "testmodel"
+
+
+def test_pilot_env_has_no_model_profile(tmp_path, monkeypatch):
+    # пилот: ключа MODEL_PROFILE нет, остальные ключи пилотного окружения прежние
+    vast = PilotVast([make_offer(1, 11)], [], ports=PILOT_PORTS_OK)
+    orc = _pilot_orc(tmp_path, monkeypatch, vast=vast)
+    assert orc._rent_one(orc.clock()) == "ok"
+    env = vast.created[0]["env"]
+    assert "MODEL_PROFILE" not in env
+    assert set(env) == {"GEN_LOG_LEVEL", "COMFYUI_ARGS", "PORTAL_CONFIG"}
+
+
+def test_split_is_stored_and_dispatch_unchanged(tmp_path, monkeypatch):
+    # VIDEO_MODEL=none: распределение уходит в фото целиком, Gemini не вызывается;
+    # результат сохраняется в self._split, а отправка по-прежнему идёт по всем номерам в очередь видео
+    monkeypatch.setenv("VIDEO_MODEL", "none")
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2))
+    summary = rig.run()
+    assert rig.orc._split is not None
+    assert rig.orc._split["video"] == []
+    assert rig.orc._split["photo"] == [1, 2]
+    assert summary.exit_code == 0
+    assert rig.worker.acked == [1, 2]

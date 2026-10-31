@@ -945,6 +945,7 @@ class Orchestrator:
         self._state: dict = {"prompts": {}}
         self._prompts: dict = self._state["prompts"]
         self._queue: deque = deque()
+        self._split = None  # результат распределения видео/фото (STEP 7, блок A): только журнал и состояние запуска
         self._slots: dict = {}
         self._gens: dict = {}
         self._attempts: dict = {}
@@ -1322,7 +1323,7 @@ class Orchestrator:
             if not missing:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
-            self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
+            self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
             if self.limit_clips > 0:
                 missing = missing[: self.limit_clips]
                 log.info("Пробный прогон: берём первые %d номеров.", len(missing))
@@ -1951,6 +1952,8 @@ class Orchestrator:
                 "WORKER_BUILD": self.worker_build,  # номер коммита: первая строка логов воркера (SPEC 8.4)
                 "WORKER_IDLE_TIMEOUT_MIN": str(self.worker_idle_timeout_min),
                 "GEN_LOG_LEVEL": self.log_level,  # тот же уровень, что у запуска (SPEC 10)
+                # профиль модели: карта берёт его из окружения, новая модель не требует правок кода
+                "MODEL_PROFILE": self.profile or DEFAULT_MODEL_PROFILE,
                 # аргументы ComfyUI образа vastai/comfy (SPEC 8.5): порт 18188, без автозапуска браузера
                 "COMFYUI_ARGS": COMFYUI_ARGS,
                 f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
