@@ -1127,6 +1127,213 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     return EXIT_RUNTIME if pub.failures else EXIT_OK
 
 
+# --- проверка промптов (workflow verify_gemini) -----------------------------
+# Подготовка промптов как в cmd_run, но без Vast, релиза и воркера: тот же build_prompts,
+# то же распределение (plan_split), те же профили и тайминг (_build_timing, _build_prompt_config).
+
+VERIFY_REWORK_RE = re.compile(r"Prompt for segment_index (\d+):")
+_FORBIDDEN_TAG = "запрещённый тип кадра"
+_LEFTOVER_TAG = "незаполненный маркер"
+
+
+class _ReworkCounter:
+    """Прозрачная обёртка транспорта: запоминает номера, которые переписывал шаг 6 (find_problems).
+
+    Повтор шага 6 отправляется с текстом «Prompt for segment_index N: ...». Обёртка только читает
+    запрос; ответ и поведение конвейера не меняются.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.rework_nums: set = set()
+
+    def generate_json(self, model, system, user, schema) -> str:
+        m = VERIFY_REWORK_RE.match(user or "")
+        if m:
+            self.rework_nums.add(int(m.group(1)))
+        return self._inner.generate_json(model, system, user, schema)
+
+
+@dataclass
+class PreparedPrompts:
+    state: dict            # содержимое prompts.json после генерации
+    missing: list          # номера, которые проверялись (после лимита), по возрастанию
+    video_nums: list
+    photo_nums: list
+    ready_video: int
+    ready_photo: int
+    rework_video: int
+    rework_photo: int
+    failures: list         # (номер, тип, причина) для промптов, которые не готовы
+    problems: list         # строки о нарушениях; при любой строке job завершается с кодом 1
+    report_md: str         # отчёт на русском для report.md и сводки
+
+
+def _failure_reason(num: int, entry, errors: list) -> str:
+    if isinstance(entry, dict) and entry.get("error"):
+        return str(entry["error"])
+    for text in errors:
+        if f"Сегмент {num}:" in text:
+            return text
+    if not isinstance(entry, dict):
+        return "нет записи в prompts.json"
+    if not str(entry.get("prompt", "")).strip():
+        return "промпт пуст"
+    return f"статус «{entry.get('status')}»"
+
+
+def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
+    """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
+    from Generate.core.prompt_check import find_problems
+    from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
+
+    ready = forbidden = leftover = frames_bad = 0
+    not_ready: list = []
+    problems: list = []
+    for n in nums:
+        entry = prompts.get(str(n))
+        if not _prompt_ready(entry):
+            not_ready.append(n)
+            continue
+        ready += 1
+        for p in find_problems(entry["prompt"]):
+            if p.startswith(_FORBIDDEN_TAG):
+                forbidden += 1
+                problems.append(f"{label} клип {n}: {p}")
+            elif p.startswith(_LEFTOVER_TAG):
+                leftover += 1
+                problems.append(f"{label} клип {n}: {p}")
+        want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
+        if entry.get("num_frames") != want:
+            frames_bad += 1
+            problems.append(f"{label} клип {n}: num_frames {entry.get('num_frames')!r}, по правилу {want!r}")
+    return ready, forbidden, leftover, frames_bad, not_ready, problems
+
+
+def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
+    v, ph = counts["video"], counts["photo"]
+    lines = [
+        "## Проверка Gemini: отчёт",
+        "",
+        f"- Видео-профиль: {prep_args['video_profile'] if prep_args['video_model'] != 'none' else 'выключен'}",
+        f"- Фото-профиль: {prep_args['photo_profile'] or 'выключен'}",
+        f"- Проверено сегментов: {len(prep_args['missing'])}",
+        f"- Видео-сегментов: {len(counts['video_nums'])}, фото-сегментов: {len(counts['photo_nums'])}",
+        f"- Готово промптов: видео {v['ready']}, фото {ph['ready']}",
+        f"- Переписано проверкой (запрещённые типы кадра и маркеры): видео {v['rework']}, фото {ph['rework']}",
+        f"- Не готово промптов: {len(failures)}",
+        "",
+        "### Проверка запрещённых слов и маркеров",
+        f"- Видео: запрещённых типов кадра {v['forbidden']}, незаполненных маркеров {v['leftover']}",
+        f"- Фото: запрещённых типов кадра {ph['forbidden']}, незаполненных маркеров {ph['leftover']}",
+        "",
+        "### Проверка num_frames",
+        f"- Видео: несовпадений с правилом кадров профиля {v['frames_bad']}",
+        f"- Фото: несовпадений с num_frames = {ph['frames_rule']}: {ph['frames_bad']}",
+    ]
+    if failures:
+        lines += ["", "### Не готовые промпты", "", "| Клип | Тип | Причина |", "|---|---|---|"]
+        lines += [f"| {n} | {kind} | {reason} |" for n, kind, reason in failures]
+    return "\n".join(lines) + "\n"
+
+
+def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
+    """Подготовка промптов как у cmd_run до поиска карт: профили, пресет, распределение, промпты, проверка.
+
+    Не создаёт клиентов Vast и релиза, не арендует карты. Входы (args):
+      srt, missing, prompts_path, artifact_dir (пусто = распределение только в журнале),
+      video_model (ltx25 или none; none = видео выключено), video_profile (профиль видео для cfg),
+      photo_profile (None = фото выключено), video_percent, intro_seconds, limit_clips, preset.
+    Бросает GeminiInputError с текстом на русском при неверном входе.
+    """
+    from Generate.core import orchestrator as orch_mod
+    from Generate.core import prompt_pipeline as pp
+    from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES
+    from Generate.core.missing import parse_missing
+    from Generate.core.timing import compute_timings
+
+    video_model = args.video_model
+    photo_profile = args.photo_profile or None
+    if video_model == "none" and photo_profile is None:
+        raise GeminiInputError("Ошибка входных данных: видео и фото выключены, проверять нечего.")
+    if _check_profile_and_preset(args.video_profile, args.preset) is not None:
+        raise GeminiInputError("Ошибка входных данных: профиль или пресет не прошли проверку (см. сообщение выше).")
+    if load_profile_type(args.video_profile) != "video":
+        raise GeminiInputError(f"Ошибка входных данных: видеопрофиль «{args.video_profile}» не имеет типа video.")
+    if photo_profile is not None and _check_photo_profile(photo_profile) is not None:
+        raise GeminiInputError("Ошибка входных данных: профиль фото не прошёл проверку (см. сообщение выше).")
+
+    cfg, code = _load_cfg(None, {"limit_clips": args.limit_clips, "model_profile": args.video_profile,
+                                 "preset": args.preset})
+    if code is not None:
+        raise GeminiInputError("Ошибка входных данных: конфигурация не загружена (см. сообщение выше).")
+    segments = parse_srt(args.srt)
+    missing = list(parse_missing(args.missing, segments))
+    if not missing:
+        raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
+
+    timing = _build_timing(cfg, args.video_profile)
+    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
+    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+                 if photo_profile is not None else None)
+    counting = _ReworkCounter(_make_transport())
+    gemini_options = _gemini_options(cfg)
+
+    # распределение до промптов, как в _run_body: по всем номерам, потом лимит
+    dist_path = Path(args.artifact_dir) / orch_mod.DISTRIBUTION_FILENAME if args.artifact_dir else None
+    split = orch_mod.plan_split(
+        segments, missing, video_model=video_model, video_percent=float(args.video_percent),
+        intro_seconds=float(args.intro_seconds), transport=counting, gemini_options=gemini_options,
+        photo_on=photo_profile is not None, distribution_path=dist_path)
+    if cfg.limit_clips > 0:
+        missing = missing[: cfg.limit_clips]
+
+    # номера фото: из распределения (так задумано для проверки); см. отчёт о расхождении с генерацией
+    photo_nums = set(split["photo"]) if photo_profile is not None else set()
+    run = pp.build_prompts(
+        missing, segments=segments, photo_nums=photo_nums, cfg=prompt_cfg, profile=args.video_profile,
+        timing=timing, photo_profile=photo_profile, photo_cfg=photo_cfg, transport=counting,
+        gemini_options=gemini_options, prompts_path=args.prompts_path)
+
+    expected_frames = {}
+    if timing is not None:
+        try:
+            expected_frames = {t.num: t.num_frames for t in compute_timings(
+                segments, timing.fps, timing.frame_rule, timing.clip_min_sec, timing.clip_max_sec,
+                timing.gpu_max_sec, timing.tail_pad_sec)}
+        except ValueError as e:
+            raise GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
+
+    prompts = run.state.get("prompts", {})
+    video_nums = [n for n in missing if n not in photo_nums]
+    photo_list = [n for n in missing if n in photo_nums]
+    v = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
+                 _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
+    p = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
+                 _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
+    failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
+                + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
+    failures.sort(key=lambda row: row[0])
+    rework_video = len(counting.rework_nums & set(video_nums))
+    rework_photo = len(counting.rework_nums & set(photo_list))
+
+    counts = {
+        "video_nums": video_nums, "photo_nums": photo_list,
+        "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
+                  "frames_bad": v["frames_bad"], "rework": rework_video},
+        "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
+                  "frames_bad": p["frames_bad"], "rework": rework_photo, "frames_rule": PHOTO_NUM_FRAMES},
+    }
+    prep_args = {"video_model": video_model, "video_profile": args.video_profile,
+                 "photo_profile": photo_profile, "missing": missing}
+    problems = v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+    report = _verify_report(prep_args, counts, failures)
+    return PreparedPrompts(
+        state=run.state, missing=missing, video_nums=video_nums, photo_nums=photo_list,
+        ready_video=v["ready"], ready_photo=p["ready"], rework_video=rework_video, rework_photo=rework_photo,
+        failures=failures, problems=problems, report_md=report)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--srt", default=DEFAULT_SRT,

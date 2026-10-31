@@ -45,6 +45,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
                             mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from .missing import parse_missing
     from .segment_split import all_photo, select_video_segments, to_segments
+    from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
     from .video_value import score_segments, write_distribution
     from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
@@ -67,6 +68,7 @@ except ImportError:  # pragma: no cover
                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
     from missing import parse_missing  # type: ignore
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
+    from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
     from video_value import score_segments, write_distribution  # type: ignore
     from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
@@ -196,7 +198,6 @@ SSH_DIAG_FILE = "ssh_diag.log"  # SSH-диагностика карты, доп�
 # карту (SPEC 8.3). Это число подряд идущих ответов опроса, не секунды; любой успешный ответ обнуляет счётчик.
 NOT_FOUND_LIMIT = 10
 SWITCH_TIMEOUT_SEC = 900.0  # переключение модели на карте: дольше — карта снимается (STEP 7, блок B2)
-PHOTO_NUM_FRAMES = 1        # фото: один промпт = один кадр; задаётся кодом, не из тайминга
 NOT_FOUND_REASON = "экземпляр не найден в Vast"
 
 # Шаблоны маскирования текста с карты живут в core/log_setup.py (mask_remote_text): один список на журнал и на _mask_remote.
@@ -300,16 +301,6 @@ class _CardSlot:
     def started(self) -> bool:
         """Старт карты начался: Vast показал «loading» или «created» (SPEC 8.2)."""
         return self.saw_loading or self.saw_created
-
-
-def _prompt_ready(entry) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    num_frames = entry.get("num_frames")
-    return (entry.get("status") == "ready"
-            and bool(str(entry.get("prompt", "")).strip())
-            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
-            and num_frames > 0)
 
 
 def _has_start_marker(text: str) -> bool:
@@ -529,11 +520,38 @@ VALUE_SCHEMA = {
 }
 
 
+def make_value_sender(transport, gemini_options: dict):
+    """Отправитель запроса оценки video_value через ManagedTransport (лимитер, цепочка моделей)."""
+    opts = gemini_options
+    managed = go.ManagedTransport(
+        transport, opts.get("models", go.DEFAULT_MODELS),
+        rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
+        rpd_limit=opts.get("rpd_limit", 500))
+    return lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA)  # noqa: E731
+
+
+def _all_video(segs, intro_seconds) -> dict:
+    """Только видео-профиль (фото нет): все сегменты в видео, оценка Gemini не нужна (STEP 3b, V1).
+
+    Ключи те же, что у select_video_segments; бюджет и видео-секунды считаются по сегментам.
+    """
+    ordered = sorted(segs, key=lambda s: (s.start, s.id))
+    total = sum(s.duration for s in ordered)
+    return {
+        "video": [s.id for s in ordered],
+        "photo": [],
+        "budget_seconds": total,
+        "video_seconds": total,
+        "intro_seconds_used": intro_seconds,
+    }
+
+
 def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_seconds,
-                  send, distribution_path) -> dict:
+                  send, distribution_path, photo_on=True) -> dict:
     """STEP 3b: распределение видео/фото для номеров из missing.txt, до любых промптов.
 
     video_model == "none": все сегменты в фото, send не вызывается.
+    photo_on False (фото-профиля нет): все сегменты в видео, send не вызывается.
     иначе: оценка video_value через send (Gemini), затем select_video_segments.
     Ошибка оценки останавливает запуск: запасного значения по умолчанию нет.
     distribution_path None: файл не пишется, распределение всё равно считается и записывается в журнал.
@@ -542,6 +560,9 @@ def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_se
     if video_model == "none":
         values = {}
         result = all_photo(segs)
+    elif not photo_on:
+        values = {}
+        result = _all_video(segs, intro_seconds)
     else:
         try:
             values = score_segments(segs, send)
@@ -559,6 +580,17 @@ def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_se
              "бюджет видео %.1f с, видео %.1f с.",
              len(result["video"]), len(result["photo"]), result["budget_seconds"], result["video_seconds"])
     return result
+
+
+def plan_split(srt_segments, missing, *, video_model, video_percent, intro_seconds, transport,
+               gemini_options: dict, photo_on: bool, distribution_path) -> dict:
+    """Единое правило распределения для запуска и для проверки: оценка Gemini только при обоих видах."""
+    send = None
+    if video_model != "none" and photo_on:
+        send = make_value_sender(transport, gemini_options)
+    return split_for_run(srt_segments, missing, video_model=video_model, video_percent=video_percent,
+                         intro_seconds=intro_seconds, send=send, distribution_path=distribution_path,
+                         photo_on=photo_on)
 
 
 class ReleaseStartError(gp.GeminiInputError):
@@ -1329,17 +1361,11 @@ class Orchestrator:
             intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
         except ValueError:
             raise gp.GeminiInputError("VIDEO_PERCENT и INTRO_SECONDS должны быть числами.") from None
-        send = None
-        if video_model != "none":
-            opts = self.gemini_options
-            managed = go.ManagedTransport(
-                self.gemini_transport, opts.get("models", go.DEFAULT_MODELS),
-                rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
-                rpd_limit=opts.get("rpd_limit", 500))
-            send = lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA)  # noqa: E731
         dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if self._artifact else None
-        return split_for_run(self.segments, missing, video_model=video_model, video_percent=video_percent,
-                             intro_seconds=intro_seconds, send=send, distribution_path=dist_path)
+        return plan_split(self.segments, missing, video_model=video_model, video_percent=video_percent,
+                          intro_seconds=intro_seconds, transport=self.gemini_transport,
+                          gemini_options=self.gemini_options, photo_on=bool(self.photo_profile),
+                          distribution_path=dist_path)
 
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
@@ -1707,28 +1733,15 @@ class Orchestrator:
             log.warning("PILOT: onstart.log не скопирован: %s.", type(exc).__name__)
 
     # --- промпты -------------------------------------------------------------
-    def _read_state(self) -> dict:
-        try:
-            state = json.loads(self.prompts_path.read_text(encoding="utf-8"))
-            if isinstance(state, dict) and isinstance(state.get("prompts"), dict):
-                return state
-        except (OSError, ValueError):
-            pass
-        return {"prompts": {}}
-
     def _generate(self, needed: list) -> list:
-        if self.photo_profile is None:
-            self._generate_video(needed)
-        else:
-            video = [n for n in needed if n not in self._photo_nums]
-            photo = [n for n in needed if n in self._photo_nums]
-            if video:
-                self._generate_video(video)
-            if photo:
-                self._generate_photo(photo)
-            self._state = self._read_state()  # после фото: состояние файла с обоими видами
-            self._prompts = self._state.setdefault("prompts", {})
-        ready = [n for n in needed if _prompt_ready(self._prompts.get(str(n)))]
+        # один конвейер для видео и фото (prompt_pipeline.build_prompts); проверку вызывает тот же путь
+        run = build_prompts(
+            needed, segments=self.segments, photo_nums=self._photo_nums, cfg=self.cfg, profile=self.profile,
+            timing=self.timing_params, photo_profile=self.photo_profile, photo_cfg=self.photo_prompt_cfg,
+            transport=self.gemini_transport, gemini_options=self.gemini_options, prompts_path=self.prompts_path)
+        self._state = run.state
+        self._prompts = self._state.setdefault("prompts", {})
+        ready = run.ready
         for n in needed:
             if n not in ready:
                 self._failed.add(n)
@@ -1736,49 +1749,6 @@ class Orchestrator:
         if len(ready) < len(needed):
             log.warning("Без готового промпта осталось клипов: %d.", len(needed) - len(ready))
         return ready
-
-    def _generate_video(self, needed: list) -> None:
-        try:
-            state = go.generate_and_store(
-                self.segments, needed, self.cfg, self.gemini_transport, self.prompts_path,
-                profile=self.profile, timing=self.timing_params, **self.gemini_options)
-        except gp.GeminiRuntimeError as exc:
-            log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)
-            state = self._read_state()
-        self._state = state
-        self._prompts = state.setdefault("prompts", {})
-
-    def _generate_photo(self, needed: list) -> None:
-        """Промпты для фото: профиль photo_profile, без тайминга; num_frames всегда 1 (STEP 7, блок B2)."""
-        opts = self.gemini_options
-        try:
-            state = go.load_state(self.prompts_path, self.segments, self.photo_profile)
-            prompts = state["prompts"]
-            pending = go.missing_segments(prompts, needed)
-            if not pending:
-                return
-            managed = go.ManagedTransport(
-                self.gemini_transport, opts.get("models", go.DEFAULT_MODELS),
-                rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
-                rpd_limit=opts.get("rpd_limit", 500))
-
-            def on_batch(results: list) -> None:
-                for r in results:
-                    old = prompts.get(str(r.num)) or {}
-                    prompts[str(r.num)] = {
-                        "num": r.num, "num_frames": PHOTO_NUM_FRAMES, "prompt": r.prompt,
-                        "status": "ready" if r.prompt.strip() else "failed",
-                        "attempts": int(old.get("attempts", 0)) + 1,
-                        "error": r.review_reason, "needs_review": r.needs_review, "extra": r.extra,
-                    }
-                state["model"] = managed.active_model
-                state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-                go.atomic_write_json(self.prompts_path, state)
-
-            gp.generate_prompts(self.segments, pending, self.photo_prompt_cfg, managed,
-                                managed.active_model, on_batch=on_batch)
-        except gp.GeminiRuntimeError as exc:
-            log.error("Генерация промптов для фото прервана: %s. Используем уже сохранённые.", exc)
 
     def _save_state(self) -> None:
         try:
