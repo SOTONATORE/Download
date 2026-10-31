@@ -66,6 +66,22 @@ def test_paper_is_forbidden():
     assert "paper" in problems[0].lower()
 
 
+def test_letter_is_forbidden():
+    problems = find_problems("A letter lies open on the table of the room.")
+    assert len(problems) == 1
+    assert "letter" in problems[0].lower()
+
+
+def test_parchment_is_forbidden():
+    problems = find_problems("Old parchment hangs on the wall of the hall.")
+    assert len(problems) == 1
+    assert "parchment" in problems[0].lower()
+
+
+def test_bed_sheet_is_not_forbidden():
+    assert find_problems("A bed sheet lies on the floor of the room.") == []
+
+
 def test_bread_is_not_forbidden():
     assert find_problems("The bread is baked every morning.") == []
 

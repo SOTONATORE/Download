@@ -14,7 +14,7 @@ Write one prompt for a single still photographic image per segment, with no text
 
 # 2. Length
 
-Write one paragraph, with no lists. Make it detailed enough to specify composition, lighting, materials and colours. No word limit is set by the model, so do not add one.
+Write one paragraph, with no lists. Make it detailed enough to specify composition, lighting, materials and colours. Write 60 to 100 words. Name the composition, the light, the materials and the colours in every part of the frame; do not leave any element described only in a single word.
 
 # 3. Composition
 
