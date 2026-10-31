@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from Generate import cli
+from Generate.core import config_loader
 
 GENERATE_DIR = Path(__file__).resolve().parents[1]
 ZIMAGE_STYLE = GENERATE_DIR / "model_profiles" / "models" / "zimage_turbo" / "prompts" / "style.md"
@@ -28,16 +29,29 @@ def _style_body(text: str) -> str:
 class _FakePromptConfig:
     """Заглушка класса PromptConfig: запоминает аргументы конструктора."""
 
-    def __init__(self, style_file, batch_size, preset):
+    def __init__(self, style_file, batch_size, preset, media=None):
+        # media принимается, как в настоящем PromptConfig (cli передаёт его при сборке)
         self.style_file = style_file
         self.batch_size = batch_size
         self.preset = preset
+        self.media = media
 
 
 @pytest.fixture
 def fake_cls(monkeypatch):
     monkeypatch.setattr(cli, "_find_symbol", lambda name, modules: _FakePromptConfig)
     return _FakePromptConfig
+
+
+def write_profile(root, name, type_value):
+    """Создаёт root/<name>/profile.yaml; type_value None означает файл без строки type:."""
+    folder = root / name
+    folder.mkdir(parents=True, exist_ok=True)
+    lines = [f"name: {name}"]
+    if type_value is not None:
+        # строка type: на верхнем уровне, без отступа
+        lines.append(f"type: {type_value}")
+    (folder / "profile.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_zimage_style_file_checks():
@@ -61,7 +75,10 @@ def test_zimage_style_body_has_no_forbidden_ru_stems():
 
 def test_image_profile_uses_own_style_path(monkeypatch, tmp_path, fake_cls):
     monkeypatch.setattr(cli, "STYLE_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "load_profile_type", lambda name: "image")
+    # profile_dir строит путь как MODEL_PROFILES_DIR / "models" / name, поэтому профили кладём в подпапку models
+    profiles_root = tmp_path / "models"
+    monkeypatch.setattr(config_loader, "MODEL_PROFILES_DIR", profiles_root)
+    write_profile(profiles_root / "models", "fake_image", "image")
     own = tmp_path / "fake_image" / "prompts"
     own.mkdir(parents=True)
     (own / "style.md").write_text("style", encoding="utf-8")
@@ -72,18 +89,36 @@ def test_image_profile_uses_own_style_path(monkeypatch, tmp_path, fake_cls):
     assert cfg.batch_size == 5 and cfg.preset == "none"
 
 
-@pytest.mark.parametrize("profile_type", ["video", None])
-def test_video_or_missing_type_keeps_ltx_fallback(monkeypatch, tmp_path, fake_cls, profile_type):
+def test_video_profile_builds_config(monkeypatch, tmp_path, fake_cls):
     monkeypatch.setattr(cli, "STYLE_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "load_profile_type", lambda name: profile_type or "video")
-    # у профиля нет своего style.md: прежняя подмена на профиль по умолчанию
+    profiles_root = tmp_path / "models"
+    monkeypatch.setattr(config_loader, "MODEL_PROFILES_DIR", profiles_root)
+    write_profile(profiles_root / "models", "fake_video", "video")
+
     cfg = cli._build_prompt_config("fake_video", 3, "none")
-    assert cfg.style_file == f"{tmp_path}/{cli.FALLBACK_STYLE_PROFILE}/prompts/style.md"
+
+    assert cfg.media == "video", "media must be read from type: video in profile.yaml"
+
+
+def test_missing_type_raises(monkeypatch, tmp_path, fake_cls):
+    monkeypatch.setattr(cli, "STYLE_DIR", str(tmp_path))
+    profiles_root = tmp_path / "models"
+    monkeypatch.setattr(config_loader, "MODEL_PROFILES_DIR", profiles_root)
+    write_profile(profiles_root / "models", "fake_missing_type", None)
+
+    with pytest.raises(cli.GeminiInputError) as info:
+        cli._build_prompt_config("fake_missing_type", 3, "none")
+
+    message = str(info.value)
+    assert "fake_missing_type" in message
+    assert "type" in message
 
 
 def test_image_profile_missing_style_raises_with_path_and_profile(monkeypatch, tmp_path, fake_cls):
     monkeypatch.setattr(cli, "STYLE_DIR", str(tmp_path))
-    monkeypatch.setattr(cli, "load_profile_type", lambda name: "image")
+    profiles_root = tmp_path / "models"
+    monkeypatch.setattr(config_loader, "MODEL_PROFILES_DIR", profiles_root)
+    write_profile(profiles_root / "models", "fake_image_missing", "image")
     expected = f"{tmp_path}/fake_image_missing/prompts/style.md"
 
     with pytest.raises(cli.GeminiInputError) as info:
