@@ -181,7 +181,7 @@ def test_no_retirement_before_window_is_full_even_at_very_low_speed():
         assert mon.feed([_aria(10 * k, 1000, 1)]) is None   # 1 МиБ/с — очень мало, но окно не набрано
         assert mon.check() is None
     # первый замер на +10 с, последний на +90 с: окно 80 с < 90 с, решения нет
-    assert sum(1 for m in logs if m == wl.WINDOW_WAIT_NOTE) == 1
+    assert sum(1 for m in logs if "окно измерения ещё не набрано" in m) == 1
 
 
 def test_window_needs_three_samples_not_only_time():
