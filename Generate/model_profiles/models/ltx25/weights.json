@@ -1,0 +1,11 @@
+{
+  "base_url": "https://huggingface.co/Lightricks/LTX-2.5/resolve/main",
+  "needs_token": true,
+  "files": [
+    {"subdir": "diffusion_models", "name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"},
+    {"subdir": "text_encoders", "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"},
+    {"subdir": "vae", "name": "ltx-2.5-video-vae-bf16.safetensors"},
+    {"subdir": "vae", "name": "ltx-2.5-audio-vae-bf16.safetensors"},
+    {"subdir": "latent_upscale_models", "name": "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"}
+  ]
+}

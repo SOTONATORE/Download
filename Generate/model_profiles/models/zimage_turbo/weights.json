@@ -1,0 +1,9 @@
+{
+  "base_url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main",
+  "needs_token": false,
+  "files": [
+    {"subdir": "diffusion_models", "name": "z_image_turbo_bf16.safetensors", "repo_path": "split_files/diffusion_models/z_image_turbo_bf16.safetensors"},
+    {"subdir": "text_encoders", "name": "qwen_3_4b.safetensors", "repo_path": "split_files/text_encoders/qwen_3_4b.safetensors"},
+    {"subdir": "vae", "name": "ae.safetensors", "repo_path": "split_files/vae/ae.safetensors"}
+  ]
+}

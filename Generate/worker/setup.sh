@@ -10,11 +10,16 @@ if [ -z "${COMFY_DIR}" ]; then
     exit 1
 fi
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+# Профиль модели и его список весов лежат в model_profiles/models/<MODEL_PROFILE>/ (weights.json, profile.yaml).
+# Читает их core/weights_plan.py: новая модель = новая папка, без правок этого файла. По умолчанию ltx25.
+PROFILE_DIR="${REPO_DIR}/model_profiles/models/${MODEL_PROFILE:-ltx25}"
+META="$(python3 "${REPO_DIR}/core/weights_plan.py" meta "${PROFILE_DIR}")" || { echo "[setup] ОШИБКА: профиль модели не читается: ${PROFILE_DIR} (код 1)."; exit 1; }
+MODEL_TYPE="$(printf '%s\n' "${META}" | sed -n 's/^type=//p')"
+NEED_TOKEN="$(printf '%s\n' "${META}" | sed -n 's/^needs_token=//p')"
+MODEL_FILES_TOTAL="$(printf '%s\n' "${META}" | sed -n 's/^files_total=//p')"
 export PYTHONPATH="$(dirname "${REPO_DIR}")${PYTHONPATH:+:${PYTHONPATH}}"
 COMFY_MODELS_DIR="${COMFY_DIR}/models"
 HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
-# Репозиторий весов Z-Image (Comfy-Org). Используется только для профиля zimage_turbo; для LTX не применяется.
-HF_ZIMAGE_BASE_URL="https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main"
 
 # ComfyUI запускает bootstrap.sh (шаг 4б), порт 18188 задаётся COMFYUI_ARGS в env карты (SPEC 8.5). setup.sh только ждёт его на порту 18188 (стоковый путь образа через supervisor на Vast в ssh-режиме не работает).
 COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
@@ -35,13 +40,7 @@ WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
 
 SERVER_PID=""
 
-# Счётчик файлов модели для строк лога: «[1/5] ...». Зависит от профиля: ltx25 — 5 файлов, zimage_turbo — 3.
-# MODEL_PROFILE не задан — профиль ltx25 (как раньше).
-if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
-    MODEL_FILES_TOTAL=3
-else
-    MODEL_FILES_TOTAL=5
-fi
+# Счётчик файлов модели для строк лога «[1/N] ...»: MODEL_FILES_TOTAL взят из weights.json выше.
 MODEL_FILE_INDEX=0
 MODEL_PATHS=()
 # 1, если какая-либо загрузка весов не удалась: сервер воркера остаётся запущен, ComfyUI не ждём
@@ -263,8 +262,8 @@ rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}"
 log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
 
 # --- 1. Проверка токена и инструментов ---
-# Токен нужен только для LTX (репозиторий Lightricks закрыт). Z-Image (Comfy-Org) открыт, токен не требуется.
-if [ "${MODEL_PROFILE:-ltx25}" != "zimage_turbo" ] && [ -z "${HF_TOKEN:-}" ]; then
+# Токен нужен, если в weights.json профиля стоит needs_token: true (LTX: репозиторий Lightricks закрыт). Z-Image открыт.
+if [ "${NEED_TOKEN}" = "1" ] && [ -z "${HF_TOKEN:-}" ]; then
     log "ОШИБКА: Не задана переменная окружения HF_TOKEN. Репозиторий Lightricks/LTX-2.5 закрыт (gated), скачивание весов невозможно."
     exit 1
 fi
@@ -275,13 +274,8 @@ ensure_downloader
 log "Запускаю сервер воркера (до загрузки весов)..."
 # stdout сервера не направляем в bootstrap.log: его строки уже идут в буфер GET /logs, и файл дал бы дубли.
 # stderr (трассировки падения) пишется в bootstrap.log (D1), его хвост тоже попадает в GET /logs.
-# Тип профиля для воркера (comfy_client.py читает WORKER_PROFILE_TYPE) выводится здесь из MODEL_PROFILE:
-# zimage_turbo — image, остальные — video. Значение должно совпадать с полем type в profile.yaml каждого профиля.
-if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
-    WORKER_PROFILE_TYPE="image"
-else
-    WORKER_PROFILE_TYPE="video"
-fi
+# Тип профиля для воркера (comfy_client.py читает WORKER_PROFILE_TYPE) берётся из profile.yaml через weights_plan.py meta.
+WORKER_PROFILE_TYPE="${MODEL_TYPE}"
 export WORKER_PROFILE_TYPE
 log "Тип профиля для воркера: ${WORKER_PROFILE_TYPE}."
 python3 "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
@@ -296,21 +290,17 @@ else
     log "ComfyUI пока не отвечает: он запущен на шаге 4б bootstrap и грузится параллельно с весами."
 fi
 
-# --- 3. Загрузка файлов модели: zimage_turbo — три файла Z-Image, иначе — пять файлов LTX-2.5, параллельно ---
+# --- 3. Загрузка файлов модели: список из weights.json профиля (через weights_plan.py files), файлы параллельно ---
 log "Запускаю параллельную загрузку весов: ${MODEL_FILES_TOTAL} файлов."
-if [ "${MODEL_PROFILE:-ltx25}" = "zimage_turbo" ]; then
-    # Z-Image: три файла из репозитория Comfy-Org; путь в репозитории и базовый URL передаются явно
-    start_download "diffusion_models" "z_image_turbo_bf16.safetensors" "split_files/diffusion_models/z_image_turbo_bf16.safetensors" "${HF_ZIMAGE_BASE_URL}"
-    start_download "text_encoders" "qwen_3_4b.safetensors" "split_files/text_encoders/qwen_3_4b.safetensors" "${HF_ZIMAGE_BASE_URL}"
-    start_download "vae" "ae.safetensors" "split_files/vae/ae.safetensors" "${HF_ZIMAGE_BASE_URL}"
-else
-    # LTX-2.5: вызовы без изменений (три аргумента, URL от HF_BASE_URL)
-    start_download "diffusion_models" "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
-    start_download "text_encoders" "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
-    start_download "vae" "ltx-2.5-video-vae-bf16.safetensors"
-    start_download "vae" "ltx-2.5-audio-vae-bf16.safetensors"
-    start_download "latent_upscale_models" "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
-fi
+# Строки: подкаталог, имя, путь в репо HF (пусто для LTX), базовый URL, разделитель TAB.
+# Ошибка чтения списка — выход с кодом 1. Поля разбираются по TAB вручную: read с IFS=TAB схлопнул бы пустое поле.
+ROWS="$(python3 "${REPO_DIR}/core/weights_plan.py" files "${PROFILE_DIR}")" || exit 1
+while IFS= read -r line; do
+    sub="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+    name="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    rp="${rest%%$'\t'*}"; base="${rest#*$'\t'}"
+    start_download "${sub}" "${name}" "${rp}" "${base}"
+done <<< "${ROWS}"
 wait_downloads
 for dl_pid in "${DL_PIDS[@]}"; do
     if ! wait "${dl_pid}"; then
