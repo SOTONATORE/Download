@@ -26,7 +26,7 @@ Photographic realism with an archival look and muted colours. No cartoon or pain
 
 # 5. Avoid
 
-No text, letters, numbers, logos or signs. No maps, documents or flags as the main subject. No close-up faces unless the segment text names a person. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions.
+No text, letters, numbers, logos or signs. No maps, documents or flags anywhere in the frame. No close-up faces unless the segment text names a person. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions.
 
 # 6. Output
 

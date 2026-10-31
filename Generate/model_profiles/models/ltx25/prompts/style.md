@@ -112,7 +112,7 @@ Good: A wide shot of a crowd on a hillside at sunrise, people lifting their face
 
 **2. Negations**
 Bad: An empty street with no cars, no people, nothing blurry, don't show any signs.
-Good: A static wide shot of a quiet cobblestone street in early morning, shuttered shopfronts on both sides and thin mist hanging above the stones. Cool blue light, a single lamp still glowing at the far end. A scrap of paper drifts slowly across the cobbles in the breeze.
+Good: A static wide shot of a quiet cobblestone street in early morning, shuttered shopfronts on both sides and thin mist hanging above the stones. Cool blue light, a single lamp still glowing at the far end. A fallen leaf drifts slowly across the cobbles in the breeze.
 
 **3. No camera**
 Bad: A man in an office working at a computer.

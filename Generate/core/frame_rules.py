@@ -1,64 +1,36 @@
 """Запрещённые типы кадров для пайплайна Generate (шаг 4 плана PLAN_generate_photo_video.md).
 
-Модуль самодостаточен: только стандартная библиотека (re). Он не импортирует сеть,
-Gemini, Vast или worker и не копирует список из проекта Download. Список здесь свой.
+Список запрещённых типов английский и общий с проверкой готового промпта (prompt_check.py):
+он импортируется оттуда, а не копируется. Модуль использует только стандартную библиотеку (re)
+и prompt_check.py, который тоже stdlib-only и не импортирует этот модуль, поэтому цикла нет.
 """
 
 import re
 
-# Русские основы (stems): каждая совпадает со всеми формами слова.
-# «карт» покрывает «карта», «карту», «карты», «карте». Поскольку «карт» также
-# начало слова «картина», для неё задано исключение в _STEM_EXCLUDE.
-FORBIDDEN_FRAME_TYPES = (
-    "карт",          # карта: все падежи и формы
-    "календар",      # календарь
-    "документ",      # документ
-    "график",        # график
-    "диаграмм",      # диаграмма
-    "инфографик",    # инфографика
-    "флаг",          # флаг
-    "герб",          # герб
-    "газет",         # газета
-    "удостоверен",   # удостоверение
-    "паспорт",       # паспорт
-    # Правило множественных форм из плана: «формы» и «форма».
-    # Основа короткая, поэтому исключения ниже убирают «формат», «формир» и т.п.
-    "форм",
-)
+try:  # пакетный и «плоский» импорт (как в gemini_prompts.py)
+    from .prompt_check import FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative
+except ImportError:  # pragma: no cover
+    from prompt_check import FORBIDDEN_IMAGE_WORDS_EN, _STEM_EXCLUDE, _stem_alternative  # type: ignore
 
-# Исключения: слова, которые начинаются с основы, но не относятся к запрещённому типу.
-_STEM_EXCLUDE = {
-    "карт": ("картин", "картон"),
-    "форм": ("формат", "формир", "формул", "формальн"),
-}
-
-
-def _stem_alternative(stem: str) -> str:
-    """Регулярное выражение для одной основы с учётом исключений (отрицательный просмотр вперёд)."""
-    negatives = "".join(f"(?!{re.escape(e)})" for e in _STEM_EXCLUDE.get(stem, ()))
-    return f"{negatives}{re.escape(stem)}\\w*"
-
-
-# Совпадение только с начала слова (\b перед основой), без учёта регистра.
+# Совпадение только с начала слова (\b перед основой), без учёта регистра, с любым окончанием.
+# prompt_check.py не содержит готового построителя регулярного выражения для всего списка,
+# поэтому выражение собрано здесь из импортированного списка и _stem_alternative (те же правила).
 FORBIDDEN_FRAME_RE = re.compile(
-    r"\b(?:" + "|".join(_stem_alternative(s) for s in FORBIDDEN_FRAME_TYPES) + r")",
+    r"\b(?:" + "|".join(_stem_alternative(s) for s in FORBIDDEN_IMAGE_WORDS_EN) + r")",
     re.IGNORECASE,
 )
 
 # Правило, которое добавляется в запрос модели для сегмента с запрещённым кадром.
-# Само правило не называет запрещённые предметы (ни одна из основ списка сюда не
-# входит как инструкция), чтобы модель не получила их как задание нарисовать.
-REPHRASE_RULE_RU = (
-    "Если текст сегмента называет или подразумевает изображение, которое относится к "
-    "запрещённым типам (географическая схема местности, расписание дат или таблица, "
-    "печатный выпуск, личный бланк с надписями, знамя или эмблема государства), не показывай "
-    "сам предмет и не показывай его надписи. "
-    "Вместо него опиши допустимый образ того же сюжета: для географической схемы — пейзаж, "
-    "дорогу или вид города на это место без подписей; для бумаг, писем и архивных материалов — "
-    "руку, стол или хранилище без читаемого текста; для знамени или эмблемы — здание или площадь, "
-    "где оно висит, без крупного плана символа. "
-    "Никогда не пиши в промпте название запрещённого предмета. "
-    "Опирайся только на то, что прямо следует из текста сегмента, и не добавляй деталей от себя."
+# Само правило не называет запрещённые предметы как задание нарисовать их в кадре.
+REPHRASE_RULE_EN = (
+    "The text of this segment names an item that must not appear in the image. "
+    "Do not show that item, its labels or its writing. "
+    "Describe an allowed image of the same subject instead: for a map, a landscape or a city view "
+    "without labels; for documents, letters, papers, passports, forms, tickets or archive material, "
+    "a hand, a table or a storage room without readable text; for a flag or an emblem, the building "
+    "or square where it hangs, without a close-up of the symbol. "
+    "Never write the name of the forbidden item in the prompt. "
+    "Base the image only on what the segment text directly supports; add no details of your own."
 )
 
 
@@ -69,4 +41,4 @@ def needs_rephrase(segment_text: str) -> bool:
 
 def rephrase_note(segment_text: str) -> str:
     """Правило перефразирования для сегмента, либо пустая строка, если оно не нужно."""
-    return REPHRASE_RULE_RU if needs_rephrase(segment_text) else ""
+    return REPHRASE_RULE_EN if needs_rephrase(segment_text) else ""

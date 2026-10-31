@@ -16,6 +16,7 @@ from Generate.core.gemini_prompts import (
     parse_and_validate, strip_user_only,
 )
 from Generate.core.srt_parser import Segment
+from Generate.core.frame_rules import REPHRASE_RULE_EN
 
 GEN = pathlib.Path(__file__).resolve().parent.parent
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
@@ -652,3 +653,27 @@ def test_media_image_is_accepted(tmp_path):
 def test_unknown_media_raises(tmp_path):
     with pytest.raises(gp.GeminiInputError):
         gp._check_config(make_cfg(tmp_path, media="audio"))
+
+
+# ---------------------------------------------------------------- правило «not X, but Y» и перефразирование
+
+CONTRAST_RULE_TEXT = ('- When the text contrasts two things ("not X, but Y", "not X, rather Y"), show only Y, '
+                      'as a visible action or scene. Never describe X and never use a negation to refer to it.')
+
+
+def test_contrast_rule_in_video_and_image_instructions(tmp_path):
+    for media in ("video", "image"):
+        text = gp.build_system_instruction(make_cfg(tmp_path, media=media))
+        assert CONTRAST_RULE_TEXT in text
+
+
+def test_segment_with_forbidden_word_gets_rephrase_note(tmp_path):
+    segs = [seg(1, "Passports were stamped for exile, not return.")]
+    req = build_requests(segs, [1], make_cfg(tmp_path))[0]
+    assert REPHRASE_RULE_EN in req.user
+
+
+def test_segment_without_forbidden_word_has_no_rephrase_note(tmp_path):
+    segs = [seg(1, "A formal dinner in a palace hall.")]
+    req = build_requests(segs, [1], make_cfg(tmp_path))[0]
+    assert REPHRASE_RULE_EN not in req.user
