@@ -93,13 +93,13 @@ ZIMAGE_REPO_PATHS = (
 
 
 def test_g_setup_zimage_files_match_profile():
-    # Текстовый поиск по setup.sh (без сети): вызовы start_download для Z-Image с путём split_files/...
-    setup_text = SETUP.read_text(encoding="utf-8")
-    calls = re.findall(r'start_download\s+"([^"]+)"\s+"([^"]+)"\s+"(split_files/[^"]+)"', setup_text)
-    names_in_setup = [name for _subdir, name, _path in calls]
-    paths_in_setup = [path for _subdir, _name, path in calls]
+    # Список загрузки Z-Image берётся из weights.json (его читает setup.sh через weights_plan.py files)
+    weights = json.loads((MODEL / "weights.json").read_text(encoding="utf-8"))
+    files = weights["files"]
+    names_in_json = [entry["name"] for entry in files]
+    paths_in_json = [entry["repo_path"] for entry in files]
     mf = _profile()["model_files"]
-    assert names_in_setup == [mf["unet"], mf["clip"], mf["vae"]]
-    assert paths_in_setup == list(ZIMAGE_REPO_PATHS)
-    for path in ZIMAGE_REPO_PATHS:
-        assert path in setup_text
+    assert names_in_json == [mf["unet"], mf["clip"], mf["vae"]]
+    assert paths_in_json == list(ZIMAGE_REPO_PATHS)
+    for entry in files:
+        assert entry["repo_path"].startswith("split_files/")

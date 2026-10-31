@@ -14,6 +14,22 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # Читает их core/weights_plan.py: новая модель = новая папка, без правок этого файла. По умолчанию ltx25.
 PROFILE_DIR="${REPO_DIR}/model_profiles/models/${MODEL_PROFILE:-ltx25}"
 META="$(python3 "${REPO_DIR}/core/weights_plan.py" meta "${PROFILE_DIR}")" || { echo "[setup] ОШИБКА: профиль модели не читается: ${PROFILE_DIR} (код 1)."; exit 1; }
+# Проверка описания весов профиля (META из weights_plan.py meta): ровно три строки, значения по форме.
+# Пустой или битый вывод — остановка с понятной ошибкой, а не тихий пропуск загрузки.
+META_OK=1
+if [ "$(printf '%s\n' "${META}" | wc -l)" -ne 3 ]; then META_OK=0; fi
+if [ "${META_OK}" = 1 ]; then
+    META_L1="$(printf '%s\n' "${META}" | sed -n 1p)"
+    META_L2="$(printf '%s\n' "${META}" | sed -n 2p)"
+    META_L3="$(printf '%s\n' "${META}" | sed -n 3p)"
+    [[ "${META_L1}" =~ ^type=(video|image)$ ]] || META_OK=0
+    [[ "${META_L2}" =~ ^needs_token=[01]$ ]] || META_OK=0
+    [[ "${META_L3}" =~ ^files_total=[1-9][0-9]*$ ]] || META_OK=0
+fi
+if [ "${META_OK}" != 1 ]; then
+    echo "[setup] ОШИБКА: описание весов профиля некорректно: ${PROFILE_DIR} (код 1)."
+    exit 1
+fi
 MODEL_TYPE="$(printf '%s\n' "${META}" | sed -n 's/^type=//p')"
 NEED_TOKEN="$(printf '%s\n' "${META}" | sed -n 's/^needs_token=//p')"
 MODEL_FILES_TOTAL="$(printf '%s\n' "${META}" | sed -n 's/^files_total=//p')"
@@ -295,6 +311,23 @@ log "Запускаю параллельную загрузку весов: ${MO
 # Строки: подкаталог, имя, путь в репо HF (пусто для LTX), базовый URL, разделитель TAB.
 # Ошибка чтения списка — выход с кодом 1. Поля разбираются по TAB вручную: read с IFS=TAB схлопнул бы пустое поле.
 ROWS="$(python3 "${REPO_DIR}/core/weights_plan.py" files "${PROFILE_DIR}")" || exit 1
+# Проверка списка весов (ROWS из weights_plan.py files): не пуст, число строк = MODEL_FILES_TOTAL,
+# в каждой строке ровно четыре поля через TAB (три табуляции), подкаталог и имя не пустые.
+ROWS_OK=1
+if [ -z "${ROWS}" ]; then ROWS_OK=0; fi
+if [ "${ROWS_OK}" = 1 ] && [ "$(printf '%s\n' "${ROWS}" | wc -l)" -ne "${MODEL_FILES_TOTAL}" ]; then ROWS_OK=0; fi
+if [ "${ROWS_OK}" = 1 ]; then
+    while IFS= read -r chk; do
+        chk_tabs="$(printf '%s' "${chk}" | tr -cd '\t' | wc -c)"
+        if [ "${chk_tabs}" -ne 3 ]; then ROWS_OK=0; break; fi
+        chk_sub="${chk%%$'\t'*}"; chk_rest="${chk#*$'\t'}"; chk_name="${chk_rest%%$'\t'*}"
+        if [ -z "${chk_sub}" ] || [ -z "${chk_name}" ]; then ROWS_OK=0; break; fi
+    done <<< "${ROWS}"
+fi
+if [ "${ROWS_OK}" != 1 ]; then
+    echo "[setup] ОШИБКА: список весов профиля некорректен: ${PROFILE_DIR} (код 1)."
+    exit 1
+fi
 while IFS= read -r line; do
     sub="${line%%$'\t'*}"; rest="${line#*$'\t'}"
     name="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"

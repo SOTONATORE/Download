@@ -128,21 +128,21 @@ _KEY_BY_NODE = {"UNETLoader": "unet_name", "CLIPLoader": "clip_name",
 
 
 def test_setup_download_names_equal_workflow_and_profile_names():
-    text = SETUP.read_text(encoding="utf-8")
+    # Список загрузки LTX берётся из weights.json (его читает setup.sh через weights_plan.py files)
+    weights = json.loads((MODEL / "weights.json").read_text(encoding="utf-8"))
     profile_files = _yaml(PROFILE)["model_files"]
     ltx_names = set(profile_files.values())
-    # вызовы start_download могут стоять с отступом (блоки if/else); Z-Image отсекаем по именам профиля
-    all_pairs = re.findall(r'^[ \t]*start_download "([^"]+)" "([^"]+)"', text, re.M)
-    setup_pairs = {(d, f) for d, f in all_pairs if f in ltx_names}
-    assert len(setup_pairs) == len(profile_files) == 5  # MODEL_FILES_TOTAL=5 в setup.sh
-    assert {name for _, name in setup_pairs} == ltx_names
+    setup_names = [entry["name"] for entry in weights["files"]]
+    setup_pairs = {(entry["subdir"], entry["name"]) for entry in weights["files"]}
+    assert len(setup_names) == len(profile_files) == 5  # 5 файлов LTX в weights.json
+    assert set(setup_names) == ltx_names
     graph_pairs = set()
     for node in _json(WORKFLOW).values():
         cls = node.get("class_type")
         if cls in _DIR_BY_NODE:
             graph_pairs.add((_DIR_BY_NODE[cls], node["inputs"][_KEY_BY_NODE[cls]]))
     assert setup_pairs == graph_pairs
-    assert {name for _, name in setup_pairs} == set(_yaml(PROFILE)["model_files"].values())
+    assert set(setup_names) == set(_yaml(PROFILE)["model_files"].values())
 
 
 # ------------------------------------------------ сид второго прохода
