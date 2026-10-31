@@ -211,8 +211,10 @@ jobs:
 
       # S2c: при video_model=none видео не генерируем: карты не арендуются, промпты не пишутся
       - name: Run generation
-        if: env.VIDEO_MODEL != 'none'
+        if: env.VIDEO_MODEL != 'none' || env.PHOTO_MODEL != 'none'
         env:
+          # фото: профиль из photo_model; при none пусто, и флаг --photo-profile не передаётся
+          PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
           GEN_GEMINI_API_KEY: ${{ secrets.GEN_GEMINI_API_KEY }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
@@ -282,6 +284,9 @@ jobs:
             --artifact-dir "$ART_DIR"
             --debug-logs
           )
+          if [ -n "$PHOTO_PROFILE" ]; then
+            args+=(--photo-profile "$PHOTO_PROFILE")
+          fi
           if [ -n "$RELEASE_TAG" ]; then
             args+=(--release-tag "$RELEASE_TAG")
           fi
