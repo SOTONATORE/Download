@@ -12,8 +12,8 @@ from Generate.core.srt_parser import Segment
 GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
-# Эталон: системная инструкция ltx25 ДО фазы E2 (код до слоя пресета), пересчитано после правки style.md.
-BASELINE_BYTES = 16168
+# длина базы изменена правилом «not X, but Y» в системной инструкции видео (шаг: противопоставление); прежнее значение 16168.
+BASELINE_BYTES = 16340
 BASELINE_SHA256 = "bece7c1d709ffee13cb921a43b216a68a778754fbc1cdaea38323a94c9b40107"
 
 
