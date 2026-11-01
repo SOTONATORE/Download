@@ -54,6 +54,7 @@ try:  # пакетный и «плоский» импорт
         load_profile_number, load_profile_type, profile_dir, profile_exists)
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
     from Generate.core.model_constants import PRESET_NONE
+    from Generate.core import previews
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover
         load_profile_number, load_profile_type, profile_dir, profile_exists)
     from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
     from model_constants import PRESET_NONE  # type: ignore
+    import previews  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
@@ -413,6 +415,22 @@ def _resolve_docker_image(docker_image: str) -> str:
     return docker_image
 
 
+def _check_previews(prompts_count, prompts_file: str, photo_profile) -> Optional[int]:
+    """Превью из prompts.txt: переключатель 1..4 требует фото-модели и читаемый файл с промптами.
+
+    Переключатель «выкл» (или пусто) ничего не проверяет. Ошибка — до аренды карт."""
+    try:
+        if previews.count_value(prompts_count) == 0:
+            return None
+        if not photo_profile:
+            raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
+        previews.load_prompts(prompts_file)
+    except previews.PreviewInputError as exc:
+        _err(f"Ошибка входных данных: {exc}")
+        return EXIT_INPUT
+    return None
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет конфигурацию, SRT и наличие missing.txt (без разбора missing)."""
     # --scan-sec проверяется здесь же, до любого вызова Vast (предстартовая проверка workflow)
@@ -429,8 +447,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         _err(f"Ошибка входных данных: файл missing не найден: {args.missing}")
         return EXIT_INPUT
 
+    # превью (prompts.txt): проверяются до аренды; при «выкл» файл не читается
+    code = _check_previews(getattr(args, "prompts_count", None), getattr(args, "prompts_file", ""),
+                           getattr(args, "photo_profile", None))
+    if code is not None:
+        return code
+
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
+    if previews.count_value(getattr(args, "prompts_count", None)):
+        print(f"Превью: файл промптов {args.prompts_file}, вариантов на промпт {args.prompts_count}")
     print(f"srt_hash: {srt_hash(segments)}")
     return EXIT_OK
 
@@ -598,6 +624,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         min_disk_gb=0.0 if _pilot_mode(args) else float(cfg.disk_gb),
     )
 
+    # превью: ошибка входа до аренды карт (тот же проверяющий код, что в check)
+    code = _check_previews(args.prompts_count, args.prompts_file, photo_profile)
+    if code is not None:
+        return code
+
     stop = threading.Event()
     previous_handlers = _install_stop_handlers(stop)
     try:
@@ -617,6 +648,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             max_cards=cfg.max_cards,
             photo_profile=photo_profile,
             photo_prompt_cfg=photo_prompt_cfg,
+            # превью из prompts.txt: «выкл» = не делаются
+            prompts_file=args.prompts_file or None,
+            prompts_count=args.prompts_count or previews.PREVIEW_COUNT_OFF,
             budget_limit_usd=cfg.budget_limit_usd,
             limit_clips=cfg.limit_clips,
             repo=args.repo,
@@ -1385,6 +1419,13 @@ def build_parser() -> argparse.ArgumentParser:
                              help="проверить конфигурацию и входные файлы")
     check_p.add_argument("--scan-sec", type=_parse_scan_sec, default=None,
                          help="окно сбора цен, с (целое > 0); пусто = из конфига")
+    check_p.add_argument("--prompts-file", default="",
+                         help="файл промптов для превью (prompts.txt); проверяется только при переключателе 1..4")
+    check_p.add_argument("--prompts-count", default=previews.PREVIEW_COUNT_OFF,
+                         choices=previews.PREVIEW_COUNT_CHOICES,
+                         help="превью: вариантов на промпт (выкл, 1, 2, 3, 4)")
+    check_p.add_argument("--photo-profile", default=None,
+                         help="фото-профиль; пусто = фото-модель выключена (нужен для превью)")
     check_p.set_defaults(func=lambda a: cmd_check(a))
 
     # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
@@ -1410,6 +1451,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="номер запуска (передаётся явно)")
     run_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
+    run_p.add_argument("--prompts-file", default="",
+                       help="файл промптов для превью (prompts.txt); пусто = превью не делаются")
+    run_p.add_argument("--prompts-count", default=previews.PREVIEW_COUNT_OFF,
+                       choices=previews.PREVIEW_COUNT_CHOICES,
+                       help="превью: вариантов на промпт (выкл, 1, 2, 3, 4)")
     run_p.add_argument("--gpu-name", default=None,
                        help="модель GPU для поиска; пустая строка = любая; по умолчанию из конфига")
     run_p.add_argument("--min-price-per-hour", type=float, default=None,

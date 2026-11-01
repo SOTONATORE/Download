@@ -376,6 +376,9 @@ class ReleaseUploader:
         # Список релизов GitHub может отставать сразу после создания, поэтому опираться только на него нельзя.
         if kind == "service" and self._service_opened == tag:
             return tag
+        # итоговый релиз открывается превью во время генерации: повторно не создаём (список GitHub может отставать)
+        if kind == "final" and getattr(self, "_final_opened", None) == tag:
+            return tag
         found = self.store.find_releases(tag)
         if len(found) > 1:
             raise GeminiInputError(
@@ -395,6 +398,8 @@ class ReleaseUploader:
                 self._log(f"Служебный релиз {tag} уже существует: продолжаем с ним.")
         if kind == "service":
             self._service_opened = tag
+        if kind == "final":
+            self._final_opened = tag
         return tag
 
     def open_service_release(self) -> str:
@@ -440,6 +445,19 @@ class ReleaseUploader:
         self.asset_tags[name] = tag
         self.done.add(num)
         return True
+
+    def upload_preview(self, path: str) -> None:
+        """Превью preview_<x>_<y>.png -> итоговый релиз run-<run_id>-final.
+
+        В счётчики клипов и в asset_tags (generated_links.txt) не попадает."""
+        self._ensure_prepared()
+        name = os.path.basename(path)
+        if not re.fullmatch(r"preview_\d+_\d+\.png", name):
+            raise GeminiRuntimeError(f"Не имя превью: {name}")
+        if self.run_id is None:
+            raise GeminiRuntimeError("Превью некуда загрузить: не задан идентификатор запуска (run_id).")
+        tag = self._open_run_release("final")
+        self._upload_service_asset(tag, path)
 
     def upload_clip_num(self, num: int, directory: str, width: int = 0) -> bool:
         """Загружает клип по номеру из каталога (имя по clip_filename)."""

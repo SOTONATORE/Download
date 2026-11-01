@@ -30,6 +30,7 @@ import time
 import zipfile
 from collections import deque
 from datetime import datetime, timezone
+from types import MappingProxyType
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -49,6 +50,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .video_value import score_segments, write_distribution
     from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
+    from . import previews
     from .card_roles import plan_card_roles
     from . import ssh_probe
     from .release_adapter import (  # noqa: F401
@@ -72,6 +74,7 @@ except ImportError:  # pragma: no cover
     from video_value import score_segments, write_distribution  # type: ignore
     from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
+    import previews  # type: ignore
     import ssh_probe  # type: ignore
     from release_adapter import (  # type: ignore  # noqa: F401
         CARD_DIAGNOSTIC_FILES, LINKS_FILENAME, PROMPTS_FILENAME, ReleaseInfo, ReleaseStore, ReleaseUploader,
@@ -803,6 +806,11 @@ class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
     _total_needed: int = 0  # клипов нужно в этом запуске: знаменатель строк «клип N из M» (задаёт run)
+    # превью по умолчанию (без __init__, как в тестах): ничего не делается; только для чтения
+    prompts_file = None
+    prompts_count: str = "выкл"
+    _previews = MappingProxyType({})
+    _preview_order: tuple = ()
     clock = staticmethod(time.monotonic)  # часы по умолчанию; конструктор подменяет их своими
 
     def __init__(
@@ -854,6 +862,8 @@ class Orchestrator:
         log_level: str = "INFO",
         photo_profile: Optional[str] = None,   # профиль фото (type: image); None: фото не делаются
         photo_prompt_cfg=None,                 # настройки промптов для фото
+        prompts_file: Optional[str] = None,    # файл промптов для превью (prompts.txt); None = превью не делаются
+        prompts_count: str = "выкл",           # переключатель превью: выкл / 1..4 (вариантов на промпт)
         clock: Callable[[], float] = time.monotonic,
         sleep: Optional[Callable[[float], None]] = None,
         stop_event: Optional[threading.Event] = None,
@@ -914,6 +924,11 @@ class Orchestrator:
         # фото (STEP 7, блок B2): без photo_profile поведение прежнее, все номера — видео
         self.photo_profile = photo_profile or None
         self.photo_prompt_cfg = photo_prompt_cfg
+        # превью (prompts.txt): задачи фото без Gemini, в конце очереди фото; при «выкл» не создаются
+        self.prompts_file = prompts_file
+        self.prompts_count = prompts_count
+        self._previews: dict = {}            # синтетический номер -> PreviewItem
+        self._preview_order: list = []       # порядок задач превью в очереди фото
 
         self.max_cards = int(max_cards)
         self.job_deadline_min = job_deadline_min
@@ -1383,11 +1398,16 @@ class Orchestrator:
         try:
             if self.pilot:
                 return self._run_pilot()
+            self._prepare_previews()  # превью из prompts.txt: до аренды; без файла/фото-модели — ошибка входа
             missing = parse_missing(self.missing_path, self.segments)
-            if not missing:
+            if not missing and not self._previews:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
-            self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
+            if not missing:
+                # только превью: клипов нет, распределение пустое, карты берут задачи превью из очереди фото
+                self._split = {"video": [], "photo": []}
+            else:
+                self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
             # STEP 7, блок B2: номера фото берём из распределения сразу, до _generate (build_prompts читает их там)
             self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
             if not getattr(self, "_video_queue", None):
@@ -1427,7 +1447,7 @@ class Orchestrator:
         self._run_pos = {n: i for i, n in enumerate(needed, 1)}  # P2: место клипа в списке этого запуска
         # E1: missing.txt и prompts.json до любых трат; ошибка загрузки останавливает запуск (код 2)
         self._publisher.start(self.missing_path, self.prompts_path)
-        if not needed:
+        if not needed and not self._previews:
             log.info("Все запрошенные клипы уже в Release (%d): аренда карт не требуется.", len(missing))
             self._fill_summary(summary, needed)
             self._finish(summary)
@@ -1436,7 +1456,7 @@ class Orchestrator:
         self._write_heartbeat()
         try:
             try:
-                ready = self._generate(needed)
+                ready = self._generate(needed) if needed else []
                 self._work(ready)
             finally:
                 self._cleanup()  # F1 (1)-(2): логи и JSON с лимитом времени, затем уничтожение по метке
@@ -1488,6 +1508,7 @@ class Orchestrator:
             report_path = os.path.join(self._tmp, REPORT_FILENAME)
             text = self._report_text(summary)
             Path(report_path).write_text(self._mask_remote(text), encoding="utf-8", newline="\n")
+            self._publish_previews_index()  # до списка файлов артефакта и до pub.finish
             bundle_path = None
             if self._artifact is not None:
                 self._artifact.write_report(text)
@@ -1800,6 +1821,8 @@ class Orchestrator:
         photo_nums = getattr(self, "_photo_nums", frozenset())
         photo = getattr(self, "_photo_queue", None)
         video = getattr(self, "_video_queue", None)
+        if previews.is_preview_num(num):
+            return photo if photo is not None else video  # превью всегда в очереди фото (повтор тоже)
         return photo if num in photo_nums and photo is not None else video
 
     def _profile_for_role(self, role: str) -> str:
@@ -1833,6 +1856,8 @@ class Orchestrator:
         self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
         self._video_queue = deque(n for n in ready if n not in self._photo_nums)
         self._photo_queue = deque(n for n in ready if n in self._photo_nums)
+        # превью идут в самый конец очереди фото, после всех обычных фото; видеоочередь не меняется
+        self._photo_queue.extend(self._preview_order)
         drain_since: Optional[float] = None
         while True:
             if self._stop.is_set():
@@ -2782,6 +2807,10 @@ class Orchestrator:
         self._queue_of(num).appendleft(num)
 
     def _fail_clip(self, num: int, reason: str) -> None:
+        preview = self._previews.get(num)
+        if preview is not None:
+            self._fail_preview(preview, reason)
+            return
         if num in self._done or self._assigned_slot(num) is not None:
             return  # готовый или назначенный клип не возвращается в очередь
         used = self._attempts.get(num, 0)
@@ -2794,6 +2823,51 @@ class Orchestrator:
                         num, used, MAX_ATTEMPTS, reason)
             if num not in self._queue_of(num):
                 self._queue_of(num).append(num)
+
+    def _fail_preview(self, preview, reason: str) -> None:
+        """Превью не в счётчиках клипов: повтор в конце очереди фото до MAX_ATTEMPTS, затем статус «ошибка»."""
+        used = self._attempts.get(preview.num, 0)
+        if used >= MAX_ATTEMPTS:
+            preview.status = previews.STATUS_FAILED
+            log.error("генерация превью: промпт %d, сид %d: ошибка (%s)", preview.x, preview.y, reason,
+                      extra=KEY_EVENT_EXTRA)
+            return
+        preview.status = previews.STATUS_QUEUED
+        log.warning("генерация превью: промпт %d, сид %d: неудачная попытка %d из %d (%s), возвращена в очередь.",
+                    preview.x, preview.y, used, MAX_ATTEMPTS, reason)
+        if preview.num not in self._photo_queue:
+            self._photo_queue.append(preview.num)
+
+    def _prepare_previews(self) -> None:
+        """Превью из prompts.txt: проверяются до аренды карт. «выкл» — ничего не делается."""
+        count = previews.count_value(self.prompts_count)
+        if count == 0:
+            return
+        if not self.photo_profile:
+            raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
+        if not self.prompts_file:
+            raise previews.PreviewInputError("Превью запрошены, но файл промптов не задан (prompts_path пуст).")
+        prompts = previews.load_prompts(self.prompts_file)
+        items = previews.build_previews(prompts, count)
+        self._previews = {item.num: item for item in items}
+        self._preview_order = [item.num for item in items]
+        log.info("Превью: промптов %d, вариантов на промпт %d, всего генераций %d (фото-модель, "
+                 "в конце очереди фото, не входят в покрытие SRT).",
+                 len(prompts), count, len(items), extra=KEY_EVENT_EXTRA)
+
+    def _publish_previews_index(self) -> None:
+        """previews_index.txt: в служебный релиз и в артефакт; со всеми деталями по каждому превью."""
+        if not self._previews or not self._tmp:
+            return
+        path = os.path.join(self._tmp, previews.PREVIEW_INDEX_FILENAME)
+        items = [self._previews[n] for n in self._preview_order]
+        Path(path).write_text(self._mask_remote(previews.index_text(items)), encoding="utf-8", newline="\n")
+        if self._artifact is not None:
+            self._artifact.service_copy(path, previews.PREVIEW_INDEX_FILENAME)
+        try:
+            self._uploader.upload_run_file(path)
+        except (gp.GeminiRuntimeError, gp.GeminiInputError) as exc:
+            log.error("previews_index.txt не выгружен в служебный релиз: %s", self._mask_remote(str(exc)))
 
     def _clip_label(self, num: int) -> str:
         """Метка клипа в строках начала, готовности и ошибки (P2): номер из missing.txt и место в этом запуске."""
@@ -2832,16 +2906,25 @@ class Orchestrator:
             log.warning("Клип %d уже назначен или готов (%s): повторной отправки нет.", num,
                         _card_name(owner) if owner is not None else "готов")
             return
-        entry = self._prompts.get(str(num))
-        entry = entry if isinstance(entry, dict) else {}
-        num_frames = PHOTO_NUM_FRAMES if slot.role == "photo" else entry.get("num_frames")
-        if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
-            # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
-            self._attempts[num] = MAX_ATTEMPTS
-            self._fail_clip(num, "в prompts.json нет корректного num_frames")
-            return
-        payload = {"num": num, "prompt": entry["prompt"],
-                   "num_frames": num_frames, "seed": self.seed_base + num}
+        preview = self._previews.get(num)
+        if preview is not None:
+            # превью: промпт из prompts.txt как есть (без Gemini, стиля и пресета), кадр фото, случайный сид
+            preview.card = _card_name(slot)
+            preview.status = previews.STATUS_RUNNING
+            payload = {"num": num, "prompt": preview.prompt,
+                       "num_frames": PHOTO_NUM_FRAMES, "seed": preview.seed}
+            log.info("генерация превью: промпт %d, сид %d", preview.x, preview.y, extra=KEY_EVENT_EXTRA)
+        else:
+            entry = self._prompts.get(str(num))
+            entry = entry if isinstance(entry, dict) else {}
+            num_frames = PHOTO_NUM_FRAMES if slot.role == "photo" else entry.get("num_frames")
+            if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
+                # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
+                self._attempts[num] = MAX_ATTEMPTS
+                self._fail_clip(num, "в prompts.json нет корректного num_frames")
+                return
+            payload = {"num": num, "prompt": entry["prompt"],
+                       "num_frames": num_frames, "seed": self.seed_base + num}
         try:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:
@@ -2913,12 +2996,19 @@ class Orchestrator:
 
     def _finish_clip(self, slot: _CardSlot, now: float) -> None:
         task = slot.task
-        name = f"{task.num}.png" if slot.role == "photo" else clip_filename(task.num, self.width, self.template)
+        preview = self._previews.get(task.num)
+        if preview is not None:
+            name = preview.filename
+        else:
+            name = f"{task.num}.png" if slot.role == "photo" else clip_filename(task.num, self.width, self.template)
         path = os.path.join(self._tmp, name)
         reason = ""
         try:
             self._download(slot, task.id, path)
-            self._uploader.upload_clip(path)
+            if preview is not None:
+                self._uploader.upload_preview(path)  # превью в итоговый релиз, не в generated_links.txt
+            else:
+                self._uploader.upload_clip(path)
         except (_WorkerNetError, _WorkerHttpError) as exc:
             reason = f"не удалось скачать клип с воркера ({exc})"
         except gp.GeminiRuntimeError as exc:
@@ -2931,6 +3021,16 @@ class Orchestrator:
         slot.task = None
         if reason:
             self._fail_clip(task.num, reason)
+            return
+        if preview is not None:
+            # превью не входит в счётчики клипов (готово/из скольких, ср. время клипа, покрытие SRT)
+            preview.status = previews.STATUS_DONE
+            log.info("генерация превью: промпт %d, сид %d: готово, в итоговом релизе", preview.x, preview.y,
+                     extra=KEY_EVENT_EXTRA)
+            try:
+                self._call(slot, "POST", f"/ack/{task.id}")
+            except (_WorkerNetError, _WorkerHttpError):
+                log.warning("Воркер не подтвердил удаление превью %s.", preview.filename)
             return
         self._done.add(task.num)
         duration = max(0.0, now - task.started)
