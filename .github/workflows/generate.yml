@@ -12,6 +12,20 @@ on:
         description: "Путь к файлу missing"
         type: string
         default: "missing.txt"
+      prompts_path:
+        description: "Путь к файлу промптов для превью (блоки промптов через пустую строку); используется только если «Превью, вариантов на промпт» не выкл"
+        type: string
+        default: "prompts.txt"
+      prompts_count:
+        description: "Превью: вариантов на промпт. выкл = превью не делаются; 1..4 = сколько генераций на каждый промпт из файла (файлы preview_<промпт>_<вариант>.png в итоговом релизе)"
+        type: choice
+        options:
+          - "выкл"
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+        default: "выкл"
       limit_clips:
         description: "0 = все клипы из missing.txt; N > 0 = первые N клипов по возрастанию номера (пробный прогон; для первого прогона 2)"
         type: string
@@ -185,9 +199,16 @@ jobs:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
           SCAN_SEC: ${{ inputs.scan_sec }}
+          PROMPTS_FILE: ${{ inputs.prompts_path }}
+          PROMPTS_COUNT: ${{ inputs.prompts_count }}
+          # фото-профиль для превью: пусто, если фото-модель выключена (превью без неё не запускаются)
+          PREVIEW_PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
         run: |
           # пустой SCAN_SEC (не задан) не переопределяет config.default.yaml; число проверяется здесь, до аренды
-          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" --scan-sec "$SCAN_SEC"
+          # превью: при «выкл» файл промптов не читается; при 1..4 проверяются файл и фото-модель, до аренды
+          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" --scan-sec "$SCAN_SEC" \
+            --prompts-file "$PROMPTS_FILE" --prompts-count "$PROMPTS_COUNT" \
+            --photo-profile "$PREVIEW_PHOTO_PROFILE"
 
       # Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс, который запускается до шага run и
       # читает файл heartbeat, пишущийся оркестратором. При тишине уничтожает карты запуска.
@@ -222,6 +243,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          PROMPTS_FILE: ${{ inputs.prompts_path }}
+          PROMPTS_COUNT: ${{ inputs.prompts_count }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           MAX_CARDS: ${{ inputs.max_cards }}
@@ -260,6 +283,8 @@ jobs:
           args=(
             --srt "$SRT_PATH"
             --missing "$MISSING_PATH"
+            --prompts-file "$PROMPTS_FILE"
+            --prompts-count "$PROMPTS_COUNT"
             --limit-clips "$LIMIT_CLIPS"
             --max-cards "$MAX_CARDS"
             --budget-limit "$BUDGET_LIMIT"
