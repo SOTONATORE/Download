@@ -721,6 +721,62 @@ def cmd_run(args: argparse.Namespace) -> int:
     return EXIT_OK if int(getattr(summary, "exit_code", EXIT_RUNTIME)) == EXIT_OK else EXIT_RUNTIME
 
 
+# проверка списка карт Vast (fix 4): пустой или сбойный список — неизвестный результат, а не «карт нет»
+LIST_RETRY_ATTEMPTS = 3          # попыток получить список экземпляров (всего, включая первую)
+LIST_RETRY_PAUSE_SEC = 5.0       # пауза между попытками списка, сек
+LIST_UNRELIABLE_LINE = ("Список карт Vast ненадёжен (пустой или с ошибкой): наличие карт не подтверждено, "
+                        "уборка не завершена.")
+
+
+def _list_instances_verified(client, *, sleep=None) -> Optional[list]:
+    """Список экземпляров аккаунта с повтором: [] и ошибка считаются неизвестным результатом.
+
+    Возвращает непустой список или None, если за LIST_RETRY_ATTEMPTS попыток список не получен.
+    Текст ошибки клиента здесь не печатается. Пауза задаётся параметром sleep (для тестов).
+    """
+    wait = time.sleep if sleep is None else sleep
+    for attempt in range(1, LIST_RETRY_ATTEMPTS + 1):
+        try:
+            rows = client.list_instances()
+        except VastError:
+            rows = []
+        if rows:
+            return list(rows)
+        if attempt < LIST_RETRY_ATTEMPTS:
+            wait(LIST_RETRY_PAUSE_SEC)
+    return None
+
+
+def _check_cards_by_id(client, card_ids, out) -> tuple:
+    """Проверка карт по ID из артефакта, когда список Vast ненадёжен (fix 4): GET по каждому ID.
+
+    Найденная карта уничтожается. Печатаются только номер карты и результат проверки (без адресов и ключей).
+    Возвращает (уничтожены, уже не было, не удалось).
+    """
+    destroyed: list[int] = []
+    gone: list[int] = []
+    failed: list[int] = []
+    for iid in card_ids:
+        try:
+            inst = client.get_instance(iid)
+        except VastInstanceNotFound:
+            gone.append(iid)
+            out(f"Карта {iid}: проверка по ID: не найдена.")
+            continue
+        except VastError:
+            failed.append(iid)
+            out(f"Карта {iid}: проверка по ID не удалась.")
+            continue
+        out(f"Карта {iid}: проверка по ID: найдена, статус {inst.actual_status}.")
+        try:
+            client.destroy_instance(iid)
+            destroyed.append(iid)
+        except VastError:
+            failed.append(iid)
+            out(f"Карта {iid}: ошибка уничтожения.")
+    return destroyed, gone, failed
+
+
 def read_card_ids(card_dir) -> list[int]:
     """ID экземпляров из meta.json карт артефакта запуска (cards/*/meta.json, пишет оркестратор при аренде).
 
@@ -745,6 +801,8 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
 
     Основной путь: уничтожение по метке gen-<run_id>. Резерв (при --card-dir): карты из meta.json
     артефакта запуска, которые метка не нашла; их ID записал оркестратор сразу после аренды.
+    Перед уничтожением список экземпляров проверяется (fix 4): пустой или сбойный список не считается
+    «карт нет»; тогда карты проверяются по ID, а без ID или при сбое проверки выход с кодом 3.
     Код 3, если хотя бы одно уничтожение не прошло (по метке или по ID).
     """
     run_id = str(getattr(args, "run_id", "") or "").strip()
@@ -760,43 +818,49 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
     already_gone: list[int] = []
     failed_ids: list[int] = []
     card_ids: list[int] = []
+    list_unreliable = False
     client = None
     try:
         # отладочный журнал Vast здесь не включается (по умолчанию выключен; флага у kill-cards нет)
         client = VastClient()
-        try:
-            by_label = list(client.destroy_by_label(label))
-        except VastError as e:
-            # частичный результат (VastDestroyError) сохраняем: эти карты уже уничтожены
-            by_label = list(getattr(e, "destroyed_ids", []) or [])
-            errors.append(str(e))
-
         if card_dir:
             card_ids = read_card_ids(card_dir)
-            for inst_id in (i for i in card_ids if i not in by_label):
-                try:
-                    client.get_instance(inst_id)
-                except VastInstanceNotFound:
-                    already_gone.append(inst_id)
-                    continue
-                except VastError:
-                    failed_ids.append(inst_id)
-                    continue
-                try:
-                    client.destroy_instance(inst_id)
-                    by_id.append(inst_id)
-                except VastError as e:
-                    failed_ids.append(inst_id)
-                    errors.append(str(e))
-
-        if not by_label and not by_id:
-            # метка ничего не нашла: печатаем, сколько карт вообще видно аккаунту (без адресов и ключей)
+        listed = _list_instances_verified(client)
+        if listed is None:
+            # список Vast ненадёжен: карты проверяются по ID из артефакта (fix 4, 5a)
+            by_id, already_gone, failed_ids = _check_cards_by_id(client, card_ids, print)
+            list_unreliable = (not card_ids) or bool(failed_ids)
+            if list_unreliable:
+                _err(LIST_UNRELIABLE_LINE)
+        else:
             try:
-                everything = client.list_instances()
-                tagged = sum(1 for i in everything if (i.label or "").startswith(CARD_LABEL_PREFIXES))
-                print(f"Всего экземпляров в аккаунте: {len(everything)}; с метками gen-/pilot-: {tagged}.")
-            except Exception:  # диагностика не должна менять исход уборки
-                pass
+                by_label = list(client.destroy_by_label(label))
+            except VastError as e:
+                # частичный результат (VastDestroyError) сохраняем: эти карты уже уничтожены
+                by_label = list(getattr(e, "destroyed_ids", []) or [])
+                errors.append(str(e))
+
+            if card_dir:
+                for inst_id in (i for i in card_ids if i not in by_label):
+                    try:
+                        client.get_instance(inst_id)
+                    except VastInstanceNotFound:
+                        already_gone.append(inst_id)
+                        continue
+                    except VastError:
+                        failed_ids.append(inst_id)
+                        continue
+                    try:
+                        client.destroy_instance(inst_id)
+                        by_id.append(inst_id)
+                    except VastError as e:
+                        failed_ids.append(inst_id)
+                        errors.append(str(e))
+
+            if not by_label and not by_id:
+                # метка ничего не нашла: печатаем, сколько карт вообще видно аккаунту (без адресов и ключей)
+                tagged = sum(1 for i in listed if (i.label or "").startswith(CARD_LABEL_PREFIXES))
+                print(f"Всего экземпляров в аккаунте: {len(listed)}; с метками gen-/pilot-: {tagged}.")
     except VastError as e:
         _err(f"Не удалось уничтожить карты: {e}")
         return EXIT_RUNTIME
@@ -815,7 +879,7 @@ def cmd_kill_cards(args: argparse.Namespace) -> int:
         print("Логи карт в этой команде не выгружаются: токен воркера есть только у процесса run.")
     for text in errors:
         _err(f"Не удалось уничтожить карты: {text}")
-    if errors or failed_ids:
+    if errors or failed_ids or list_unreliable:
         return EXIT_RUNTIME
     return EXIT_OK
 
@@ -1034,11 +1098,12 @@ class CleanupResult:
     destroyed: int = 0
     failed: int = 0
     unclassified: int = 0
+    unreliable: bool = False  # список Vast пуст или сбойный и карты не подтверждены (fix 4)
 
     @property
     def exit_code(self) -> int:
-        """0, если все уничтожения прошли или уничтожать нечего; 3 при неудаче или карте без номера."""
-        return EXIT_RUNTIME if (self.failed or self.unclassified) else EXIT_OK
+        """0, если все уничтожения прошли или уничтожать нечего; 3 при неудаче, карте без номера или ненадёжном списке."""
+        return EXIT_RUNTIME if (self.failed or self.unclassified or self.unreliable) else EXIT_OK
 
     def summary_lines(self) -> list[str]:
         return [
@@ -1051,14 +1116,28 @@ class CleanupResult:
 
 
 def cleanup_cards(client, *, run_status_fn: Callable[[str], Optional[str]], now: float,
-                  out: Callable[[str], None] = print) -> CleanupResult:
+                  out: Callable[[str], None] = print, card_ids: tuple = (), sleep=None) -> CleanupResult:
     """Уборка карт с метками gen-* и pilot-* (SPEC 8.3 г). Остальные карты аккаунта не трогаются.
 
     run_status_fn(run_id) возвращает статус запуска или None. Решение по каждой карте печатается
-    с номером карты (не адресом) и причиной.
+    с номером карты (не адресом) и причиной. Пустой или сбойный список Vast (fix 4) не считается
+    «карт нет»: повтор списка, затем проверка по card_ids (GET по ID); без ID или при сбое — код 3.
     """
     result = CleanupResult()
-    cards = [i for i in client.list_instances() if (i.label or "").startswith(CARD_LABEL_PREFIXES)]
+    listed = _list_instances_verified(client, sleep=sleep)
+    if listed is None:
+        if not card_ids:
+            out(LIST_UNRELIABLE_LINE)
+            result.unreliable = True
+            return result
+        destroyed, _gone, failed = _check_cards_by_id(client, card_ids, out)
+        result.destroyed += len(destroyed)
+        result.failed += len(failed)
+        if failed:
+            out(LIST_UNRELIABLE_LINE)
+            result.unreliable = True
+        return result
+    cards = [i for i in listed if (i.label or "").startswith(CARD_LABEL_PREFIXES)]
     if not cards:
         out("Карт с метками gen-* и pilot-* нет — убирать нечего.")
     for inst in cards:

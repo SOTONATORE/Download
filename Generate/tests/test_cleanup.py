@@ -408,3 +408,82 @@ def test_cleanup_adds_no_environment_read_to_cli():
     # cleanup-vast не читает окружение: ключ Vast читает VastClient, gh получает GhCommandRunner
     text = open(cli.__file__, encoding="utf-8").read()
     assert text.count("os.environ") == 1
+
+
+# ---------------------------------------------------------------------------
+# fix 4: пустой или сбойный список Vast — не «карт нет»
+# ---------------------------------------------------------------------------
+
+class _ListBrokenVast(FakeCleanupVast):
+    """Список Vast пуст или падает; GET по ID отдаёт карты из by_id, остальные — not found."""
+
+    def __init__(self, *a, **k):
+        self.list_calls = 0
+        self.list_exc = None
+        self.by_id = {}
+        self.gets = []
+        self.destroyed_here = []
+
+    def list_instances(self, label=None):
+        self.list_calls += 1
+        if self.list_exc is not None:
+            raise self.list_exc
+        return []
+
+    def get_instance(self, iid):
+        self.gets.append(iid)
+        if iid in self.by_id:
+            return self.by_id[iid]
+        from Generate.core.vast_client import VastInstanceNotFound
+        raise VastInstanceNotFound("карта не найдена в ответе API")
+
+    def destroy_instance(self, iid):
+        self.destroyed_here.append(iid)
+        return True
+
+
+def test_empty_list_three_times_uses_get_by_id_and_destroys_found_card():
+    client = _ListBrokenVast()
+    client.by_id = {7: _inst(7, "gen-10", YOUNG)}
+    sleeps, out = [], []
+    result = cli.cleanup_cards(client, run_status_fn=_status_fn({}), now=NOW, out=out.append,
+                               card_ids=(7, 8), sleep=sleeps.append)
+    assert client.list_calls == 3 == cli.LIST_RETRY_ATTEMPTS
+    assert sleeps == [cli.LIST_RETRY_PAUSE_SEC, cli.LIST_RETRY_PAUSE_SEC]
+    assert client.gets == [7, 8]
+    assert client.destroyed_here == [7]
+    assert result.destroyed == 1
+    assert result.exit_code == 0
+
+
+def test_get_not_found_is_already_gone_not_failure():
+    client = _ListBrokenVast()
+    out = []
+    result = cli.cleanup_cards(client, run_status_fn=_status_fn({}), now=NOW, out=out.append,
+                               card_ids=(5,), sleep=lambda s: None)
+    assert client.destroyed_here == []
+    assert (result.failed, result.unreliable, result.exit_code) == (0, False, 0)
+    assert any("не найдена" in line for line in out)
+
+
+def test_list_error_without_card_ids_is_unreliable_and_exit_3():
+    client = _ListBrokenVast()
+    client.list_exc = VastRuntimeError("сбой списка")
+    out = []
+    result = cli.cleanup_cards(client, run_status_fn=_status_fn({}), now=NOW, out=out.append,
+                               sleep=lambda s: None)
+    assert result.unreliable is True
+    assert result.exit_code == cli.EXIT_RUNTIME
+    assert cli.LIST_UNRELIABLE_LINE in out
+
+
+def test_kill_cards_list_error_exits_nonzero_and_prints_warning(capsys, monkeypatch):
+    import argparse
+    client = _ListBrokenVast()
+    client.list_exc = VastRuntimeError("сбой списка")
+    monkeypatch.setattr(cli, "VastClient", lambda *a, **k: client)
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    code = cli.cmd_kill_cards(argparse.Namespace(label=None, run_id="10", card_dir=""))
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_RUNTIME
+    assert cli.LIST_UNRELIABLE_LINE in captured.err

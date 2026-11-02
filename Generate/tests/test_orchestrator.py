@@ -2844,3 +2844,93 @@ def test_fallback_by_queue_lengths_applies_after_plan_is_exhausted():
     assert o._next_role(0.0) == "video"  # фото 1 < видео 2
     o._photo_queue = deque([2, 4, 6])
     assert o._next_role(0.0) == "photo"  # фото 3 >= видео 2
+
+
+# ---------------------------------------------------------------------------
+# fix 2-4: логи Vast перед уничтожением: бюджет времени, повторы, DELETE в finally
+# ---------------------------------------------------------------------------
+
+class _LogsVast(FakeVast):
+    """Фейк логов Vast: request_logs по очереди отдаёт исключение или успех (None), download_logs пишет 200."""
+
+    def __init__(self, offers, events, request_script) -> None:
+        super().__init__(offers, events)
+        self.request_script = list(request_script)
+        self.request_calls = 0
+        self.download_calls = 0
+
+    def request_logs(self, instance_id, *, tail=2000, daemon_logs=False):
+        self.request_calls += 1
+        step = self.request_script[min(self.request_calls - 1, len(self.request_script) - 1)]
+        if step is not None:
+            raise step
+        return "https://storage.example/logs.txt"
+
+    def download_logs(self, url, dest):
+        self.download_calls += 1
+        with open(dest, "wb") as fh:
+            fh.write(b"container log line\n")
+        return 200
+
+
+def _rent_for_logs(tmp_path, monkeypatch, script, **orch_kw):
+    """Аренда одной карты с каталогом артефакта и фейком логов; возвращает (rig, fake, slot)."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,), artifact_dir=str(tmp_path / "art"), **orch_kw)
+    fake = _LogsVast([make_offer(1, 11)], rig.events, script)
+    rig.orc.vast = fake
+    rig.orc._rent_one(rig.clock(), offers=[make_offer(1, 11)])
+    return rig, fake, rig.orc._slots[1]
+
+
+def test_delete_is_sent_even_when_log_request_is_interrupted(tmp_path, monkeypatch):
+    """Прерывание во время запроса логов не отменяет DELETE: уничтожение в finally."""
+    rig, fake, slot = _rent_for_logs(tmp_path, monkeypatch, [KeyboardInterrupt()])
+    with pytest.raises(KeyboardInterrupt):
+        rig.orc._retire(slot, "тест прерывания")
+    assert fake.destroyed == [slot.instance_id]
+
+
+def test_403_from_request_logs_is_not_retried(tmp_path, monkeypatch):
+    """403 от request_logs: ровно один запрос логов, повторов нет."""
+    rig, fake, slot = _rent_for_logs(tmp_path, monkeypatch, [vc.VastStatusError("доступ запрещён", status=403)])
+    rig.orc._retire(slot, "тест 403")
+    assert fake.request_calls == 1
+    assert fake.download_calls == 0
+    assert fake.destroyed == [slot.instance_id]
+
+
+def test_429_is_retried_and_total_time_stays_within_budget(tmp_path, monkeypatch):
+    """429 повторяется; суммарное время на фальшивых часах не выходит за LOG_BUDGET_BEFORE_DESTROY_SEC."""
+    rig, fake, slot = _rent_for_logs(
+        tmp_path, monkeypatch, [vc.VastStatusError("слишком часто", status=429), None])
+    start = rig.clock.now
+    rig.orc._retire(slot, "тест 429")
+    elapsed = rig.clock.now - start
+    assert fake.request_calls == 2
+    assert fake.download_calls == 1
+    assert elapsed <= orch.LOG_BUDGET_BEFORE_DESTROY_SEC
+    assert fake.destroyed == [slot.instance_id]
+
+
+def test_retries_stop_at_the_log_budget(tmp_path, monkeypatch):
+    """Постоянные 503: попытки и паузы не выходят за бюджет перед уничтожением, DELETE всё равно идёт."""
+    rig, fake, slot = _rent_for_logs(
+        tmp_path, monkeypatch, [vc.VastStatusError("временно недоступно", status=503)])
+    start = rig.clock.now
+    rig.orc._retire(slot, "тест 503")
+    assert rig.clock.now - start <= orch.LOG_BUDGET_BEFORE_DESTROY_SEC
+    assert fake.request_calls <= rig.orc._vast_logs_attempts
+    assert fake.destroyed == [slot.instance_id]
+
+
+def test_cleanup_gives_log_fetch_the_remaining_limit_and_stays_within_it(tmp_path, monkeypatch):
+    """_cleanup передаёт остаток ARTIFACT_SAVE_LIMIT_SEC; общее время сбора логов не выходит за лимит."""
+    rig, fake, slot = _rent_for_logs(
+        tmp_path, monkeypatch, [vc.VastStatusError("временно недоступно", status=503)],
+        vast_logs_attempts=100)
+    start = rig.clock.now
+    rig.orc._cleanup()
+    elapsed = rig.clock.now - start
+    assert fake.request_calls > 1          # бюджет использован: повторы были
+    assert elapsed <= orch.ARTIFACT_SAVE_LIMIT_SEC
+    assert fake.label_destroyed == [LABEL]   # уборка по метке всё равно выполнена (фейк, поставленный в orc)

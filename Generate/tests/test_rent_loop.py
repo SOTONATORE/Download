@@ -361,3 +361,26 @@ def test_interruptible_still_enters_price_window(tmp_path, monkeypatch, caplog):
     assert rig.orc._scan_started == now                     # окно открыто, как и раньше
     assert len(vast.searches) == 1                          # первый шаг опроса при открытии окна
     assert any("Окно сбора цен открыто" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# fix 1: сигнал остановки непосредственно перед запросом аренды
+# ---------------------------------------------------------------------------
+
+def test_stop_set_after_offer_selection_does_not_send_create(tmp_path, monkeypatch, caplog):
+    """Сигнал, пришедший после выбора предложения и сборки окружения: аренда не отправляется, результат stop."""
+    rig = Rig(tmp_path, monkeypatch, missing=(1,))
+    orc_obj = rig.orc
+    real_profile = orc_obj._profile_for_role
+
+    def profile_then_stop(role):
+        # _profile_for_role вызывается при сборке окружения, уже после выбора предложения и до create_instance
+        orc_obj._stop.set()
+        return real_profile(role)
+
+    monkeypatch.setattr(orc_obj, "_profile_for_role", profile_then_stop)
+    with caplog.at_level(logging.INFO):
+        result = orc_obj._rent_one(rig.clock(), offers=[make_offer(1, 11)])
+    assert result == "stop"
+    assert rig.vast.created == []
+    assert any("сигнал остановки" in r.getMessage() for r in caplog.records)

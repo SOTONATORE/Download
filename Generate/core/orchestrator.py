@@ -99,6 +99,10 @@ MAX_NET_FAILS = 6         # подряд сбоев связи с воркеро
 EXIT_OK = 0
 EXIT_PARTIAL = 3
 LOGS_TIMEOUT_SEC = 10.0   # таймаут GET /logs (периодический и перед уничтожением карты), SPEC 8.4
+# общий бюджет времени на логи перед уничтожением карты (fix 2): одна попытка и повторы в его пределах
+LOG_BUDGET_BEFORE_DESTROY_SEC = 20.0
+# пауза между повторами логов Vast в бюджете перед уничтожением: не длиннее остатка бюджета (fix 2)
+LOG_RETRY_PAUSE_BEFORE_DESTROY_SEC = 5.0
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
@@ -2110,6 +2114,9 @@ class Orchestrator:
                 env["HF_TOKEN"] = hf_token
         # поле «price» уходит только при прерываемой аренде: ставка bid (та же цена, что в бюджете)
         bid_price = price if offer.is_interruptible else None
+        if self._stop.is_set():  # сигнал пришёл после выбора предложения и сборки окружения: аренда не отправляется
+            log.info("Аренда не отправлена: получен сигнал остановки.")
+            return "stop"
         # запрос аренды считается до отправки; предложение больше не выбирается в этом запуске (9е-3)
         self._rent_requests += 1
         self._used_offers.add(offer.offer_id)
@@ -2176,36 +2183,43 @@ class Orchestrator:
                 self._requeue_free(task.num)
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
-        self._dump_before_destroy(slot)
-        # стоимость карты фиксируется в момент снятия, независимо от исхода уничтожения (SPEC 8.3).
-        # Повторное закрытие невозможно: финальная уборка закрывает только открытые записи.
         try:
-            self.budget.track_instance_stop(slot.instance_id, self.clock())
-        except BudgetError:
-            pass
-        try:
-            self.vast.destroy_instance(slot.instance_id)
-        except VastError as exc:
-            log.warning("Не удалось уничтожить %s (машина %s): %s. Стоимость зафиксирована "
-                        "на этот момент; уничтожение не подтверждено, карта будет проверена при "
-                        "финальной уборке.", _card_name(slot), slot.machine_id, exc)
-        else:
-            self._destroyed += 1
+            self._dump_before_destroy(slot, budget=LOG_BUDGET_BEFORE_DESTROY_SEC)
+        finally:
+            # DELETE уходит и тогда, когда логи упали или прерваны (fix 2): уничтожение не ждёт логов
+            # стоимость карты фиксируется в момент снятия, независимо от исхода уничтожения (SPEC 8.3).
+            # Повторное закрытие невозможно: финальная уборка закрывает только открытые записи.
+            try:
+                self.budget.track_instance_stop(slot.instance_id, self.clock())
+            except BudgetError:
+                pass
+            try:
+                self.vast.destroy_instance(slot.instance_id)
+            except VastError as exc:
+                log.warning("Не удалось уничтожить %s (машина %s): %s. Стоимость зафиксирована "
+                            "на этот момент; уничтожение не подтверждено, карта будет проверена при "
+                            "финальной уборке.", _card_name(slot), slot.machine_id, exc)
+            else:
+                self._destroyed += 1
         self._clear_silent_vast_logs(slot)  # снятая карта больше не опрашивается периодикой: URL сбрасывается
         slot.ssh_host = None  # снятая карта не опрашивается SSH-диагностикой: адрес и порт забываются
         slot.ssh_port = None
         self._slots.pop(slot.index, None)
 
-    def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC) -> None:
+    def _dump_before_destroy(self, slot: _CardSlot, timeout: float = LOGS_TIMEOUT_SEC,
+                             budget: Optional[float] = None) -> None:
         """Логи карты запрашиваются до уничтожения: логи воркера (при известном адресе) и логи Vast.
 
         Логи Vast берутся, если логов воркера нет (адреса нет, либо GET /logs не удался). Оба пути пробуются
         независимо: сбой одного не пропускает другой. Любая ошибка гасится: уничтожение карты от логов не зависит.
         """
+        # budget (сек) — общий предел времени на весь сбор логов перед уничтожением; None = без предела (fix 2, 4a)
+        started = self.clock()
+        worker_timeout = timeout if budget is None else min(timeout, budget)
         worker_logs = False
         if slot.url:
             try:
-                worker_logs = self._pull_card_logs(slot, final=True, timeout=timeout)
+                worker_logs = self._pull_card_logs(slot, final=True, timeout=worker_timeout)
             except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
                 log.warning("Не удалось получить логи карты %d: %s.", slot.instance_id, type(exc).__name__)
         elif self.pilot:
@@ -2217,12 +2231,25 @@ class Orchestrator:
                      _card_name(slot, cap=True))
         if not worker_logs:
             # воркер не отдал логи: логи контейнера берутся через Vast (SPEC 8.4)
+            # остаток общего бюджета после попытки воркера; без бюджета — как раньше
+            left = None if budget is None else max(0.0, budget - (self.clock() - started))
             try:
-                self._fetch_vast_logs(slot)
+                self._fetch_vast_logs(slot, budget=left)
             except Exception as exc:  # уничтожение не должно ждать и падать из-за логов
                 log.warning("Не удалось получить логи Vast карты %d: %s.", slot.instance_id, type(exc).__name__)
 
-    def _fetch_vast_logs(self, slot: _CardSlot, *, attempts: Optional[int] = None) -> bool:
+    @staticmethod
+    def _vast_logs_retryable(code: Optional[int]) -> bool:
+        """Повтор логов Vast в бюджете перед уничтожением: сетевой сбой (код None), 429 и 5xx.
+
+        403 и прочие 4xx повтору не подлежат: ссылка или доступ не изменятся от повтора.
+        """
+        if code is None:
+            return True
+        return code == 429 or 500 <= int(code) <= 599
+
+    def _fetch_vast_logs(self, slot: _CardSlot, *, attempts: Optional[int] = None,
+                         budget: Optional[float] = None) -> bool:
         """Логи контейнера карты через Vast: PUT request_logs, затем загрузка result_url (SPEC 8.4).
 
         Вызывается только на путях снятия, где логов воркера нет: нет адреса, молчание хоста, таймаут готовности.
@@ -2242,7 +2269,11 @@ class Orchestrator:
             fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
             os.close(fd)
             self._write_heartbeat()  # heartbeat до первой попытки (F2)
+            # budget (сек): предел времени на все попытки и паузы; None — прежнее поведение периодики (fix 4b)
+            deadline = None if budget is None else self.clock() + float(budget)
             for attempt in range(1, attempts + 1):
+                if deadline is not None and self.clock() >= deadline:
+                    break  # бюджет исчерпан: новая попытка не начинается
                 code, size = self._vast_logs_attempt(slot, raw_path)
                 if code == 200:
                     log.info("%s: логи Vast получены, %d байт, код %s.", _card_name(slot, cap=True), size, code)
@@ -2253,8 +2284,18 @@ class Orchestrator:
                     return True
                 log.warning("%s: логи Vast, попытка %d из %d, код %s.",
                             _card_name(slot, cap=True), attempt, attempts, code if code is not None else "нет")
-                if attempt < attempts and self._vast_logs_pause > 0:
-                    self._pause_with_heartbeat(self._vast_logs_pause)
+                if deadline is None:
+                    if attempt < attempts and self._vast_logs_pause > 0:
+                        self._pause_with_heartbeat(self._vast_logs_pause)
+                    continue
+                # с бюджетом повтор только при сетевом сбое, 429 и 5xx (fix 2, 3b)
+                if not self._vast_logs_retryable(code) or attempt >= attempts:
+                    break
+                left = deadline - self.clock()
+                if left <= 0:
+                    break
+                # пауза не длиннее остатка бюджета (fix 2, 3c; fix 4a)
+                self._pause_with_heartbeat(min(LOG_RETRY_PAUSE_BEFORE_DESTROY_SEC, left))
             self._write_heartbeat()  # heartbeat после последней попытки (F2)
             log.warning("%s: логи Vast не получены после %d попыток.", _card_name(slot, cap=True), attempts)
             return False
@@ -3058,7 +3099,7 @@ class Orchestrator:
                 log.warning("Лимит %d с на сохранение логов исчерпан: карта %d без выгрузки логов.",
                             int(ARTIFACT_SAVE_LIMIT_SEC), slot.instance_id)
                 continue
-            self._dump_before_destroy(slot, timeout=min(LOGS_TIMEOUT_SEC, left))
+            self._dump_before_destroy(slot, timeout=min(LOGS_TIMEOUT_SEC, left), budget=left)
             self._save_instance(slot)
         try:
             ids = self.vast.destroy_by_label(self.label)
