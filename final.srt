@@ -1,2264 +1,6056 @@
 1
-00:00:00,000 --> 00:00:03,843
-For over six hundred years, one family sat on a throne that stretched from the
+00:00:00,000 --> 00:00:02,720
+В центральном архиве есть картонная карточка.
 
 2
-00:00:03,897 --> 00:00:06,806
-gates of Vienna to the shores of the Persian Gulf.
+00:00:03,120 --> 00:00:07,880
+Одна на одного человека. Таких в стеллажах тысячи, и почти все они
 
 3
-00:00:07,006 --> 00:00:10,970
-Sultans. Caliphs. The last dynasty of Islam's greatest
+00:00:07,920 --> 00:00:10,960
+заполнены от руки аккуратным канцелярским почерком.
 
 4
-00:00:11,039 --> 00:00:14,733
-empire. And then, within the span of two winters,
+00:00:11,600 --> 00:00:13,520
+На этой карточке записано немного.
 
 5
-00:00:14,773 --> 00:00:19,217
-every one of them was given a number of hours to pack a bag and get on a boat or
+00:00:14,080 --> 00:00:16,880
+Родился в ауле, батрак, из бедняков.
 
 6
-00:00:19,257 --> 00:00:21,459
-a train, never to return.
+00:00:17,360 --> 00:00:20,240
+В конце двадцатых вступил в партию. Школа.
 
 7
-00:00:21,620 --> 00:00:25,623
-If your family has any connection to this part of the world, or if you've ever
+00:00:20,560 --> 00:00:22,800
+Курсы в Москве. Звание майора.
 
 8
-00:00:25,667 --> 00:00:29,947
-wondered what actually happens to royalty after the empire disappears from under
+00:00:23,040 --> 00:00:27,520
+Назначение командиром полка. Всё это уместилось на одну сторону.
 
 9
-00:00:29,995 --> 00:00:34,511
-them, this is the story nobody tells in full: what happened to the people
+00:00:27,920 --> 00:00:30,640
+А на обороте, внизу, одна строчка,
 
 10
-00:00:34,576 --> 00:00:37,394
-themselves. The ones who were born into absolute
+00:00:30,693 --> 00:00:35,280
+напечатанная машинкой с западающей буквой р: пропал без вести.
 
 11
-00:00:37,474 --> 00:00:40,437
-power and woke up one day as refugees,
+00:00:35,920 --> 00:00:39,840
+Строчка короткая. Она не говорит, где, когда и как.
 
 12
-00:00:40,494 --> 00:00:44,840
-unable to find a single country willing to let them keep their own name.
+00:00:40,240 --> 00:00:44,640
+Она просто закрывает вопрос, потому что дальше по бумаге идти некуда.
 
 13
-00:00:44,881 --> 00:00:48,444
-The family's exile didn't start with a law in 1924.
+00:00:45,280 --> 00:00:47,360
+В разделе о семье три имени.
 
 14
-00:00:48,497 --> 00:00:53,488
-It started two years earlier, with one man, alone, on a British warship.
+00:00:47,600 --> 00:00:50,120
+Жена Мария. Дочь Надежда.
 
 15
-00:00:53,588 --> 00:00:56,211
-Mehmed VI Vahideddin became sultan in
+00:00:50,320 --> 00:00:55,120
+Сын Дамир. О них записано больше, чем о нём самом после той весны.
 
 16
-00:00:56,291 --> 00:00:59,414
-July 1918, at the worst possible moment
+00:00:55,440 --> 00:00:57,840
+Кто-то аккуратно вписал адреса, даты
 
 17
-00:00:59,494 --> 00:01:01,736
-in six hundred years of Ottoman history.
+00:00:57,960 --> 00:01:00,480
+рождения, название школы для сына.
 
 18
-00:01:01,736 --> 00:01:05,579
-The empire had already lost the war. British forces occupied Baghdad and
+00:01:00,800 --> 00:01:03,959
+Для человека, которого нет, там не нашлось места.
 
 19
-00:01:05,635 --> 00:01:09,583
-Jerusalem, and within months of his coronation, Allied troops were sitting in
+00:01:04,319 --> 00:01:08,319
+Дивизию, в которой он служил, долгие десятилетия числили пропавшей.
 
 20
-00:01:09,645 --> 00:01:13,106
-Istanbul itself. Vahideddin's strategy for keeping the
+00:01:10,247 --> 00:01:14,327
+Архив отвечал на запросы короткими справками: документы почти не
 
 21
-00:01:13,166 --> 00:01:17,192
-dynasty alive was cooperation. He signed the Treaty of Sèvres in August
+00:01:14,407 --> 00:01:17,207
+сохранились, личный состав значился без
 
 22
-00:01:17,228 --> 00:01:21,516
-1920, a document that stripped the empire down to little more than the Turkish
+00:01:17,287 --> 00:01:20,007
+вести, сведений не имеется.
 
 23
-00:01:21,556 --> 00:01:25,119
-heartland and recognized foreign mandates over what was left.
+00:01:20,047 --> 00:01:23,247
+Несколько тысяч человек в одной строке.
 
 24
-00:01:25,226 --> 00:01:28,722
-It was meant to save the throne. Instead, it turned him into the
+00:01:23,287 --> 00:01:25,647
+Спросить о них было некого.
 
 25
-00:01:28,769 --> 00:01:32,646
-nationalist movement's primary enemy, because every concession he made to the
+00:01:25,687 --> 00:01:29,927
+Иногда такие справки приходят спустя годы, и каждая из них похожа на
 
 26
-00:01:32,726 --> 00:01:37,050
-Allies looked, from Ankara, like a sultan selling out his own country to keep his
+00:01:30,007 --> 00:01:33,247
+предыдущую, как капли из одной протечки.
 
 27
-00:01:37,130 --> 00:01:41,133
-palace. By 1922, Mustafa Kemal's forces had
+00:01:33,287 --> 00:01:37,847
+Лет пятнадцать назад в казахстанской газете на первой полосе напечатали старую
 
 28
-00:01:41,186 --> 00:01:45,577
-defeated the Greek army in Anatolia and were in firm control of the country.
+00:01:37,927 --> 00:01:41,287
+фотографию. Группа мужчин в военной форме стоит на
 
 29
-00:01:45,697 --> 00:01:49,941
-On November 1, the Grand National Assembly voted to abolish the sultanate
+00:01:41,367 --> 00:01:46,087
+ступенях штабного здания. Подпись: командиры сто шестой казахской
 
 30
-00:01:50,021 --> 00:01:54,826
-itself, the political office, not yet the family's religious title as Caliph.
+00:01:46,127 --> 00:01:50,327
+кавалерийской дивизии. Родственники одного из них увидели снимок
 
 31
-00:01:54,826 --> 00:01:59,710
-Sixteen days later, on November 17, Vahideddin left Constantinople aboard the
+00:01:50,407 --> 00:01:53,074
+и узнали в одном из стоящих деда.
 
 32
-00:01:59,750 --> 00:02:02,433
-British warship HMS Malaya, accompanied
+00:01:53,100 --> 00:01:56,967
+Узнали по лицу, по тому, как он держит фуражку в левой руке.
 
 33
-00:02:02,486 --> 00:02:06,196
-by his ten-year-old son, Prince Ertuğrul, and two of his consorts.
+00:01:57,047 --> 00:01:59,487
+Звали его Тажигали Уваисов.
 
 34
-00:02:06,329 --> 00:02:08,918
-He took almost nothing else. No treasury.
+00:01:59,527 --> 00:02:02,527
+Майор, командир триста седьмого полка.
 
 35
-00:02:08,998 --> 00:02:13,322
-No jewels. Whatever fit in his own hands and the small amount of luggage the British
+00:02:02,567 --> 00:02:04,887
+Почему о человеке, чья служба записана по
 
 36
-00:02:13,382 --> 00:02:17,967
-allowed. The British wouldn't even let him live in a Muslim-majority country, and that alone
+00:02:04,967 --> 00:02:08,767
+годам, известно только одно: пропал без вести?
 
 37
-00:02:18,020 --> 00:02:20,449
-shows how fast his status had collapsed.
+00:02:08,807 --> 00:02:11,647
+Ответ придётся искать шаг за шагом.
 
 38
-00:02:20,529 --> 00:02:23,131
-He asked for Hejaz. He asked for Egypt.
+00:02:11,687 --> 00:02:15,727
+От степи до фронта. От фотографии до карты.
 
 39
-00:02:23,171 --> 00:02:26,935
-He asked for Palestine. Every request was refused, out of fear
+00:02:17,231 --> 00:02:20,111
+Аул стоял у подножия невысоких гор, где
 
 40
-00:02:26,967 --> 00:02:30,298
-that a deposed Ottoman sultan sitting anywhere in the Islamic world would
+00:02:20,231 --> 00:02:23,231
+летом трава доходила до стремени, а зимой
 
 41
-00:02:30,332 --> 00:02:34,221
-become a rallying point for exactly the kind of nationalist unrest the Allies
+00:02:23,311 --> 00:02:27,751
+ветер сдувал снег с сопок начисто и оставлял лишь тонкую белую корку в
 
 42
-00:02:34,253 --> 00:02:37,985
-were trying to suppress elsewhere. He was moved first to Malta, then
+00:02:27,791 --> 00:02:31,471
+ложбинах. Тажигали родился в семье, где мужчины
 
 43
-00:02:38,029 --> 00:02:42,389
-eventually given refuge in Italy by King Victor Emmanuel III, and settled in the
+00:02:31,551 --> 00:02:36,191
+работали на чужих. Отец пас табун одного бая, мать шила из
 
 44
-00:02:42,429 --> 00:02:45,672
-small resort town of San Remo on the Italian Riviera.
+00:02:36,271 --> 00:02:39,231
+войлока и тянула на себе двоих младших.
 
 45
-00:02:45,672 --> 00:02:49,915
-He tried once more to salvage some version of his old religious authority,
+00:02:39,311 --> 00:02:41,471
+Ему было восемь, когда он впервые сел на
 
 46
-00:02:49,951 --> 00:02:54,079
-attempting to have himself installed as Caliph in the Hejaz instead, a bid that
+00:02:41,551 --> 00:02:44,431
+коня без седла, и десять, когда впервые
 
 47
-00:02:54,135 --> 00:02:58,243
-collapsed almost immediately under regional rivalry and colonial pressure.
+00:02:44,511 --> 00:02:47,111
+увидел, как седло ломается в степи.
 
 48
-00:02:58,403 --> 00:03:01,126
-Back in Constantinople, his own cousin,
+00:02:47,151 --> 00:02:49,591
+Подпруга лопнула на полном скаку.
 
 49
-00:03:01,179 --> 00:03:05,369
-Abdulmecid, was named Caliph in his place within two days of his departure.
+00:02:49,631 --> 00:02:53,178
+Всадник не разбился, но коня пришлось добивать.
 
 50
-00:03:05,509 --> 00:03:09,533
-The family kept its religious title even as it stripped the deposed sultan of
+00:02:53,204 --> 00:02:55,631
+Тажигали смотрел на обрывок ремня.
 
 51
-00:03:09,577 --> 00:03:13,136
-everything else. Vahideddin spent his last years in San
+00:02:55,711 --> 00:02:58,831
+Его занимало другое: кто шил эту подпругу
 
 52
-00:03:13,196 --> 00:03:16,499
-Remo writing memoirs nobody in power was listening to.
+00:02:58,911 --> 00:03:01,071
+и почему шов не выдержал.
 
 53
-00:03:16,687 --> 00:03:20,983
-He died there on May 16, 1926, of a heart condition.
+00:03:01,111 --> 00:03:03,111
+Вечером он спросил отца.
 
 54
-00:03:21,075 --> 00:03:23,145
-Turkey refused to take the body.
+00:03:03,151 --> 00:03:06,591
+Тот долго молчал, потом сказал одно: Шов
 
 55
-00:03:23,225 --> 00:03:27,069
-It was his own daughter, Sabiha Sultan, who arranged for him to be buried in
+00:03:06,671 --> 00:03:09,191
+всегда там, где торопились.
 
 56
-00:03:27,140 --> 00:03:32,033
-Damascus: a sultan of six centuries of Ottoman rule, laid to rest in a cemetery
+00:03:09,231 --> 00:03:12,150
+Эти слова Тажигали запомнил на всю жизнь.
 
 57
-00:03:32,065 --> 00:03:35,557
-that wasn't even in his own country, because the country he'd ruled wouldn't
+00:03:12,190 --> 00:03:16,350
+Может быть, поэтому он потом никогда не торопился там, где нельзя было
 
 58
-00:03:35,589 --> 00:03:39,480
-have him back even dead. Two days after Vahideddin sailed away on
+00:03:16,430 --> 00:03:20,350
+торопиться. В двадцатом году в аул пришли новые люди
 
 59
-00:03:39,560 --> 00:03:43,804
-a British warship, the family handed its last remaining title to a man who never
+00:03:20,390 --> 00:03:24,750
+с красными лентами. Говорили о земле, о равенстве, о том, что
 
 60
-00:03:43,838 --> 00:03:46,847
-wanted a throne in the first place. He wanted a studio.
+00:03:24,790 --> 00:03:27,750
+батрак больше не будет гнуть спину на бая.
 
 61
-00:03:46,967 --> 00:03:49,649
-Abdulmecid had spent most of his life waiting.
+00:03:29,278 --> 00:03:32,718
+Тажигали слушал молча, как слушал всё.
 
 62
-00:03:49,729 --> 00:03:53,733
-Under Ottoman custom, a prince of his rank was confined to the palace grounds
+00:03:32,798 --> 00:03:35,278
+Он работал на заготовке кизяка, потом на
 
 63
-00:03:53,773 --> 00:03:57,176
-until the age of forty, watching three different cousins take the throne ahead
+00:03:35,358 --> 00:03:40,318
+сенокосе, потом в колхозном сарае, где впервые взял в руки счёты и быстро
 
 64
-00:03:57,203 --> 00:04:01,100
-of him while he filled the years with painting lessons, cello practice, and
+00:03:40,398 --> 00:03:42,518
+выучился считать трудодни.
 
 65
-00:04:01,157 --> 00:04:03,422
-Friday visits from the artists he supported.
+00:03:42,558 --> 00:03:46,438
+В двадцать шестом году его отправили в Алма-Ату на курсы.
 
 66
-00:04:03,502 --> 00:04:07,666
-He chaired the Ottoman Artists' Society, studied under European-trained painters,
+00:03:46,478 --> 00:03:49,438
+Там была казарма, холодный пол, махорка и
 
 67
-00:04:07,706 --> 00:04:12,390
-and produced canvases, portraits, battle scenes, harem interiors, good enough that
+00:03:49,518 --> 00:03:52,358
+газеты, которые читали по три раза.
 
 68
-00:04:12,470 --> 00:04:16,233
-a full museum retrospective would eventually be built around them, decades
+00:03:52,398 --> 00:03:54,718
+Он выучил русский язык так, как учат
 
 69
-00:04:16,286 --> 00:04:19,116
-after his death, in a country that had exiled him.
+00:03:54,798 --> 00:03:59,718
+ремесло: по словам, по фразам, по ошибкам, которые преподаватель поправлял
 
 70
-00:04:19,169 --> 00:04:21,999
-He became crown prince only in 1918, when
+00:03:59,758 --> 00:04:03,758
+красным карандашом. Окончив курсы, он подал заявление в
 
 71
-00:04:22,039 --> 00:04:25,922
-Vahideddin took the throne, and even then he had no real power.
+00:04:03,838 --> 00:04:07,638
+партию. Анкету заполнял долго, аккуратно, выводя
 
 72
-00:04:25,975 --> 00:04:28,725
-He simply outranked everyone else left standing.
+00:04:07,678 --> 00:04:12,398
+каждую букву. В графе отец написал батрак, пастух у
 
 73
-00:04:28,725 --> 00:04:32,008
-On November 19, 1922, two days after his
+00:04:12,478 --> 00:04:14,825
+бая. Вопросов не задавали.
 
 74
-00:04:32,042 --> 00:04:35,531
-cousin's departure, the Grand National Assembly elected him Caliph.
+00:04:14,851 --> 00:04:17,838
+Тогда ещё было принято верить людям на слово.
 
 75
-00:04:35,638 --> 00:04:40,095
-He was chosen by vote, not inheritance: elected by a secular parliament that had
+00:04:17,878 --> 00:04:22,518
+Мария получила от него первое письмо через три месяца после отъезда.
 
 76
-00:04:40,143 --> 00:04:43,618
-just abolished the political half of his family's power and kept only the
+00:04:22,558 --> 00:04:25,798
+Письмо было короткое: Жив, здоров.
 
 77
-00:04:43,666 --> 00:04:47,942
-religious half, on its own terms. He arrived in Constantinople five days
+00:04:25,838 --> 00:04:27,878
+Учусь. Береги детей.
 
 78
-00:04:47,995 --> 00:04:51,385
-later to a position that had been deliberately hollowed out in advance.
+00:04:27,918 --> 00:04:31,918
+Скоро напишу подробнее. Подробнее он не писал долго.
 
 79
-00:04:51,518 --> 00:04:56,510
-No army, no state, no sultanate to back it, just the ceremonial headship of Sunni
+00:04:31,998 --> 00:04:35,958
+Жизнь военного в те годы была расписана по часам и по приказам.
 
 80
-00:04:56,590 --> 00:05:01,074
-Islam operating inside a republic that no longer wanted a monarchy of any kind.
+00:04:37,510 --> 00:04:40,870
+Переводы, назначения, учебные сборы.
 
 81
-00:05:01,207 --> 00:05:03,236
-He held it for sixteen months.
+00:04:40,950 --> 00:04:43,510
+Письма приходили редко, и каждое Мария
 
 82
-00:05:03,289 --> 00:05:07,159
-In that time he tried, quietly and without much success, to expand the
+00:04:43,630 --> 00:04:47,510
+читала вслух соседке, а потом прятала под подушку.
 
 83
-00:05:07,216 --> 00:05:11,003
-office back into something resembling real authority, corresponding with Muslim
+00:04:47,590 --> 00:04:52,550
+Дамир, маленький, спрашивал, где папа воюет, если мирное время.
 
 84
-00:05:11,043 --> 00:05:14,526
-leaders abroad, hosting foreign dignitaries with more ceremony than the
+00:04:52,630 --> 00:04:57,070
+Мария отвечала, что папа учит других людей защищать границу.
 
 85
-00:05:14,566 --> 00:05:18,369
-new government was comfortable with. It was a losing effort from the start,
+00:04:57,110 --> 00:05:00,430
+Надежда, старшая, уже понимала больше.
 
 86
-00:05:18,389 --> 00:05:21,332
-and on March 3, 1924, the Assembly
+00:05:00,470 --> 00:05:02,830
+Она молча складывала письма по датам и
 
 87
-00:05:21,388 --> 00:05:25,896
-abolished the caliphate outright and voted his own family into exile along
+00:05:02,870 --> 00:05:06,310
+однажды сказала матери: Он пишет одно и то же.
 
 88
-00:05:25,944 --> 00:05:28,619
-with him. He was given almost no warning.
+00:05:06,390 --> 00:05:09,150
+Значит, у него нет времени писать другое.
 
 89
-00:05:28,739 --> 00:05:32,943
-Abdulmecid didn't wait for the three-day grace period the law technically allowed
+00:05:09,190 --> 00:05:13,537
+Мария промолчала. Ей было страшно, что девочка права.
 
 90
-00:05:32,987 --> 00:05:37,267
-everyone else; he and his household were put on a train before the law had even
+00:05:13,563 --> 00:05:18,230
+В конце тридцатых годов в газетах писали про Испанию, про Халхин-Гол, про
 
 91
-00:05:37,320 --> 00:05:39,749
-taken effect, at Çatalca rather than
+00:05:18,310 --> 00:05:22,669
+строительство каналов. О китайском Синьцзяне почти не писали.
 
 92
-00:05:39,811 --> 00:05:44,553
-Istanbul's main station, specifically to avoid the kind of public farewell that
+00:05:22,709 --> 00:05:27,549
+Там всё было тихо для советского читателя и громко для тех, кто там жил.
 
 93
-00:05:44,606 --> 00:05:49,037
-might turn into a demonstration. A Jewish stationmaster at Çatalca was
+00:05:27,589 --> 00:05:30,669
+Губернатор провинции попросил помощи у Москвы.
 
 94
-00:05:49,088 --> 00:05:53,121
-reportedly the last person in the country to treat him with the courtesy of his old
+00:05:30,709 --> 00:05:35,069
+Против него поднимались повстанцы, и своих сил ему не хватало.
 
 95
-00:05:53,201 --> 00:05:57,365
-rank before the train pulled out. He settled first in Switzerland, then in
+00:05:35,109 --> 00:05:39,589
+Москва помощь дала. Советские части вошли в провинцию, потом
 
 96
-00:05:57,461 --> 00:06:02,409
-Nice, and eventually in Paris, where he kept painting almost until the end, a
+00:05:39,669 --> 00:05:43,549
+вышли, но оставили там отдельную кавалерийскую группу.
 
 97
-00:06:02,469 --> 00:06:05,052
-caliph with no caliphate, still signing
+00:05:43,589 --> 00:05:45,549
+Об этом знали немногие.
 
 98
-00:06:05,116 --> 00:06:09,776
-canvases the same way he had as a young prince confined to Dolmabahçe.
+00:05:47,133 --> 00:05:52,013
+Тажигали к тому времени служил в штабе, и его вызвали на закрытое совещание, где
 
 99
-00:06:09,856 --> 00:06:14,180
-He wrote twelve volumes of memoirs that his daughter kept safe for decades.
+00:05:52,093 --> 00:05:54,413
+зачитывали карты и списки.
 
 100
-00:06:14,180 --> 00:06:16,742
-He died in his Paris home on August 23,
+00:05:54,493 --> 00:05:56,733
+Он смотрел на карту долго.
 
 101
-00:06:16,778 --> 00:06:19,865
-1944, of a heart attack, in a city still
+00:05:56,813 --> 00:06:00,173
+Горы, перевалы, узкие долины, и одна
 
 102
-00:06:19,918 --> 00:06:24,749
-under German occupation, an ocean away from either of the two institutions he'd
+00:06:00,253 --> 00:06:05,173
+дорога, которая вела через перевал Торугарт и обрывалась в чужой земле.
 
 103
-00:06:24,813 --> 00:06:28,993
-once briefly headed. Turkey wouldn't take his body any more
+00:06:05,213 --> 00:06:08,573
+Спросил, для чего. Ему ответили, что для оказания
 
 104
-00:06:29,025 --> 00:06:32,196
-than it had taken Vahideddin's eighteen years earlier.
+00:06:08,733 --> 00:06:10,773
+интернациональной помощи.
 
 105
-00:06:32,316 --> 00:06:37,081
-His daughter petitioned for years to have him buried at home and was refused every
+00:06:10,813 --> 00:06:15,253
+Слово интернациональная повторялось на совещании раз сорок.
 
 106
-00:06:37,161 --> 00:06:40,604
-time. His coffin sat inside the Grand Mosque of
+00:06:15,293 --> 00:06:19,493
+Тажигали записал его в блокнот и больше ничего не спросил.
 
 107
-00:06:40,684 --> 00:06:44,127
-Paris for a decade, an actual decade, not
+00:06:19,533 --> 00:06:21,653
+Ночью он долго не спал.
 
 108
-00:06:44,167 --> 00:06:48,931
-a delay of months, while the family tried and failed to find him any resting place
+00:06:21,693 --> 00:06:25,320
+Ему казалось, что он уже видел эти горы во сне.
 
 109
-00:06:48,988 --> 00:06:52,935
-closer to Istanbul than the one his cousin had already been given.
+00:06:25,346 --> 00:06:27,400
+Колонна выходила на рассвете.
 
 110
-00:06:53,255 --> 00:06:57,339
-In 1954, ten years after his death, he
+00:06:27,426 --> 00:06:32,093
+Кони стояли у коновязи, и пар от их дыхания смешивался с холодным туманом
 
 111
-00:06:57,379 --> 00:07:01,903
-was finally interred in Medina, the second man in this family in twenty years
+00:06:32,213 --> 00:06:35,253
+долины. Тажигали проверял подпруги сам.
 
 112
-00:07:01,956 --> 00:07:05,666
-to end up buried in someone else's country because his own wouldn't have
+00:06:35,293 --> 00:06:38,493
+Каждую. Двое молодых бойцов смотрели на него и
 
 113
-00:07:05,726 --> 00:07:10,230
-him. By 1924, the empire itself was gone in
+00:06:38,573 --> 00:06:41,053
+молчали, потому что знали: командир
 
 114
-00:07:10,298 --> 00:07:14,314
-every way that mattered, and the one office the family still held, the
+00:06:41,093 --> 00:06:43,933
+проверит ещё раз, когда никто не видит.
 
 115
-00:07:14,374 --> 00:07:19,038
-caliphate, sitting now with Abdulmecid, was the last thing standing.
+00:06:44,013 --> 00:06:48,200
+Шов всегда там, где торопились, сказал он одному из них.
 
 116
-00:07:19,167 --> 00:07:24,163
-That didn't last either. On March 3, 1924, the Turkish parliament
+00:06:48,226 --> 00:06:51,000
+Тот кивнул, хотя не понял, к чему это.
 
 117
-00:07:24,219 --> 00:07:28,087
-abolished the caliphate outright, and went much further than removing one man
+00:06:51,026 --> 00:06:54,053
+Киргизский халат был жёстким и пах дымом.
 
 118
-00:07:28,135 --> 00:07:32,731
-from one office. A hundred and fifty-six members of the House of Osman were stripped of their
+00:06:55,677 --> 00:06:59,597
+Шапка сидела неудобно. Тажигали посмотрел на себя в осколок
 
 119
-00:07:32,781 --> 00:07:36,495
-Turkish citizenship in a single stroke, and ordered out of the country within
+00:06:59,677 --> 00:07:02,637
+зеркала и подумал, что видит чужого человека.
 
 120
-00:07:36,535 --> 00:07:40,659
-three days. Once you counted the children who left with their parents, the relatives who
+00:07:03,277 --> 00:07:05,437
+Потом подумал, что и другие увидят его
 
 121
-00:07:40,686 --> 00:07:44,663
-weren't technically named in the law but went anyway, and the servants who refused
+00:07:05,517 --> 00:07:08,557
+чужим, и это, пожалуй, было правильно.
 
 122
-00:07:44,690 --> 00:07:48,666
-to abandon the families they'd served for decades, the real number of people forced
+00:07:08,877 --> 00:07:10,877
+Две недели в горах прошли быстро.
 
 123
-00:07:48,726 --> 00:07:52,670
-out ran into the hundreds. This wasn't just Abdulmecid, the one man
+00:07:11,277 --> 00:07:13,757
+Днём учения, ночью короткий сон.
 
 124
-00:07:52,710 --> 00:07:56,914
-holding the last symbolic title. It was children, elderly widows, distant
+00:07:14,317 --> 00:07:17,037
+Патрули уходили вперёд и возвращались, и
 
 125
-00:07:56,974 --> 00:07:59,396
-cousins who'd never held office in their lives.
+00:07:17,077 --> 00:07:19,917
+каждый раз кто-то докладывал, что граница пуста.
 
 126
-00:07:59,416 --> 00:08:03,960
-The law didn't distinguish between the head of the family and a relative six times removed.
+00:07:20,557 --> 00:07:25,117
+Пустота тоже была приказом. Перевал Торугарт встретил их ветром.
 
 127
-00:08:03,960 --> 00:08:07,563
-If your surname connected you to the dynasty, you were leaving, and you had
+00:07:25,597 --> 00:07:28,476
+Камень был серым, снег лежал в расщелинах.
 
 128
-00:08:07,623 --> 00:08:11,727
-exactly one year to sell whatever property you owned inside Turkey, or lose
+00:07:29,116 --> 00:07:32,316
+Лошади шли по одной, тропа гудела под копытами.
 
 129
-00:08:11,754 --> 00:08:15,891
-it to the state treasury outright. The law even forbade family members from
+00:07:32,956 --> 00:07:34,796
+На самом верху остановились.
 
 130
-00:08:15,941 --> 00:08:19,814
-passing through Turkish territory in transit, on their way to anywhere else.
+00:07:35,356 --> 00:07:38,156
+Внизу, за хребтом, лежала другая земля.
 
 131
-00:08:19,942 --> 00:08:22,457
-Bank accounts were frozen the same week.
+00:07:38,716 --> 00:07:43,356
+Она не казалась чужой. Такие же сопки, такие же долины, тот же
 
 132
-00:08:22,521 --> 00:08:25,499
-Passports were stamped for exile, not return.
+00:07:43,436 --> 00:07:47,756
+сухой запах полыни. Только там уже было тихо по-другому.
 
 133
-00:08:25,600 --> 00:08:29,103
-Six hundred years of rule, and the family's last physical connection to the
+00:07:48,236 --> 00:07:50,796
+Тажигали достал блокнот и записал дату.
 
 134
-00:08:29,172 --> 00:08:33,907
-empire ended on a rural train platform, in the dark, with an armed escort making
+00:07:51,196 --> 00:07:55,116
+Потом вычеркнул. Такие вещи записывать не разрешалось.
 
 135
-00:08:33,939 --> 00:08:37,831
-sure they actually got on board. While the family itself was still finding
+00:07:55,356 --> 00:07:59,836
+Спуск занял целый день. Вечером разбили лагерь у ручья, и повар
 
 136
-00:08:37,871 --> 00:08:41,834
-its footing in Nice and Beirut, the government back in Istanbul moved fast on
+00:07:59,916 --> 00:08:02,636
+варил кашу из пшена, которое везли в мешках.
 
 137
-00:08:41,874 --> 00:08:43,676
-the buildings they'd left behind.
+00:08:03,116 --> 00:08:04,076
+Говорили мало.
 
 138
-00:08:43,783 --> 00:08:46,959
-On April 3, 1924, barely a month after
+00:08:05,924 --> 00:08:08,964
+Бекжан, сын сапожника, вспомнил мать и
 
 139
-00:08:46,999 --> 00:08:51,603
-the exile law passed, Topkapı Palace, the sultans' primary residence for nearly
+00:08:09,044 --> 00:08:11,284
+маленький двор с кривым забором.
 
 140
-00:08:51,683 --> 00:08:55,767
-four centuries, was converted by government decree into Turkey's first
+00:08:11,364 --> 00:08:14,804
+Другой боец сказал, что хватит, потом поговорим.
 
 141
-00:08:55,811 --> 00:08:58,890
-national museum. The imperial harem quarters the family
+00:08:14,884 --> 00:08:17,444
+Ночью Тажигали вышел из палатки.
 
 142
-00:08:58,930 --> 00:09:03,534
-had lived and died in for generations became a ticketed exhibition space.
+00:08:17,524 --> 00:08:22,284
+Звёзды были такими близкими, что казалось, их можно достать рукой.
 
 143
-00:09:03,614 --> 00:09:08,098
-The treasury rooms, sealed for centuries under a ceremony dating back to Sultan
+00:08:22,324 --> 00:08:26,404
+Он думал о Марии. Она, наверное, сейчас укладывала Дамира и
 
 144
-00:09:08,178 --> 00:09:10,980
-Selim I, were unlocked for the general public.
+00:08:26,564 --> 00:08:28,911
+слушала, как Надежда читает вслух.
 
 145
-00:09:11,079 --> 00:09:15,465
-Visitors could now walk past the same jeweled objects, including the Topkapı
+00:08:28,937 --> 00:08:31,324
+Письма из этих мест шли долго.
 
 146
-00:09:15,534 --> 00:09:19,468
-Dagger and the Spoonmaker's Diamond, that had once required a sultan's personal
+00:08:31,364 --> 00:08:33,604
+Полк входил в Синьцзян по частям.
 
 147
-00:09:19,516 --> 00:09:22,511
-authority to view. The timing wasn't incidental.
+00:08:33,644 --> 00:08:37,404
+Сначала разведка, потом штаб, потом эскадроны.
 
 148
-00:09:22,611 --> 00:09:26,515
-The new republic wanted the empire's former splendor visibly stripped of its
+00:08:37,444 --> 00:08:40,124
+Никаких флагов. Никаких песен.
 
 149
-00:09:26,584 --> 00:09:31,399
-owners and handed to "the nation" as fast as possible, a public, physical
+00:08:40,164 --> 00:08:42,764
+Только стук копыт по каменистой дороге.
 
 150
-00:09:31,456 --> 00:09:35,483
-demonstration that the family's exile wasn't just a legal formality.
+00:08:42,804 --> 00:08:45,791
+В письмах домой о походе не было ни слова.
 
 151
-00:09:35,543 --> 00:09:39,566
-Dolmabahçe Palace, the newer Bosphorus residence the family had actually been
+00:08:45,817 --> 00:08:49,244
+Тажигали писал коротко, как всегда: Здоров.
 
 152
-00:09:39,612 --> 00:09:43,650
-living in more recently, followed the same path in the years after, eventually
+00:08:49,284 --> 00:08:51,564
+Служба идёт. Скоро вернусь.
 
 153
-00:09:43,686 --> 00:09:47,253
-becoming a museum and occasional state residence in its own right.
+00:08:51,604 --> 00:08:54,524
+Слова были правдой, но не всей правдой.
 
 154
-00:09:47,253 --> 00:09:51,017
-The family that had once required a formal ceremony just to unlock their own
+00:08:54,564 --> 00:08:57,684
+Мария читала их и понимала: остальное
 
 155
-00:09:51,079 --> 00:09:55,180
-treasury now had less right to walk through those rooms than any tourist
+00:08:57,764 --> 00:08:59,791
+осталось там, в горах.
 
 156
-00:09:55,220 --> 00:09:59,745
-holding a ticket. The same March 3, 1924 sitting of
+00:08:59,817 --> 00:09:02,084
+Полк провёл в Китае почти год.
 
 157
-00:09:59,789 --> 00:10:04,068
-parliament that abolished the caliphate also created an entirely new government
+00:09:02,164 --> 00:09:04,164
+Осенью вернулись в Алма-Ату.
 
 158
-00:10:04,148 --> 00:10:08,392
-body, the Directorate General of Foundations, and handed it control of
+00:09:04,244 --> 00:09:06,604
+Строй шёл по городу под утренним солнцем,
 
 159
-00:10:08,459 --> 00:10:12,236
-every vakıf in the country, the centuries-old religious endowments that
+00:09:06,644 --> 00:09:09,364
+и женщины на тротуарах махали платками.
 
 160
-00:10:12,276 --> 00:10:16,880
-had funded mosques, soup kitchens, schools and hospitals across the empire,
+00:09:09,444 --> 00:09:13,964
+Никто из них не знал, откуда возвращаются эти люди и что они видели.
 
 161
-00:10:17,008 --> 00:10:21,844
-many of them established and personally funded by sultans going back generations.
+00:09:14,004 --> 00:09:16,364
+В штабе собрали всех в одном зале.
 
 162
-00:10:21,965 --> 00:10:26,088
-Overnight, an entire category of family-linked property that had
+00:09:17,924 --> 00:09:22,271
+Говорил старший по званию, негромко, без лишних слов.
 
 163
-00:10:26,121 --> 00:10:29,692
-technically never belonged to any individual sultan, but had always been
+00:09:22,297 --> 00:09:25,684
+То, что было в Синьцзяне, остаётся в Синьцзяне.
 
 164
-00:10:29,752 --> 00:10:33,695
-managed through the family's religious authority, was folded into the state and
+00:09:25,764 --> 00:09:30,324
+Говорить об этом запрещено. Ни в семье, ни в письмах, ни в пьяном
 
 165
-00:10:33,752 --> 00:10:38,259
-placed permanently outside anything a descendant could ever claim as inheritance.
+00:09:30,404 --> 00:09:34,110
+разговоре. Кто нарушит, отвечает по закону.
 
 166
-00:10:38,479 --> 00:10:42,823
-The shockwaves from that one law didn't stop at Turkey's borders.
+00:09:34,136 --> 00:09:38,110
+Потом принесли бумаги. Каждый расписывался сам.
 
 167
-00:10:42,923 --> 00:10:45,466
-The Ottoman sultan hadn't just been a monarch.
+00:09:38,136 --> 00:09:40,563
+Тажигали взял ручку и вывел фамилию так
 
 168
-00:10:45,466 --> 00:10:49,630
-As Caliph, he was recognized across the Muslim world as the spiritual head of
+00:09:40,643 --> 00:09:43,523
+же аккуратно, как выводил её в анкетах.
 
 169
-00:10:49,697 --> 00:10:53,313
-Sunni Islam. Abolishing the title didn't just end a
+00:09:43,563 --> 00:09:47,523
+Рука не дрогнула. Этому он научился давно.
 
 170
-00:10:53,383 --> 00:10:57,877
-dynasty. It ended an institution millions of people outside Turkey considered
+00:09:47,603 --> 00:09:51,443
+Подписка о неразглашении была тонкой, на серой бумаге.
 
 171
-00:10:57,933 --> 00:11:02,441
-essential to their own religious life, and the reaction proved it within weeks.
+00:09:51,523 --> 00:09:53,603
+Лист почти ничего не весил.
 
 172
-00:11:02,601 --> 00:11:04,603
-Nowhere felt it harder than India.
+00:09:53,643 --> 00:09:57,123
+Но в руке он казался тяжелее, чем должен быть.
 
 173
-00:11:04,803 --> 00:11:08,206
-Since 1919, Indian Muslims had run an
+00:09:57,203 --> 00:10:01,923
+Вечером Тажигали шёл домой по улице, которую знал с детства, и думал, что
 
 174
-00:11:08,275 --> 00:11:12,530
-entire political movement, the Khilafat Movement, built around defending the
+00:10:02,003 --> 00:10:06,523
+теперь у него есть тайна, о которой нельзя рассказать даже жене.
 
 175
-00:11:12,580 --> 00:11:15,333
-Ottoman caliphate from exactly this outcome.
+00:10:06,563 --> 00:10:08,590
+Это было новое чувство.
 
 176
-00:11:15,480 --> 00:11:18,295
-Under the Ali brothers, Muhammad Ali and
+00:10:08,616 --> 00:10:11,283
+Приятным его назвать было нельзя.
 
 177
-00:11:18,348 --> 00:11:20,778
-Shaukat Ali, the movement had organized
+00:10:11,363 --> 00:10:13,870
+Осенью его назначили командиром полка в
 
 178
-00:11:20,838 --> 00:11:25,582
-boycotts of British goods, mass protests, and an alliance with Gandhi's Indian
+00:10:13,896 --> 00:10:16,443
+восемьдесят первой кавалерийской дивизии.
 
 179
-00:11:25,626 --> 00:11:29,586
-National Congress that produced one of the first real moments of Hindu-Muslim
+00:10:16,483 --> 00:10:18,643
+Формировали её в Джамбуле.
 
 180
-00:11:29,634 --> 00:11:31,828
-political unity under British rule.
+00:10:18,723 --> 00:10:22,283
+Город гудел, как улей: эшелоны, склады,
 
 181
-00:11:31,965 --> 00:11:36,792
-Gandhi himself folded the cause into his non-cooperation campaign, telling
+00:10:22,323 --> 00:10:25,843
+новобранцы в обмотках, которых учили держаться в седле.
 
 182
-00:11:36,836 --> 00:11:40,636
-supporters that defending the caliphate and defending Indian self-rule were the
+00:10:27,451 --> 00:10:29,531
+Дивизия собиралась долго.
 
 183
-00:11:40,700 --> 00:11:45,440
-same fight. Millions of Indian Muslims had spent five years, and no small amount of their own
+00:10:29,611 --> 00:10:32,491
+Коней не хватало, сёдла приходили старые,
 
 184
-00:11:45,490 --> 00:11:48,323
-freedom, fighting to keep this one office intact.
+00:10:32,571 --> 00:10:34,891
+оружие было разного калибра.
 
 185
-00:11:48,435 --> 00:11:52,807
-Then Turkey abolished it from the inside, on its own initiative, with no outside
+00:10:34,971 --> 00:10:39,931
+Тажигали ходил по конюшням каждое утро и смотрел, как чистят копыта, как
 
 186
-00:11:52,851 --> 00:11:57,130
-pressure forcing the decision. The Indian scholar Maulana Mohammad Ali
+00:10:40,051 --> 00:10:44,691
+подтягивают подпруги. Шов всегда там, где торопились.
 
 187
-00:11:57,211 --> 00:12:01,775
-Jauhar's reaction was somewhere close to grief: he called it the greatest betrayal
+00:10:44,731 --> 00:10:48,051
+Он повторял это командирам, и некоторые морщились.
 
 188
-00:12:01,802 --> 00:12:06,179
-in Islamic history, accusing the Turks of destroying the very institution Indian
+00:10:48,091 --> 00:10:51,011
+Им казалось, что старик учит жить.
 
 189
-00:12:06,239 --> 00:12:10,903
-Muslims had spent years defending, at real personal cost, on Turkey's behalf.
+00:10:51,051 --> 00:10:53,251
+Зимой дивизия пошла на фронт.
 
 190
-00:12:11,023 --> 00:12:14,586
-The movement that had briefly united Hindus and Muslims against the British
+00:10:53,291 --> 00:10:55,851
+Поезда стояли днями на полустанках,
 
 191
-00:12:14,634 --> 00:12:18,430
-collapsed within months, robbed of the one cause that had held it together.
+00:10:55,931 --> 00:11:00,611
+солдаты грели руки у костров, а письма из дома приходили по одному.
 
 192
-00:12:18,521 --> 00:12:22,593
-Within a few years, that fragile alliance between Congress and the Khilafat
+00:11:00,651 --> 00:11:04,891
+Тажигали читал их при свете фонаря и прятал в нагрудный карман.
 
 193
-00:12:22,638 --> 00:12:27,318
-leadership had broken down entirely, and Hindu-Muslim relations in India hardened
+00:11:04,971 --> 00:11:07,691
+Дивизия вышла в степи под Сталинградом.
 
 194
-00:12:27,371 --> 00:12:30,200
-along lines that would matter again two decades later.
+00:11:07,731 --> 00:11:11,371
+Там всё было открыто, ровно и без укрытий.
 
 195
-00:12:30,328 --> 00:12:33,964
-Elsewhere, the reaction was less grief and more opportunism.
+00:11:11,451 --> 00:11:13,931
+Вода кончалась к полудню, колодцы были
 
 196
-00:12:33,964 --> 00:12:37,967
-With the office suddenly vacant, several rulers quietly floated themselves as the
+00:11:14,011 --> 00:11:16,851
+ржавые, пыль скрипела на зубах.
 
 197
-00:12:38,007 --> 00:12:41,491
-new Caliph. Egypt's King Fuad I let it be known he
+00:11:16,891 --> 00:11:20,011
+Бои начинались медленно, почти незаметно,
 
 198
-00:12:41,531 --> 00:12:44,854
-might be willing to take up the title, and reportedly funded scholars
+00:11:20,091 --> 00:11:22,571
+а потом становились жестокими.
 
 199
-00:12:44,901 --> 00:12:49,097
-sympathetic to his own claim. In the Hejaz, King Hussein went further
+00:11:22,611 --> 00:11:25,811
+Полк Тажигали держал участок у железной дороги.
 
 200
-00:12:49,157 --> 00:12:53,261
-and simply declared himself Caliph outright within weeks of the abolition,
+00:11:25,851 --> 00:11:28,651
+Ночами по насыпи ходили патрули, днём
 
 201
-00:12:53,272 --> 00:12:56,784
-though the claim never gained meaningful recognition beyond his own court and
+00:11:28,731 --> 00:11:32,491
+немецкие самолёты гоняли по степи всё, что двигалось.
 
 202
-00:12:56,840 --> 00:12:59,427
-collapsed along with his kingdom the following year.
+00:11:32,571 --> 00:11:35,731
+В конце ноября дивизия вышла к Котельниково.
 
 203
-00:12:59,534 --> 00:13:04,151
-In 1926, Muslim scholars convened a conference in Cairo specifically to
+00:11:37,267 --> 00:11:42,146
+Командование ставило задачу удержать рубеж и ждать подхода соседей.
 
 204
-00:13:04,185 --> 00:13:08,555
-settle the question, weighing candidates that included Fuad, Hussein, Morocco's
+00:11:42,226 --> 00:11:44,306
+Соседи не подходили.
 
 205
-00:13:08,601 --> 00:13:12,118
-Sultan Moulay Yusef, and India's own Aga Khan III.
+00:11:44,346 --> 00:11:48,026
+Тажигали видел, как в тот день меняется лицо степи.
 
 206
-00:13:12,165 --> 00:13:16,002
-After genuine debate, the conference reached no agreement at all, concluding
+00:11:48,066 --> 00:11:52,106
+Утром была тишина, потом появились танки.
 
 207
-00:13:16,018 --> 00:13:20,886
-that reviving the caliphate wasn't realistically possible under the political conditions of the time.
+00:11:52,146 --> 00:11:55,066
+Много танков, с пехотой на броне.
 
 208
-00:13:20,886 --> 00:13:24,810
-The position that Indian Muslims had fought five years to protect, and that
+00:11:55,106 --> 00:11:58,106
+Они шли медленно и уверенно, как люди,
 
 209
-00:13:24,858 --> 00:13:28,973
-half a dozen rulers had quietly hoped to claim for themselves, simply stayed
+00:11:58,146 --> 00:12:00,266
+которым некуда торопиться.
 
 210
-00:13:29,030 --> 00:13:32,537
-vacant. In the century since, it still has.
+00:12:00,306 --> 00:12:02,066
+Полк принял бой.
 
 211
-00:13:32,657 --> 00:13:36,981
-Exile is easy to say and hard to actually live through, and the family found that
+00:12:02,146 --> 00:12:05,706
+Сабли, карабины, гранаты, связки бутылок.
 
 212
-00:13:37,041 --> 00:13:39,943
-out within months. Most of them scattered to whichever
+00:12:05,746 --> 00:12:09,213
+Кони падали в траву, и бойцы поднимались за ними.
 
 213
-00:13:40,005 --> 00:13:42,426
-European city would issue them a visa:
+00:12:09,239 --> 00:12:14,146
+Тажигали кричал команды по-казахски и по-русски, и голос у него сел уже к
 
 214
-00:13:42,506 --> 00:13:46,389
-Nice, Beirut, Alexandria, later Paris and Vienna.
+00:12:14,266 --> 00:12:17,386
+полудню. К вечеру кольцо сжалось.
 
 215
-00:13:46,529 --> 00:13:49,392
-A few had savings or jewelry they'd managed to carry out.
+00:12:17,426 --> 00:12:19,706
+Связь с соседями оборвалась.
 
 216
-00:13:49,520 --> 00:13:53,235
-Most didn't. Some lived off the charity of wealthier relatives.
+00:12:19,746 --> 00:12:24,573
+Пришёл приказ: отходить небольшими группами и пробиваться к своим.
 
 217
-00:13:53,363 --> 00:13:58,120
-Some took ordinary jobs under shortened or assumed names, quietly dropping any
+00:12:24,599 --> 00:12:28,026
+Приказ был короткий, а дорога длинная.
 
 218
-00:13:58,187 --> 00:14:01,643
-trace of the family name from their paperwork, in countries that had no
+00:12:28,066 --> 00:12:31,986
+Дивизию расформировали. Официально, на бумаге.
 
 219
-00:14:01,694 --> 00:14:05,807
-particular reason to be sympathetic to a deposed Muslim dynasty in the interwar
+00:12:32,066 --> 00:12:34,826
+Личный состав передали в другой корпус.
 
 220
-00:14:05,900 --> 00:14:08,849
-years. A handful of sympathetic outsiders tried
+00:12:34,866 --> 00:12:37,426
+Тажигали получил назначение в штаб и шёл
 
 221
-00:14:08,876 --> 00:14:11,332
-to help: the ruler of Hyderabad, an
+00:12:37,466 --> 00:12:40,826
+туда пешком, ведя в поводу раненого коня.
 
 222
-00:14:11,385 --> 00:14:16,056
-Egyptian prince, even the King of Hejaz sent money at various points, but with
+00:12:40,866 --> 00:12:43,686
+Коня он не бросил. Никогда.
 
 223
-00:14:16,076 --> 00:14:20,140
-the family scattered across a dozen countries, most of that aid simply never
+00:12:43,706 --> 00:12:46,826
+В штабе ему сказали, что нужно ехать в Казахстан.
 
 224
-00:14:20,190 --> 00:14:24,544
-reached the people who needed it most. France, for its part, wouldn't grant
+00:12:46,866 --> 00:12:49,106
+Там формировалась новая дивизия.
 
 225
-00:14:24,597 --> 00:14:28,547
-citizenship even to descendants of Suleiman the Magnificent, the sultan who
+00:12:50,754 --> 00:12:53,314
+Нужны были люди, которые знают коней,
 
 226
-00:14:28,587 --> 00:14:31,270
-had once come to a French king's rescue militarily.
+00:12:53,394 --> 00:12:55,994
+знают степь и умеют держать строй.
 
 227
-00:14:31,470 --> 00:14:34,873
-The best they got was a travel document, not a passport.
+00:12:56,274 --> 00:13:00,034
+Тажигали кивнул. Он подумал, что в степи всё начинается
 
 228
-00:14:35,020 --> 00:14:39,917
-Abdulmecid, the last Caliph, had already spent his final two decades painting and
+00:13:00,114 --> 00:13:04,514
+заново, с первой подпруги. Тринадцатого ноября государственный
 
 229
-00:14:39,958 --> 00:14:44,722
-writing memoirs in Nice and then Paris, largely withdrawn from public life.
+00:13:04,594 --> 00:13:08,914
+комитет обороны принял решение: формировать национальные войсковые
 
 230
-00:14:44,822 --> 00:14:49,766
-His death in 1944, and the decade his coffin spent waiting in a Paris mosque
+00:13:08,994 --> 00:13:12,714
+соединения. В бумаге это выглядело одной строкой.
 
 231
-00:14:49,812 --> 00:14:54,090
-before Turkey would even permit a distant burial in Medina, was only the sharpest
+00:13:12,914 --> 00:13:16,194
+В степи это означало поезда, списки и
 
 232
-00:14:54,140 --> 00:14:58,734
-version of a fate the rest of the family lived out more quietly, one ordinary year
+00:13:16,274 --> 00:13:19,634
+людей, которые день за днём приходили на сборный пункт.
 
 233
-00:14:58,761 --> 00:15:01,697
-at a time. Every account of this exile tends to
+00:13:20,114 --> 00:13:22,514
+Акмолинск встретил Тажигали холодом.
 
 234
-00:15:01,750 --> 00:15:06,341
-focus on the sultans, the caliphs, the princes with titles worth writing about.
+00:13:22,994 --> 00:13:25,634
+Ветер гнал по улицам снежную крупу, и
 
 235
-00:15:06,432 --> 00:15:10,265
-Almost nobody tells you what happened to the people who'd spent their entire lives
+00:13:25,714 --> 00:13:28,834
+каждое утро у ворот военкомата стояли очереди.
 
 236
-00:15:10,315 --> 00:15:14,268
-serving them, and the record that does exist is thin on purpose.
+00:13:29,314 --> 00:13:33,874
+Старики приводили сыновей. Жёны приносили узелки с хлебом и сушёным
 
 237
-00:15:14,360 --> 00:15:18,672
-Nobody was keeping careful files on servants in 1924.
+00:13:33,954 --> 00:13:37,154
+мясом. Девушки-комсомолки с красными повязками
 
 238
-00:15:18,692 --> 00:15:21,475
-The imperial harem wasn't just a private residence.
+00:13:37,474 --> 00:13:39,914
+записывали фамилии в толстые тетради.
 
 239
-00:15:21,502 --> 00:15:25,959
-It was an enormous administrative institution with its own budgets, ranks,
+00:13:40,194 --> 00:13:44,834
+В тот год в Казахстане формировали больше пятидесяти частей и соединений.
 
 240
-00:15:25,999 --> 00:15:29,963
-and internal hierarchy, staffed by hundreds of women, many of them
+00:13:45,234 --> 00:13:48,433
+Три из них были национальными кавалерийскими дивизиями.
 
 241
-00:15:30,014 --> 00:15:34,367
-originally brought in as enslaved girls from the Caucasus and educated within the
+00:13:48,913 --> 00:13:51,553
+Сто шестую собирали здесь, в Акмолинске.
 
 242
-00:15:34,413 --> 00:15:36,609
-palace system for the rest of their lives.
+00:13:51,953 --> 00:13:56,113
+Девяносто шестую в Усть-Каменогорске, сто пятую в Джамбуле.
 
 243
-00:15:36,737 --> 00:15:41,413
-Some rose to genuine positions of influence inside that hierarchy, running
+00:13:58,025 --> 00:14:02,452
+Протокол бюро городского комитета партии лежал на столе у секретаря.
 
 244
-00:15:41,478 --> 00:15:45,737
-households, training younger women, managing the domestic machinery of an
+00:14:02,478 --> 00:14:04,865
+В конце ноября его подписали.
 
 245
-00:15:45,817 --> 00:15:49,020
-empire from inside rooms the public never saw.
+00:14:04,905 --> 00:14:09,345
+Там было написано коротко: отбирать в дивизию лучших людей.
 
 246
-00:15:49,020 --> 00:15:53,344
-When the March 1924 law hit, it didn't distinguish between a princess by blood
+00:14:09,385 --> 00:14:11,465
+Должность значения не имеет.
 
 247
-00:15:53,404 --> 00:15:56,947
-and a woman who'd spent forty years running a palace household with no legal
+00:14:11,545 --> 00:14:13,812
+Важны личные качества.
 
 248
-00:15:56,997 --> 00:15:59,750
-freedom of her own. Both were told to leave.
+00:14:13,838 --> 00:14:16,305
+Тажигали читал этот протокол дважды.
 
 249
-00:15:59,790 --> 00:16:02,392
-Neither was given anywhere in particular to go.
+00:14:16,345 --> 00:14:20,665
+Потом спросил, кто будет решать, что такое личные качества.
 
 250
-00:16:02,442 --> 00:16:05,835
-Turkish government archives from the following year record roughly thirty
+00:14:20,745 --> 00:14:23,185
+Ему ответили, что решат командиры.
 
 251
-00:16:05,888 --> 00:16:09,518
-enslaved men and women expelled from the palace and quietly redirected into
+00:14:23,225 --> 00:14:25,745
+Он кивнул и не стал спорить.
 
 252
-00:16:09,554 --> 00:16:13,602
-government institutions as ordinary servants, with no severance and no say in
+00:14:25,785 --> 00:14:30,745
+Исследователи позже подсчитали: в сто шестой дивизии девять из каждых десяти
 
 253
-00:16:13,622 --> 00:16:18,246
-the reassignment. Contemporary accounts describe many of the harem's former women being sent to
+00:14:30,825 --> 00:14:35,305
+человек были казахами. Но в ту зиму никто ещё не считал.
 
 254
-00:16:18,326 --> 00:16:22,170
-Darülaceze, the state poorhouse in Istanbul, the same institution that
+00:14:35,385 --> 00:14:39,385
+Люди просто приходили и говорили: я умею держаться в седле.
 
 255
-00:16:22,216 --> 00:16:25,773
-housed the city's homeless and destitute, so that women who had once managed the
+00:14:39,545 --> 00:14:42,305
+Я знаю коней. Я вырос в степи.
 
 256
-00:16:25,826 --> 00:16:29,536
-domestic affairs of an empire ended their lives in a building built for people with
+00:14:42,345 --> 00:14:46,865
+Формирование шло в декабре. В дивизию вошли три кавалерийских полка,
 
 257
-00:16:29,576 --> 00:16:32,659
-nothing at all. Two eunuchs expelled from Yıldız Palace
+00:14:46,905 --> 00:14:50,452
+конноартиллерийский дивизион и полуэскадрон связи.
 
 258
-00:16:32,712 --> 00:16:37,464
-as early as 1909, well before the main exile, were reportedly still living in a
+00:14:50,478 --> 00:14:52,545
+Командиры спали по два часа.
 
 259
-00:16:37,517 --> 00:16:40,907
-shanty house more than a decade later, forgotten by everyone except the
+00:14:52,585 --> 00:14:57,065
+Писари спали по четыре. Печки в казармах топили кизяком, потому
 
 260
-00:16:40,954 --> 00:16:44,430
-journalists who occasionally tracked them down for a human-interest piece on the
+00:14:57,145 --> 00:15:01,105
+что угля не хватало. Сначала Тажигали работал в штабе,
 
 261
-00:16:44,499 --> 00:16:49,154
-empire's last remnants. The republican press of 1924 wasn't
+00:15:01,145 --> 00:15:03,425
+начальником оперативного отдела.
 
 262
-00:16:49,207 --> 00:16:52,837
-sympathetic to any of this. One popular magazine described the newly
+00:15:03,465 --> 00:15:06,985
+Карты на стенах, карандаши, стопки донесений.
 
 263
-00:16:52,888 --> 00:16:56,841
-emptied palaces as treasure houses built on the blood of the poor, and used the
+00:15:08,585 --> 00:15:13,065
+Ночью он сидел над картой и двигал красные и синие значки.
 
 264
-00:16:56,881 --> 00:17:00,524
-harem's dissolution as a symbol of everything the new Turkey was supposedly
+00:15:13,145 --> 00:15:17,972
+Иногда ему казалось, что значки живые и сами знают, куда им идти.
 
 265
-00:17:00,564 --> 00:17:04,448
-leaving behind, a narrative that made the women's expulsion into a kind of moral
+00:15:17,998 --> 00:15:22,065
+Потом его вызвали к начальству и сказали: триста седьмой полк.
 
 266
-00:17:04,518 --> 00:17:08,452
-cleanup rather than what it actually was for most of them: the sudden loss of the
+00:15:22,105 --> 00:15:26,185
+Командовать им. Тажигали спросил, сколько в полку людей.
 
 267
-00:17:08,500 --> 00:17:10,614
-only home and profession they'd ever had.
+00:15:26,265 --> 00:15:30,185
+Ему назвали цифру. Он ничего не ответил, только записал её в
 
 268
-00:17:10,721 --> 00:17:15,178
-Whatever the truth of that framing, the individual women themselves rarely got
+00:15:30,305 --> 00:15:32,452
+блокнот и подчеркнул дважды.
 
 269
-00:17:15,218 --> 00:17:17,500
-any say in how their own story was told.
+00:15:32,478 --> 00:15:34,665
+Командиры первого полка, которые пришли
 
 270
-00:17:17,500 --> 00:17:21,744
-They simply lost the only life they'd ever known, on the same trains and the
+00:15:34,745 --> 00:15:37,545
+из кадров, смотрели на него сверху вниз.
 
 271
-00:17:21,808 --> 00:17:26,228
-same week as the family they'd served, with nobody writing their names down.
+00:15:37,585 --> 00:15:42,452
+Майор с пятнадцатилетним стажем и батрацкой биографией казался им странным.
 
 272
-00:17:26,388 --> 00:17:30,471
-A century later, nobody has gone back to write them down since.
+00:15:42,478 --> 00:15:46,265
+Тажигали не обижался. Он знал, что доверие приходит вместе с
 
 273
-00:17:30,605 --> 00:17:34,395
-If you want to understand what this exile did to someone who actually did have a
+00:15:46,345 --> 00:15:49,385
+первым конем, который встал в строй без крика.
 
 274
-00:17:34,459 --> 00:17:39,119
-name history remembers, there's no better case than Abdulmecid's own granddaughter.
+00:15:49,465 --> 00:15:54,185
+Здесь, в Акмолинске, он впервые увидел тех, с кем пойдёт на фронт.
 
 275
-00:17:39,279 --> 00:17:41,762
-Neslişah Sultan was three years old when
+00:15:54,265 --> 00:15:56,557
+Старший лейтенант Муфтиев Дюйсен,
 
 276
-00:17:41,782 --> 00:17:45,365
-the 1924 law put her family on that train out of Istanbul.
+00:15:56,611 --> 00:15:59,304
+командир сабельного эскадрона, высокий,
 
 277
-00:17:45,505 --> 00:17:49,689
-She grew up in Nice, one of hundreds of children in the family learning French
+00:15:59,384 --> 00:16:04,144
+молчаливый, с руками, которые привыкли держать поводья дольше, чем винтовку.
 
 278
-00:17:49,729 --> 00:17:53,773
-instead of Ottoman court etiquette, her family reportedly struggling with real
+00:16:04,184 --> 00:16:09,024
+Младший лейтенант Рахимжанов Набибек, командир взвода противотанковых ружей.
 
 279
-00:17:53,829 --> 00:17:57,896
-financial hardship even as she carried the title of imperial princess.
+00:16:09,064 --> 00:16:12,624
+Молодой, веснушчатый, с вечным вопросом в глазах.
 
 280
-00:17:57,966 --> 00:18:01,620
-She had no idea whether she'd ever see the city she was born in again.
+00:16:14,272 --> 00:16:19,152
+Оба потом будут в списках, и о них в газетах тоже напишут: переведены из
 
 281
-00:18:01,700 --> 00:18:05,463
-In 1941, she married Prince Abdel Moneim,
+00:16:19,232 --> 00:16:21,392
+восемьдесят первой дивизии.
 
 282
-00:18:05,523 --> 00:18:10,187
-son of Egypt's last Khedive, a match that, on paper, restored some of what
+00:16:21,472 --> 00:16:24,232
+Что с ними стало дальше, пока неизвестно.
 
 283
-00:18:10,267 --> 00:18:14,952
-exile had taken. She was marrying back into royalty, into a family that still actually had a
+00:16:24,272 --> 00:16:27,019
+Документы на этот счёт говорят мало.
 
 284
-00:18:14,992 --> 00:18:19,476
-throne. Eleven years later, that throne collapsed
+00:16:27,045 --> 00:16:29,832
+Для Тажигали это был уже не первый фронт.
 
 285
-00:18:19,556 --> 00:18:24,520
-too. In July 1952, Egypt's Free Officers forced King Farouk to abdicate.
+00:16:29,872 --> 00:16:33,659
+Позади остались Синьцзян и восемьдесят первая дивизия.
 
 286
-00:18:24,660 --> 00:18:28,604
-Neslişah's husband was appointed regent for the country's infant king, and for
+00:16:33,685 --> 00:16:37,512
+Впереди была дивизия, которую только что собрали в степи.
 
 287
-00:18:28,668 --> 00:18:33,088
-nine months, she stood in as Egypt's de facto first lady, attending the opera,
+00:16:37,552 --> 00:16:39,072
+Он смотрел на её людей и
 
 288
-00:18:33,118 --> 00:18:37,012
-running charity hospitals and the Red Crescent, representing a monarchy both of
+00:16:39,552 --> 00:16:42,632
+думал: эти ещё не знают, что такое война.
 
 289
-00:18:37,044 --> 00:18:39,173
-them must have known was already finished.
+00:16:42,672 --> 00:16:45,592
+Значит, им придётся узнать быстро.
 
 290
-00:18:39,281 --> 00:18:43,818
-In June 1953, the officers abolished the Egyptian monarchy outright.
+00:16:45,632 --> 00:16:48,952
+Весной в официальных бумагах всё выглядело просто.
 
 291
-00:18:43,930 --> 00:18:47,421
-Four years after that, in 1957, Neslişah
+00:16:48,992 --> 00:16:53,392
+Дивизию расформировали, людей передали другим частям, и на этом история
 
 292
-00:18:47,441 --> 00:18:49,823
-and her husband were arrested and accused of treason.
+00:16:53,432 --> 00:16:56,592
+заканчивалась. Бумага закрывала вопрос.
 
 293
-00:18:49,963 --> 00:18:53,426
-She was exiled a second time, from a country that had only ever been her
+00:16:56,672 --> 00:16:58,792
+Для многих этого хватало.
 
 294
-00:18:53,473 --> 00:18:57,110
-replacement home in the first place. She was released from prison after
+00:16:58,832 --> 00:17:00,952
+Эшелоны шли один за другим.
 
 295
-00:18:57,156 --> 00:19:00,713
-Turkey's own president personally intervened on her behalf, the same
+00:17:00,992 --> 00:17:05,832
+Их было больше десятка, и каждый прибывал к Харькову вслед за предыдущим.
 
 296
-00:19:00,763 --> 00:19:04,717
-Turkish state that had exiled her family thirty-three years earlier, now the one
+00:17:05,872 --> 00:17:09,832
+Вагоны скрипели на стыках, из щелей тянуло холодом.
 
 297
-00:19:04,777 --> 00:19:08,720
-negotiating for her freedom. She eventually made it back to Istanbul,
+00:17:09,872 --> 00:17:12,112
+Бойцы смотрели в открытые двери на чужие
 
 298
-00:19:08,760 --> 00:19:11,202
-the city she'd left as a three-year-old.
+00:17:12,192 --> 00:17:16,152
+поля и пытались угадать, где кончается степь.
 
 299
-00:19:11,242 --> 00:19:14,085
-She died there in 2012, at ninety-one, in
+00:17:16,192 --> 00:17:19,499
+Одно письмо из семьи до сих пор хранится у родных.
 
 300
-00:19:14,125 --> 00:19:18,249
-a villa on the Bosphorus, having lived through the fall of two empires from the
+00:17:19,525 --> 00:17:22,312
+Тажигали написал его на последнем привале.
 
 301
-00:19:18,318 --> 00:19:22,413
-inside of both, and having spent a lifetime, by her biographer's account,
+00:17:23,824 --> 00:17:26,784
+Почерк был ровный, но строчки шли вкось,
 
 302
-00:19:22,520 --> 00:19:26,256
-never once relinquishing her own sense of who she was.
+00:17:26,864 --> 00:17:29,264
+потому что бумага лежала на колене.
 
 303
-00:19:26,476 --> 00:19:31,060
-Neslişah wasn't the only child of this family who grew up carrying a title with
+00:17:29,344 --> 00:17:31,824
+Мария, мы едем на запад.
 
 304
-00:19:31,140 --> 00:19:35,224
-no country attached to it. A generation later, a different branch
+00:17:31,904 --> 00:17:35,024
+Части стоят в деревне Алексеевка под Харьковом.
 
 305
-00:19:35,268 --> 00:19:39,148
-produced its own version of the same story, and it turned out very
+00:17:35,104 --> 00:17:37,824
+Тут много снега, и кони мёрзнут.
 
 306
-00:19:39,195 --> 00:19:42,751
-differently. Şehzade Ertuğrul Osman, the New York
+00:17:37,864 --> 00:17:42,504
+Береги Дамира и Надю. Если долго не будет писем, не бойся.
 
 307
-00:19:42,815 --> 00:19:44,753
-financier who became head of the house in
+00:17:42,544 --> 00:17:47,371
+Значит, некогда писать. Мария получила это письмо спустя месяц.
 
 308
-00:19:44,797 --> 00:19:47,876
-1994 and didn't set foot in Turkey until
+00:17:47,397 --> 00:17:49,864
+Она прочитала его три раза и положила в
 
 309
-00:19:47,929 --> 00:19:51,799
-he was nearly eighty, married twice and had no children of his own.
+00:17:49,904 --> 00:17:52,664
+сундук, поверх старых фотографий.
 
 310
-00:19:51,979 --> 00:19:54,842
-His story ends, in that sense, exactly
+00:17:52,704 --> 00:17:56,864
+Харьковская операция в тот год задумывалась как широкий удар, который
 
 311
-00:19:54,869 --> 00:19:59,646
-where his family's exile left it: a name with nobody left to carry it forward from
+00:17:56,904 --> 00:17:59,064
+должен был освободить город.
 
 312
-00:19:59,686 --> 00:20:02,849
-his own line. But other branches of the family, less
+00:17:59,104 --> 00:18:03,264
+Замысел был смелый. Исполнение оказалось другим.
 
 313
-00:20:02,929 --> 00:20:05,572
-famous, kept having children who grew up
+00:18:03,343 --> 00:18:07,023
+Сотни тысяч людей погибли или попали в плен.
 
 314
-00:20:05,629 --> 00:20:10,376
-asking the same question Neslişah had asked as a three-year-old on a train out
+00:18:07,063 --> 00:18:09,583
+Именно эта катастрофа открыла немецкой
 
 315
-00:20:10,403 --> 00:20:15,260
-of Istanbul: what does it mean to be a princess when the empire that made you
+00:18:09,663 --> 00:18:13,463
+армии дорогу к Дону, а потом и к Сталинграду.
 
 316
-00:20:15,340 --> 00:20:18,703
-one has been gone since before your parents were born?
+00:18:13,503 --> 00:18:15,983
+Кавалерии в ту весну было уже мало, а
 
 317
-00:20:18,823 --> 00:20:23,508
-Abdulhamid Kayıhan Osmanoğlu, a great-great-grandson of Sultan Abdul
+00:18:16,063 --> 00:18:18,663
+воевать её всё равно отправили.
 
 318
-00:20:23,568 --> 00:20:26,470
-Hamid II, spent decades as the family's
+00:18:18,703 --> 00:18:21,143
+Танки и самолёты стали главными.
 
 319
-00:20:26,514 --> 00:20:30,954
-unofficial spokesman inside Turkey, the one who confirmed deaths and successions
+00:18:21,183 --> 00:18:23,943
+Конные полки выглядели архаикой.
 
 320
-00:20:31,007 --> 00:20:34,718
-to Turkish reporters when the family association wanted something said
+00:18:23,983 --> 00:18:26,263
+Но приказы не обсуждались.
 
 321
-00:20:34,780 --> 00:20:38,962
-publicly but didn't want the head of the house himself making statements to the
+00:18:26,303 --> 00:18:28,703
+Историк Татьяна Крупа в детстве слышала
 
 322
-00:20:39,055 --> 00:20:42,725
-press. It's a strange kind of inherited job: no
+00:18:28,783 --> 00:18:33,063
+от бабушки историю о том, как бойцы шли на танки с шашками.
 
 323
-00:20:42,805 --> 00:20:45,528
-throne, no ministry, just a standing
+00:18:34,599 --> 00:18:37,199
+Она считала это народным преданием.
 
 324
-00:20:45,592 --> 00:20:49,691
-responsibility to explain a dynasty to a country that abolished it.
+00:18:37,239 --> 00:18:40,039
+Взрослой она прочитала архивные донесения
 
 325
-00:20:49,811 --> 00:20:53,054
-The pattern repeats down through the youngest generation too.
+00:18:40,119 --> 00:18:43,439
+и поняла: предание оказалось правдой.
 
 326
-00:20:53,215 --> 00:20:57,779
-Harun Osman's own granddaughter, born decades after the exile law was even
+00:18:43,479 --> 00:18:47,839
+Один из участников позже вспоминал, что кавалеристы действительно поднимались в
 
 327
-00:20:57,841 --> 00:21:01,942
-repealed, grew up in Istanbul with no memory of statelessness at all.
+00:18:47,879 --> 00:18:51,759
+атаку с саблями. В живых из них осталось трое.
 
 328
-00:21:01,942 --> 00:21:05,866
-She never had to learn a foreign language to survive, never watched her family's
+00:18:51,799 --> 00:18:56,039
+В донесении того времени говорилось, что в шестой кавалерийский корпус прибыло
 
 329
-00:21:05,914 --> 00:21:09,789
-bank accounts get frozen. What she inherited instead was a surname
+00:18:56,079 --> 00:18:59,599
+пополнение, почти полная кавалерийская дивизия.
 
 330
-00:21:09,822 --> 00:21:13,793
-that still draws television cameras, wedding invitations from other deposed
+00:18:59,639 --> 00:19:01,999
+Больше четырёх тысяч человек.
 
 331
-00:21:13,833 --> 00:21:18,037
-royal houses, and a public curiosity about what an actual Ottoman princess
+00:19:02,039 --> 00:19:05,346
+Через несколько недель корпус оказался в окружении.
 
 332
-00:21:18,077 --> 00:21:22,281
-looks like doing something as ordinary as walking down a street in the city her
+00:19:05,372 --> 00:19:10,279
+В секретном акте приёмки, который сохранился в архивах, записано: в дивизии
 
 333
-00:21:22,327 --> 00:21:25,163
-family once ruled from a palace two miles away.
+00:19:10,359 --> 00:19:13,039
+четыре тысячи девяносто один человек.
 
 334
-00:21:25,233 --> 00:21:29,567
-Between Neslişah's generation and this one sits the entire shape of what exile
+00:19:13,079 --> 00:19:15,279
+Автоматов не было ни одного.
 
 335
-00:21:29,611 --> 00:21:32,770
-actually cost. One generation lost a country.
+00:19:15,319 --> 00:19:19,039
+Наганов ни одного. Винтовок сто две.
 
 336
-00:21:32,890 --> 00:21:35,573
-The next generation grew up in someone else's.
+00:19:19,079 --> 00:19:22,439
+Тажигали читал эти цифры в штабе, стоя у окна.
 
 337
-00:21:35,653 --> 00:21:39,576
-This generation was simply born already belonging to the place their family had
+00:19:22,519 --> 00:19:24,719
+За стеклом шёл мокрый снег.
 
 338
-00:21:39,592 --> 00:21:43,740
-been dragged out of: proof that a hundred years is long enough for even a forced
+00:19:24,759 --> 00:19:29,519
+Он думал, что такие акты пишут люди, которые никогда не сидели в седле.
 
 339
-00:21:43,820 --> 00:21:48,064
-exile to fully heal into something that looks, from the outside, like it was
+00:19:29,559 --> 00:19:32,119
+Цифры были сухими, а люди за ними были
 
 340
-00:21:48,104 --> 00:21:51,347
-never broken at all. Not every branch of the family handled
+00:19:32,199 --> 00:19:34,719
+живыми и мёрзли в палатках.
 
 341
-00:21:51,414 --> 00:21:55,190
-exile the same way, and the differences say a lot about what this collapse
+00:19:34,759 --> 00:19:39,039
+Он сказал командирам полков одну фразу, которую запомнили все.
 
 342
-00:21:55,235 --> 00:21:59,274
-actually cost people. Take Şehzade Mehmed Abdülkerim, a
+00:19:40,551 --> 00:19:43,591
+Патроны считайте как воду в колодце: если
 
 343
-00:21:59,345 --> 00:22:01,917
-grandson of Sultan Abdülhamid II.
+00:19:43,671 --> 00:19:46,951
+колодец пуст, никакие расчёты не помогут.
 
 344
-00:22:02,037 --> 00:22:06,561
-Stripped of a throne, he found a second, stranger use for his royal blood.
+00:19:47,031 --> 00:19:48,911
+Некоторые усмехнулись.
 
 345
-00:22:06,614 --> 00:22:11,045
-In the early 1930s, Japan's government recruited him as a figurehead to incite
+00:19:48,951 --> 00:19:52,098
+Через месяц уже никто не усмехался.
 
 346
-00:22:11,098 --> 00:22:16,089
-an uprising among Turkic Muslims in East Turkestan against Chinese rule, betting
+00:19:52,124 --> 00:19:55,391
+В конце мая наступление обернулось ловушкой.
 
 347
-00:22:16,105 --> 00:22:20,093
-that an actual Ottoman prince's name could rally a rebellion Tokyo wanted for
+00:19:55,431 --> 00:19:59,751
+Кольцо замкнулось в районе Краснограда, Мерефы и Лозовеньки.
 
 348
-00:22:20,153 --> 00:22:23,416
-its own regional interests. The uprising failed.
+00:19:59,831 --> 00:20:01,911
+Связь рвалась, приказы приходили
 
 349
-00:22:23,476 --> 00:22:26,018
-Japan abandoned him the moment he stopped being useful.
+00:20:01,951 --> 00:20:05,111
+запоздало, пыль стояла над полями такая,
 
 350
-00:22:26,151 --> 00:22:31,143
-He fled to the United States and, in 1935, took his own life in New York City.
+00:20:05,191 --> 00:20:07,871
+что солнце казалось тусклой монетой.
 
 351
-00:22:31,276 --> 00:22:35,787
-He's buried in a cemetery in Queens, a long way from either Istanbul or East
+00:20:07,911 --> 00:20:11,750
+В последние дни мая полк Тажигали прикрывал отход.
 
 352
-00:22:35,827 --> 00:22:38,910
-Turkestan. He left behind two young sons, born in
+00:20:11,830 --> 00:20:13,910
+Степь была изрыта воронками.
 
 353
-00:22:38,954 --> 00:22:42,513
-1930 and 1932, suddenly fatherless in a
+00:20:13,990 --> 00:20:16,910
+Подбитые танки стояли чёрными коробками.
 
 354
-00:22:42,563 --> 00:22:44,995
-country that had no obligation to them at all.
+00:20:16,950 --> 00:20:19,470
+Кони шли тяжело, и бойцы вели их в
 
 355
-00:22:45,055 --> 00:22:47,237
-One of those boys, Harun, eventually
+00:20:19,510 --> 00:20:23,150
+поводу, потому что каждый шаг стоил сил.
 
 356
-00:22:47,282 --> 00:22:52,202
-returned to Istanbul once the 1974 law finally allowed men of the dynasty back
+00:20:23,190 --> 00:20:27,163
+Тажигали ехал впереди. Рядом с ним молодой связной держал в
 
 357
-00:22:52,234 --> 00:22:55,245
-into the country. He is, as of today, the current head of
+00:20:27,190 --> 00:20:30,830
+руках карту, которая уже не совпадала с местностью.
 
 358
-00:22:55,265 --> 00:22:59,168
-the House of Osman, a position he holds not because of anything resembling a
+00:20:30,870 --> 00:20:34,363
+Ориентиры исчезли, дороги оборвались.
 
 359
-00:22:59,237 --> 00:23:03,252
-throne, but because a genealogical chart maintained by a private family
+00:20:34,417 --> 00:20:36,590
+Где мы? спросил связной.
 
 360
-00:23:03,319 --> 00:23:05,934
-association says he's next in line.
+00:20:36,630 --> 00:20:40,110
+Там, где нас ждут, ответил Тажигали.
 
 361
-00:23:06,074 --> 00:23:10,138
-A boy orphaned in the 1930s by his father's failed use as a foreign power's
+00:20:40,150 --> 00:20:42,990
+Он не знал, что сказать точнее.
 
 362
-00:23:10,178 --> 00:23:14,302
-political pawn ended up, decades later, as the ceremonial head of a
+00:20:43,030 --> 00:20:45,470
+Об этом дне есть две версии.
 
 363
-00:23:14,382 --> 00:23:17,585
-six-hundred-year dynasty. Nobody planned that outcome.
+00:20:45,510 --> 00:20:50,390
+По одной, почти все, кто пропал без вести или попал в плен, приняли свой последний
 
 364
-00:23:17,718 --> 00:23:20,467
-It's just where the succession chart happened to land.
+00:20:50,550 --> 00:20:51,870
+бой у Лозовеньки.
 
 365
-00:23:20,588 --> 00:23:24,952
-One branch treated the fall as final and adapted completely, assimilating into
+00:20:53,462 --> 00:20:55,982
+Именно эту точку называет историк Лариса
 
 366
-00:23:25,009 --> 00:23:29,436
-French or Lebanese society, marrying outside the family, building ordinary
+00:20:56,022 --> 00:21:00,782
+Ямпольская, и её версия опирается на разборы боёв того времени.
 
 367
-00:23:29,479 --> 00:23:33,279
-professional lives, and largely letting the Ottoman name become a historical
+00:21:00,822 --> 00:21:03,062
+По другой версии, гибель связывают с
 
 368
-00:23:33,341 --> 00:23:35,841
-footnote rather than an identity to defend.
+00:21:03,102 --> 00:21:06,142
+Тарановкой и датой двадцать седьмое мая.
 
 369
-00:23:36,162 --> 00:23:39,284
-A second branch did the opposite. They organized.
+00:21:06,182 --> 00:21:09,382
+Так считают поисковики из Харьковской области.
 
 370
-00:23:39,284 --> 00:23:43,208
-Family associations were formed to keep track of every living descendant,
+00:21:09,462 --> 00:21:14,302
+Они ходили по полям, собирали находки и разговаривали с местными жителями.
 
 371
-00:23:43,261 --> 00:23:47,051
-maintain the internal hierarchy of succession according to agnatic seniority
+00:21:14,342 --> 00:21:17,662
+Какая из версий точнее, пока сказать нельзя.
 
 372
-00:23:47,119 --> 00:23:51,936
-rules going back centuries, and preserve whatever documentation and heirlooms had
+00:21:17,702 --> 00:21:20,422
+Документы не дают однозначного ответа, а
 
 373
-00:23:51,984 --> 00:23:56,420
-made it out of Istanbul. To this day, that succession is tracked
+00:21:20,502 --> 00:21:23,182
+живых свидетелей почти не осталось.
 
 374
-00:23:56,452 --> 00:24:00,904
-with the same formality a reigning house would use, even though the position
+00:21:23,222 --> 00:21:26,049
+Так что место гибели называют два разных.
 
 375
-00:24:00,968 --> 00:24:05,628
-confers no country, no income, and no legal recognition anywhere on Earth.
+00:21:26,075 --> 00:21:29,822
+И это честно отражает то, что известно сегодня.
 
 376
-00:24:05,868 --> 00:24:10,753
-The clearest example of this divide is Ertuğrul Osman, sometimes called by
+00:21:29,862 --> 00:21:34,662
+Бидулин из объединения Ориентир рассказывал, что в Тарановке бойцов очень
 
 377
-00:24:10,806 --> 00:24:15,157
-journalists "the last Ottoman," who spent most of his adult life in New York,
+00:21:34,742 --> 00:21:37,862
+много. Незарегистрированные братские захоронения
 
 378
-00:24:15,197 --> 00:24:19,241
-working an ordinary job in finance and only occasionally acknowledging his
+00:21:37,942 --> 00:21:42,142
+лежат рядом друг с другом. Поисковики не торопятся с выводами.
 
 379
-00:24:19,291 --> 00:24:20,522
-lineage publicly.
+00:21:42,182 --> 00:21:45,302
+Они копают осторожно, по слоям, и каждая
 
 380
-00:24:20,895 --> 00:24:24,605
-He didn't set foot in Turkey until 1992,
+00:21:45,382 --> 00:21:47,982
+находка записывается в протокол.
 
 381
-00:24:24,672 --> 00:24:28,769
-sixty-eight years after his family's expulsion, and even then only as a
+00:21:48,022 --> 00:21:52,942
+В этом году они подняли бойца, у которого сохранилась красноармейская книжка.
 
 382
-00:24:28,809 --> 00:24:33,333
-private citizen, on a passport that gave him no special status whatsoever.
+00:21:52,982 --> 00:21:56,942
+Бумага, пропитанная землёй, но имя на ней читалось.
 
 383
-00:24:33,509 --> 00:24:36,937
-When he died in 2009, Turkish television
+00:21:58,430 --> 00:22:03,390
+Вполне возможно, что по этой книжке удастся установить и другие имена.
 
 384
-00:24:36,977 --> 00:24:40,300
-covered his funeral in Istanbul as a genuine national event.
+00:22:03,470 --> 00:22:07,230
+Тажигали в тот вечер получил приказ отойти к Краснограду.
 
 385
-00:24:40,300 --> 00:24:44,063
-The country that exiled the family gave the last direct claimant to the caliphate
+00:22:07,270 --> 00:22:10,857
+Он собрал командиров эскадронов и посмотрел на каждого.
 
 386
-00:24:44,103 --> 00:24:48,387
-a state-adjacent farewell it had refused both his grandfather and Abdulmecid
+00:22:10,883 --> 00:22:14,777
+Потом сказал: Кто идёт со мной, идёт до конца.
 
 387
-00:24:48,433 --> 00:24:51,430
-before him. Not every displaced heir handled it with
+00:22:14,803 --> 00:22:18,829
+Кто хочет выйти из кольца небольшими группами, пусть выходит, я не буду
 
 388
-00:24:51,470 --> 00:24:53,992
-Ertuğrul's quiet corporate normalcy, either.
+00:22:18,909 --> 00:22:21,349
+держать. Никто не вышел.
 
 389
-00:24:54,132 --> 00:24:58,716
-Bayezid Osman, who succeeded him as head of the house after his death in 2009,
+00:22:21,389 --> 00:22:24,069
+Одни промолчали, другие кивнули.
 
 390
-00:24:58,823 --> 00:25:02,960
-spent his life in Istanbul working as a librarian, running puppet shows for
+00:22:24,109 --> 00:22:26,709
+Муфтиев поправил ремень шашки и сказал,
 
 391
-00:25:02,991 --> 00:25:06,163
-neighborhood children, and looking after his elderly mother.
+00:22:26,749 --> 00:22:29,149
+что эскадрон пойдёт первым.
 
 392
-00:25:06,296 --> 00:25:09,846
-Acquaintances remembered him mainly for his sense of humor and his enormous
+00:22:29,189 --> 00:22:33,309
+Ночью прорыв не удался. Тьма была плотной, и связь с соседними
 
 393
-00:25:09,910 --> 00:25:14,330
-fondness for Ottoman home cooking: stuffed grape leaves, savory pastries,
+00:22:33,469 --> 00:22:35,749
+частями окончательно оборвалась.
 
 394
-00:25:14,400 --> 00:25:18,014
-chicken dishes rich enough that his doctor once told him to cut back, a
+00:22:35,789 --> 00:22:40,069
+Утром полк оказался в низине, со всех сторон его обстреливали.
 
 395
-00:25:18,064 --> 00:25:21,777
-request he reportedly ignored, showing up to the follow-up appointment with his
+00:22:40,109 --> 00:22:43,349
+Кони падали, люди падали рядом с ними.
 
 396
-00:25:21,825 --> 00:25:24,900
-coat pockets stuffed with coins for the vending machine anyway.
+00:22:43,389 --> 00:22:45,829
+Тажигали помнил этот бой отрывками.
 
 397
-00:25:25,060 --> 00:25:29,624
-His own father, offered the chance to perform publicly as a pianist, turned it
+00:22:45,869 --> 00:22:49,869
+Пыль на губах. Короткий, сорвавшийся на хрип крик команды.
 
 398
-00:25:29,688 --> 00:25:33,468
-down out of simple stage fright. A family that once commanded an empire
+00:22:49,949 --> 00:22:52,269
+Лицо Рахимжанова, который держал пулемёт
 
 399
-00:25:33,521 --> 00:25:37,952
-produced, a few generations later, a shy amateur pianist and a librarian who did
+00:22:52,309 --> 00:22:55,469
+и смеялся, хотя смеяться было нельзя.
 
 400
-00:25:38,009 --> 00:25:42,035
-puppet shows: proof that exile doesn't just strip away wealth and title.
+00:22:55,509 --> 00:22:59,349
+Потом он больше не видел ни Рахимжанова, ни Муфтиева.
 
 401
-00:25:42,108 --> 00:25:44,878
-Eventually it just lets people become ordinary.
+00:22:59,389 --> 00:23:02,696
+Что случилось дальше, в точности не знает никто.
 
 402
-00:25:44,928 --> 00:25:48,441
-Not everyone let go of the principle behind the title even after letting go of
+00:23:02,722 --> 00:23:06,869
+Так записано в документах. Так говорят те, кто ищет.
 
 403
-00:25:48,477 --> 00:25:51,404
-everything else. When Turkey finally lifted the exile in
+00:23:08,461 --> 00:23:11,221
+Пленных вели колонной по пыльной дороге.
 
 404
-00:25:51,424 --> 00:25:56,128
-the mid-1970s, Ertuğrul Osman was working abroad and initially refused to even
+00:23:11,261 --> 00:23:14,501
+Тех, кто выжил, собирали в лагерь под Красноградом.
 
 405
-00:25:56,195 --> 00:25:59,731
-apply for the citizenship being offered back to him, on the grounds that he'd
+00:23:14,541 --> 00:23:16,941
+Немцы называли его Дулагом.
 
 406
-00:25:59,779 --> 00:26:03,495
-done nothing wrong in the first place and had no need of anyone's amnesty.
+00:23:17,021 --> 00:23:21,901
+Здесь не было ни крыши, ни нормальной кухни, только колючая проволока и вышки
 
 407
-00:26:03,548 --> 00:26:07,979
-He and his second wife, herself a niece of Afghanistan's last king, spent decades
+00:23:21,941 --> 00:23:26,061
+на краю поля. Люди ложились на землю, потому что стоять
 
 408
-00:26:08,027 --> 00:26:11,902
-afterward in a modest, rent-controlled Manhattan apartment, paying a few hundred
+00:23:26,141 --> 00:23:30,581
+не было сил. Кто-то шептал имена, которые боялся забыть.
 
 409
-00:26:11,952 --> 00:26:15,025
-dollars a month for a home a world away from Topkapı.
+00:23:30,621 --> 00:23:35,341
+Кто-то молчал. Раны гноились, вода была мутной, и каждый
 
 410
-00:26:15,078 --> 00:26:18,869
-He said publicly, more than once, that the republic had been hard on his family
+00:23:35,421 --> 00:23:37,861
+день кого-то выносили за ограду.
 
 411
-00:26:18,929 --> 00:26:23,913
-but good for Turkey. His wife was considerably less willing to make peace with history, telling an
+00:23:37,901 --> 00:23:40,981
+Об этом пишут те, кто искал дивизию по следам.
 
 412
-00:26:23,957 --> 00:26:27,516
-American newspaper decades later that the world would be better off if the
+00:23:41,021 --> 00:23:43,461
+Но подробностей почти не осталось.
 
 413
-00:26:27,576 --> 00:26:31,920
-caliphate still existed. Two people who'd lived the same exile,
+00:23:43,501 --> 00:23:48,461
+Немецкие списки разрозненны, советские документы неполны, а часть бумаг
 
 414
-00:26:31,960 --> 00:26:35,844
-married to each other, still disagreeing to the end about whether any of it had
+00:23:48,541 --> 00:23:52,581
+уничтожили в тех же боях. Тех, кто выжил и вернулся, после
 
 415
-00:26:35,876 --> 00:26:39,047
-been worth it. Losing a throne is one thing.
+00:23:52,621 --> 00:23:55,221
+освобождения ждали советские лагеря.
 
 416
-00:26:39,097 --> 00:26:42,890
-Getting anything back afterward turned out to be almost impossible, and the
+00:23:55,261 --> 00:23:59,741
+Так было со многими. Проверка, допросы, бесконечные вопросы о
 
 417
-00:26:42,947 --> 00:26:47,214
-family's decades-long attempts to do so form one of the stranger legal footnotes
+00:23:59,901 --> 00:24:02,421
+том, почему человек остался жив.
 
 418
-00:26:47,241 --> 00:26:48,976
-of twentieth-century monarchy.
+00:24:02,461 --> 00:24:06,621
+Ответа у них часто не было. Или ответ был таким, что его нельзя было
 
 419
-00:26:49,116 --> 00:26:53,620
-The exile law of 1924 didn't just remove the family from the country.
+00:24:06,741 --> 00:24:10,981
+произнести вслух. Архив на запросы отвечал короткой справкой.
 
 420
-00:26:53,727 --> 00:26:57,624
-It seized their property outright, and gave them exactly one year to sell
+00:24:11,021 --> 00:24:12,981
+Больше в ней ничего не было.
 
 421
-00:26:57,660 --> 00:27:01,227
-whatever they owned inside Turkey before the state simply took it.
+00:24:14,557 --> 00:24:17,437
+Тажигали значился пропавшим без вести, и
 
 422
-00:27:01,440 --> 00:27:04,270
-In practice, a year wasn't a real deadline.
+00:24:17,517 --> 00:24:21,464
+эта строчка стала его последним словом в казённой бумаге.
 
 423
-00:27:04,297 --> 00:27:07,392
-It was a fire sale. Family members forced to liquidate
+00:24:21,490 --> 00:24:25,756
+В тысяча девятьсот семьдесят шестом году вышел военно-исторический труд под
 
 424
-00:27:07,472 --> 00:27:12,117
-estates, mines, and mansions from outside the country, through agents they barely
+00:24:25,836 --> 00:24:27,836
+редакцией маршала Гречко.
 
 425
-00:27:12,177 --> 00:27:16,280
-had time to vet, ended up handing over land and buildings for a fraction of what
+00:24:27,916 --> 00:24:32,289
+В нём упоминалось, что в Казахстане формировалась такая дивизия и её
 
 426
-00:27:16,307 --> 00:27:20,204
-it had been worth just months earlier, or simply signing it over to friends they
+00:24:32,343 --> 00:24:36,609
+отправляли на фронт. О её судьбе там ничего не говорилось.
 
 427
-00:27:20,264 --> 00:27:22,766
-trusted to hold it and never got it back from.
+00:24:36,663 --> 00:24:40,996
+Как будто степь проглотила целую дивизию и не подавилась.
 
 428
-00:27:22,906 --> 00:27:25,889
-The same March 1924 sitting of parliament
+00:24:41,036 --> 00:24:45,556
+Мария долго ждала. Она писала запросы, ходила в военкомат,
 
 429
-00:27:25,921 --> 00:27:30,453
-that abolished the caliphate also moved every vakıf, the religious endowments
+00:24:45,596 --> 00:24:50,076
+стояла в очередях. Ей отвечали одно и то же: сведений не
 
 430
-00:27:30,469 --> 00:27:34,377
-that had funded mosques, schools, and hospitals under the family's authority
+00:24:50,196 --> 00:24:53,996
+имеется. Надежда выросла, пошла учиться, потом
 
 431
-00:27:34,417 --> 00:27:38,460
-for centuries, permanently under state control through a brand-new government
+00:24:54,076 --> 00:24:58,276
+работала в библиотеке. Дамир стал инженером и редко вспоминал
 
 432
-00:27:38,513 --> 00:27:42,624
-directorate, closing off an entire category of property before any
+00:24:58,316 --> 00:25:01,156
+отца, потому что помнил его плохо.
 
 433
-00:27:42,668 --> 00:27:45,106
-descendant even had the chance to argue over it.
+00:25:01,196 --> 00:25:04,836
+Но письмо в сундуке Мария хранила до конца жизни.
 
 434
-00:27:45,106 --> 00:27:49,831
-A 1949 law went further still, specifically blocking any descendant from
+00:25:04,876 --> 00:25:09,236
+Она перечитывала его по вечерам, когда в доме становилось тихо.
 
 435
-00:27:49,867 --> 00:27:53,914
-claiming inheritance rights over what had been taken, a provision that conveniently
+00:25:09,276 --> 00:25:11,956
+Лет пятнадцать назад всё изменилось.
 
 436
-00:27:53,957 --> 00:27:58,078
-strengthened the hand of neighboring states like Iraq, Syria, and Lebanon in
+00:25:11,996 --> 00:25:14,076
+Работа по архивам шла долго.
 
 437
-00:27:58,105 --> 00:28:01,521
-their own disputes with the family over former Ottoman territory.
+00:25:14,156 --> 00:25:17,636
+Первые запросы подали весной две тысячи десятого года.
 
 438
-00:28:01,681 --> 00:28:05,205
-The exile itself eased before the property ever did.
+00:25:17,676 --> 00:25:22,276
+Историки перелистывали подборки документов, поисковики ездили по полям,
 
 439
-00:28:05,272 --> 00:28:09,528
-Women of the family were allowed to return to Turkey starting in 1952.
+00:25:22,316 --> 00:25:25,076
+родственники собирали семейные альбомы.
 
 440
-00:28:09,649 --> 00:28:13,212
-Men had to wait until 1974, a gap of over
+00:25:26,604 --> 00:25:29,884
+В казахстанской газете вышла статья о дивизии.
 
 441
-00:28:13,272 --> 00:28:17,536
-two decades between the two, and most of the returning men came back to a country
+00:25:29,964 --> 00:25:34,444
+На первой полосе напечатали старую фотографию: группа командиров стоит на
 
 442
-00:28:17,568 --> 00:28:20,098
-that had changed beyond anything they remembered.
+00:25:34,604 --> 00:25:39,364
+ступенях штабного здания. Подпись короткая, но её хватило.
 
 443
-00:28:20,205 --> 00:28:24,902
-Property was a different story entirely, and it's still being fought over today.
+00:25:39,404 --> 00:25:43,644
+Отклик пришёл сразу. Внуки и правнуки перебирали снимки и
 
 444
-00:28:25,035 --> 00:28:27,945
-In 2010, descendants of Sultan Abdülhamid
+00:25:43,724 --> 00:25:47,564
+вглядывались в лица. Одна из женщин увидела на фотографии
 
 445
-00:28:27,965 --> 00:28:31,628
-II filed a complaint over roughly 4,200
+00:25:47,604 --> 00:25:50,924
+мужчину, который держал фуражку в левой руке.
 
 446
-00:28:31,685 --> 00:28:35,632
-seized properties, seeking damages reported at close to eighteen billion
+00:25:50,964 --> 00:25:55,084
+Она узнала эту привычку. Так её дед держал фуражку на всех
 
 447
-00:28:35,702 --> 00:28:40,116
-dollars. One descendant, speaking to a Turkish newspaper at the time, said the family
+00:25:55,164 --> 00:25:58,631
+семейных фотографиях. Она позвонила в редакцию.
 
 448
-00:28:40,164 --> 00:28:44,920
-wasn't asking for palaces like Topkapı or Dolmabahçe, just land the sultan had
+00:25:58,657 --> 00:26:01,684
+Потом в музей. Потом в архив.
 
 449
-00:28:44,971 --> 00:28:49,084
-personally held title to, land that had since been sold off or absorbed by the
+00:26:01,724 --> 00:26:04,964
+Бумаги подтвердили то, что подсказала память.
 
 450
-00:28:49,137 --> 00:28:51,246
-state's National Estate Institution.
+00:26:05,004 --> 00:26:08,684
+Майор Уваисов, командир триста седьмого полка.
 
 451
-00:28:51,366 --> 00:28:55,570
-A separate suit followed in 2014, with attorneys for the family citing land
+00:26:08,764 --> 00:26:13,644
+Биография, записанная в архиве, и место, найденное поисковиками, сошлись в одной
 
 452
-00:28:55,623 --> 00:28:59,333
-registry documents they'd tracked down in state archives themselves.
+00:26:13,724 --> 00:26:18,084
+точке. Уваисова исключили из списка пропавших без вести.
 
 453
-00:28:59,379 --> 00:29:02,857
-Family members have also pointed to a wider precedent they feel Turkey has
+00:26:18,124 --> 00:26:22,644
+Но место гибели в разных источниках до сих пор называется по-разному.
 
 454
-00:29:02,917 --> 00:29:06,700
-ignored: Germany negotiated an actual settlement with its own former royal
+00:26:22,684 --> 00:26:25,164
+В Краснограде тоже нашлись следы.
 
 455
-00:29:06,769 --> 00:29:11,184
-family, the Hohenzollerns, returning some property and compensating for the rest, a
+00:26:25,244 --> 00:26:27,804
+Макка Каражанова из объединения Бирлик и
 
 456
-00:29:11,232 --> 00:29:15,028
-deal the Ottomans have spent a century asking for and never received.
+00:26:27,884 --> 00:26:32,244
+её соратница Татьяна Крупа пришли в городской художественный музей.
 
 457
-00:29:15,108 --> 00:29:18,230
-Then, in 2025, a century after the exile,
+00:26:33,803 --> 00:26:37,923
+Они перелистывали подборки военных документов и наткнулись на строчку о
 
 458
-00:29:18,284 --> 00:29:22,154
-an Istanbul court finally ruled on the underlying question of who counts as an
+00:26:37,963 --> 00:26:40,963
+дивизии: её расформировали и передали в
 
 459
-00:29:22,202 --> 00:29:25,117
-heir at all. After a legal process that had run for
+00:26:41,003 --> 00:26:43,203
+шестой кавалерийский корпус.
 
 460
-00:29:25,187 --> 00:29:29,841
-fifteen years, the court formally recognized seventy-one living descendants
+00:26:43,243 --> 00:26:46,163
+Из этой строчки началась новая работа.
 
 461
-00:29:29,894 --> 00:29:32,884
-of Abdülhamid II as his legitimate heirs.
+00:26:46,203 --> 00:26:48,603
+В ней участвовал военный историк Леонид
 
 462
-00:29:33,124 --> 00:29:36,447
-It was, on paper, a historic result.
+00:26:48,683 --> 00:26:51,443
+Карцев, почётный житель Краснограда.
 
 463
-00:29:36,517 --> 00:29:40,891
-And then the same ruling added the catch: that recognition alone couldn't be used
+00:26:51,483 --> 00:26:56,163
+Он собирал документы для музея и помог связать находки в одну картину.
 
 464
-00:29:40,918 --> 00:29:44,654
-to automatically transfer any real estate, due to the very restrictions the
+00:26:56,203 --> 00:27:01,083
+Оказалось, что в ауле Коктерек, где он родился, работает историко-краеведческий
 
 465
-00:29:44,711 --> 00:29:47,457
-family had been fighting since 1949.
+00:27:01,163 --> 00:27:04,763
+музей. Его основатель, Толеген-ага Сейткереев,
 
 466
-00:29:47,537 --> 00:29:51,861
-Being confirmed as an heir and actually receiving an inheritance turned out to be
+00:27:04,843 --> 00:27:08,403
+стал одним из тех, кто связал бумаги и рассказы.
 
 467
-00:29:51,901 --> 00:29:56,265
-two entirely different things. A century after the exile, the family
+00:27:08,443 --> 00:27:13,403
+Сейчас участники этих поисков называют друг друга добрыми друзьями.
 
 468
-00:29:56,315 --> 00:29:58,827
-finally won the argument about who they are.
+00:27:13,483 --> 00:27:16,683
+Степь под Котельниково была плоской, как ладонь.
 
 469
-00:29:58,891 --> 00:30:02,430
-They still haven't won back anything that argument was actually about.
+00:27:16,723 --> 00:27:20,310
+Ни оврага, ни рощицы, за которой можно спрятаться.
 
 470
-00:30:02,564 --> 00:30:07,155
-So who's actually left, and what does being "Ottoman royalty" mean for someone
+00:27:20,336 --> 00:27:22,683
+Только сухая трава по колено, пыльные
 
 471
-00:30:07,201 --> 00:30:11,879
-living right now, in 2026, a hundred years after the exile?
+00:27:22,763 --> 00:27:25,376
+дороги и редкие курганы, на которых в
 
 472
-00:30:11,999 --> 00:30:15,802
-The family estimates its living membership at several hundred people,
+00:27:25,403 --> 00:27:28,630
+старые времена стояли сторожевые пикеты.
 
 473
-00:30:15,849 --> 00:30:18,125
-spread mostly across Turkey, along with
+00:27:28,656 --> 00:27:31,363
+Тажигали знал эти курганы с детства.
 
 474
-00:30:18,145 --> 00:30:21,888
-the United States, France, Lebanon, and Egypt.
+00:27:31,403 --> 00:27:36,283
+Отец рассказывал, что на таких холмах кочевники зажигали костры, если приходила
 
 475
-00:30:21,888 --> 00:30:25,972
-The current head of the house holds a position that exists purely as tradition.
+00:27:36,403 --> 00:27:40,851
+беда. Теперь на курганах стояли пулемётные
 
 476
-00:30:25,999 --> 00:30:29,655
-No palace, no civil list payment, no state ceremony.
+00:27:40,971 --> 00:27:43,531
+расчёты, и огонь гасить было не нужно.
 
 477
-00:30:29,755 --> 00:30:33,178
-The handover happens through a phone call and an announcement to the family
+00:27:43,731 --> 00:27:48,211
+Он и так горел повсюду. Полк занял позиции в ночь на двадцать
 
 478
-00:30:33,245 --> 00:30:35,981
-association, not a coronation, and the
+00:27:48,291 --> 00:27:52,451
+пятое ноября. Тишина стояла такая, что слышно было, как
 
 479
-00:30:36,045 --> 00:30:40,945
-line behind Harun Osman is already mapped out decades in advance, down to men in
+00:27:52,531 --> 00:27:57,411
+лошади жуют сено. Бойцы копали окопы руками и лопатками,
 
 480
-00:30:40,958 --> 00:30:45,109
-their thirties who will likely never hold the title themselves but who know exactly
+00:27:57,491 --> 00:27:59,731
+земля была твёрдой, а сил мало.
 
 481
-00:30:45,149 --> 00:30:48,072
-where they sit if they outlive everyone ahead of them.
+00:28:00,531 --> 00:28:04,851
+Утром разведчики вернулись с известием: с запада движется колонна.
 
 482
-00:30:48,152 --> 00:30:51,995
-So, before we go further, if a story like this is the kind of thing you want more
+00:28:05,171 --> 00:28:07,211
+Много машин и танки.
 
 483
-00:30:52,075 --> 00:30:56,799
-of, this channel runs on exactly this material, and subscribing is genuinely
+00:28:07,651 --> 00:28:11,571
+Тажигали поднёс бинокль к глазам и долго смотрел на горизонт.
 
 484
-00:30:56,832 --> 00:31:01,444
-what keeps it going. Some descendants engage warmly with Turkish media and historical
+00:28:12,211 --> 00:28:16,411
+Серое пятно росло медленно, и в нём угадывались силуэты.
 
 485
-00:31:01,488 --> 00:31:05,607
-commemorations, showing up at documentary premieres or giving interviews about
+00:28:16,851 --> 00:28:18,851
+Сколько их? спросил комиссар.
 
 486
-00:31:05,664 --> 00:31:10,492
-family history when a Turkish network wants context for a costume drama about
+00:28:19,491 --> 00:28:21,731
+Больше, чем нас, ответил Тажигали.
 
 487
-00:31:10,519 --> 00:31:13,855
-their own ancestors. Others avoid the spotlight entirely,
+00:28:22,371 --> 00:28:24,691
+Он не стал добавлять намного, потому что
 
 488
-00:31:13,891 --> 00:31:17,778
-treating the lineage as a private family matter, an understandable instinct, after
+00:28:24,811 --> 00:28:27,411
+знал: это слово ничего не изменит.
 
 489
-00:31:17,810 --> 00:31:20,981
-what happened to their grandparents' generation, and a reminder that the same
+00:28:28,051 --> 00:28:31,011
+Приказ был прост: держать рубеж до вечера.
 
 490
-00:31:21,041 --> 00:31:24,905
-surname can mean a television career for one cousin and total anonymity for
+00:28:31,411 --> 00:28:35,731
+Соседи обещали подойти. Тажигали послал связного проверить, так
 
 491
-00:31:24,955 --> 00:31:28,828
-another, depending entirely on what each of them decided to do with a birthright
+00:28:35,811 --> 00:28:39,411
+ли это. Связной вернулся через час и сказал, что
 
 492
-00:31:28,868 --> 00:31:33,793
-neither one chose. What's genuinely unexpected is how the relationship with Turkey itself has
+00:28:39,531 --> 00:28:42,130
+соседей нет. Ни справа, ни слева.
 
 493
-00:31:33,855 --> 00:31:36,515
-softened. The same state that gave the family a few
+00:28:42,530 --> 00:28:44,930
+Только пустая степь и далёкий гул.
 
 494
-00:31:36,568 --> 00:31:40,839
-hours to leave the country in 1924 now, on occasion, sends official
+00:28:45,570 --> 00:28:49,210
+Тажигали кивнул и приказал полку развернуться по фронту.
 
 495
-00:31:40,892 --> 00:31:44,843
-representation to the funerals of its most prominent surviving descendants, and
+00:28:49,490 --> 00:28:50,370
+Никто не спорил.
 
 496
-00:31:44,883 --> 00:31:48,766
-its president has personally telephoned the family to offer condolences when a
+00:28:52,282 --> 00:28:56,842
+Каждый понимал, что приказ остаётся приказом, даже когда его некому
 
 497
-00:31:48,782 --> 00:31:51,729
-head of the house has died. It's not restitution.
+00:28:56,922 --> 00:29:00,442
+подтвердить. Бой начался около полудня.
 
 498
-00:31:51,862 --> 00:31:55,412
-It's not recognition of any claim. But it's a strange kind of quiet
+00:29:00,682 --> 00:29:03,882
+Сначала артиллерия, потом пехота на броне.
 
 499
-00:31:55,471 --> 00:32:00,457
-reconciliation between a republic and the dynasty it replaced, one century, and one
+00:29:04,202 --> 00:29:06,922
+Танки шли уверенно, поливая степь огнём.
 
 500
-00:32:00,510 --> 00:32:04,861
-phone call at a time. Harun Osman has been head of the house since 2021.
+00:29:07,482 --> 00:29:10,842
+Кони рвались из рук, и связные едва удерживали их.
 
 501
-00:32:04,914 --> 00:32:08,224
-He won't be the last person to hold that position, and the rules for what happens
+00:29:11,402 --> 00:29:13,722
+Муфтиев повёл эскадрон в контратаку.
 
 502
-00:32:08,277 --> 00:32:11,987
-after him explain a lot about why this family still functions as a family at
+00:29:14,202 --> 00:29:16,842
+Он вырвался вперёд, подняв шашку над головой.
 
 503
-00:32:12,047 --> 00:32:14,950
-all, a hundred years after losing everything else.
+00:29:17,322 --> 00:29:20,282
+Бойцы кричали, но крики тонули в грохоте.
 
 504
-00:32:14,990 --> 00:32:19,114
-The succession runs on agnatic seniority: the position passes to the oldest living
+00:29:20,922 --> 00:29:23,082
+Тажигали видел, как эскадрон врезался в
 
 505
-00:32:19,162 --> 00:32:22,076
-male descendant in the direct male line, full stop.
+00:29:23,162 --> 00:29:27,402
+цепь пехоты, как сверкнули клинки, как упали первые кони.
 
 506
-00:32:22,177 --> 00:32:24,879
-Not the oldest child. Not the closest relative.
+00:29:27,962 --> 00:29:31,642
+Рахимжанов со своим взводом противотанковых ружей бил по броне.
 
 507
-00:32:24,959 --> 00:32:29,123
-The oldest man whose father, and his father, and his father before that, trace
+00:29:32,202 --> 00:29:34,442
+Выстрелы были короткими и резкими.
 
 508
-00:32:29,171 --> 00:32:32,206
-back to the House of Osman without a woman anywhere in the chain.
+00:29:34,842 --> 00:29:39,482
+Один танк загорелся, второй остановился и начал разворачивать башню.
 
 509
-00:32:32,262 --> 00:32:35,849
-Genealogists maintaining the family's own records count roughly twenty-seven men
+00:29:39,962 --> 00:29:43,082
+Рахимжанов смеялся, хотя смеяться было нельзя.
 
 510
-00:32:35,889 --> 00:32:40,573
-currently in that line, spread across Turkey, Lebanon, Egypt, and beyond.
+00:29:43,642 --> 00:29:46,922
+Он кричал что-то весёлое, и бойцы отвечали ему.
 
 511
-00:32:40,653 --> 00:32:44,337
-That rule excludes everyone else. Neslişah Sultan's own children and
+00:29:47,642 --> 00:29:51,722
+К вечеру кольцо сжалось. Полк держался на небольшом участке у
 
 512
-00:32:44,377 --> 00:32:48,100
-grandchildren don't count, because Neslişah was a woman: the rule that made
+00:29:51,802 --> 00:29:54,282
+дороги. Патронов почти не осталось.
 
 513
-00:32:48,140 --> 00:32:51,463
-her a Sultan by birth is the same rule that keeps her descendants permanently
+00:29:54,842 --> 00:29:59,482
+Раненые лежали в воронках, и санитары перетаскивали их по одному, перебегая под
 
 514
-00:32:51,523 --> 00:32:54,986
-outside the line that matters. The same is true for every other female
+00:29:59,522 --> 00:30:04,306
+огнём. Тажигали получил ранение в плечо.
 
 515
-00:32:55,022 --> 00:32:57,388
-descendant across four generations of exile.
+00:30:04,386 --> 00:30:09,266
+Осколок прошёл касательно, но кровь текла, и рука стала тяжёлой.
 
 516
-00:32:57,477 --> 00:33:01,152
-Hundreds of people who carry Ottoman blood, some of them more publicly
+00:30:09,306 --> 00:30:13,906
+Он перевязал её сам, одной рукой, зубами затянув узел.
 
 517
-00:33:01,203 --> 00:33:05,075
-identified with the family name than the men technically ahead of them in line,
+00:30:13,986 --> 00:30:17,986
+Вечером пришёл приказ: отходить небольшими группами.
 
 518
-00:33:05,107 --> 00:33:08,038
-have no claim at all under the family's own constitution.
+00:30:18,026 --> 00:30:19,986
+Тажигали собрал командиров.
 
 519
-00:33:08,262 --> 00:33:11,081
-Next after Harun is Osman Selaheddin
+00:30:20,066 --> 00:30:23,186
+Он смотрел на их лица, на грязь и кровь,
 
 520
-00:33:11,148 --> 00:33:15,725
-Osmanoğlu, born in 1940, descended from Sultan Murad V.
+00:30:23,266 --> 00:30:26,546
+на глаза, которые стали старше за один день.
 
 521
-00:33:15,805 --> 00:33:19,248
-For decades he's chaired the family association that keeps this genealogy
+00:30:26,626 --> 00:30:28,786
+Выходить по одному, по двое.
 
 522
-00:33:19,298 --> 00:33:23,172
-current, the closest thing the Osmanoğlu name has to an institution.
+00:30:28,866 --> 00:30:33,346
+Не геройствовать. Кто дойдёт, тот расскажет, сказал он.
 
 523
-00:33:23,412 --> 00:33:26,695
-No property comes with the title when it eventually passes to him.
+00:30:33,426 --> 00:30:35,426
+Некоторые не хотели уходить.
 
 524
-00:33:26,855 --> 00:33:30,538
-No income, no legal recognition in Turkey or anywhere else.
+00:30:35,466 --> 00:30:38,466
+Муфтиев стоял прямо, не опуская шашки.
 
 525
-00:33:30,586 --> 00:33:34,302
-What he'll inherit is a phone call, an announcement, and the job of being the
+00:30:38,506 --> 00:30:41,906
+Тажигали подошёл к нему и положил руку на плечо.
 
 526
-00:33:34,348 --> 00:33:37,344
-person journalists call when something Ottoman is in the news.
+00:30:41,946 --> 00:30:46,346
+Твой эскадрон теперь живой. Береги его, сказал он тихо.
 
 527
-00:33:37,425 --> 00:33:40,707
-That's the real tension inside the family today, and it isn't loud.
+00:30:46,386 --> 00:30:49,825
+Муфтиев кивнул. Больше они не говорили.
 
 528
-00:33:40,815 --> 00:33:43,830
-It's structural. A rule built for an empire that needed a
+00:30:49,905 --> 00:30:53,545
+Ночью Тажигали шёл по степи с раненым конём в поводу.
 
 529
-00:33:43,887 --> 00:33:48,154
-single unambiguous heir is still being applied to a family that has nothing left
+00:30:53,585 --> 00:30:57,945
+Конь хромал, но шёл. Звёзды были холодными, и где-то далеко
 
 530
-00:33:48,181 --> 00:33:50,877
-to inherit except the argument over who's next.
+00:30:57,985 --> 00:31:02,865
+гудели моторы. Он думал о Марии, о Дамире, о Наде.
 
 531
-00:33:51,010 --> 00:33:54,400
-It's worth putting this next to how other fallen dynasties fared in the same
+00:31:02,945 --> 00:31:05,225
+Думал о словах отца про шов.
 
 532
-00:33:54,460 --> 00:33:56,642
-century, because the contrast is stark.
+00:31:05,265 --> 00:31:07,945
+Шов всегда там, где торопились.
 
 533
-00:33:56,742 --> 00:34:00,806
-The Romanovs, the last imperial family of Russia, weren't exiled at all.
+00:31:07,985 --> 00:31:11,785
+Сегодня торопились все, и швы разошлись.
 
 534
-00:34:00,886 --> 00:34:05,530
-They were executed by firing squad in a basement in 1918, the entire family
+00:31:11,825 --> 00:31:15,145
+Мария получала письма редко, но они приходили.
 
 535
-00:34:05,574 --> 00:34:09,213
-together, with no train ride and no chance to negotiate an exit.
+00:31:16,641 --> 00:31:19,361
+Каждое она читала у окна, в последних
 
 536
-00:34:09,273 --> 00:34:13,057
-The Habsburgs, who'd ruled over Austria-Hungary, lost the empire itself
+00:31:19,441 --> 00:31:22,241
+лучах солнца, чтобы не тратить керосин.
 
 537
-00:34:13,097 --> 00:34:16,420
-but were eventually allowed to keep a portion of their private wealth and,
+00:31:22,641 --> 00:31:27,121
+Надежда сидела рядом и шевелила губами, повторяя слова за матерью.
 
 538
-00:34:16,460 --> 00:34:19,783
-after decades of legal wrangling in Austria, some family members were
+00:31:27,601 --> 00:31:31,681
+В последнем письме, которое дошло до дома, Тажигали писал о степи.
 
 539
-00:34:19,823 --> 00:34:23,866
-permitted to return as ordinary citizens, without ever fully losing their name's
+00:31:32,161 --> 00:31:36,641
+О том, как пахнет полынь после дождя, о том, как кони тянутся к воде.
 
 540
-00:34:23,912 --> 00:34:27,710
-social standing in parts of Europe. Germany's Hohenzollerns negotiated an
+00:31:37,201 --> 00:31:40,161
+Писал о сыне, который любит считать ворон на заборе.
 
 541
-00:34:27,767 --> 00:34:31,794
-actual settlement with the new republic in the 1920s, trading their claim to
+00:31:40,641 --> 00:31:41,841
+Ни слова о фронте.
 
 542
-00:34:31,840 --> 00:34:35,957
-former state property for cash and the right to keep dozens of palaces and
+00:31:42,801 --> 00:31:46,881
+Дамир, маленький, спрашивал, почему папа не пишет про войну.
 
 543
-00:34:36,027 --> 00:34:40,762
-estates, a formal deal the Ottomans never got, and never even had the chance to ask
+00:31:47,601 --> 00:31:52,321
+Мария гладила его по голове и говорила, что папа бережёт их от страшных слов.
 
 544
-00:34:40,822 --> 00:34:45,646
-for. Set against that spectrum, the Ottoman outcome sits closer to the Romanovs' than
+00:31:53,041 --> 00:31:55,681
+А бережёт, это как? спрашивал мальчик.
 
 545
-00:34:45,666 --> 00:34:49,329
-the Hohenzollerns'. Nobody put the family in front of a firing squad.
+00:31:56,321 --> 00:31:59,041
+Это когда любишь и молчишь, отвечала
 
 546
-00:34:49,430 --> 00:34:53,733
-But a hundred and fifty-six people expelled within three days, all assets
+00:31:59,081 --> 00:32:02,161
+Мария, и сама не знала, правда это или нет.
 
 547
-00:34:53,779 --> 00:34:57,497
-seized with no settlement ever negotiated, and a legal system still
+00:32:03,041 --> 00:32:05,681
+Надежда, старшая, уже понимала больше.
 
 548
-00:34:57,550 --> 00:35:01,661
-refusing full restitution a century later, that's a family that lost,
+00:32:06,241 --> 00:32:09,121
+Она заметила, что в письмах стало меньше подробностей.
 
 549
-00:35:01,707 --> 00:35:06,465
-structurally, almost everything a deposed dynasty can lose without anyone actually
+00:32:09,441 --> 00:32:13,841
+Что почерк отца стал мельче, будто он писал в спешке или на коленях.
 
 550
-00:35:06,505 --> 00:35:09,588
-being shot. Strip away the titles, and what's left of
+00:32:14,401 --> 00:32:18,081
+Однажды она сказала матери: Он пишет одно и то же.
 
 551
-00:35:09,648 --> 00:35:13,832
-six hundred years of Ottoman rule is a few hundred people scattered across four
+00:32:18,321 --> 00:32:20,481
+Значит, у него нет времени писать другое.
 
 552
-00:35:13,885 --> 00:35:18,316
-or five countries, connected mainly by a shared surname and a voluntary family
+00:32:21,281 --> 00:32:25,041
+Мария промолчала. Ей было страшно, что девочка права.
 
 553
-00:35:18,383 --> 00:35:21,438
-association that has no legal power anywhere.
+00:32:26,001 --> 00:32:27,441
+Потом пришло извещение.
 
 554
-00:35:21,438 --> 00:35:25,522
-That's the part worth sitting with. Not the collapse itself, empires end,
+00:32:29,385 --> 00:32:32,265
+Короткое, казённое, с одним словом:
 
 555
-00:35:25,538 --> 00:35:29,366
-that's not unusual. It's how completely the ending was allowed to be final.
+00:32:32,745 --> 00:32:37,305
+пропал без вести. Мария долго смотрела на бумагу, не
 
 556
-00:35:29,499 --> 00:35:31,848
-Twice, for the sultan and the caliph both.
+00:32:37,385 --> 00:32:42,025
+понимая смысла. Слово пропал звучало как о вещи, которую
 
 557
-00:35:32,008 --> 00:35:35,932
-No pension. No palace. No recognition, beyond what individual
+00:32:42,105 --> 00:32:44,345
+потеряли в дороге. Не о человеке.
 
 558
-00:35:35,989 --> 00:35:40,095
-family members managed to rebuild for themselves, one ordinary life at a time,
+00:32:44,985 --> 00:32:48,745
+Она пошла в военкомат. Там ей сказали, что сведения будут
 
 559
-00:35:40,122 --> 00:35:45,060
-in cities that had never heard of them. Six hundred years built something that looked permanent from the inside.
+00:32:48,785 --> 00:32:51,305
+уточняться. Что это может занять время.
 
 560
-00:35:45,193 --> 00:35:48,022
-It took two votes, two years apart, to prove it wasn't.
+00:32:51,545 --> 00:32:55,065
+Что нужно ждать. Мария спросила, сколько ждать.
 
 561
-00:35:48,119 --> 00:35:51,866
-When the thing you built your whole identity around disappears completely,
+00:32:55,544 --> 00:32:59,357
+Ей не ответили. Она возвращалась домой по той же дороге,
 
 562
-00:35:51,882 --> 00:35:54,829
-what actually survives, and is it ever really the same thing again?
+00:32:59,411 --> 00:33:03,304
+что и каждый день. Шла медленно, держа Дамира за руку.
 
 563
-00:35:55,042 --> 00:35:58,912
-If a story like this pulls at something for you, the idea that certainty like
+00:33:03,784 --> 00:33:06,904
+Мальчик тянул её к каждой луже и каждой собаке.
 
 564
-00:35:58,960 --> 00:36:02,355
-this can just end, there's more where that came from on this channel.
+00:33:07,464 --> 00:33:09,464
+Надя шла позади и молчала.
 
 565
-00:36:02,496 --> 00:36:06,679
-New videos like this go up regularly, and honestly, subscribing is the single
+00:33:10,104 --> 00:33:12,744
+Дома Мария достала письмо из сундука,
 
 566
-00:36:06,719 --> 00:36:09,562
-biggest thing that helps a channel like this keep getting made.
+00:33:12,824 --> 00:33:16,344
+положила его рядом с извещением и долго сидела в тишине.
+
+567
+00:33:16,904 --> 00:33:19,784
+Потом сказала дочери: Мы будем ждать.
+
+568
+00:33:20,184 --> 00:33:22,984
+Это тоже работа. Надежда кивнула.
+
+569
+00:33:23,384 --> 00:33:28,024
+Она научилась у матери терпеть, но в эту ночь долго не могла уснуть.
+
+570
+00:33:28,584 --> 00:33:32,024
+Ей снились степь, кони и человек, который
+
+571
+00:33:32,104 --> 00:33:34,104
+держит фуражку в левой руке.
+
+572
+00:33:34,504 --> 00:33:37,704
+Годы шли. Надя окончила школу, поступила в
+
+573
+00:33:37,744 --> 00:33:40,184
+институт, потом работала в библиотеке.
+
+574
+00:33:42,128 --> 00:33:45,448
+Там она часто брала в руки старые подшивки газет.
+
+575
+00:33:45,488 --> 00:33:49,128
+Искала имена, которые могли бы совпасть с отцовским.
+
+576
+00:33:49,168 --> 00:33:52,728
+Ни одного не нашла. Дамир стал инженером.
+
+577
+00:33:52,768 --> 00:33:55,688
+Он помнил отца плохо: какие-то обрывки,
+
+578
+00:33:55,728 --> 00:33:58,715
+запах табака, тёплую руку на плече.
+
+579
+00:33:58,741 --> 00:34:02,008
+Этого было мало, но мало было всего.
+
+580
+00:34:02,048 --> 00:34:05,728
+О Муфтиеве Дюйсене в семье его родственников сохранилось несколько
+
+581
+00:34:05,848 --> 00:34:10,848
+историй. Одна из них рассказывает о том, как он в детстве ездил на вороном жеребце по
+
+582
+00:34:10,928 --> 00:34:14,648
+берегу реки. Конь не слушался никого, кроме него.
+
+583
+00:34:14,688 --> 00:34:17,248
+Старики говорили, что у этого парня руки
+
+584
+00:34:17,408 --> 00:34:21,448
+особенные, с ними можно выводить даже непослушных коней.
+
+585
+00:34:21,488 --> 00:34:25,168
+Потом он служил в кавалерии. Потом учился в Ташкенте, на курсах
+
+586
+00:34:25,248 --> 00:34:28,688
+командиров. Потом получил эскадрон и вёл его через
+
+587
+00:34:28,768 --> 00:34:32,248
+степи и горы, сдержанно, без лишних слов.
+
+588
+00:34:32,288 --> 00:34:34,448
+В Акмолинске он был молчалив.
+
+589
+00:34:34,528 --> 00:34:39,528
+Бойцы уважали его, но не любили: слишком строг, слишком прям.
+
+590
+00:34:39,568 --> 00:34:43,128
+Однако в бою эскадрон шёл за ним, как за ветром.
+
+591
+00:34:43,168 --> 00:34:45,528
+Рахимжанов Набибек был другим.
+
+592
+00:34:45,568 --> 00:34:48,808
+Весёлым, лёгким, быстро сходился с людьми.
+
+593
+00:34:50,384 --> 00:34:55,104
+Он писал письма домой каждый день и рисовал в них смешные картинки: кони в
+
+594
+00:34:55,184 --> 00:34:57,904
+шапках, командиры с большими усами.
+
+595
+00:34:57,944 --> 00:35:00,184
+Родные хранили эти рисунки.
+
+596
+00:35:00,224 --> 00:35:03,423
+Что стало с ними дальше, точно неизвестно.
+
+597
+00:35:03,503 --> 00:35:07,423
+В одной из публикаций сказано, что о судьбе этих офицеров ещё предстоит
+
+598
+00:35:07,583 --> 00:35:12,503
+узнать. Документы о них разрознены, некоторые списки утеряны.
+
+599
+00:35:12,543 --> 00:35:17,370
+Поисковики говорят, что в Тарановке и Лозовеньке находили вещи, похожие на те,
+
+600
+00:35:17,396 --> 00:35:21,703
+которые носили кавалеристы. Гильзы, пуговицы с номерами полков,
+
+601
+00:35:21,743 --> 00:35:25,303
+обломки сабель. Но установить, кому они принадлежали,
+
+602
+00:35:25,343 --> 00:35:30,103
+сложно. Родственники Муфтиева рассказывают, что в семье долго ждали.
+
+603
+00:35:30,143 --> 00:35:33,050
+Мать каждый вечер выносила ему чай на порог.
+
+604
+00:35:33,076 --> 00:35:35,383
+Так делали многие матери в те годы.
+
+605
+00:35:35,423 --> 00:35:38,023
+Чай остывал, и никто его не пил.
+
+606
+00:35:38,063 --> 00:35:40,303
+Рахимжанова вспоминали друзья.
+
+607
+00:35:40,383 --> 00:35:44,623
+Один из них, вернувшийся с войны, говорил, что Набибек был последним, кто
+
+608
+00:35:44,703 --> 00:35:48,663
+смеялся в той низине. Больше он ничего не добавлял.
+
+609
+00:35:48,703 --> 00:35:50,903
+Эти истории не сходятся в деталях.
+
+610
+00:35:50,943 --> 00:35:54,663
+Но в них есть общее: люди были, служили и
+
+611
+00:35:54,703 --> 00:35:58,583
+не вернулись. Их имена пока не вписаны в полные списки.
+
+612
+00:36:00,247 --> 00:36:04,407
+Это тоже часть правды. В две тысячи десятом году, когда пришли
+
+613
+00:36:04,487 --> 00:36:07,847
+первые запросы, поиски казались безнадёжными.
+
+614
+00:36:07,927 --> 00:36:12,167
+Архивы были закрыты на ремонт, часть документов переведена в электронный вид с
+
+615
+00:36:12,247 --> 00:36:16,287
+ошибками, карты не совпадали с нынешними названиями.
+
+616
+00:36:16,327 --> 00:36:21,074
+Татьяна Крупа рассказывала, что в первые месяцы работы она ходила по архивам с
+
+617
+00:36:21,180 --> 00:36:25,487
+блокнотом и карандашом. Каждую строчку переписывала от руки,
+
+618
+00:36:25,527 --> 00:36:29,567
+потому что копировальные машины ломались чаще, чем работали.
+
+619
+00:36:29,607 --> 00:36:34,247
+Иногда она приходила домой с руками, испачканными пылью, и муж смеялся, что
+
+620
+00:36:34,327 --> 00:36:37,367
+она теперь похожа на историка-археолога.
+
+621
+00:36:37,407 --> 00:36:40,047
+Макка Каражанова занималась людьми.
+
+622
+00:36:40,087 --> 00:36:42,247
+Она ездила в аулы, разговаривала со
+
+623
+00:36:42,327 --> 00:36:45,487
+стариками, записывала семейные предания.
+
+624
+00:36:45,527 --> 00:36:48,327
+Многие из них рассказывали одно и то же:
+
+625
+00:36:48,367 --> 00:36:51,207
+дед ушёл на войну и не вернулся.
+
+626
+00:36:51,327 --> 00:36:55,327
+Никто не знал, где он похоронен. Но все помнили его имя.
+
+627
+00:36:55,367 --> 00:36:59,647
+Леонид Карцев, военный историк, собирал документы для музея.
+
+628
+00:36:59,687 --> 00:37:04,487
+Он сверял карты, сопоставлял даты, восстанавливал маршруты дивизии.
+
+629
+00:37:06,031 --> 00:37:10,430
+Его коллеги шутили, что он знает степь лучше, чем собственный огород.
+
+630
+00:37:10,830 --> 00:37:13,710
+Олег Бидулин руководил отрядом поисковиков.
+
+631
+00:37:14,190 --> 00:37:16,510
+Они копали в Тарановке осторожно, по
+
+632
+00:37:16,590 --> 00:37:19,230
+слоям, с кисточками и лопатками.
+
+633
+00:37:19,790 --> 00:37:24,310
+Каждую находку фотографировали, описывали, записывали в протокол.
+
+634
+00:37:24,590 --> 00:37:29,310
+Ни одного лишнего движения. В этом году они подняли бойца, у которого
+
+635
+00:37:29,390 --> 00:37:31,470
+сохранилась красноармейская книжка.
+
+636
+00:37:32,030 --> 00:37:35,790
+Бумага была размыта землёй, но номер и фамилия читались.
+
+637
+00:37:36,430 --> 00:37:40,390
+Поисковики сидели над ней долго, почти не говоря друг с другом.
+
+638
+00:37:40,670 --> 00:37:44,510
+Потом кто-то тихо сказал: Может быть, это он.
+
+639
+00:37:44,990 --> 00:37:47,630
+Сообщество поисковиков не спешит с выводами.
+
+640
+00:37:48,030 --> 00:37:50,510
+Они знают, что ошибка стоит дорого.
+
+641
+00:37:50,990 --> 00:37:55,070
+Нельзя назвать имя без доказательств, нельзя обмануть родных.
+
+642
+00:37:55,390 --> 00:38:00,190
+Толеген-ага Сейткереев в Коктереке показывал гостям старые фотографии и
+
+643
+00:38:00,270 --> 00:38:03,470
+письма. Он говорил, что музей нужен для того,
+
+644
+00:38:03,550 --> 00:38:05,630
+чтобы люди помнили, откуда они.
+
+645
+00:38:06,430 --> 00:38:08,830
+Гости слушали молча и кивали.
+
+646
+00:38:09,070 --> 00:38:12,990
+Сейчас участники поисков называют друг друга добрыми друзьями.
+
+647
+00:38:13,470 --> 00:38:17,870
+Они созваниваются, обмениваются документами, вместе ездят в поля.
+
+648
+00:38:19,854 --> 00:38:24,174
+Это длинный путь, и никто не обещает, что он будет быстрым.
+
+649
+00:38:24,254 --> 00:38:27,814
+Место для памятника в Краснограде выбрали не сразу.
+
+650
+00:38:27,854 --> 00:38:30,574
+Сначала обсуждали площадь в центре, потом
+
+651
+00:38:30,654 --> 00:38:33,374
+парк, потом двор возле школы.
+
+652
+00:38:33,454 --> 00:38:35,974
+Остановились на третьем микрорайоне.
+
+653
+00:38:36,014 --> 00:38:40,854
+Там, по словам организаторов, последние бои вёл шестой кавалерийский корпус, и в
+
+654
+00:38:40,894 --> 00:38:43,494
+его составе была та дивизия.
+
+655
+00:38:43,534 --> 00:38:46,214
+Проект памятника согласовывали долго.
+
+656
+00:38:46,254 --> 00:38:50,854
+Хотели, чтобы на нём были имена, фотографии и короткий текст.
+
+657
+00:38:50,894 --> 00:38:54,774
+Имён пока мало: большая часть документов уничтожена.
+
+658
+00:38:54,814 --> 00:38:59,454
+Но лица сохранились, и их решили сделать частью памятника.
+
+659
+00:38:59,534 --> 00:39:02,454
+Школьники ходят мимо площадки каждый день.
+
+660
+00:39:02,494 --> 00:39:05,734
+Некоторые спрашивают, кто эти люди на фотографиях.
+
+661
+00:39:05,774 --> 00:39:10,414
+Учителя рассказывают им, что это были кавалеристы, которые ушли на фронт и не
+
+662
+00:39:10,534 --> 00:39:14,174
+вернулись. Дети слушают внимательно и иногда задают
+
+663
+00:39:14,254 --> 00:39:17,254
+вопросы, на которые нет ответа.
+
+664
+00:39:17,294 --> 00:39:21,653
+Надежда однажды пришла к школе, когда там шло открытие площадки.
+
+665
+00:39:21,693 --> 00:39:24,773
+Она стояла у ограды и смотрела на людей.
+
+666
+00:39:24,813 --> 00:39:28,173
+Пожилая женщина рядом спросила, кого она ищет.
+
+667
+00:39:29,717 --> 00:39:32,437
+Надежда ответила: деда.
+
+668
+00:39:32,477 --> 00:39:36,677
+Женщина кивнула и сказала, что многие ищут своих.
+
+669
+00:39:36,757 --> 00:39:40,384
+В ауле Коктерек в тот день тоже собрались родственники.
+
+670
+00:39:40,410 --> 00:39:44,077
+Они вынесли старые фотографии и разложили их на столе.
+
+671
+00:39:44,117 --> 00:39:48,117
+Говорили мало. Потом один из старших сказал: Степь
+
+672
+00:39:48,197 --> 00:39:51,037
+помнит. Нам остаётся не забывать.
+
+673
+00:39:51,077 --> 00:39:53,277
+Вот что можно сказать твёрдо.
+
+674
+00:39:53,317 --> 00:39:55,677
+Документы говорят о командире одно.
+
+675
+00:39:55,717 --> 00:39:59,237
+Поисковики и историки говорят о месте по-разному.
+
+676
+00:39:59,277 --> 00:40:01,957
+Семья говорит о деде то, что помнит.
+
+677
+00:40:02,037 --> 00:40:06,317
+Между этими голосами остаётся часть, которую мы пока не знаем.
+
+678
+00:40:06,357 --> 00:40:09,637
+Честно сказать об этом тоже часть истории.
+
+679
+00:40:09,677 --> 00:40:12,437
+Снимок до сих пор лежит в альбоме у внучки.
+
+680
+00:40:12,517 --> 00:40:16,757
+Фуражка в левой руке, прямой взгляд, неподвижные ступени.
+
+681
+00:40:16,837 --> 00:40:21,277
+Бумага выцвела, края пожелтели, но лицо можно узнать.
+
+682
+00:40:21,317 --> 00:40:25,397
+Иногда она достаёт его вечером и рассматривает при свете лампы.
+
+683
+00:40:25,477 --> 00:40:28,597
+Думает о том, каким был дед: строгим или
+
+684
+00:40:28,677 --> 00:40:31,877
+весёлым, молчаливым или разговорчивым.
+
+685
+00:40:31,957 --> 00:40:35,037
+Семейные предания рассказывают о нём по-разному.
+
+686
+00:40:35,077 --> 00:40:37,557
+Одни говорят, что он смеялся громко.
+
+687
+00:40:39,245 --> 00:40:42,085
+Другие помнят, что он редко улыбался.
+
+688
+00:40:42,365 --> 00:40:47,005
+Может быть, оба правы. Может быть, на войне люди меняются.
+
+689
+00:40:47,325 --> 00:40:50,765
+Может быть, фотография говорит больше, чем любые рассказы.
+
+690
+00:40:51,405 --> 00:40:55,245
+Она не знает, где он лежит. Но знает, что его помнят.
+
+691
+00:40:55,725 --> 00:40:59,085
+Этого пока достаточно, чтобы продолжать поиски.
+
+692
+00:40:59,565 --> 00:41:02,925
+Осенью сорок второго года в аул пришли первые слухи.
+
+693
+00:41:03,485 --> 00:41:06,365
+Говорили, что фронт откатился к Дону, что
+
+694
+00:41:06,445 --> 00:41:10,125
+немцы уже в степи, что в Сталинграде горит всё.
+
+695
+00:41:10,845 --> 00:41:15,645
+Люди слушали эти разговоры у колодца и расходились молча, каждый со своим
+
+696
+00:41:15,725 --> 00:41:18,285
+ведром. Мария не верила слухам.
+
+697
+00:41:18,605 --> 00:41:21,965
+Она верила письмам, а письма приходили всё реже.
+
+698
+00:41:22,605 --> 00:41:26,684
+Потом пришло одно, без обратного адреса, с размытыми строками.
+
+699
+00:41:27,244 --> 00:41:30,124
+Она узнала почерк Тажигали, но слова были
+
+700
+00:41:30,204 --> 00:41:33,004
+чужими, будто писал их другой человек.
+
+701
+00:41:33,644 --> 00:41:38,284
+Соседка, Айгуль, принесла ей хлеб и сказала: Береги детей.
+
+702
+00:41:38,684 --> 00:41:41,084
+Если придут за ними, не выходи во двор.
+
+703
+00:41:41,724 --> 00:41:43,724
+Кто придёт? спросила Мария.
+
+704
+00:41:44,284 --> 00:41:47,004
+Никто не придёт. Но так говорят старики.
+
+705
+00:41:47,804 --> 00:41:50,364
+Старики в ауле помнили голод двадцатых.
+
+706
+00:41:52,252 --> 00:41:57,052
+Помнили, как уходили в степь целыми семьями, как хоронили детей под каменными
+
+707
+00:41:57,132 --> 00:42:00,812
+курганами. Они знали, что война не спрашивает, кто
+
+708
+00:42:01,292 --> 00:42:04,679
+прав. Надежда тогда училась в школе в райцентре.
+
+709
+00:42:04,705 --> 00:42:07,052
+Она ездила туда на попутной телеге, два
+
+710
+00:42:07,132 --> 00:42:10,052
+раза в неделю, с мешком сушёной брынзы.
+
+711
+00:42:10,092 --> 00:42:14,932
+Однажды вернулась поздно и сказала матери, что в классе не хватает учителей.
+
+712
+00:42:14,972 --> 00:42:16,972
+Многих забрали на фронт.
+
+713
+00:42:17,052 --> 00:42:19,812
+Я тоже пойду работать, сказала она.
+
+714
+00:42:19,852 --> 00:42:22,572
+Ты будешь учиться, ответила Мария.
+
+715
+00:42:22,652 --> 00:42:26,132
+Я буду учиться и работать. Так все делают.
+
+716
+00:42:26,172 --> 00:42:29,692
+Мария не стала спорить. Она видела, что дочь выросла раньше
+
+717
+00:42:29,772 --> 00:42:33,252
+времени, и это пугало её больше, чем голод.
+
+718
+00:42:33,292 --> 00:42:36,412
+Дамир в те годы любил ходить с отцовским седлом.
+
+719
+00:42:36,492 --> 00:42:40,212
+Седло было старое, потёртое, с потрескавшейся кожей.
+
+720
+00:42:40,252 --> 00:42:44,572
+Мальчик клал его на землю и садился сверху, будто скачет.
+
+721
+00:42:44,652 --> 00:42:47,372
+Мария однажды увидела это и долго стояла
+
+722
+00:42:47,452 --> 00:42:50,359
+у забора, не в силах окликнуть сына.
+
+723
+00:42:50,385 --> 00:42:54,172
+Папа так делал, сказал Дамир, заметив её взгляд.
+
+724
+00:42:54,252 --> 00:42:58,692
+Знаю, ответила она и отвернулась, чтобы он не видел слёз.
+
+725
+00:43:00,172 --> 00:43:04,292
+Эвакуированные семьи приезжали в аул с другого края страны.
+
+726
+00:43:04,332 --> 00:43:09,092
+Это были женщины с детьми, старики, ремесленники, врачи.
+
+727
+00:43:09,132 --> 00:43:13,412
+Их селили в пустые мазанки, делили с ними хлеб и кизяк.
+
+728
+00:43:13,452 --> 00:43:16,012
+Мария помогала им, чем могла: отдавала
+
+729
+00:43:16,092 --> 00:43:19,252
+шерсть, учила детей казахским словам.
+
+730
+00:43:19,292 --> 00:43:23,492
+Одна из эвакуированных, Лидия, рассказывала о Ленинграде.
+
+731
+00:43:23,532 --> 00:43:26,412
+Говорила, что там люди ели клей и ремни,
+
+732
+00:43:26,492 --> 00:43:28,892
+что дети падали на улицах.
+
+733
+00:43:28,932 --> 00:43:31,652
+Мария слушала и думала о муже.
+
+734
+00:43:31,692 --> 00:43:35,811
+Где он сейчас, что ест, спит ли под крышей?
+
+735
+00:43:35,851 --> 00:43:38,691
+Письма она больше не ждала с такой надеждой.
+
+736
+00:43:38,731 --> 00:43:42,371
+Ждала по привычке, как ждут дождя в засуху.
+
+737
+00:43:42,411 --> 00:43:46,491
+Что происходило в лагере под Красноградом, знают лишь отрывками.
+
+738
+00:43:46,571 --> 00:43:51,171
+Сохранились немецкие списки, часть советских свидетельств и рассказы тех,
+
+739
+00:43:51,211 --> 00:43:54,731
+кто выжил. Эти источники не всегда сходятся, и
+
+740
+00:43:54,811 --> 00:43:58,091
+поэтому пересказывать их приходится осторожно.
+
+741
+00:43:58,171 --> 00:44:00,931
+Лагерь располагался на окраине поля.
+
+742
+00:44:00,971 --> 00:44:05,691
+Ограда из колючей проволоки, вышки по углам, навес на столбах, под которым
+
+743
+00:44:05,771 --> 00:44:07,731
+пленные спали вповалку.
+
+744
+00:44:09,315 --> 00:44:13,475
+Вода привозилась раз в день в бочках, и её не хватало.
+
+745
+00:44:13,555 --> 00:44:16,275
+Пища состояла из жидкой похлёбки и кусков
+
+746
+00:44:16,315 --> 00:44:18,862
+хлеба, которые делили на всех.
+
+747
+00:44:18,888 --> 00:44:21,755
+Тажигали попал туда с ранением в плечо.
+
+748
+00:44:21,795 --> 00:44:26,635
+Рана воспалилась, и он несколько дней лежал на земле, не в силах подняться.
+
+749
+00:44:26,675 --> 00:44:31,115
+Соседи по навесу отдавали ему часть своей воды и кусок хлеба.
+
+750
+00:44:31,155 --> 00:44:33,835
+Один из них, пожилой кузнец из Оренбурга,
+
+751
+00:44:33,875 --> 00:44:36,795
+говорил по-русски медленно, с паузами.
+
+752
+00:44:36,835 --> 00:44:39,662
+Он называл Тажигали казах и смеялся,
+
+753
+00:44:39,688 --> 00:44:43,435
+когда тот поправлял его: Казах, но майор.
+
+754
+00:44:43,475 --> 00:44:46,475
+Майор, это хорошо, сказал кузнец.
+
+755
+00:44:46,515 --> 00:44:48,875
+Майоров немцы держат отдельно.
+
+756
+00:44:48,915 --> 00:44:51,022
+Может, и тебя отдельно.
+
+757
+00:44:51,048 --> 00:44:55,195
+Тажигали не ответил. Он думал о том, что отдельно держат тех,
+
+758
+00:44:55,235 --> 00:44:58,955
+кого боятся. Или тех, кого хотят сломать.
+
+759
+00:44:58,995 --> 00:45:01,195
+Ночами в лагере было холодно.
+
+760
+00:45:01,235 --> 00:45:04,635
+Люди жались друг к другу, укрываясь старыми шинелями.
+
+761
+00:45:04,675 --> 00:45:08,955
+Кто-то кашлял, кто-то бредил, кто-то тихо читал молитву.
+
+762
+00:45:08,995 --> 00:45:13,115
+Тажигали вспоминал степь, полынь, ветер с гор.
+
+763
+00:45:13,155 --> 00:45:15,155
+В бреду ему казалось, что он снова на
+
+764
+00:45:15,235 --> 00:45:18,235
+коне, что шов подпруги держит.
+
+765
+00:45:19,707 --> 00:45:22,947
+Однажды утром в лагерь пришла комиссия.
+
+766
+00:45:22,987 --> 00:45:27,067
+Офицеры в кожаных пальто оглядывали пленных, задавали вопросы через
+
+767
+00:45:27,147 --> 00:45:30,907
+переводчика. Кто из какой части, кто командир, кто
+
+768
+00:45:30,987 --> 00:45:34,147
+знает других. Тажигали молчал.
+
+769
+00:45:34,187 --> 00:45:38,227
+Он знал, что любое слово может стоить жизни людям рядом.
+
+770
+00:45:38,267 --> 00:45:41,026
+Но переводчик вдруг спросил его напрямую:
+
+771
+00:45:41,066 --> 00:45:43,346
+Вы из сто шестой дивизии?
+
+772
+00:45:43,386 --> 00:45:47,359
+Тажигали поднял голову. За спиной переводчика стоял человек в
+
+773
+00:45:47,386 --> 00:45:51,266
+штатском и смотрел на него внимательно, без злобы.
+
+774
+00:45:51,386 --> 00:45:54,066
+Я из кавалерии, ответил Тажигали.
+
+775
+00:45:54,106 --> 00:45:56,946
+Это было правдой, но не всей правдой.
+
+776
+00:45:56,986 --> 00:45:59,266
+Человек в штатском что-то записал.
+
+777
+00:45:59,306 --> 00:46:03,226
+Больше вопросов не было. Эти подробности тоже есть в тех же
+
+778
+00:46:03,306 --> 00:46:07,146
+разрозненных бумагах. Ни одной фамилии из списка комиссии
+
+779
+00:46:07,186 --> 00:46:09,426
+сегодня достоверно не установлено.
+
+780
+00:46:09,466 --> 00:46:13,266
+Поэтому в тексте остаётся только то, что можно проверить.
+
+781
+00:46:13,306 --> 00:46:16,306
+После освобождения пленных ждали проверки.
+
+782
+00:46:16,346 --> 00:46:20,466
+Тех, кто вернулся из немецкого плена, не всегда принимали обратно.
+
+783
+00:46:20,506 --> 00:46:24,946
+Допросы шли долго, и вопросы часто повторялись одни и те же.
+
+784
+00:46:26,474 --> 00:46:29,754
+Почему остался жив. Почему не застрелился.
+
+785
+00:46:29,834 --> 00:46:31,914
+Кто видел, как ты сдался.
+
+786
+00:46:31,994 --> 00:46:34,114
+Ответов у многих не было.
+
+787
+00:46:34,154 --> 00:46:38,021
+Или ответ был таким, что его нельзя было произнести вслух.
+
+788
+00:46:38,047 --> 00:46:42,821
+Тажигали получил направление в один из лагерей на севере, где строили дорогу.
+
+789
+00:46:42,847 --> 00:46:45,434
+Там работали такие же, как он: кто-то без
+
+790
+00:46:45,514 --> 00:46:49,314
+вины, кто-то с виной, которую сам не мог назвать.
+
+791
+00:46:49,354 --> 00:46:53,554
+Утром их будили гудком, вечером вели обратно по снегу.
+
+792
+00:46:53,594 --> 00:46:57,474
+Он работал с лопатой, потом с тачкой, потом учётчиком.
+
+793
+00:46:57,514 --> 00:47:02,274
+Учётчик записывал выработку, считал кубометры земли, сверял списки.
+
+794
+00:47:02,314 --> 00:47:07,034
+Это занятие давалось ему легче других: цифры не обманывали, если их считать
+
+795
+00:47:07,114 --> 00:47:11,141
+честно. Ночами он писал письма, которые не отправлял.
+
+796
+00:47:11,167 --> 00:47:14,674
+Писал Марии, писал Дамиру, писал Наде.
+
+797
+00:47:14,714 --> 00:47:17,954
+Слова выходили короткими, как в старых донесениях.
+
+798
+00:47:17,994 --> 00:47:20,994
+Иногда он рвал листы и бросал в печку.
+
+799
+00:47:21,034 --> 00:47:23,714
+Иногда прятал под подкладку шинели.
+
+800
+00:47:23,754 --> 00:47:27,794
+Там же, в лагере, он встретил людей из казахских аулов.
+
+801
+00:47:27,834 --> 00:47:32,434
+Они говорили на родном языке, и Тажигали слушал их, закрыв глаза.
+
+802
+00:47:33,986 --> 00:47:36,466
+Казалось, что степь пахнет здесь так же,
+
+803
+00:47:36,506 --> 00:47:41,106
+как дома, хотя это был север, и полынь сюда не росла.
+
+804
+00:47:41,186 --> 00:47:44,146
+Что стало с ним дальше, точно неизвестно.
+
+805
+00:47:44,306 --> 00:47:48,345
+Документы говорят о том, что он был в списках пропавших без вести.
+
+806
+00:47:48,385 --> 00:47:51,585
+Значит, те, кто искал его, не нашли следов.
+
+807
+00:47:51,665 --> 00:47:56,385
+Значит, след обрывается где-то в той степи, где кончилась первая часть его
+
+808
+00:47:56,465 --> 00:47:59,985
+пути. В ауле Коктерек, где он родился, помнят
+
+809
+00:48:00,065 --> 00:48:04,865
+его имя. Старики говорят, что Тажигали был спокойным мальчиком, который любил
+
+810
+00:48:04,945 --> 00:48:07,625
+считать звёзды и не любил спорить.
+
+811
+00:48:07,665 --> 00:48:12,065
+Говорят, что он умел разговаривать с конями, и кони его слушались.
+
+812
+00:48:12,145 --> 00:48:16,705
+Музей в ауле небольшой. Несколько комнат, стенды с фотографиями,
+
+813
+00:48:16,785 --> 00:48:20,825
+старые седла, медные чайники, вышитые полотенца.
+
+814
+00:48:20,865 --> 00:48:23,185
+Толеген-ага Сейткереев показывает гостям
+
+815
+00:48:23,225 --> 00:48:25,945
+эти вещи и рассказывает, откуда они.
+
+816
+00:48:25,985 --> 00:48:29,465
+Особое место в музее занимает стенд о майоре.
+
+817
+00:48:29,505 --> 00:48:32,945
+Там нет ни одной полной биографии, только обрывки.
+
+818
+00:48:32,985 --> 00:48:35,505
+Фотография из газеты, копия карточки из
+
+819
+00:48:35,585 --> 00:48:38,785
+архива, письма, которые сохранила семья.
+
+820
+00:48:40,393 --> 00:48:45,073
+Рядом висит пожелтевшая открытка с видом Синьцзяна, которую кто-то прислал в
+
+821
+00:48:45,113 --> 00:48:49,913
+тридцать восьмом году. На обороте только одна строчка: Жив,
+
+822
+00:48:49,993 --> 00:48:52,393
+здоров, служба идёт.
+
+823
+00:48:52,473 --> 00:48:54,993
+Гости подолгу стоят у этого стенда.
+
+824
+00:48:55,033 --> 00:48:58,553
+Некоторые плачут. Другие молчат и смотрят на лицо в
+
+825
+00:48:58,633 --> 00:49:01,633
+фуражке, которое смотрит на них в ответ.
+
+826
+00:49:01,673 --> 00:49:06,513
+Толеген-ага говорит, что музей нужен, чтобы люди знали, откуда они пришли.
+
+827
+00:49:06,553 --> 00:49:08,513
+Чтобы дети, которые приходят сюда на
+
+828
+00:49:08,553 --> 00:49:13,393
+экскурсии, понимали, что за каждым именем стоит человек.
+
+829
+00:49:13,433 --> 00:49:16,673
+Семья майора живёт в соседних аулах и в городах.
+
+830
+00:49:16,713 --> 00:49:20,273
+Они приезжают в Коктерек на праздники и в дни памяти.
+
+831
+00:49:20,313 --> 00:49:23,073
+Собираются у музея, вспоминают деда,
+
+832
+00:49:23,113 --> 00:49:26,033
+читают стихи, которые знали с детства.
+
+833
+00:49:26,073 --> 00:49:30,873
+Одна из внучек, учительница истории, сказала однажды, что дед для неё как
+
+834
+00:49:30,953 --> 00:49:35,193
+вопрос без ответа. Она будет искать его всю жизнь, даже если
+
+835
+00:49:35,273 --> 00:49:38,153
+не найдёт. И это тоже честно.
+
+836
+00:49:38,180 --> 00:49:41,913
+В степи есть обычай: помнить тех, кто ушёл.
+
+837
+00:49:41,993 --> 00:49:44,953
+Старики поют песни о тех, кто не вернулся.
+
+838
+00:49:44,993 --> 00:49:48,193
+Женщины расстилают платки и говорят имена.
+
+839
+00:49:49,753 --> 00:49:53,033
+Мужчины стоят молча, опустив головы.
+
+840
+00:49:53,073 --> 00:49:57,592
+Этот обычай пришёл из старых времён, когда люди уходили в походы и редко
+
+841
+00:49:57,672 --> 00:50:01,752
+возвращались. Тогда не было ни газет, ни архивов.
+
+842
+00:50:01,792 --> 00:50:04,232
+Была только память и песня.
+
+843
+00:50:04,312 --> 00:50:06,792
+Песня передавалась от отца к сыну, и
+
+844
+00:50:06,872 --> 00:50:11,059
+каждый, кто её пел, знал, что он хранит чью-то жизнь.
+
+845
+00:50:11,085 --> 00:50:13,912
+Сегодня в ауле поют эту песню на поминках.
+
+846
+00:50:13,992 --> 00:50:17,032
+Её знают все, даже самые маленькие.
+
+847
+00:50:17,072 --> 00:50:19,432
+Когда дети спрашивают, о ком она, им
+
+848
+00:50:19,512 --> 00:50:22,659
+отвечают: о тех, кого мы ищем.
+
+849
+00:50:22,685 --> 00:50:26,432
+Поисковики говорят, что эта песня помогла им найти людей.
+
+850
+00:50:26,472 --> 00:50:31,192
+Старики вспоминали имена, которые слышали в детстве, и подсказывали, где могли быть
+
+851
+00:50:31,232 --> 00:50:35,672
+могилы. Бумаги и песня оказались рядом, и вместе
+
+852
+00:50:35,752 --> 00:50:39,752
+они стали сильнее. Надежда однажды спросила Толеген-агу,
+
+853
+00:50:39,832 --> 00:50:42,112
+почему люди так долго помнят.
+
+854
+00:50:42,152 --> 00:50:46,872
+Он ответил: Потому что помнить, это единственное, что мы можем сделать для
+
+855
+00:50:46,952 --> 00:50:48,832
+тех, кто не вернулся.
+
+856
+00:50:48,872 --> 00:50:51,992
+Остальное делают архивы и государство.
+
+857
+00:50:52,072 --> 00:50:55,352
+Она кивнула. Ей показалось, что в его словах есть
+
+858
+00:50:55,432 --> 00:50:57,632
+правда, хотя и горькая.
+
+859
+00:50:59,112 --> 00:51:02,912
+Список имён пропавших в той дивизии строится медленно.
+
+860
+00:51:03,192 --> 00:51:06,232
+Каждое новое имя, это находка, которую
+
+861
+00:51:06,272 --> 00:51:08,912
+поисковики выносят из земли по слоям.
+
+862
+00:51:09,272 --> 00:51:12,152
+Иногда это красноармейская книжка, иногда
+
+863
+00:51:12,312 --> 00:51:15,832
+пуговица с номером полка, иногда обрывок письма.
+
+864
+00:51:16,312 --> 00:51:18,072
+Поисковики ведут журнал.
+
+865
+00:51:18,472 --> 00:51:23,432
+В нём записаны даты, координаты, описания находок, фамилии людей, которые
+
+866
+00:51:23,552 --> 00:51:27,112
+передавали информацию. Журнал сух и точен.
+
+867
+00:51:27,512 --> 00:51:29,952
+Но в каждой строке чья-то судьба.
+
+868
+00:51:30,232 --> 00:51:35,032
+Макка Каражанова говорит, что самое трудное, не находить, а сообщать.
+
+869
+00:51:35,672 --> 00:51:40,552
+Когда семье приходит известие, что их родственник найден, люди плачут и смеются
+
+870
+00:51:40,632 --> 00:51:44,472
+одновременно. Они спрашивают, где он лежит, можно ли
+
+871
+00:51:44,592 --> 00:51:47,432
+его перенести, будут ли говорить о нём в школе.
+
+872
+00:51:48,072 --> 00:51:52,152
+Иногда ответов нет. Тогда семья просто знает, что их
+
+873
+00:51:52,232 --> 00:51:55,272
+родственник был там, в той степи, и этого
+
+874
+00:51:55,312 --> 00:51:57,592
+достаточно, чтобы продолжать помнить.
+
+875
+00:51:58,152 --> 00:52:01,592
+Татьяна Крупа говорит, что каждое имя, это дверь.
+
+876
+00:52:02,232 --> 00:52:04,711
+Если открыть её, за ней обнаруживаются
+
+877
+00:52:04,791 --> 00:52:08,391
+другие двери: соседи, однополчане, семьи,
+
+878
+00:52:08,431 --> 00:52:11,511
+которые тоже ждали. Так работает память.
+
+879
+00:52:13,463 --> 00:52:16,663
+Одна нить тянет за собой другую.
+
+880
+00:52:16,743 --> 00:52:19,583
+Мария умерла, когда внуки уже выросли.
+
+881
+00:52:19,623 --> 00:52:23,103
+Она до последнего дня хранила письмо в сундуке.
+
+882
+00:52:23,143 --> 00:52:27,423
+Перед смертью попросила дочь достать его и положить в её руки.
+
+883
+00:52:27,463 --> 00:52:29,503
+Надя исполнила это.
+
+884
+00:52:29,543 --> 00:52:31,943
+Мария долго смотрела на строчки, потом
+
+885
+00:52:32,023 --> 00:52:35,583
+сказала тихо: Он писал одно и то же.
+
+886
+00:52:35,623 --> 00:52:37,623
+Но это было важно.
+
+887
+00:52:37,663 --> 00:52:40,063
+Дамир работал на заводе в городе.
+
+888
+00:52:40,103 --> 00:52:44,623
+Он редко говорил об отце, но когда говорил, его голос менялся.
+
+889
+00:52:44,663 --> 00:52:47,143
+В такие моменты он садился у окна и
+
+890
+00:52:47,223 --> 00:52:49,743
+смотрел на степь, будто ждал, что оттуда
+
+891
+00:52:49,783 --> 00:52:53,023
+вернётся кто-то, кого он помнит плохо.
+
+892
+00:52:53,063 --> 00:52:57,463
+Надя стала библиотекарем. Её полка в библиотеке заполнена старыми
+
+893
+00:52:57,503 --> 00:53:01,503
+книгами о войне. Она сама переписывает архивные списки,
+
+894
+00:53:01,543 --> 00:53:04,223
+сверяет даты, отмечает совпадения.
+
+895
+00:53:04,263 --> 00:53:07,663
+Коллеги шутят, что она ищет иголку в стоге сена.
+
+896
+00:53:07,703 --> 00:53:12,383
+Она отвечает, что иголка там есть, просто стог очень большой.
+
+897
+00:53:12,423 --> 00:53:15,343
+Вечерами она садится у окна с фотографией.
+
+898
+00:53:15,383 --> 00:53:18,303
+Фуражка в левой руке. Прямой взгляд.
+
+899
+00:53:18,343 --> 00:53:22,823
+Думает о том, что он мог бы вернуться, если бы всё сложилось иначе.
+
+900
+00:53:24,359 --> 00:53:26,759
+Но тогда, возможно, не было бы ни этих
+
+901
+00:53:26,839 --> 00:53:30,039
+поисков, ни памятника, ни людей, которые
+
+902
+00:53:30,119 --> 00:53:33,079
+пришли в архив и открыли старые папки.
+
+903
+00:53:33,559 --> 00:53:35,799
+Зима в Акмолинске приходила резко.
+
+904
+00:53:36,039 --> 00:53:38,679
+Вчера была слякоть, сегодня степь стояла
+
+905
+00:53:38,759 --> 00:53:42,119
+белая и звонкая, и под ногами хрустел наст.
+
+906
+00:53:42,839 --> 00:53:45,399
+Лошади в конюшнях сбивались в кучу, пили
+
+907
+00:53:45,519 --> 00:53:50,159
+талую воду из корыт и косились на людей большими тёмными глазами.
+
+908
+00:53:50,599 --> 00:53:52,919
+Тажигали приходил в конюшню до рассвета.
+
+909
+00:53:53,319 --> 00:53:58,119
+Он брал щётку и сам чистил гнедого жеребца, которого привели из соседнего
+
+910
+00:53:58,199 --> 00:54:02,359
+колхоза. Жеребец был норовистым, рвался из рук, но
+
+911
+00:54:02,439 --> 00:54:06,679
+под щёткой затихал. Коновод смотрел на майора с удивлением.
+
+912
+00:54:07,319 --> 00:54:09,319
+Вы же командир, зачем сами?
+
+913
+00:54:10,038 --> 00:54:14,678
+Командир тот, кто знает, что у коня под попоной, ответил Тажигали.
+
+914
+00:54:15,318 --> 00:54:19,318
+Молодые бойцы из пополнения учились в этой конюшне держаться в седле.
+
+915
+00:54:19,798 --> 00:54:22,118
+Многие впервые в жизни сели на лошадь
+
+916
+00:54:22,198 --> 00:54:26,038
+именно здесь, в Акмолинске, а не в степи, как их отцы.
+
+917
+00:54:26,438 --> 00:54:30,438
+Учили их казахские старики, которых призвали инструкторами.
+
+918
+00:54:30,758 --> 00:54:34,518
+Старики говорили мало, но каждое слово запоминалось.
+
+919
+00:54:36,454 --> 00:54:39,094
+Конь чувствует, когда ты боишься, говорил
+
+920
+00:54:39,174 --> 00:54:43,134
+один из них, Ахметжан, седой, с обветренным лицом.
+
+921
+00:54:43,174 --> 00:54:46,094
+Поэтому сначала научись не бояться.
+
+922
+00:54:46,134 --> 00:54:49,854
+А если страшно? спрашивал мальчишка лет семнадцати.
+
+923
+00:54:49,894 --> 00:54:53,841
+Тогда притворяйся. Конь поверит, и ты поверишь.
+
+924
+00:54:53,867 --> 00:54:56,814
+Мальчишка улыбнулся и вывел коня в круг.
+
+925
+00:54:56,854 --> 00:54:59,601
+Ахметжан стоял у ограды и смотрел.
+
+926
+00:54:59,627 --> 00:55:02,054
+Тажигали смотрел на него и думал, что
+
+927
+00:55:02,134 --> 00:55:04,961
+такие люди, основа любой армии.
+
+928
+00:55:04,987 --> 00:55:08,654
+Без них любые приказы повисают в воздухе.
+
+929
+00:55:08,694 --> 00:55:11,041
+Вечером в штабе собирались командиры.
+
+930
+00:55:11,067 --> 00:55:13,774
+Печка гудела, на столе лежали карты, и
+
+931
+00:55:13,814 --> 00:55:17,134
+керосиновая лампа бросала жёлтый круг на бумаги.
+
+932
+00:55:17,174 --> 00:55:21,254
+Командиры обсуждали, как распределить людей по полкам, сколько выделить на
+
+933
+00:55:21,374 --> 00:55:23,454
+обоз, где взять фураж.
+
+934
+00:55:23,494 --> 00:55:27,414
+Фуража не хватало. Зерно уходило на фронт, сено выгребали
+
+935
+00:55:27,494 --> 00:55:30,934
+подчистую. Командиры спорили, кому отдать последние
+
+936
+00:55:30,974 --> 00:55:33,694
+мешки, и голоса делались резкими.
+
+937
+00:55:33,734 --> 00:55:37,334
+Тажигали молчал. Он знал, что решение придётся принимать
+
+938
+00:55:37,414 --> 00:55:41,734
+ему, и знал, что оно не понравится половине собравшихся.
+
+939
+00:55:41,814 --> 00:55:45,374
+Выделим полку по мешку на эскадрон, сказал он наконец.
+
+940
+00:55:47,014 --> 00:55:50,614
+Остальное в резерв. Кони должны дойти до фронта.
+
+941
+00:55:50,654 --> 00:55:53,814
+Без них мы никто. Никто не возражал.
+
+942
+00:55:53,854 --> 00:55:56,614
+Тажигали видел, что многие согласны, но
+
+943
+00:55:56,734 --> 00:55:59,094
+никто не хочет говорить это первым.
+
+944
+00:55:59,174 --> 00:56:01,454
+Ночами он писал донесения.
+
+945
+00:56:01,494 --> 00:56:04,974
+Цифры шли одна за другой: люди, кони,
+
+946
+00:56:05,014 --> 00:56:09,254
+винтовки, патроны. Он сверял их по нескольку раз, потому что
+
+947
+00:56:09,334 --> 00:56:12,001
+ошибка в цифре могла стоить жизни.
+
+948
+00:56:12,027 --> 00:56:16,881
+Иногда он откладывал ручку и смотрел в окно, где падал мокрый снег.
+
+949
+00:56:16,907 --> 00:56:19,013
+Тогда ему вспоминался отец.
+
+950
+00:56:19,093 --> 00:56:22,533
+Его руки, пахнущие конским потом и полынью.
+
+951
+00:56:22,613 --> 00:56:26,720
+Его голос: Шов всегда там, где торопились.
+
+952
+00:56:26,746 --> 00:56:30,573
+Тажигали понимал, что эти слова стали для него компасом.
+
+953
+00:56:30,613 --> 00:56:33,786
+Он не торопился там, где нельзя было торопиться.
+
+954
+00:56:33,840 --> 00:56:37,413
+И поэтому многие его люди до сих пор живы.
+
+955
+00:56:37,493 --> 00:56:39,933
+Весной полки готовились к отправке.
+
+956
+00:56:39,973 --> 00:56:42,533
+Лошади проходили осмотр, бойцы получали
+
+957
+00:56:42,613 --> 00:56:46,173
+обмундирование, в вагоны грузили сёдла и котлы.
+
+958
+00:56:46,213 --> 00:56:48,933
+Вокзал гудел, как растревоженный улей.
+
+959
+00:56:49,013 --> 00:56:53,573
+Женщины стояли у вагонов, держа детей за руки, и смотрели на мужчин, которые
+
+960
+00:56:53,653 --> 00:56:58,469
+уходили. Мария не пришла на вокзал.
+
+961
+00:56:58,549 --> 00:57:01,349
+Она осталась дома с Дамиром и Надей.
+
+962
+00:57:01,429 --> 00:57:05,589
+Ей казалось, что если она пойдёт, то не сможет отпустить.
+
+963
+00:57:05,669 --> 00:57:08,269
+Поэтому она проводила мужа мысленно, у
+
+964
+00:57:08,309 --> 00:57:10,709
+окна, вглядываясь в степь.
+
+965
+00:57:10,749 --> 00:57:14,349
+Тажигали попрощался с семьёй за два дня до отъезда.
+
+966
+00:57:14,389 --> 00:57:18,629
+Писем он не оставил. Только сказал Надежде: Береги брата и
+
+967
+00:57:18,709 --> 00:57:23,469
+маму. Учись. Если меня долго не будет, значит, я воюю.
+
+968
+00:57:23,509 --> 00:57:26,109
+Это не конец. Надя кивнула.
+
+969
+00:57:26,149 --> 00:57:30,829
+Она была уже взрослой, и отец впервые говорил с ней как со взрослой.
+
+970
+00:57:30,869 --> 00:57:33,629
+Дамир спросил, вернётся ли папа на коне.
+
+971
+00:57:33,669 --> 00:57:36,149
+Тажигали наклонился к сыну, поправил ему
+
+972
+00:57:36,309 --> 00:57:39,909
+воротник и сказал: Если вернусь, то на коне.
+
+973
+00:57:39,989 --> 00:57:44,749
+Если нет, то коня возьмёт кто-то другой, и он тоже будет нести тебя.
+
+974
+00:57:44,789 --> 00:57:47,869
+Мальчик не понял, что это значит. Но запомнил.
+
+975
+00:57:47,909 --> 00:57:51,949
+Поезд ушёл на рассвете. Степь была серой и пустой.
+
+976
+00:57:51,989 --> 00:57:56,096
+Мария стояла у окна и смотрела, как дым растворяется в небе.
+
+977
+00:57:56,122 --> 00:57:58,669
+Потом отвернулась и пошла на кухню.
+
+978
+00:57:58,709 --> 00:58:00,709
+Нужно было готовить обед.
+
+979
+00:58:00,789 --> 00:58:02,789
+Жизнь не ждала.
+
+980
+00:58:02,829 --> 00:58:05,829
+Тарановка, небольшое село под Харьковом.
+
+981
+00:58:07,509 --> 00:58:10,309
+Летом там пахнет подсолнечником, зимой
+
+982
+00:58:10,389 --> 00:58:14,389
+тихо, а весной земля тяжёлая и тёмная.
+
+983
+00:58:14,469 --> 00:58:16,549
+Жители говорят, что в этих полях всегда
+
+984
+00:58:16,709 --> 00:58:21,309
+что-то находят: то снаряд, то кость, то ржавую пряжку.
+
+985
+00:58:21,349 --> 00:58:24,096
+В мае сорок второго там шли бои.
+
+986
+00:58:24,122 --> 00:58:28,548
+Кавалеристы выходили к селу по степной дороге, между посадками и заброшенными
+
+987
+00:58:28,628 --> 00:58:32,068
+полями. Снаряды ложились вдоль дороги, и кони
+
+988
+00:58:32,148 --> 00:58:36,508
+шарахались, ломая строй. Тажигали вёл полк через балку.
+
+989
+00:58:36,548 --> 00:58:40,548
+Внизу блестела вода, на склонах росли низкие кусты.
+
+990
+00:58:40,628 --> 00:58:44,148
+Он приказал спешиться, чтобы не выдать себя силуэтами.
+
+991
+00:58:44,188 --> 00:58:48,908
+Бойцы шли по дну балки, держа коней в поводу, и тихо переговаривались.
+
+992
+00:58:48,948 --> 00:58:51,068
+Наверху гудели моторы.
+
+993
+00:58:51,108 --> 00:58:54,508
+Немецкие танки шли по дороге, за ними пехота.
+
+994
+00:58:54,548 --> 00:58:59,348
+Тажигали видел, как колонна растягивается по полю, как между машинами мелькают
+
+995
+00:58:59,428 --> 00:59:02,575
+каски. Ждём, сказал он командирам.
+
+996
+00:59:02,601 --> 00:59:05,908
+Пока не подойдут ближе. Ждать было тяжело.
+
+997
+00:59:05,948 --> 00:59:10,108
+Кони фыркали, бойцы сжимали винтовки, никто не курил.
+
+998
+00:59:10,148 --> 00:59:14,628
+Тишина давила на уши. Потом вдруг грохнуло справа, и полк
+
+999
+00:59:14,708 --> 00:59:18,348
+поднялся. Атака была короткой и яростной.
+
+1000
+00:59:19,892 --> 00:59:23,892
+Кавалеристы выскочили из балки, размахивая шашками, и понеслись на
+
+1001
+00:59:23,945 --> 00:59:27,812
+пехоту. Кони рвались вперёд, бойцы кричали.
+
+1002
+00:59:27,852 --> 00:59:31,252
+Пули свистели у ушей, пыль заволакивала поле.
+
+1003
+00:59:31,652 --> 00:59:33,572
+Муфтиев вёл эскадрон первым.
+
+1004
+00:59:34,052 --> 00:59:36,692
+Тажигали видел его силуэт в клубах пыли:
+
+1005
+00:59:36,732 --> 00:59:39,772
+прямая спина, поднятая шашка, и кони,
+
+1006
+00:59:39,812 --> 00:59:42,212
+которые шли за ним, как волны за лодкой.
+
+1007
+00:59:42,692 --> 00:59:46,932
+Потом силуэт пропал. Рахимжанов со своими людьми бил по
+
+1008
+00:59:47,012 --> 00:59:51,652
+танкам. Выстрелы из противотанковых ружей были резкими, как удары молота.
+
+1009
+00:59:52,212 --> 00:59:54,532
+Один танк загорелся, потом второй.
+
+1010
+00:59:55,012 --> 00:59:57,972
+Рахимжанов кричал что-то, и бойцы отвечали ему.
+
+1011
+00:59:58,612 --> 01:00:03,492
+К полудню бой стих. Поле было усеяно телами людей и коней.
+
+1012
+01:00:04,132 --> 01:00:07,012
+Тажигали ходил между ними, вглядываясь в лица.
+
+1013
+01:00:07,572 --> 01:00:10,372
+Некоторые были знакомыми, некоторые нет.
+
+1014
+01:00:10,932 --> 01:00:15,092
+Среди тел у дороги он заметил человека с шашкой, лежащего навзничь.
+
+1015
+01:00:15,572 --> 01:00:18,052
+Тажигали подошёл, но лицо было залито
+
+1016
+01:00:18,132 --> 01:00:20,932
+кровью и землёй, и узнать его не удалось.
+
+1017
+01:00:21,492 --> 01:00:25,732
+Он не стал гадать. Документы о Муфтиеве с тех пор ничего не
+
+1018
+01:00:25,852 --> 01:00:29,172
+говорят об этом дне. Рахимжанова он не нашёл.
+
+1019
+01:00:29,492 --> 01:00:31,012
+Ни тогда, ни потом.
+
+1020
+01:00:33,019 --> 01:00:37,499
+Судьба обоих офицеров так и осталась в списках неизвестной.
+
+1021
+01:00:37,579 --> 01:00:42,059
+Лозовенька, другое село, в нескольких верстах от Тарановки.
+
+1022
+01:00:42,099 --> 01:00:45,579
+Там тоже была дорога, тоже балки и поля.
+
+1023
+01:00:45,659 --> 01:00:50,619
+Историк Лариса Ямпольская связывает с этим местом последний бой дивизии.
+
+1024
+01:00:50,699 --> 01:00:53,179
+Её версия опирается на разборы боёв того
+
+1025
+01:00:53,259 --> 01:00:56,979
+времени и на показания немногих живых свидетелей.
+
+1026
+01:00:57,019 --> 01:01:00,886
+По её версии, кавалеристы попали в кольцо у Лозовеньки.
+
+1027
+01:01:00,912 --> 01:01:05,619
+Окружение сомкнулось быстро, связь пропала, приказы не доходили.
+
+1028
+01:01:05,659 --> 01:01:07,979
+Полки действовали разрозненно, и каждый
+
+1029
+01:01:08,059 --> 01:01:10,979
+командир сам решал, как прорываться.
+
+1030
+01:01:11,019 --> 01:01:15,179
+Тажигали в этой версии остаётся командиром, который собирает людей вокруг
+
+1031
+01:01:15,259 --> 01:01:20,099
+себя. Он ведёт их по балкам, останавливает, перегруппировывает.
+
+1032
+01:01:20,139 --> 01:01:24,099
+Он знает, что ночью будет тяжело, и готовится к этому.
+
+1033
+01:01:24,139 --> 01:01:26,659
+Ночь действительно была тяжёлой.
+
+1034
+01:01:26,699 --> 01:01:29,939
+Луны не было, звёзды прятались за дымом.
+
+1035
+01:01:29,979 --> 01:01:34,099
+Бойцы шли молча, держась друг за друга, чтобы не потеряться.
+
+1036
+01:01:34,139 --> 01:01:38,419
+Кони спотыкались о камни, падали, их поднимали снова.
+
+1037
+01:01:38,459 --> 01:01:41,059
+Под утро впереди раздалась стрельба.
+
+1038
+01:01:42,571 --> 01:01:45,211
+Кто-то выскочил на дорогу и закричал.
+
+1039
+01:01:45,251 --> 01:01:48,131
+Тажигали поднял руку, и полк замер.
+
+1040
+01:01:48,171 --> 01:01:52,678
+Тихо, сказал он. Из темноты вышел разведчик, весь в грязи,
+
+1041
+01:01:52,704 --> 01:01:56,651
+с перевязанной головой. Он доложил, что впереди стоят танки и
+
+1042
+01:01:56,731 --> 01:01:59,091
+пехота, что пройти нельзя.
+
+1043
+01:01:59,131 --> 01:02:01,638
+Тажигали выслушал, кивнул и принял
+
+1044
+01:02:01,744 --> 01:02:05,051
+решение: идти в обход, через овраг.
+
+1045
+01:02:05,131 --> 01:02:07,811
+Овраг оказался глубоким и скользким.
+
+1046
+01:02:07,851 --> 01:02:11,971
+Кони скользили, падали, бойцы тащили их за поводья.
+
+1047
+01:02:12,011 --> 01:02:15,264
+Внизу журчал ручей, холодный и быстрый.
+
+1048
+01:02:15,318 --> 01:02:17,411
+Многие вымокли до пояса.
+
+1049
+01:02:17,451 --> 01:02:20,691
+На выходе из оврага их встретил пулемётный огонь.
+
+1050
+01:02:20,731 --> 01:02:24,171
+Полк рассыпался. Тажигали успел крикнуть, чтобы все
+
+1051
+01:02:24,251 --> 01:02:27,331
+залегли, но крик потонул в грохоте.
+
+1052
+01:02:27,371 --> 01:02:30,131
+Что было дальше, в точности не известно.
+
+1053
+01:02:30,171 --> 01:02:34,211
+Одни говорят, что полк прорвался и часть людей ушла в лес.
+
+1054
+01:02:34,251 --> 01:02:37,571
+Другие, что кольцо сомкнулось окончательно.
+
+1055
+01:02:37,611 --> 01:02:42,130
+Документы дают разные цифры, и каждая из них кажется правдоподобной.
+
+1056
+01:02:42,170 --> 01:02:45,650
+После войны родственники пропавших писали запросы.
+
+1057
+01:02:45,690 --> 01:02:49,810
+Они приходили в военкоматы, в архивы, в редакции газет.
+
+1058
+01:02:51,306 --> 01:02:54,506
+Письма были короткими и отчаянными: Прошу
+
+1059
+01:02:54,586 --> 01:02:56,746
+сообщить о судьбе моего сына.
+
+1060
+01:02:56,826 --> 01:03:00,266
+Ищу мужа, призванного в тысяча девятьсот сорок первом.
+
+1061
+01:03:00,306 --> 01:03:03,226
+Помогите найти моего деда, майора.
+
+1062
+01:03:03,306 --> 01:03:07,866
+Ответы приходили редко, и каждый из них был похож на предыдущий.
+
+1063
+01:03:07,906 --> 01:03:11,253
+Сведений не имеется. Пропал без вести.
+
+1064
+01:03:11,279 --> 01:03:13,506
+Документы не сохранились.
+
+1065
+01:03:13,546 --> 01:03:16,146
+Мария писала такие письма много раз.
+
+1066
+01:03:16,186 --> 01:03:20,826
+Она хранила черновики в отдельной папке, и Надя, когда выросла, нашла эти
+
+1067
+01:03:20,906 --> 01:03:23,346
+черновики и перечитала их все.
+
+1068
+01:03:23,386 --> 01:03:28,226
+Там было много одинаковых слов, но в каждом слышалось отчаяние.
+
+1069
+01:03:28,266 --> 01:03:32,066
+В одном письме Мария написала: Мне нужна правда.
+
+1070
+01:03:32,106 --> 01:03:35,506
+Даже если она будет страшной, я хочу знать.
+
+1071
+01:03:35,546 --> 01:03:38,159
+Ответа на это письмо не было.
+
+1072
+01:03:38,213 --> 01:03:41,813
+Поиски в две тысячи двадцатые годы велись уже по-другому.
+
+1073
+01:03:41,839 --> 01:03:46,586
+Появились интернет-архивы, электронные базы, и поисковики больше не ходили по
+
+1074
+01:03:46,666 --> 01:03:51,426
+коридорам с пачками бумаг. Но старые методы тоже остались: разговоры
+
+1075
+01:03:51,466 --> 01:03:55,346
+со стариками, поездки по полям, сверка фотографий.
+
+1076
+01:03:55,386 --> 01:03:59,426
+Олег Бидулин со своим отрядом ездил в Тарановку каждую весну.
+
+1077
+01:04:01,002 --> 01:04:04,282
+Они брали с собой щупы, лопатки, кисточки
+
+1078
+01:04:04,322 --> 01:04:08,682
+и ящики для находок. Работали по утрам, пока не жарко, потом
+
+1079
+01:04:08,762 --> 01:04:12,242
+возвращались в гостиницу и составляли протоколы.
+
+1080
+01:04:12,282 --> 01:04:17,002
+Один из поисковиков, молодой парень Ержан, рассказывал, что впервые увидел
+
+1081
+01:04:17,122 --> 01:04:19,522
+красноармейскую книжку в земле.
+
+1082
+01:04:19,562 --> 01:04:23,362
+Она была размыта, почти превратилась в бурую кашу.
+
+1083
+01:04:23,402 --> 01:04:27,122
+Он осторожно подцепил её кисточкой и положил в пакет.
+
+1084
+01:04:27,162 --> 01:04:30,842
+Потом долго сидел в машине, не решаясь вскрыть пакет.
+
+1085
+01:04:30,882 --> 01:04:33,362
+Боялся, что книжка рассыплется.
+
+1086
+01:04:33,402 --> 01:04:35,922
+Когда в гостинице её аккуратно высушили и
+
+1087
+01:04:35,962 --> 01:04:39,202
+разобрали строчки, там оказалась фамилия.
+
+1088
+01:04:39,242 --> 01:04:43,722
+Имя тоже читалось. Номер части был не полным, но достаточным
+
+1089
+01:04:43,802 --> 01:04:47,588
+для проверки. Ержан позвонил в музей Коктерека.
+
+1090
+01:04:47,614 --> 01:04:51,841
+Трубку взял Толеген-ага. Он сказал, что нужно сверить записи, и
+
+1091
+01:04:51,881 --> 01:04:55,601
+Ержан записал номер. Такие моменты редки.
+
+1092
+01:04:55,641 --> 01:05:00,561
+Обычно поиски состоят из долгих дней, пустых находок и ошибок.
+
+1093
+01:05:00,601 --> 01:05:04,641
+Но в эти дни поисковики вспоминают, зачем они здесь.
+
+1094
+01:05:04,681 --> 01:05:08,401
+Вернувшись из поля, Надя снова достала фотографию.
+
+1095
+01:05:09,905 --> 01:05:11,985
+Теперь она знала больше.
+
+1096
+01:05:12,065 --> 01:05:16,865
+Знала, что дед был в Синьцзяне, что служил в восемьдесят первой, что собирал
+
+1097
+01:05:16,945 --> 01:05:20,838
+дивизию в Акмолинске. Знала, что поисковики нашли следы в
+
+1098
+01:05:20,865 --> 01:05:23,025
+Тарановке и Лозовеньке.
+
+1099
+01:05:23,105 --> 01:05:25,825
+Знала, что его имя внесено в списки, но
+
+1100
+01:05:25,905 --> 01:05:28,505
+место гибели остаётся спорным.
+
+1101
+01:05:28,545 --> 01:05:33,105
+Она смотрела на его лицо и пыталась понять, что он думал в тот день, когда
+
+1102
+01:05:33,185 --> 01:05:36,745
+снимок делали. Был ли он уверен, что вернётся.
+
+1103
+01:05:36,785 --> 01:05:41,225
+Или знал, что уходит на войну, из которой возвращаются не все.
+
+1104
+01:05:41,265 --> 01:05:43,505
+Фотография не отвечала.
+
+1105
+01:05:43,545 --> 01:05:46,345
+Но она давала пространство для вопросов.
+
+1106
+01:05:46,385 --> 01:05:49,945
+Надя положила снимок на стол, рядом с письмом Марии.
+
+1107
+01:05:49,985 --> 01:05:53,025
+Письмо было пожелтевшим, строчки выцвели.
+
+1108
+01:05:53,105 --> 01:05:56,745
+Слова Жив, здоров, служба идёт читались с
+
+1109
+01:05:56,785 --> 01:06:00,225
+трудом. Она подумала, что эти двое в разное время
+
+1110
+01:06:00,345 --> 01:06:02,705
+писали друг другу одно и то же.
+
+1111
+01:06:02,785 --> 01:06:04,825
+Он писал жене, что жив.
+
+1112
+01:06:04,865 --> 01:06:08,025
+Она писала запросы в архивы, что ждёт.
+
+1113
+01:06:08,065 --> 01:06:11,585
+И оба знали, что правда может быть другой.
+
+1114
+01:06:11,665 --> 01:06:15,345
+Истории о войне обычно заканчиваются на поле боя.
+
+1115
+01:06:15,385 --> 01:06:18,425
+Но у этой истории продолжение длиннее.
+
+1116
+01:06:19,913 --> 01:06:22,686
+Оно начинается в архиве, в степи, в
+
+1117
+01:06:22,713 --> 01:06:26,820
+музее, в школе, в голосах тех, кто помнит.
+
+1118
+01:06:26,846 --> 01:06:29,473
+Тажигали Уваисов не вернулся домой.
+
+1119
+01:06:29,513 --> 01:06:33,193
+Это известно. Но то, что он оставил после себя, живёт
+
+1120
+01:06:33,273 --> 01:06:36,100
+до сих пор: в письмах, в песнях, в
+
+1121
+01:06:36,126 --> 01:06:40,046
+фотографиях, в именах, которые вписывают в списки.
+
+1122
+01:06:40,100 --> 01:06:42,193
+Поисковики продолжают работать.
+
+1123
+01:06:42,233 --> 01:06:45,113
+Архивисты продолжают отвечать на запросы.
+
+1124
+01:06:45,193 --> 01:06:47,393
+Семья продолжает помнить.
+
+1125
+01:06:47,433 --> 01:06:49,633
+И каждый, кто слышит эту историю,
+
+1126
+01:06:49,673 --> 01:06:52,993
+становится частью её продолжения.
+
+1127
+01:06:53,033 --> 01:06:56,352
+Второй день под Котельниково начался с тумана.
+
+1128
+01:06:56,392 --> 01:07:01,272
+Он лежал на степи сплошным полотном, и сквозь него едва проступали силуэты
+
+1129
+01:07:01,312 --> 01:07:06,312
+курганов. Бойцы просыпались мокрые, с колючим холодом в костях.
+
+1130
+01:07:06,432 --> 01:07:10,352
+Никто не разжигал огня: дым мог выдать позицию.
+
+1131
+01:07:10,392 --> 01:07:12,912
+Тажигали обходил окопы на рассвете.
+
+1132
+01:07:12,952 --> 01:07:17,912
+Он заглядывал в каждый, спрашивал, есть ли вода, есть ли патроны, не нужна ли
+
+1133
+01:07:17,952 --> 01:07:20,992
+помощь с раненым. Бойцы отвечали коротко.
+
+1134
+01:07:21,032 --> 01:07:24,432
+Некоторые улыбались, хотя улыбаться было нечем.
+
+1135
+01:07:24,472 --> 01:07:27,992
+У одного из окопов сидел молодой казах, Бауыржан.
+
+1136
+01:07:28,072 --> 01:07:30,192
+Ему было не больше восемнадцати.
+
+1137
+01:07:31,696 --> 01:07:36,496
+Он держал винтовку на коленях и смотрел в туман, будто ждал, что оттуда кто-то
+
+1138
+01:07:36,536 --> 01:07:38,616
+выйдет. Страшно?
+
+1139
+01:07:38,656 --> 01:07:42,776
+спросил Тажигали. Страшно, признался Бауыржан.
+
+1140
+01:07:42,816 --> 01:07:46,656
+Но я думаю о коне. Он стоит там, за курганом.
+
+1141
+01:07:46,736 --> 01:07:49,483
+Если я умру, кто его поведёт?
+
+1142
+01:07:49,509 --> 01:07:53,816
+Тажигали присел рядом. Он вспомнил свой первый конь, подпругу,
+
+1143
+01:07:53,856 --> 01:07:57,656
+которая лопнула в степи. Вспомнил слова отца.
+
+1144
+01:07:57,696 --> 01:08:01,416
+Конь всегда ждёт того, кто вернётся, сказал он.
+
+1145
+01:08:01,456 --> 01:08:03,456
+Значит, ты вернёшься.
+
+1146
+01:08:03,536 --> 01:08:06,683
+Бауыржан кивнул и крепче сжал винтовку.
+
+1147
+01:08:06,709 --> 01:08:09,176
+К полудню туман начал рассеиваться.
+
+1148
+01:08:09,216 --> 01:08:12,336
+Сквозь него проступили первые силуэты танков.
+
+1149
+01:08:12,376 --> 01:08:16,789
+Они стояли на дальнем гребне, как вкопанные, и долго не двигались.
+
+1150
+01:08:16,843 --> 01:08:18,856
+Потом двинулись разом.
+
+1151
+01:08:18,896 --> 01:08:22,216
+Атака была ожидаемой и всё равно страшной.
+
+1152
+01:08:22,256 --> 01:08:25,136
+Танки шли впереди, за ними пехота.
+
+1153
+01:08:25,176 --> 01:08:29,176
+Пулемёты били по окопам, и земля вздрагивала от взрывов.
+
+1154
+01:08:29,216 --> 01:08:32,696
+Бойцы стреляли, перезаряжали, снова стреляли.
+
+1155
+01:08:32,736 --> 01:08:34,923
+Патронов становилось всё меньше.
+
+1156
+01:08:34,949 --> 01:08:37,496
+Тажигали переходил от окопа к окопу.
+
+1157
+01:08:37,536 --> 01:08:41,096
+Он кричал, поднимал людей, показывал, куда бить.
+
+1158
+01:08:41,136 --> 01:08:44,256
+Голос садился, но он продолжал кричать.
+
+1159
+01:08:45,856 --> 01:08:48,736
+Рука с ранением болела, и каждое движение
+
+1160
+01:08:48,816 --> 01:08:51,296
+отдавалось в плече резкой болью.
+
+1161
+01:08:51,336 --> 01:08:54,256
+В какой-то момент рядом разорвался снаряд.
+
+1162
+01:08:54,336 --> 01:08:58,656
+Земля взметнулась фонтаном, и Тажигали отбросило в сторону.
+
+1163
+01:08:58,696 --> 01:09:01,136
+Он упал на бок, перед глазами вспыхнул
+
+1164
+01:09:01,216 --> 01:09:04,095
+белый свет, потом темнота.
+
+1165
+01:09:04,175 --> 01:09:08,735
+Когда он очнулся, над ним склонился Бауыржан и тянул его за руку.
+
+1166
+01:09:08,815 --> 01:09:12,415
+Командир, вставайте! Тажигали поднялся.
+
+1167
+01:09:12,495 --> 01:09:15,335
+Ноги держали плохо, но держали.
+
+1168
+01:09:15,375 --> 01:09:18,575
+Он огляделся: окоп был разрушен, двое
+
+1169
+01:09:18,655 --> 01:09:22,615
+бойцов лежали неподвижно, третий полз к пулемёту.
+
+1170
+01:09:22,655 --> 01:09:26,015
+Держать! крикнул Тажигали, и голос вдруг стал
+
+1171
+01:09:26,095 --> 01:09:28,855
+прежним, звонким, как в молодости.
+
+1172
+01:09:28,895 --> 01:09:32,762
+Бойцы повернули головы. Пулемёт снова застучал.
+
+1173
+01:09:32,788 --> 01:09:36,495
+Танк на дальнем гребне дёрнулся и остановился.
+
+1174
+01:09:36,575 --> 01:09:38,615
+Бой продолжался до вечера.
+
+1175
+01:09:38,655 --> 01:09:41,242
+Потом пришёл приказ отходить.
+
+1176
+01:09:41,268 --> 01:09:44,535
+Тажигали собрал людей у дороги и пересчитал их.
+
+1177
+01:09:44,575 --> 01:09:47,135
+Осталось меньше половины полка.
+
+1178
+01:09:47,175 --> 01:09:50,695
+Многие ранены. Коней почти не было.
+
+1179
+01:09:50,735 --> 01:09:53,615
+Бауыржан шёл рядом, опираясь на винтовку.
+
+1180
+01:09:53,695 --> 01:09:58,495
+Он не говорил ни слова, только иногда оглядывался назад, туда, где остался
+
+1181
+01:09:58,575 --> 01:10:02,207
+окоп. Твой конь жив?
+
+1182
+01:10:02,527 --> 01:10:06,287
+спросил Тажигали. Не знаю, ответил Бауыржан.
+
+1183
+01:10:06,767 --> 01:10:10,647
+Но я вернусь и посмотрю. Тажигали не стал возражать.
+
+1184
+01:10:10,847 --> 01:10:13,487
+В степи каждый возвращался по-своему.
+
+1185
+01:10:14,367 --> 01:10:16,847
+В Харькове в ту весну было тревожно.
+
+1186
+01:10:17,087 --> 01:10:19,967
+Город пережил бомбёжки, его улицы были в
+
+1187
+01:10:20,087 --> 01:10:22,367
+воронках, окна заклеены бумагой.
+
+1188
+01:10:22,927 --> 01:10:26,607
+Люди ходили осторожно, оглядываясь на каждый гул самолётов.
+
+1189
+01:10:27,247 --> 01:10:29,567
+Кавалеристы проходили через город ночью.
+
+1190
+01:10:29,887 --> 01:10:32,527
+Их вели по узким улицам, стараясь не шуметь.
+
+1191
+01:10:33,007 --> 01:10:37,887
+Копыта стучали по булыжнику, и этот звук казался громче любого взрыва.
+
+1192
+01:10:38,607 --> 01:10:43,327
+Тажигали шёл во главе колонны. Рядом ехал комиссар, пожилой мужчина в
+
+1193
+01:10:43,407 --> 01:10:46,527
+очках, который смотрел на город с тихой грустью.
+
+1194
+01:10:47,087 --> 01:10:49,647
+Он сказал, что помнит Харьков другим:
+
+1195
+01:10:49,687 --> 01:10:53,567
+тёплым, весёлым, с трамваями и цветущими каштанами.
+
+1196
+01:10:54,207 --> 01:10:57,687
+Теперь здесь пахнет гарью, сказал комиссар.
+
+1197
+01:10:58,047 --> 01:11:00,207
+Пахнет, согласился Тажигали.
+
+1198
+01:11:00,687 --> 01:11:05,407
+Но кони всё равно идут. Комиссар усмехнулся и покачал головой.
+
+1199
+01:11:06,207 --> 01:11:08,847
+На одном из перекрёстков колонна остановилась.
+
+1200
+01:11:09,167 --> 01:11:11,166
+Впереди был завал из обломков.
+
+1201
+01:11:13,094 --> 01:11:16,054
+Бойцы спешились, начали разбирать камни.
+
+1202
+01:11:16,294 --> 01:11:18,854
+Работали молча, в темноте, только
+
+1203
+01:11:18,934 --> 01:11:21,494
+слышалось сопение и стук кирпичей.
+
+1204
+01:11:21,814 --> 01:11:24,774
+Тажигали стоял у края дороги и смотрел на город.
+
+1205
+01:11:25,334 --> 01:11:30,214
+Где-то там, за крышами, была Алексеевка, где стояли эшелоны.
+
+1206
+01:11:30,534 --> 01:11:33,654
+Где-то там были письма, которые он отправлял домой.
+
+1207
+01:11:34,214 --> 01:11:37,254
+Ему казалось, что город смотрит на него в ответ.
+
+1208
+01:11:37,974 --> 01:11:42,414
+Колонна прошла через завал. Копыта снова застучали по булыжнику.
+
+1209
+01:11:42,694 --> 01:11:46,054
+Тажигали оглянулся один раз и больше не оглядывался.
+
+1210
+01:11:46,694 --> 01:11:49,654
+Кольцо сжималось медленно, но неотвратимо.
+
+1211
+01:11:50,214 --> 01:11:52,814
+Сначала пропали соседи, потом связь с
+
+1212
+01:11:52,854 --> 01:11:55,334
+штабом корпуса, потом подвоз.
+
+1213
+01:11:55,974 --> 01:12:00,534
+Командиры собирали людей в группы, разбивали на взводы, выбирали направления
+
+1214
+01:12:00,574 --> 01:12:04,134
+для прорыва. Тажигали не верил, что прорыв удастся.
+
+1215
+01:12:04,534 --> 01:12:06,374
+Он видел карту, на которой кольцо
+
+1216
+01:12:06,454 --> 01:12:10,134
+охватывало уже всё: Краснокутск, Мерефу,
+
+1217
+01:12:10,174 --> 01:12:14,934
+Лозовеньку. Видел, как синие стрелки на бумаге сходятся в одну точку.
+
+1218
+01:12:15,494 --> 01:12:20,494
+Но он не говорил об этом людям. Он говорил о конях, о патронах, о том,
+
+1219
+01:12:20,534 --> 01:12:22,774
+что каждый шаг нужно делать с умом.
+
+1220
+01:12:24,638 --> 01:12:28,718
+Кто хочет уйти, пусть уходит, сказал он однажды вечером.
+
+1221
+01:12:29,198 --> 01:12:32,078
+Я не буду держать. Никто не ушёл.
+
+1222
+01:12:32,398 --> 01:12:35,958
+Бойцы сидели у костров, грели руки и молчали.
+
+1223
+01:12:36,238 --> 01:12:40,878
+Кто-то писал письма, кто-то чистил оружие, кто-то просто смотрел в огонь.
+
+1224
+01:12:41,598 --> 01:12:43,758
+Ночью к Тажигали пришёл Муфтиев.
+
+1225
+01:12:44,158 --> 01:12:48,678
+Он сел рядом, положил шашку на колени и долго смотрел в темноту.
+
+1226
+01:12:49,038 --> 01:12:53,198
+Устал? спросил Тажигали. Устал, ответил Муфтиев.
+
+1227
+01:12:53,678 --> 01:12:55,998
+Но эскадрон держится. Это главное.
+
+1228
+01:12:56,638 --> 01:12:59,598
+Главное, чтобы держались, согласился Тажигали.
+
+1229
+01:12:59,998 --> 01:13:02,798
+И чтобы вернулись. Муфтиев кивнул.
+
+1230
+01:13:03,278 --> 01:13:07,238
+Он не говорил о будущем. Ни о том, что будет после войны, ни о
+
+1231
+01:13:07,278 --> 01:13:11,198
+том, что будет завтра. Для него существовал только сегодняшний
+
+1232
+01:13:11,278 --> 01:13:13,758
+день, и этого было достаточно.
+
+1233
+01:13:14,478 --> 01:13:18,877
+Рахимжанов появился позже. Он принёс пачку махорки и раздал её
+
+1234
+01:13:18,997 --> 01:13:23,277
+бойцам. Смеялся, рассказывал анекдоты, которые слышал в Акмолинске.
+
+1235
+01:13:23,757 --> 01:13:27,197
+Его смех звучал громко, и солдаты поддерживали его.
+
+1236
+01:13:27,837 --> 01:13:29,837
+Не боишься? спросил Тажигали.
+
+1237
+01:13:30,317 --> 01:13:32,557
+Боюсь, честно ответил Рахимжанов.
+
+1238
+01:13:32,877 --> 01:13:35,597
+Но смеяться легче. Смех отгоняет страх.
+
+1239
+01:13:36,237 --> 01:13:37,517
+Тажигали усмехнулся.
+
+1240
+01:13:39,445 --> 01:13:44,325
+Он вспомнил, как в детстве смеялся над отцом, который всегда говорил, что смех
+
+1241
+01:13:44,405 --> 01:13:46,845
+нужен, но не всегда кстати.
+
+1242
+01:13:46,885 --> 01:13:50,125
+Теперь он понимал, что отец был прав.
+
+1243
+01:13:50,165 --> 01:13:54,685
+В две тысячи пятнадцатом году, когда в газетах писали о юбилее победы, в
+
+1244
+01:13:54,725 --> 01:13:57,632
+Коктереке собрались люди со всей области.
+
+1245
+01:13:57,658 --> 01:14:01,725
+Пришли ветераны, их дети, внуки, правнуки.
+
+1246
+01:14:01,765 --> 01:14:04,352
+Школьники принесли цветы и ленты.
+
+1247
+01:14:04,378 --> 01:14:07,245
+Толеген-ага открыл новый стенд в музее.
+
+1248
+01:14:07,285 --> 01:14:11,245
+На нём были фотографии, документы, рисунки школьников.
+
+1249
+01:14:11,285 --> 01:14:14,085
+В центре висел портрет Тажигали: фуражка
+
+1250
+01:14:14,112 --> 01:14:18,085
+в левой руке, прямой взгляд, неподвижные ступени.
+
+1251
+01:14:18,165 --> 01:14:22,285
+Надя приехала из города. Она долго стояла у стенда и смотрела на
+
+1252
+01:14:22,325 --> 01:14:26,245
+фотографию. Потом подошла к Толеген-аге и спросила,
+
+1253
+01:14:26,325 --> 01:14:28,605
+верит ли он, что деда найдут.
+
+1254
+01:14:28,645 --> 01:14:33,085
+Верю, ответил старик. Потому что люди продолжают искать.
+
+1255
+01:14:33,125 --> 01:14:35,925
+А пока они ищут, он не потерян.
+
+1256
+01:14:36,005 --> 01:14:38,938
+Надя кивнула. Она не знала, что сказать.
+
+1257
+01:14:38,992 --> 01:14:42,885
+Просто стояла рядом и слушала, как шумит ветер за окном.
+
+1258
+01:14:42,965 --> 01:14:45,098
+Вечером в ауле пели песни.
+
+1259
+01:14:45,152 --> 01:14:49,165
+Старики затянули ту самую, о тех, кто не вернулся.
+
+1260
+01:14:50,677 --> 01:14:54,437
+Женщины подпевали, мужчины стояли молча.
+
+1261
+01:14:54,477 --> 01:14:58,677
+Дети сидели на ковре и слушали, как взрослые говорят имена.
+
+1262
+01:14:58,757 --> 01:15:03,117
+Надя тоже пела. Голос у неё был тихий, но ровный.
+
+1263
+01:15:03,157 --> 01:15:05,877
+Она пела для отца, которого не помнила, и
+
+1264
+01:15:05,957 --> 01:15:08,877
+для деда, которого никогда не видела.
+
+1265
+01:15:08,917 --> 01:15:12,317
+Степь вокруг Коктерека по-прежнему полна ветра.
+
+1266
+01:15:12,357 --> 01:15:15,397
+Летом трава доходит до колена, зимой снег
+
+1267
+01:15:15,477 --> 01:15:17,504
+сдувает с сопок начисто.
+
+1268
+01:15:17,530 --> 01:15:21,984
+Там, где когда-то стояли сторожевые курганы, теперь пасутся табуны.
+
+1269
+01:15:22,010 --> 01:15:24,237
+Тажигали мог бы узнать эти места.
+
+1270
+01:15:24,277 --> 01:15:28,943
+Мог бы выйти к реке, на которой катал ребятишек на вороном жеребце, и услышать,
+
+1271
+01:15:28,969 --> 01:15:32,836
+как поёт камыш. Мог бы сесть у костра и рассказать внукам
+
+1272
+01:15:32,916 --> 01:15:36,316
+о Синьцзяне, о Торугарте, о Котельниково.
+
+1273
+01:15:36,356 --> 01:15:41,076
+Но его нет в степи. Он в списках, в архиве, в фотографии, в
+
+1274
+01:15:41,116 --> 01:15:44,476
+песне. Он в памяти тех, кто ищет.
+
+1275
+01:15:44,516 --> 01:15:48,716
+Иногда по вечерам Надя выходит на крыльцо и смотрит на горизонт.
+
+1276
+01:15:48,756 --> 01:15:52,556
+Небо там густого синего цвета, с первыми звёздами.
+
+1277
+01:15:52,596 --> 01:15:57,076
+Она думает, что звёзды те же самые, что видел отец, когда писал письма из
+
+1278
+01:15:57,156 --> 01:15:58,276
+Синьцзяна.
+
+1279
+01:15:59,796 --> 01:16:02,276
+Дамир, который давно вырос, говорит, что
+
+1280
+01:16:02,356 --> 01:16:05,316
+отец, наверное, любил считать эти звёзды.
+
+1281
+01:16:05,396 --> 01:16:09,276
+Надя смеётся и говорит, что он считал не звёзды, а коней.
+
+1282
+01:16:09,316 --> 01:16:12,316
+Оба правы. Степь помнит всё.
+
+1283
+01:16:12,356 --> 01:16:16,356
+Этой истории нет окончания, которое можно поставить точкой.
+
+1284
+01:16:16,436 --> 01:16:20,596
+Есть место, где погиб человек, которое пока называют по-разному.
+
+1285
+01:16:20,676 --> 01:16:24,516
+Есть список, в котором имя то появляется, то исчезает.
+
+1286
+01:16:24,596 --> 01:16:28,836
+Есть фотография, на которой мужчина держит фуражку в левой руке.
+
+1287
+01:16:28,916 --> 01:16:33,476
+Что можно сказать твёрдо. Тажигали Уваисов был командиром, который
+
+1288
+01:16:33,636 --> 01:16:37,476
+знал коней и людей. Он служил в Синьцзяне, в восемьдесят
+
+1289
+01:16:37,556 --> 01:16:40,996
+первой дивизии, собирал сто шестую в Акмолинске.
+
+1290
+01:16:41,076 --> 01:16:45,436
+Он вёл полк через бои под Котельниково, Тарановку и Лозовеньку.
+
+1291
+01:16:45,476 --> 01:16:48,543
+Он не вернулся домой. Что неизвестно.
+
+1292
+01:16:48,569 --> 01:16:52,676
+Точное место гибели. Судьба Муфтиева и Рахимжанова.
+
+1293
+01:16:52,756 --> 01:16:55,116
+Где лежат люди, которых не нашли.
+
+1294
+01:16:55,156 --> 01:16:58,716
+Честно сказать и об этом тоже часть истории.
+
+1295
+01:16:58,756 --> 01:17:02,356
+Деревня Алексеевка под Харьковом в те годы была тихой.
+
+1296
+01:17:02,396 --> 01:17:07,396
+Хаты стояли вдоль одной улицы, огороды спускались к реке, за околицей шелестели
+
+1297
+01:17:07,476 --> 01:17:08,716
+подсолнухи.
+
+1298
+01:17:10,212 --> 01:17:15,092
+Жители рассказывали потом, что по ночам к деревне подходили эшелоны, и люди
+
+1299
+01:17:15,172 --> 01:17:18,812
+выходили смотреть, как конники грузятся и разгружаются.
+
+1300
+01:17:19,092 --> 01:17:21,092
+Кавалеристы стояли здесь недолго.
+
+1301
+01:17:21,492 --> 01:17:26,212
+Их разместили в сараях и на краю сада, в палатках, которые привезли с собой.
+
+1302
+01:17:26,692 --> 01:17:30,532
+Кони стояли под навесом, жевали сено, фыркали в темноту.
+
+1303
+01:17:31,012 --> 01:17:34,691
+Бойцы чистили сёдла, латали одежду, писали письма.
+
+1304
+01:17:35,091 --> 01:17:37,291
+Тажигали приходил сюда по вечерам.
+
+1305
+01:17:37,491 --> 01:17:41,571
+Он сидел на бревне у колодца и смотрел, как женщины набирают воду.
+
+1306
+01:17:41,971 --> 01:17:44,291
+Они были в платках, с тёмными от солнца
+
+1307
+01:17:44,371 --> 01:17:47,651
+лицами, и иногда бросали на него короткие взгляды.
+
+1308
+01:17:48,131 --> 01:17:51,731
+Однажды одна из них подошла и спросила, откуда он.
+
+1309
+01:17:52,131 --> 01:17:55,411
+Тажигали ответил, что из степи, из-под Акмолинска.
+
+1310
+01:17:55,891 --> 01:18:00,611
+Женщина покачала головой и сказала, что на её памяти кавалеристы никогда не
+
+1311
+01:18:00,691 --> 01:18:02,691
+проходили через деревню так близко.
+
+1312
+01:18:03,251 --> 01:18:05,331
+Может, и не проходили, ответил он.
+
+1313
+01:18:05,731 --> 01:18:09,971
+Но теперь прошли. Она улыбнулась и ушла, неся вёдра на
+
+1314
+01:18:10,051 --> 01:18:13,171
+коромысле. Тажигали смотрел ей вслед и думал о
+
+1315
+01:18:13,331 --> 01:18:15,411
+письме, которое написал домой.
+
+1316
+01:18:15,491 --> 01:18:19,171
+В нём было сказано, что часть стоит в деревне Алексеевка.
+
+1317
+01:18:21,131 --> 01:18:24,758
+Этого было достаточно, чтобы Мария знала, где он.
+
+1318
+01:18:24,784 --> 01:18:27,211
+Потом деревня осталась позади.
+
+1319
+01:18:27,291 --> 01:18:30,571
+Дорога вела дальше, в поля, туда, где уже
+
+1320
+01:18:30,611 --> 01:18:34,211
+гремели орудия. Дамир вырос в городе.
+
+1321
+01:18:34,251 --> 01:18:38,678
+Он учился в политехническом институте, потом работал инженером на заводе,
+
+1322
+01:18:38,704 --> 01:18:41,611
+который строил насосы для нефтяных скважин.
+
+1323
+01:18:41,691 --> 01:18:45,371
+Жена его, Гульнара, преподавала в школе русский язык.
+
+1324
+01:18:45,411 --> 01:18:47,571
+Вместе они растили дочь.
+
+1325
+01:18:47,611 --> 01:18:49,611
+Отца Дамир помнил плохо.
+
+1326
+01:18:49,651 --> 01:18:54,171
+Он знал его по рассказам матери, по фотографиям, по старому седлу, которое
+
+1327
+01:18:54,251 --> 01:18:59,078
+всё ещё стояло в сенях. Иногда он садился в седло, не зная зачем,
+
+1328
+01:18:59,104 --> 01:19:04,011
+и смотрел на стену, будто ждал, что кто-то скажет ему, как правильно держать
+
+1329
+01:19:04,131 --> 01:19:07,931
+поводья. Однажды, когда Дамиру было уже сорок, он
+
+1330
+01:19:08,011 --> 01:19:10,771
+поехал в Коктерек на юбилей музея.
+
+1331
+01:19:10,811 --> 01:19:14,331
+Там он впервые увидел стенд с фотографией отца.
+
+1332
+01:19:14,411 --> 01:19:16,838
+Долго стоял, не говоря ни слова.
+
+1333
+01:19:16,864 --> 01:19:19,291
+Потом подошёл Толеген-ага, положил руку
+
+1334
+01:19:19,371 --> 01:19:24,091
+ему на плечо и сказал: Твой отец был человеком степи.
+
+1335
+01:19:24,131 --> 01:19:27,171
+Это видно по лицу. Дамир кивнул.
+
+1336
+01:19:27,211 --> 01:19:29,011
+Он не знал, что ответить.
+
+1337
+01:19:30,515 --> 01:19:33,155
+Но в тот день понял, что отец был живым
+
+1338
+01:19:33,235 --> 01:19:36,115
+человеком, которого любили и помнили.
+
+1339
+01:19:36,915 --> 01:19:38,995
+Вечером Дамир звонил сестре.
+
+1340
+01:19:39,315 --> 01:19:41,954
+Надя слушала его молча, а потом сказала:
+
+1341
+01:19:42,594 --> 01:19:44,674
+Я тоже сегодня смотрела на его лицо.
+
+1342
+01:19:45,234 --> 01:19:48,034
+Теперь мы оба знаем, что он был здесь.
+
+1343
+01:19:48,994 --> 01:19:52,834
+Надежда стала библиотекарем, потом заведующей читальным залом.
+
+1344
+01:19:53,394 --> 01:19:55,634
+Её знали в городе как женщину, которая
+
+1345
+01:19:55,714 --> 01:20:00,514
+помнит всё: даты, названия, имена авторов, номера полок.
+
+1346
+01:20:01,074 --> 01:20:04,834
+Читатели приходили к ней за справками и уходили с нужными книгами.
+
+1347
+01:20:05,394 --> 01:20:07,994
+Но главное её дело было другим.
+
+1348
+01:20:08,354 --> 01:20:12,834
+Вечерами она сидела за столом и перебирала старые архивные списки.
+
+1349
+01:20:13,314 --> 01:20:16,434
+Сверяла фамилии, даты, номера частей.
+
+1350
+01:20:16,674 --> 01:20:20,434
+Искала совпадения. Иногда находила, иногда нет.
+
+1351
+01:20:21,074 --> 01:20:23,234
+Коллеги спрашивали, зачем ей это.
+
+1352
+01:20:23,634 --> 01:20:26,194
+Она отвечала: чтобы кто-то помнил.
+
+1353
+01:20:26,674 --> 01:20:30,794
+И замолкала, потому что слова казались недостаточными.
+
+1354
+01:20:31,234 --> 01:20:35,074
+Надя часто вспоминала слова матери: Мы будем ждать.
+
+1355
+01:20:35,474 --> 01:20:39,834
+Это тоже работа. Она поняла их только в зрелом возрасте.
+
+1356
+01:20:40,114 --> 01:20:44,634
+Ожидание само по себе может быть трудом, если в нём есть смысл.
+
+1357
+01:20:44,994 --> 01:20:46,754
+Теперь у неё был смысл.
+
+1358
+01:20:48,658 --> 01:20:51,538
+Она знала, что дед был командиром, что
+
+1359
+01:20:51,578 --> 01:20:56,418
+вёл людей через трудные бои, что его имя вписано в списки.
+
+1360
+01:20:56,498 --> 01:20:59,885
+И она знала, что эти списки не закрыты.
+
+1361
+01:20:59,911 --> 01:21:04,898
+Когда Надя шла по улице, мимо школ и парков, она иногда смотрела на детей и
+
+1362
+01:21:05,018 --> 01:21:09,858
+думала, что кто-то из них однажды тоже станет искать своих родных.
+
+1363
+01:21:09,898 --> 01:21:13,458
+Тогда у них будут письма, фотографии, архивы.
+
+1364
+01:21:13,498 --> 01:21:17,938
+Может быть, даже песни. Фотография висит в доме у Надежды.
+
+1365
+01:21:18,018 --> 01:21:21,778
+Не в альбоме, а на стене, в простой деревянной рамке.
+
+1366
+01:21:21,818 --> 01:21:25,098
+Каждое утро, проходя мимо, она смотрит на неё.
+
+1367
+01:21:25,138 --> 01:21:27,738
+Фуражка в левой руке, прямой взгляд,
+
+1368
+01:21:27,778 --> 01:21:30,458
+неподвижные ступени штабного здания.
+
+1369
+01:21:30,498 --> 01:21:34,898
+Внучка, когда приходит в гости, спрашивает, почему дед держит фуражку
+
+1370
+01:21:34,978 --> 01:21:38,938
+именно так. Надя отвечает, что это была его привычка:
+
+1371
+01:21:38,978 --> 01:21:41,898
+так он здоровался с людьми, которым доверял.
+
+1372
+01:21:41,938 --> 01:21:45,258
+А почему он не улыбается? спрашивает внучка.
+
+1373
+01:21:45,298 --> 01:21:48,457
+Тогда было не до улыбок, отвечает Надя.
+
+1374
+01:21:48,497 --> 01:21:51,217
+Но он всё равно смотрел в объектив прямо.
+
+1375
+01:21:51,297 --> 01:21:53,657
+Внучка кивает и садится рядом.
+
+1376
+01:21:53,697 --> 01:21:57,977
+Они вместе смотрят на фотографию, и каждая думает о своём.
+
+1377
+01:21:59,553 --> 01:22:03,953
+Вот и вся история. Она продолжается и живёт в рассказах, в
+
+1378
+01:22:03,993 --> 01:22:08,433
+песнях, в списках, в памяти тех, кто не забывает.
+
+1379
+01:22:08,473 --> 01:22:12,833
+Письмо, написанное под Харьковом, Мария получила через месяц после того, как его
+
+1380
+01:22:12,913 --> 01:22:16,433
+отправили. Она прочитала его у окна, как читала
+
+1381
+01:22:16,513 --> 01:22:19,473
+всегда, и потом долго держала в руках, не
+
+1382
+01:22:19,553 --> 01:22:21,793
+решаясь положить в сундук.
+
+1383
+01:22:21,833 --> 01:22:25,673
+Надя пришла из школы и застала мать сидящей неподвижно.
+
+1384
+01:22:25,713 --> 01:22:30,140
+Она молча села рядом, взяла письмо и прочитала его сама.
+
+1385
+01:22:30,166 --> 01:22:33,953
+Потом сказала: Он пишет, что коням холодно.
+
+1386
+01:22:34,033 --> 01:22:36,953
+Значит, он думал о них больше, чем о себе.
+
+1387
+01:22:36,993 --> 01:22:40,953
+Мария кивнула. Она знала, что муж всегда так писал.
+
+1388
+01:22:40,993 --> 01:22:45,900
+Сначала о конях, потом о людях, и в последнюю очередь о себе.
+
+1389
+01:22:45,926 --> 01:22:50,153
+Дамир, маленький в ту пору, спросил, что значит береги.
+
+1390
+01:22:50,193 --> 01:22:52,993
+Мария объяснила: это когда человек думает
+
+1391
+01:22:53,073 --> 01:22:56,433
+о тех, кто рядом, даже если его самого нет.
+
+1392
+01:22:56,513 --> 01:22:59,953
+Мальчик задумался. Потом сказал, что будет беречь маму и
+
+1393
+01:22:59,993 --> 01:23:02,233
+сестру, пока папа воюет.
+
+1394
+01:23:02,273 --> 01:23:06,953
+Мария обняла его и заплакала, хотя обещала себе не плакать.
+
+1395
+01:23:08,457 --> 01:23:12,217
+Письмо сохранилось. Оно и сейчас лежит в сундуке, между
+
+1396
+01:23:12,257 --> 01:23:14,137
+фотографиями и справками.
+
+1397
+01:23:14,457 --> 01:23:18,377
+Строчки выцвели, но слова береги видны ясно.
+
+1398
+01:23:19,337 --> 01:23:23,737
+Иногда в степи поднимается ветер, который гонит по полю сухую траву.
+
+1399
+01:23:24,297 --> 01:23:28,937
+Старики говорят, что это души тех, кто ушёл и ещё не нашёл дороги домой.
+
+1400
+01:23:29,577 --> 01:23:32,057
+Молодые смеются над этим, но в ветреные
+
+1401
+01:23:32,137 --> 01:23:35,657
+дни всё равно выходят на улицу и смотрят на горизонт.
+
+1402
+01:23:36,617 --> 01:23:40,137
+Надя вспоминает эти слова, когда стоит у окна в своём доме.
+
+1403
+01:23:40,777 --> 01:23:45,337
+За окном шумят тополя, по дороге едут машины, дети спешат в школу.
+
+1404
+01:23:45,977 --> 01:23:48,217
+Жизнь идёт, как и должна идти.
+
+1405
+01:23:48,857 --> 01:23:50,857
+Но иногда она думает о деде.
+
+1406
+01:23:51,417 --> 01:23:56,376
+О том, как он шёл по степи с раненым конём в поводу, как смотрел на звёзды и
+
+1407
+01:23:56,456 --> 01:24:00,136
+думал о доме. Она представляет, что ветер, который дует
+
+1408
+01:24:00,216 --> 01:24:03,096
+сейчас, тоже когда-то дул над его головой.
+
+1409
+01:24:03,736 --> 01:24:06,776
+Тогда она закрывает глаза и просто слушает.
+
+1410
+01:24:07,416 --> 01:24:10,136
+Ветер говорит тихо, но его слышно.
+
+1411
+01:24:11,176 --> 01:24:13,576
+Есть и другие истории, похожие на эту.
+
+1412
+01:24:14,056 --> 01:24:19,016
+В каждом ауле, в каждом городе есть семьи, которые ждут вестей с той войны.
+
+1413
+01:24:20,960 --> 01:24:24,360
+Их деды и прадеды ушли и не вернулись, а
+
+1414
+01:24:24,400 --> 01:24:27,240
+архивы отвечают короткими справками.
+
+1415
+01:24:27,280 --> 01:24:29,493
+Но кто-то всё равно пишет запросы,
+
+1416
+01:24:29,547 --> 01:24:32,360
+перебирает фотографии, ездит в поля.
+
+1417
+01:24:32,400 --> 01:24:35,720
+Поисковые отряды работают в разных областях страны.
+
+1418
+01:24:35,760 --> 01:24:38,880
+Они копают землю осторожно, по слоям, и
+
+1419
+01:24:38,960 --> 01:24:42,360
+каждая находка становится событием для семьи.
+
+1420
+01:24:42,400 --> 01:24:46,280
+Иногда имя находят быстро, иногда через годы.
+
+1421
+01:24:46,320 --> 01:24:49,440
+Иногда не находят вовсе, и тогда остаётся
+
+1422
+01:24:49,480 --> 01:24:53,227
+память, которую передают из поколения в поколение.
+
+1423
+01:24:53,253 --> 01:24:55,920
+Тажигали Уваисов стал одним из тех, чью
+
+1424
+01:24:56,000 --> 01:24:58,440
+историю удалось собрать по кускам.
+
+1425
+01:24:58,480 --> 01:25:01,960
+Его фотография, его карточка, его полк,
+
+1426
+01:25:02,000 --> 01:25:04,360
+его путь от степи до фронта.
+
+1427
+01:25:04,400 --> 01:25:08,040
+Это не полная картина, но это уже много.
+
+1428
+01:25:08,080 --> 01:25:11,080
+Карты того времени плохо совпадают с нынешними.
+
+1429
+01:25:11,120 --> 01:25:13,760
+Названия сёл поменялись, дороги проложили
+
+1430
+01:25:13,840 --> 01:25:17,867
+заново, балки засыпали, речки ушли в другие русла.
+
+1431
+01:25:17,893 --> 01:25:22,880
+Поисковики берут старую карту, кладут её на современную, и линии расходятся на
+
+1432
+01:25:22,920 --> 01:25:25,800
+километры. Это главная трудность.
+
+1433
+01:25:25,840 --> 01:25:28,160
+Чтобы понять, где стоял полк, нужно
+
+1434
+01:25:28,240 --> 01:25:31,000
+сначала понять, где проходила дорога.
+
+1435
+01:25:32,528 --> 01:25:36,928
+А дорога в степи была тропой, которую протоптали кони и телеги.
+
+1436
+01:25:37,008 --> 01:25:41,728
+Её нет ни на одной карте, кроме той, что нарисована от руки в штабе.
+
+1437
+01:25:41,808 --> 01:25:46,368
+Леонид Карцев, работая над картами, говорил, что каждую линию приходится
+
+1438
+01:25:46,448 --> 01:25:48,848
+проверять по нескольким источникам.
+
+1439
+01:25:48,928 --> 01:25:51,728
+Донесение упоминает высоту с курганом.
+
+1440
+01:25:51,808 --> 01:25:54,928
+Мемуары вспоминают пологий спуск к ручью.
+
+1441
+01:25:54,968 --> 01:25:57,008
+Местные жители показывают на поле и
+
+1442
+01:25:57,088 --> 01:26:00,208
+говорят: здесь всегда что-то находили.
+
+1443
+01:26:00,288 --> 01:26:04,327
+Из этих кусочков складывается картина, но не всегда одна.
+
+1444
+01:26:04,367 --> 01:26:07,207
+Поэтому на картах поисковиков две точки.
+
+1445
+01:26:07,247 --> 01:26:10,327
+Одна у Лозовеньки, другая у Тарановки.
+
+1446
+01:26:10,367 --> 01:26:15,327
+Они просто честно показывают, что известно и что ещё предстоит проверить.
+
+1447
+01:26:15,407 --> 01:26:18,314
+Тажигали, если бы мог увидеть эти карты,
+
+1448
+01:26:18,340 --> 01:26:20,567
+наверное, покачал бы головой.
+
+1449
+01:26:20,607 --> 01:26:25,047
+Он всегда говорил, что карта врёт, если её не проверить ногами.
+
+1450
+01:26:25,087 --> 01:26:29,927
+Теперь её проверяли ногами, и это было долго и трудно.
+
+1451
+01:26:29,967 --> 01:26:34,727
+Внучка Надежды училась в восьмом классе и любила задавать вопросы.
+
+1452
+01:26:34,767 --> 01:26:37,847
+Однажды за ужином она спросила: Бабушка,
+
+1453
+01:26:37,887 --> 01:26:40,447
+а если деда найдут, что будет?
+
+1454
+01:26:42,007 --> 01:26:45,047
+Надя отложила ложку и задумалась.
+
+1455
+01:26:45,127 --> 01:26:49,607
+Она не знала, как ответить честно и при этом не напугать ребёнка.
+
+1456
+01:26:49,687 --> 01:26:52,460
+Его похоронят, сказала она наконец.
+
+1457
+01:26:52,514 --> 01:26:56,167
+По-человечески. С именем, с фотографией, с местом, где
+
+1458
+01:26:56,327 --> 01:26:59,007
+можно прийти. А если не найдут?
+
+1459
+01:26:59,047 --> 01:27:01,087
+Тогда мы всё равно будем помнить.
+
+1460
+01:27:01,127 --> 01:27:05,247
+Это тоже важно. Внучка кивнула, но в глазах у неё был
+
+1461
+01:27:05,287 --> 01:27:08,887
+вопрос. Потом она спросила, почему деда назвали
+
+1462
+01:27:09,047 --> 01:27:12,647
+Тажигали. Надя рассказала, что имя означает что-то
+
+1463
+01:27:12,727 --> 01:27:17,727
+вроде степного камня, который стоит прочно, даже когда вокруг ветер.
+
+1464
+01:27:17,767 --> 01:27:21,087
+Внучка улыбнулась и сказала, что ей нравится.
+
+1465
+01:27:21,127 --> 01:27:23,487
+Ночью Надя долго не спала.
+
+1466
+01:27:23,527 --> 01:27:26,007
+Она думала о словах внучки и о том, что
+
+1467
+01:27:26,087 --> 01:27:29,047
+каждое поколение задаёт свои вопросы.
+
+1468
+01:27:29,127 --> 01:27:31,367
+Её мать спрашивала, где муж.
+
+1469
+01:27:31,447 --> 01:27:34,287
+Её сын спрашивал, почему папа не пишет.
+
+1470
+01:27:34,327 --> 01:27:37,607
+Внучка спрашивает, что будет, если найдут.
+
+1471
+01:27:37,647 --> 01:27:42,567
+Может быть, в этом и есть продолжение истории: вопрос, который переходит от
+
+1472
+01:27:42,647 --> 01:27:46,207
+одного к другому. В архивном зале тихо.
+
+1473
+01:27:46,247 --> 01:27:49,567
+Слышно, как шуршат страницы и скрипят стулья.
+
+1474
+01:27:51,151 --> 01:27:53,631
+Исследователи сидят за длинными столами,
+
+1475
+01:27:53,711 --> 01:27:57,391
+склонившись над папками, и каждый думает о своём.
+
+1476
+01:27:57,471 --> 01:28:01,951
+Татьяна Крупа рассказывала, что тяжелее всего бывает, когда находишь строчку,
+
+1477
+01:28:01,991 --> 01:28:04,351
+которая говорит слишком много.
+
+1478
+01:28:04,391 --> 01:28:06,671
+Например, список из нескольких десятков
+
+1479
+01:28:06,711 --> 01:28:10,670
+фамилий, где напротив одной стоит отметка выбыл.
+
+1480
+01:28:10,750 --> 01:28:13,390
+Что это значит, никто не объясняет.
+
+1481
+01:28:13,470 --> 01:28:17,390
+Тогда исследователь откладывает папку и выходит на улицу.
+
+1482
+01:28:17,470 --> 01:28:20,870
+Смотрит на небо, на детей, которые бегут по двору.
+
+1483
+01:28:20,910 --> 01:28:23,843
+Потом возвращается и продолжает работу,
+
+1484
+01:28:23,897 --> 01:28:28,070
+потому что знает: за каждой отметкой стоит человек.
+
+1485
+01:28:28,110 --> 01:28:30,697
+Такие минуты тоже часть истории.
+
+1486
+01:28:30,723 --> 01:28:33,470
+О них редко пишут в газетах, но без них
+
+1487
+01:28:33,550 --> 01:28:36,350
+не было бы ни одного найденного имени.
+
+1488
+01:28:36,430 --> 01:28:38,870
+Макка Каражанова вспоминала, что однажды
+
+1489
+01:28:38,910 --> 01:28:41,710
+в архиве ей попалась старая открытка.
+
+1490
+01:28:41,750 --> 01:28:45,430
+На ней было написано несколько слов, адресованных жене.
+
+1491
+01:28:45,470 --> 01:28:48,190
+Почерк был торопливым, но разборчивым.
+
+1492
+01:28:48,230 --> 01:28:51,510
+Она сфотографировала открытку и отправила в аул.
+
+1493
+01:28:51,550 --> 01:28:56,470
+Через неделю пришёл ответ: да, это почерк деда, мы узнали.
+
+1494
+01:28:56,510 --> 01:28:59,750
+Этот маленький эпизод многое значил для семьи.
+
+1495
+01:29:01,278 --> 01:29:06,265
+Они держали в руках слова, которые писал человек, ушедший на фронт.
+
+1496
+01:29:06,291 --> 01:29:11,278
+Пусть это были короткие фразы, но в них было дыхание того времени.
+
+1497
+01:29:11,438 --> 01:29:15,891
+Если бы Тажигали вернулся домой, дорога заняла бы несколько недель.
+
+1498
+01:29:15,945 --> 01:29:20,038
+Поезда, попутные машины, пешие переходы через степь.
+
+1499
+01:29:20,078 --> 01:29:22,825
+Он шёл бы без спешки, как ходит человек,
+
+1500
+01:29:22,851 --> 01:29:25,478
+который знает цену каждому дню.
+
+1501
+01:29:25,518 --> 01:29:27,998
+Мария встречала бы его у околицы.
+
+1502
+01:29:28,078 --> 01:29:32,958
+Надя стояла бы рядом, а Дамир бежал бы впереди, крича, что папа вернулся на
+
+1503
+01:29:33,078 --> 01:29:36,038
+коне. Но коня у него уже не было бы.
+
+1504
+01:29:36,078 --> 01:29:39,158
+Конь остался там, где остались многие.
+
+1505
+01:29:39,198 --> 01:29:41,638
+Эта дорога не состоялась.
+
+1506
+01:29:41,678 --> 01:29:44,678
+Но она живёт в рассказах тех, кто ищет.
+
+1507
+01:29:44,718 --> 01:29:47,038
+Они представляют её себе по картам, по
+
+1508
+01:29:47,118 --> 01:29:50,051
+письмам, по воспоминаниям старых солдат.
+
+1509
+01:29:50,105 --> 01:29:51,918
+И каждый раз, когда кто-то из семьи
+
+1510
+01:29:52,078 --> 01:29:55,198
+говорит вот бы он вернулся, эта дорога
+
+1511
+01:29:55,278 --> 01:29:57,598
+становится чуточку ближе.
+
+1512
+01:29:57,678 --> 01:30:02,398
+Если эта история задела вас, расскажите о ней тем, кто помнит своих родных с той
+
+1513
+01:30:02,518 --> 01:30:04,758
+войны. И подпишитесь на канал.
+
+1514
+01:30:04,798 --> 01:30:08,638
+Следующие истории тоже о людях, которых почти забыли.
 
