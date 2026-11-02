@@ -542,9 +542,16 @@ class KillVast:
     result = [11, 22]
     error = None
     labels = []
+    # по умолчанию список непустой: kill-cards идёт по обычному пути (проверка списка до уничтожения)
+    listing = [SimpleNamespace(instance_id=11, label="gen-123"), SimpleNamespace(instance_id=22, label="gen-123")]
 
     def __init__(self, *a, **k):
         self.closed = False
+
+    def list_instances(self, label=None):
+        # cmd_kill_cards вызывает список экземпляров до уничтожения (fix 4);
+        # без этого метода kill-cards падает с AttributeError, а не проверяет поведение, которое тестируется
+        return list(KillVast.listing)
 
     def destroy_by_label(self, label):
         KillVast.labels.append(label)

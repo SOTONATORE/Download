@@ -728,22 +728,28 @@ LIST_UNRELIABLE_LINE = ("Список карт Vast ненадёжен (пуст
                         "уборка не завершена.")
 
 
-def _list_instances_verified(client, *, sleep=None) -> Optional[list]:
+def _list_instances_verified(client, *, sleep=None, empty_ok=False) -> Optional[list]:
     """Список экземпляров аккаунта с повтором: [] и ошибка считаются неизвестным результатом.
 
     Возвращает непустой список или None, если за LIST_RETRY_ATTEMPTS попыток список не получен.
+    При empty_ok=True пустой список без единой ошибки возвращается как [] (его «карт нет»
+    подтверждено); ошибка в любой попытке по-прежнему даёт None.
     Текст ошибки клиента здесь не печатается. Пауза задаётся параметром sleep (для тестов).
     """
     wait = time.sleep if sleep is None else sleep
+    got_error = False
     for attempt in range(1, LIST_RETRY_ATTEMPTS + 1):
         try:
             rows = client.list_instances()
         except VastError:
             rows = []
+            got_error = True
         if rows:
             return list(rows)
         if attempt < LIST_RETRY_ATTEMPTS:
             wait(LIST_RETRY_PAUSE_SEC)
+    if empty_ok and not got_error:
+        return []
     return None
 
 
@@ -1124,7 +1130,9 @@ def cleanup_cards(client, *, run_status_fn: Callable[[str], Optional[str]], now:
     «карт нет»: повтор списка, затем проверка по card_ids (GET по ID); без ID или при сбое — код 3.
     """
     result = CleanupResult()
-    listed = _list_instances_verified(client, sleep=sleep)
+    # Пустой список без единой ошибки и без ID карт из артефакта — «карт нет», код 0.
+    # Если ID есть, пустой список по-прежнему ненадёжен: проверка по ID и код 3 (как раньше).
+    listed = _list_instances_verified(client, sleep=sleep, empty_ok=not card_ids)
     if listed is None:
         if not card_ids:
             out(LIST_UNRELIABLE_LINE)

@@ -215,7 +215,7 @@ def test_retire_clears_url(tmp_path, monkeypatch):
     orc._budget_blocked = False
     orc._bad_machines = set()
     orc._destroyed = 0
-    orc._dump_before_destroy = lambda slot, timeout=0: None
+    orc._dump_before_destroy = lambda slot, **kwargs: None
     slot = _slot()
     orc._slots = {slot.index: slot}
     orc._pull_silent_vast_logs(0.0)                     # PUT: адрес в памяти
