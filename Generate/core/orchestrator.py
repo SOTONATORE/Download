@@ -836,7 +836,7 @@ class Orchestrator:
         max_cards: int = 4,
         budget_limit_usd: float = 2.0,
         job_deadline_min: int = 330,
-        silent_host_timeout_min: int = 20,
+        silent_host_timeout_min: int = 10,
         worker_idle_timeout_min: int = 2,
         offer_filter: Optional[OfferFilter] = None,
         bid_margin: float = BID_MARGIN_DEFAULT,
