@@ -41,11 +41,17 @@ HF_BASE_URL="https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
 COMFY_READY_URL="http://127.0.0.1:18188/system_stats"
 COMFY_TIMEOUT_SEC=180
 COMFY_POLL_SEC=2
+# Наблюдатель ComfyUI для Правила A: опрос /system_stats раз в несколько секунд (фон, см. start_comfy_watch)
+COMFY_WATCH_POLL_SEC=5
 
 # Файл готовности для GET /health сервера воркера (SPEC 8.1): создаётся после ответа ComfyUI.
 WORKER_READY_FLAG="${WORKER_READY_FLAG:-/opt/worker/worker_ready}"
 # Файл причины для GET /health: создаётся, если веса не загрузились (строка «weights_failed»). Имя = флаг + «.failed».
 WORKER_FAILED_FLAG="${WORKER_READY_FLAG}.failed"
+# Файл «ComfyUI отвечает» (Правило A): создаётся на первом ответе 200 от ComfyUI; GET /health отдаёт comfy_alive.
+# Экспорт нужен, чтобы сервер воркера, запущенный из этого скрипта, видел тот же путь.
+WORKER_COMFY_FLAG="${WORKER_COMFY_FLAG:-/opt/worker/comfy_alive}"
+export WORKER_COMFY_FLAG
 
 # Лог setup.sh и aria2 (SPEC 8.1): stderr сервера воркера (трассировки падения) пишется сюда.
 WORKER_BOOTSTRAP_LOG="${WORKER_BOOTSTRAP_LOG:-/opt/worker/bootstrap.log}"
@@ -166,10 +172,25 @@ restart_comfy() {
     log "Перезапуск ComfyUI выполнен: новый PID ${new_pid}, вывод в ${COMFY_LOG_FILE}."
 }
 
+# Наблюдатель ComfyUI (Правило A): фоновый цикл ждёт первый ответ 200 от /system_stats и создаёт
+# WORKER_COMFY_FLAG. Выходит сразу после создания файла или когда сервер воркера уже не работает.
+# Не трогает comfy_answers (он из weights_download.sh и нужен шагам загрузки и ожидания).
+start_comfy_watch() {
+    (
+        while kill -0 "${SERVER_PID}" 2>/dev/null; do
+            if curl -sf -o /dev/null "${COMFY_READY_URL}"; then
+                touch "${WORKER_COMFY_FLAG}" 2>/dev/null || true
+                exit 0
+            fi
+            sleep "${COMFY_WATCH_POLL_SEC}"
+        done
+    ) &
+}
+
 log "Запуск контейнера воркера. Уровень логов: ${GEN_LOG_LEVEL:-INFO}."
 
 # Флаг от прошлого запуска не должен открыть /health до готовности (SPEC 8.1)
-rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}"
+rm -f "${WORKER_READY_FLAG}" "${WORKER_FAILED_FLAG}" "${WORKER_COMFY_FLAG}"
 log "Флаг готовности сброшен; до создания флага GET /health отвечает ok=false."
 
 # --- 1. Проверка токена и инструментов ---
@@ -192,6 +213,9 @@ log "Тип профиля для воркера: ${WORKER_PROFILE_TYPE}."
 python3 "${REPO_DIR}/worker/server.py" >/dev/null 2>>"${WORKER_BOOTSTRAP_LOG}" &
 SERVER_PID=$!
 log "Сервер воркера запущен, PID: ${SERVER_PID}"
+# Наблюдатель ComfyUI стартует сразу после сервера и до загрузки весов (Правило A)
+start_comfy_watch
+log "Наблюдатель ComfyUI запущен: флаг ${WORKER_COMFY_FLAG} появится на первом ответе ComfyUI."
 
 # ComfyUI из шага 4б bootstrap.sh может уже отвечать. Если нет, ничего не делаем: он грузится параллельно с весами.
 if comfy_answers; then

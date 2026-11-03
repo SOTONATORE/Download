@@ -108,6 +108,7 @@ LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
 WAIT_LOG_INTERVAL_SEC = 30.0  # строка состояния ожидания воркера на карту: не чаще раза в 30 с
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
+COMFY_ANSWER_LIMIT_SEC = 300.0  # Правило A: ComfyUI на карте не ответил за 5 мин от аренды → карта снимается
 SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
 CARD_WARN_REPEAT_SEC = 30.0  # повтор одного предупреждения карты в консоли: не чаще раза в 30 с (_warn_card)
 SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
@@ -287,6 +288,10 @@ class _CardSlot:
     probe_result: str = ""              # последний результат /health: HTTP-код или тип ошибки (для строки состояния)
     probe_answered: bool = False      # последний /health получил HTTP-ответ (не ошибку связи)
     health_reason: str = ""           # поле reason из последнего /health («weights_failed» или пусто)
+    comfy_checked: bool = False       # /health ответил 200 с полем comfy_alive (Правило A)
+    comfy_answered: bool = False      # comfy_alive был true: ComfyUI ответил на карте (Правило A); не сбрасывается
+    comfy_missing_noted: bool = False  # строка «воркер не отдаёт comfy_alive» уже выведена для карты
+    vast_logs_refused: bool = False   # request_logs вернул 403: повторов логов Vast по карте нет (Правило B)
     weights_wait_since: Optional[float] = None  # воркер отвечает, строк весов нет: с какого момента ждём весы
     wait_log_at: float = -1e9         # время последней строки состояния ожидания (не чаще WAIT_LOG_INTERVAL_SEC)
     ready_announced: bool = False     # строка «карта N: воркер готов» уже выведена (одна на карту)
@@ -2253,7 +2258,7 @@ class Orchestrator:
         """Логи контейнера карты через Vast: PUT request_logs, затем загрузка result_url (SPEC 8.4).
 
         Вызывается только на путях снятия, где логов воркера нет: нет адреса, молчание хоста, таймаут готовности.
-        Повтор при HTTP 4xx/5xx (в том числе AccessDenied: ссылка может быть не готова сразу): пауза
+        Повтор при HTTP 4xx/5xx, кроме 403 от request_logs (Правило B: повтора нет): пауза
         _vast_logs_pause, затем новый запрос. Число попыток задаёт конфиг. Адрес result_url не пишется ни в журнал,
         ни в файл; в журнал идут код ответа и размер. Файл пишется замаскированным и с ограничением строк.
         Любая ошибка гасится: снятие карты от логов не зависит.
@@ -2262,6 +2267,8 @@ class Orchestrator:
             return False
         if self._artifact is None:
             log.info("%s: каталог артефакта не задан, логи Vast не запрашиваются.", _card_name(slot, cap=True))
+            return False
+        if slot.vast_logs_refused:  # Правило B: 403 от request_logs уже получен по этой карте, повторов нет
             return False
         attempts = self._vast_logs_attempts if attempts is None else attempts  # периодический путь: 1 попытка
         raw_path = None
@@ -2274,7 +2281,7 @@ class Orchestrator:
             for attempt in range(1, attempts + 1):
                 if deadline is not None and self.clock() >= deadline:
                     break  # бюджет исчерпан: новая попытка не начинается
-                code, size = self._vast_logs_attempt(slot, raw_path)
+                code, size, stage = self._vast_logs_attempt(slot, raw_path)
                 if code == 200:
                     log.info("%s: логи Vast получены, %d байт, код %s.", _card_name(slot, cap=True), size, code)
                     with open(raw_path, "rb") as fh:
@@ -2282,6 +2289,11 @@ class Orchestrator:
                     text = mask_fetched_text(self._mask_remote(raw.decode("utf-8", errors="replace")))
                     self._artifact.card_vast_logs(slot, limit_log_lines(text))
                     return True
+                if code == 403 and stage == "request":  # Правило B: 403 на запрос логов — без повтора, карта снимается
+                    slot.vast_logs_refused = True
+                    log.warning("%s: логи Vast не запрошены, код 403 на запрос логов; повтора нет.",
+                                _card_name(slot, cap=True))
+                    return False
                 log.warning("%s: логи Vast, попытка %d из %d, код %s.",
                             _card_name(slot, cap=True), attempt, attempts, code if code is not None else "нет")
                 if deadline is None:
@@ -2326,21 +2338,22 @@ class Orchestrator:
             self._write_heartbeat()
 
     def _vast_logs_attempt(self, slot: _CardSlot, raw_path: str) -> tuple:
-        """Одна попытка: запрос result_url и загрузка в raw_path. Возвращает (код HTTP или None, размер байт).
+        """Одна попытка: запрос result_url и загрузка в raw_path. Возвращает (код HTTP или None, размер байт, этап).
 
+        Этап: "request" — ошибка на PUT request_logs (код из ответа Vast), "download" — загрузка result_url.
         Сетевой сбой и ошибка разбора ответа дают None. Исключения, не из VastRuntimeError, уходят наружу.
         """
         try:
             url = self.vast.request_logs(slot.instance_id, tail=VAST_LOGS_TAIL_LINES, daemon_logs=False)
         except VastRuntimeError as exc:
-            return getattr(exc, "status", None), 0
+            return getattr(exc, "status", None), 0, "request"
         try:
             code = self.vast.download_logs(url, raw_path)
         except VastRuntimeError:
-            return None, 0
+            return None, 0, "download"
         finally:
             url = None  # адрес не держится дольше нужного
-        return code, (os.path.getsize(raw_path) if code == 200 else 0)
+        return code, (os.path.getsize(raw_path) if code == 200 else 0), "download"
 
     def _check_start_failure(self, slot: _CardSlot, prev_status: str, info: InstanceInfo) -> bool:
         """Неудачный старт карты (SPEC 8.2). Возвращает True, если карта снята.
@@ -2466,6 +2479,10 @@ class Orchestrator:
             reason = self._monitor(slot).check()
             if reason:
                 self._retire_bad(slot, reason)
+                return
+            # Правило A: воркер отвечает, но ComfyUI на карте не ответил (comfy_alive не стал true) за 5 мин от аренды
+            if slot.comfy_checked and not slot.comfy_answered and age >= COMFY_ANSWER_LIMIT_SEC:
+                self._retire(slot, "ComfyUI не ответил за 5 мин", bad=True)
                 return
             if isinstance(lookup_exc, VastInstanceNotFound):
                 # подряд идущие «не найдена» считаются отдельно (SPEC 8.3); остальные ошибки ниже, как раньше
@@ -2599,10 +2616,24 @@ class Orchestrator:
         ok = resp.status_code == 200 and data.get("ok") is True
         reason = data.get("reason")
         slot.health_reason = reason if (resp.status_code == 200 and isinstance(reason, str)) else ""
+        self._note_comfy_alive(slot, resp.status_code, data)
         body = _one_line(self._mask_remote(resp.text))  # /health короткий: пишется целиком
         log.info("%s: проверка /health: код %d, ответ %s, за %.1f с, %s.", name, resp.status_code,
                  body or "пусто", self.clock() - start, "готов" if ok else "не готов")
         return ok
+
+    def _note_comfy_alive(self, slot: _CardSlot, status_code: int, data: dict) -> None:
+        """Правило A: поле comfy_alive из ответа /health. Учитывается только 200; без поля — одна строка на карту."""
+        if status_code != 200:
+            return
+        if "comfy_alive" not in data:
+            if not slot.comfy_missing_noted:
+                slot.comfy_missing_noted = True
+                log.warning("Rule A: воркер не отдаёт comfy_alive, карта %d", slot.instance_id)
+            return
+        slot.comfy_checked = True
+        if data.get("comfy_alive") is True:
+            slot.comfy_answered = True
 
     def _log_wait_state(self, slot: _CardSlot, now: float) -> None:
         """Одна строка состояния ожидания воркера на карту не чаще WAIT_LOG_INTERVAL_SEC; после готовности молчит.
