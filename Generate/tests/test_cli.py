@@ -398,7 +398,7 @@ def test_run_default_card_params(capsys, run_env, missing_file):
     _, kwargs = run_env.calls[0]
     assert kwargs["docker_image"] == "vastai/comfy:v0.41.0-cuda-13.2-py312"
     assert kwargs["disk_gb"] == 100
-    assert kwargs["silent_host_timeout_min"] == 20
+    assert kwargs["silent_host_timeout_min"] == 10
 
 
 def test_run_custom_card_params(capsys, run_env, missing_file):

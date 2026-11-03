@@ -754,7 +754,7 @@ def test_orchestrator_defaults_for_new_parameters(tmp_path, monkeypatch):
     # Rig задаёт docker_image явно; остальные значения — по умолчанию.
     assert rig.orc.docker_image == "img:latest"
     assert rig.orc.disk_gb == 100
-    assert rig.orc._silent_sec == 20 * 60.0
+    assert rig.orc._silent_sec == 10 * 60.0
 
 
 def test_run_generation_passes_new_parameters(tmp_path, monkeypatch):
