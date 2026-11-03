@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from test_worker_bootstrap import CANARY, _run_bootstrap, _write_exec
+from Generate.tests.bootstrap_helpers import CANARY, _run_bootstrap, _write_exec
 
 HF_CANARY = "HFKEY-67890"
 ARGS_MARK = "--enable-cors-header"  # часть COMFYUI_ARGS из _run_bootstrap, в выводе быть не должна
