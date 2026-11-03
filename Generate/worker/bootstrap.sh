@@ -301,6 +301,46 @@ else
         exit 7
     fi
     say "шаг 4б: ComfyUI запущен в фоне, PID $(cat "${COMFY_PID_FILE}" 2>/dev/null || echo ?) (код 0)"
+    # Проверка, что процесс жив через COMFY_ALIVE_CHECK_SEC секунд (диагностика). Зачем: раньше сразу после nohup
+    # писалось «запущен в фоне», и если ComfyUI падал в первые секунды (нет модуля, занят порт, ошибка аргументов),
+    # причина оставалась только в comfyui.log и в карточке её не было видно. Теперь хвост лога уходит в bootstrap.log,
+    # а значит и в GET /logs. Bootstrap не останавливаем: дальше setup.sh сам ждёт порт 18188 и пишет свою ошибку.
+    # Значение задаётся переменной окружения COMFY_ALIVE_CHECK_SEC; по умолчанию 20 с. Не число — берётся 20.
+    COMFY_ALIVE_CHECK_SEC="${COMFY_ALIVE_CHECK_SEC:-20}"
+    case "${COMFY_ALIVE_CHECK_SEC}" in
+        ''|*[!0-9]*) COMFY_ALIVE_CHECK_SEC=20 ;;
+    esac
+    sleep "${COMFY_ALIVE_CHECK_SEC}"
+    # Жив = kill -0 проходит и процесс не зомби (состояние Z в /proc/<pid>/stat). Зомби отвечает на kill -0,
+    # но уже не работает; в контейнере без init, который собирает зомби, так бывает. Если /proc не читается,
+    # считаем процесс живым (kill -0 прошёл).
+    comfy_pid="$(cat "${COMFY_PID_FILE}" 2>/dev/null || true)"
+    comfy_state=""
+    comfy_alive=0
+    if [ -n "${comfy_pid}" ] && kill -0 "${comfy_pid}" 2>/dev/null; then
+        comfy_state="$(sed 's/^.*) //' "/proc/${comfy_pid}/stat" 2>/dev/null | cut -d' ' -f1)"
+        if [ "${comfy_state}" != "Z" ]; then
+            comfy_alive=1
+        fi
+    fi
+    # Последние 40 строк comfyui.log, каждая с префиксом «[comfy] ». Если файла нет, ничего не пишем.
+    comfy_tail() {
+        [ -f "${COMFY_LOG_FILE}" ] || return 0
+        tail -n 40 "${COMFY_LOG_FILE}" 2>/dev/null | while IFS= read -r comfy_line; do
+            say "[comfy] ${comfy_line}"
+        done
+    }
+    if [ "${comfy_alive}" -eq 0 ]; then
+        say "шаг 4б: ComfyUI не запущен через ${COMFY_ALIVE_CHECK_SEC} с после старта (код ${comfy_state:-нет PID}), хвост ${COMFY_LOG_FILE}:"
+        comfy_tail
+    else
+        say "шаг 4б: ComfyUI жив через ${COMFY_ALIVE_CHECK_SEC} с (PID ${comfy_pid})"
+        # Хвост после проверки жизни: вывод старта ComfyUI попадает в карточку без нового эндпоинта
+        if [ -f "${COMFY_LOG_FILE}" ]; then
+            say "шаг 4б: хвост ComfyUI на старте:"
+            comfy_tail
+        fi
+    fi
 fi
 
 # --- шаг 5: окружение для setup.sh и передача управления ---

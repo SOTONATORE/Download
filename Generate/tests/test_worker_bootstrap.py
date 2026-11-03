@@ -87,6 +87,7 @@ def _run_bootstrap(tmp_path: Path, *, comfy_exists: bool = True, repo_has_setup:
         "WORKER_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
         "COMFY_LOG_FILE": str(tmp_path / "comfyui.log"),
         "COMFY_PID_FILE": str(tmp_path / "comfyui.pid"),
+        "COMFY_ALIVE_CHECK_SEC": "1",  # короткая проверка жизни ComfyUI (шаг 4б), иначе каждый тест ждёт 20 с
     }
     env.update(extra or {})
     for key in drop:
