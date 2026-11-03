@@ -133,7 +133,7 @@ on:
       silent_host_timeout_min:
         description: "Таймаут первого ответа хоста, минут"
         type: number
-        default: 20
+        default: 10
       scan_sec:
         description: "Окно сбора цен перед первой арендой, секунд. Действует только при rental_type interruptible; при on-demand не используется"
         type: number
