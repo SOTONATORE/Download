@@ -1142,8 +1142,9 @@ class Orchestrator:
                 self._weights_start_noted = True
                 log.info("Веса %s начало загрузки", model_name, extra=KEY_EVENT_EXTRA)
             elif kind == "progress":
-                log.info("карта %d: Веса %s %d%%", _slot.instance_id, model_name, pct,
-                         extra=KEY_EVENT_EXTRA)
+                # время строки берёт монитор: «время карты» (сводка aria2) или «время получения»
+                log.info("карта %d: Веса %s %d%% (%s)", _slot.instance_id, model_name, pct,
+                         mon.progress_time_text, extra=KEY_EVENT_EXTRA)
             elif kind == "loaded":
                 log.info("Веса %s загружены", model_name, extra=KEY_EVENT_EXTRA)
 

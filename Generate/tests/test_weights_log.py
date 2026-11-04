@@ -633,6 +633,70 @@ def test_monitor_writes_model_name_in_every_weight_line():
 
 # --- запуск как скрипт ----------------------------------------------------------------
 
+# --- шаги процентов: перескок, повторы, время строки ------------------------------
+
+def test_console_jump_0_to_70_prints_every_crossed_step_once_in_order():
+    """Один замер с 70% печатает 10..70 по порядку, каждый один раз (раньше печатался только 70)."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70]
+
+
+def test_console_second_sample_at_100_prints_80_90_100_once_each():
+    """После 70% следующий замер 100% даёт 80, 90, 100 и ничего лишнего."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    clock.now += 1
+    mon.feed([_aria(1000, 1000, 1)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    assert len(pcts) == len(set(pcts))
+
+
+def test_console_repeated_samples_at_same_percent_print_nothing_new():
+    """Повторные замеры того же процента новых строк не дают."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    before = list(consoles)
+    for _ in range(3):
+        clock.now += 1
+        mon.feed([_aria(705, 1000, 1)])                # всё ещё 70%
+    assert consoles == before
+
+
+def test_console_unknown_total_prints_no_progress_at_all():
+    """Без известного итога процентов нет, даже при большом проценте одного файла."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])   # размер ни одного файла не известен
+    clock.now += 5
+    mon.feed([_aria(900, 1000, 50, file=NAME.rsplit("/", 1)[-1])])
+    assert [kind for kind, _ in consoles if kind == "progress"] == []
+
+
+def test_progress_time_is_card_time_when_summary_is_in_same_pull():
+    """Если в той же выгрузке есть сводка aria2, время строки шага — время карты."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(100, 1000, 1), "*** Download Progress Summary as of 11/04 13:50:07 ***"])
+    assert mon.progress_time_text == "время карты: 11/04 13:50:07"
+
+
+def test_progress_time_is_receipt_time_when_no_summary_in_pull():
+    """Без сводки в выгрузке время строки — «время получения» (не время карты)."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(100, 1000, 1)])
+    assert mon.progress_time_text.startswith("время получения: ")
+
+
 def _run_all() -> int:
     failed = 0
     names = [n for n in sorted(globals()) if n.startswith("test_")]
