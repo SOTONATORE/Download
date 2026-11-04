@@ -23,8 +23,14 @@ def _load_module():
     return mod
 
 
-gq = _load_module()
 from Generate.core.gemini_pool import KeyPool  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def gq():
+    # Загрузка модуля Download/generate_queries.py. Если google-genai не установлен,
+    # ImportError выведется как ошибка теста, а не будет тихо пропущен.
+    return _load_module()
 
 
 class FakeClock:
@@ -66,7 +72,7 @@ KEYS = [(f"GEMINI{i}", f"fake-value-{i}") for i in range(1, 4)]
 # 1. Батчи распределяются по ключам
 # ---------------------------------------------------------------------------
 
-def test_batches_distributed_across_keys():
+def test_batches_distributed_across_keys(gq):
     clock = FakeClock()
     pool = _pool(KEYS, clock)
     used_keys = set()
@@ -95,7 +101,7 @@ def test_batches_distributed_across_keys():
 # 2. Чекпоинт не портится при записи из нескольких потоков
 # ---------------------------------------------------------------------------
 
-def test_checkpoint_valid_json_under_threads(tmp_path):
+def test_checkpoint_valid_json_under_threads(tmp_path, gq):
     clock = FakeClock()
     pool = _pool(KEYS, clock)
     cp = tmp_path / "cp.json"
@@ -124,7 +130,7 @@ def test_checkpoint_valid_json_under_threads(tmp_path):
 # 3. Дневная квота одного ключа не гасит остальные
 # ---------------------------------------------------------------------------
 
-def test_daily_quota_marks_only_one_key():
+def test_daily_quota_marks_only_one_key(gq):
     clock = FakeClock()
     pool = _pool(KEYS, clock)
     bad_name = KEYS[0][0]
@@ -152,7 +158,7 @@ def test_daily_quota_marks_only_one_key():
     assert all(not k.startswith(f"{KEYS[2][0]}|") for k in exhausted)
 
 
-def test_daily_quota_for_every_key_returns_3():
+def test_daily_quota_for_every_key_returns_3(gq):
     clock = FakeClock()
     keys = KEYS[:2]
     pool = _pool(keys, clock)
@@ -172,7 +178,7 @@ def test_daily_quota_for_every_key_returns_3():
 # 4. Коды 1, 3, 4 сохраняются
 # ---------------------------------------------------------------------------
 
-def test_hard_error_returns_1_and_stops_new_tasks():
+def test_hard_error_returns_1_and_stops_new_tasks(gq):
     clock = FakeClock()
     pool = _pool(KEYS, clock)
     started = []
@@ -193,7 +199,7 @@ def test_hard_error_returns_1_and_stops_new_tasks():
     assert len(started) < 50, "после жёсткой ошибки новые задания не стартуют"
 
 
-def test_exit_code_4_from_model_unavailable_is_unchanged():
+def test_exit_code_4_from_model_unavailable_is_unchanged(gq):
     # Код 4 формируется в pick_working_model/main по ModelUnavailableError - проверяем, что
     # класс сохранён и отличается от квоты (код 3).
     err = gq.ModelUnavailableError({"m": "ServerError: 503"}, [])
@@ -201,7 +207,7 @@ def test_exit_code_4_from_model_unavailable_is_unchanged():
     assert not isinstance(err, gq.AllModelsQuotaExhaustedError)
 
 
-def test_exit_code_3_from_all_models_quota_is_unchanged():
+def test_exit_code_3_from_all_models_quota_is_unchanged(gq):
     assert issubclass(gq.AllModelsQuotaExhaustedError, RuntimeError)
     assert not issubclass(gq.AllModelsQuotaExhaustedError, gq.ModelUnavailableError)
 
@@ -210,14 +216,14 @@ def test_exit_code_3_from_all_models_quota_is_unchanged():
 # 5. REPAIR: чанки идут через пул, порядок сегментов сохраняется
 # ---------------------------------------------------------------------------
 
-def _seg(i):
+def _seg(gq, i):
     return gq.Segment(index=i, start="00:00:00,000", end="00:00:01,000", text=f"line {i}")
 
 
-def test_repair_chunks_go_through_pool_and_keep_order(tmp_path):
+def test_repair_chunks_go_through_pool_and_keep_order(gq, tmp_path):
     clock = FakeClock()
     pool = _pool(KEYS, clock)
-    segments = [_seg(i) for i in range(1, 301)]
+    segments = [_seg(gq, i) for i in range(1, 301)]
     # Все записи изначально с нарушением (пустые sites), REPAIR их исправляет.
     results = {str(i): {"scene": "x", "sites": [], "query_narrow": "", "query_medium": "",
                         "query_broad": None, "type": "image", "is_entity": False,
