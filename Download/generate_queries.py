@@ -126,8 +126,8 @@ REPAIR2_CONTEXT_WINDOW = 10
 REPAIR_MAX_EXPAND_SEGMENTS = 20
 MAX_RETRIES = 5
 # Лимиты пула на один ключ (RPM/TPM - окно 60 с, RPD - сутки по паре ключ+модель).
-# Значения консервативные: их нужно сверить с панелью лимитов аккаунта. Не подтверждены.
-POOL_RPM_LIMIT = 10
+# лимиты на один ключ (проект Google Cloud), как в Generate/config.default.yaml
+POOL_RPM_LIMIT = 15
 POOL_TPM_LIMIT = 250000
 POOL_RPD_LIMIT = 500
 # Максимум параллельных батчей (не больше числа ключей, см. main).

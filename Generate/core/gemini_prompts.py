@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -730,9 +731,14 @@ class _LoggedTransport:
             raise
 
 
+# Максимум параллельных батчей в generate_prompts (не больше числа ключей Gemini)
+MAX_PARALLEL_BATCHES = 10
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
-                     on_batch: Optional[Callable[[list], None]] = None) -> list:
+                     on_batch: Optional[Callable[[list], None]] = None,
+                     max_workers: Optional[int] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -743,6 +749,12 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     retry), до начала следующего; results: list[PromptResult] этого батча по возрастанию номера,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
     отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
+
+    max_workers: число потоков. По умолчанию берётся число ключей Gemini из окружения (тот же
+    источник, что у RealTransport), не больше MAX_PARALLEL_BATCHES и числа батчей. При одном потоке
+    работа идёт в вызывающем потоке, как раньше. Батчи берутся из очереди по порядку; вызовы
+    on_batch идут под одним замком в порядке завершения батчей. Первая ошибка останавливает взятие
+    новых батчей; уже запущенные батчи доходят до конца, после чего ошибка пробрасывается.
     """
     builder = _Builder(segments, wanted_nums, cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
@@ -751,38 +763,87 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     batches = builder.batches(builder.wanted)
     log.info("Генерация промптов начата: модель %s, клипов к описанию: %d, батчей: %d.",
              model, len(builder.wanted), len(batches), extra=KEY_EVENT_EXTRA)
-    logged = _LoggedTransport(transport)  # журнал неудачных попыток; ответы не меняет
+
+    # число потоков: без явного значения — число ключей из окружения; если ключей нет, идём в один поток
+    if max_workers is None:
+        try:
+            max_workers = len(_pool_module().load_gemini_keys(os.environ))
+        except Exception:
+            max_workers = 1
+    n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
+    log.info("Батчи выполняются в %d потоках.", n_workers)
+
     out: dict = {}
-    for batch_no, batch in enumerate(batches, start=1):
-        logged.start_batch(batch_no)
-        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
-                 extra=KEY_EVENT_EXTRA)
-        t_batch = time.monotonic()
-        batch_res = _run_batch(logged, model, builder, batch)
-        for r in batch_res.values():
-            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
-            if r.prompt.strip():
-                r.prompt = attach_style(r.prompt, style_text)
-        # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
-        review_nums = []
-        for n in batch.nums:
-            r = batch_res.get(n)
-            if r is None:
-                continue
-            if r.needs_review:
-                review_nums.append(n)
-            elif r.prompt.strip():
-                digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
-                log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
-        if review_nums:
-            log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
-                        batch_no, ", ".join(str(n) for n in review_nums))
-        with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
-        log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
-                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch, extra=KEY_EVENT_EXTRA)
-        out.update(batch_res)
-        if on_batch is not None:
-            on_batch([batch_res[n] for n in batch.nums])
+    queue_lock = threading.Lock()    # очередь батчей, флаг остановки и первая ошибка
+    out_lock = threading.Lock()      # out и вызов on_batch: один замок на весь колбэк
+    stop = threading.Event()
+    first_error: list = []           # первая ошибка; последующие не сохраняются (их видно в журнале попыток)
+    next_idx = 0
+
+    def worker() -> None:
+        nonlocal next_idx
+        # журнал свой у каждого потока: номер батча и попытка не делятся между потоками
+        logged = _LoggedTransport(transport)
+        while True:
+            with queue_lock:
+                if stop.is_set() or next_idx >= len(batches):
+                    return
+                idx = next_idx
+                next_idx += 1
+            batch_no = idx + 1
+            batch = batches[idx]
+            try:
+                logged.start_batch(batch_no)
+                log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
+                         extra=KEY_EVENT_EXTRA)
+                t_batch = time.monotonic()
+                batch_res = _run_batch(logged, model, builder, batch)
+                for r in batch_res.values():
+                    # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+                    if r.prompt.strip():
+                        r.prompt = attach_style(r.prompt, style_text)
+                # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
+                review_nums = []
+                for n in batch.nums:
+                    r = batch_res.get(n)
+                    if r is None:
+                        continue
+                    if r.needs_review:
+                        review_nums.append(n)
+                    elif r.prompt.strip():
+                        digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
+                        log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
+                if review_nums:
+                    log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
+                                batch_no, ", ".join(str(n) for n in review_nums))
+                with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
+                log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
+                         batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
+                         extra=KEY_EVENT_EXTRA)
+                with out_lock:
+                    out.update(batch_res)
+                    if on_batch is not None:
+                        on_batch([batch_res[n] for n in batch.nums])
+            except BaseException as exc:
+                # ошибка не глотается: запоминаем первую, новые батчи не берём, запущенные доходят до конца
+                with queue_lock:
+                    if not first_error:
+                        first_error.append(exc)
+                    stop.set()
+                return
+
+    if n_workers == 1:
+        worker()   # один ключ: тот же поток, та же последовательность, что раньше
+    else:
+        threads = [threading.Thread(target=worker, name=f"gemini-batch-{i + 1}")
+                   for i in range(n_workers)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+    if first_error:
+        raise first_error[0]
+
     results = [out[n] for n in builder.wanted]
     flagged = sum(1 for r in results if r.needs_review)
     log.info("Промпты готовы: %d, из них требуют проверки: %d.", len(results), flagged)

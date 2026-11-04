@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -135,6 +136,8 @@ class ManagedTransport:
         self._max_retries = max_rate_retries
         self._sleep = sleep
         self._clock = clock
+        # замок защищает состояние цепочки моделей; на время сетевого вызова он не берётся
+        self._lock = threading.Lock()
         self._exhausted: set = set()               # модели, отключённые на этот прогон (суточная квота)
         self._last_transient: tuple = (None, "")   # (status, code) последней временной ошибки
         self.active_model: str = self._models[0]
@@ -144,7 +147,8 @@ class ManagedTransport:
 
     def _transient_exhausted(self, model: str) -> gp.GeminiRuntimeError:
         """Ошибка после TRANSIENT_ATTEMPTS неудачных попыток подряд на модели; тело ответа в сообщение не входит."""
-        status, code = self._last_transient
+        with self._lock:
+            status, code = self._last_transient
         return gp.GeminiRuntimeError(
             f"Модель {model} не ответила за {TRANSIENT_ATTEMPTS} попыток подряд (около 10 минут), "
             f"прогон остановлен; последняя ошибка: {_describe(status, code)}. "
@@ -152,13 +156,14 @@ class ManagedTransport:
             status=status, code=code)
 
     def _pick_model(self) -> str:
-        for m in self._models:
-            if not self._usable(m):
-                continue
-            if m != self.active_model:
-                log.warning("Переключение на запасную модель: %s.", m)
-            self.active_model = m
-            return m
+        with self._lock:   # выбор и смена active_model идут под замком: потоки не портят друг другу состояние
+            for m in self._models:
+                if not self._usable(m):
+                    continue
+                if m != self.active_model:
+                    log.warning("Переключение на запасную модель: %s.", m)
+                self.active_model = m
+                return m
         raise gp.GeminiRuntimeError(
             "Суточная квота исчерпана у всех моделей цепочки; прогресс сохранён, "
             "повторите запуск после сброса квоты.",
@@ -184,7 +189,8 @@ class ManagedTransport:
                         # квота исчерпана у одного ключа для этой модели: модель не меняем, пул выдаст другой ключ
                         log.warning("Модель %s: суточная квота исчерпана у одного ключа, пробуем другой ключ.", m)
                         continue
-                    self._exhausted.add(m)
+                    with self._lock:
+                        self._exhausted.add(m)
                     log.warning("Модель %s: суточная квота исчерпана, модель отключена.", m)
                     rate_retries = 0
                     continue
@@ -203,7 +209,8 @@ class ManagedTransport:
                 if not is_transient(e):
                     raise
                 tries += 1
-                self._last_transient = (e.status, e.code)
+                with self._lock:
+                    self._last_transient = (e.status, e.code)
                 if tries < TRANSIENT_ATTEMPTS:
                     wait = _transient_wait(e)
                     log.warning("Модель %s: временная ошибка (%s), пауза %.1f с (попытка %d из %d).",
