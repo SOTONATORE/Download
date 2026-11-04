@@ -21,7 +21,7 @@ from Generate.core.frame_rules import REPHRASE_RULE_EN
 GEN = pathlib.Path(__file__).resolve().parent.parent
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 # Имя переменной окружения собрано из частей (структурный тест запрещает литерал в коде).
-ENV_NAME = "GEN_" + "GEMINI_API_KEY"
+ENV_NAME = "GEMINI" + "1"
 TESTKEY = "TESTKEY-12345"
 
 

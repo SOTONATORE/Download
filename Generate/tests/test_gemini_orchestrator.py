@@ -13,7 +13,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, PromptConfig
 from Generate.core.srt_parser import Segment, srt_hash
 
-ENV_NAME = "GEN_" + "GEMINI_API_KEY"
+ENV_NAME = "GEMINI" + "1"
 TESTKEY = "TESTKEY-12345"
 M1, M2 = "model-a", "model-b"
 TIMING = go.TimingParams(24, {"kind": "8k+1"}, 2.5, 5.0, 10.0, 0.5)

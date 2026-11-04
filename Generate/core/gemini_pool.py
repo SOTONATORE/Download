@@ -31,7 +31,9 @@ KEY_ENV_COUNT = 10
 
 WINDOW_SECONDS = 60.0          # окно для RPM и TPM
 DEFAULT_PAUSE_SECONDS = 60.0   # пауза при 429 без Retry-After
-SECONDS_PER_DAY = 86400        # сутки для RPD; граница по UTC (см. открытые вопросы)
+# Граница суток для RPD: сейчас полночь по UTC. Значение НЕ проверено по документации Google;
+# в Download/generate_queries.py указана полночь по тихоокеанскому времени. Не менять без проверки.
+SECONDS_PER_DAY = 86400
 
 
 class AllKeysExhaustedError(GeminiRuntimeError):

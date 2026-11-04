@@ -7,7 +7,7 @@ GEN = pathlib.Path(__file__).resolve().parent.parent
 CORE = GEN / "core"
 
 # Запрещённые литералы собраны из частей, чтобы этот файл сам их не содержал.
-KEYS = ("GEN_" + "GEMINI_API_KEY", "GEN_" + "VAST_API_KEY")
+KEYS = ("GEMINI" + "1", "GEN_" + "VAST_API_KEY")
 
 
 def _code_without_comments(path: pathlib.Path) -> str:

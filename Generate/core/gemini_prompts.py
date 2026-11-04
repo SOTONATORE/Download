@@ -826,7 +826,8 @@ def _safe_error_fields(response: Any) -> tuple:
                 continue
             for v in d.get("violations", []) or []:
                 qid = str(v.get("quotaId", "")) if isinstance(v, dict) else ""
-                if "PerDay" in qid:
+                # суточная квота: как _is_daily_quota_error в Download/generate_queries.py (без учёта регистра)
+                if "perday" in qid.lower():
                     daily = True
             delay = d.get("retryDelay")
             if isinstance(delay, str):
@@ -839,23 +840,57 @@ def _safe_error_fields(response: Any) -> tuple:
         daily = True
     return code, daily, retry
 
+# Лимиты пула по умолчанию: совпадают с config.default.yaml (gemini_rpm_limit и т.д.).
+# Значения из конфига в RealTransport не передаются (cli создаёт транспорт без аргументов).
+DEFAULT_POOL_RPM = 15
+DEFAULT_POOL_TPM = 250_000
+DEFAULT_POOL_RPD = 500
+# Оценка токенов для TPM: те же константы, что в gemini_orchestrator (CHARS_PER_TOKEN, output_reserve_tokens).
+POOL_CHARS_PER_TOKEN = 3
+POOL_OUTPUT_RESERVE_TOKENS = 2000
+
+
+def _pool_module():
+    """Модуль пула подгружается при создании транспорта: gemini_pool сам импортирует gemini_prompts."""
+    try:
+        from . import gemini_pool as gpool
+    except ImportError:  # плоский импорт, как в остальных модулях core
+        import gemini_pool as gpool  # type: ignore
+    return gpool
+
+
+def _retry_after_header(response: Any) -> Optional[float]:
+    """Заголовок Retry-After в секундах. Дата в HTTP-формате или мусор дают None."""
+    try:
+        value = float(response.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
 
 class RealTransport:
-    """Реальный транспорт Gemini на httpx. Ключ читается из окружения при создании и уходит
-    только в заголовок x-goog-api-key; в URL, логи и исключения он не попадает."""
+    """Реальный транспорт Gemini на httpx поверх общего пула ключей (gemini_pool).
 
-    def __init__(self, *, api_key_env: str = ENV_KEY_NAME, timeout: float = 120.0,
-                 client: Any = None, base_url: str = API_BASE_URL):
-        key = os.environ.get(api_key_env, "")
-        if not key:
-            raise GeminiInputError(f"Не задана переменная окружения {api_key_env} с ключом Gemini.")
+    Для каждого вызова generate_json берётся ключ (lease) из пула; ключ уходит только в заголовок
+    x-goog-api-key; в URL, логи и исключения он не попадает. Исход запроса возвращается в пул."""
+
+    def __init__(self, *, pool: Any = None, timeout: float = 120.0, client: Any = None,
+                 base_url: str = API_BASE_URL, environ: Any = None,
+                 rpm_limit: int = DEFAULT_POOL_RPM, tpm_limit: int = DEFAULT_POOL_TPM,
+                 rpd_limit: int = DEFAULT_POOL_RPD):
         try:
             import httpx
         except ImportError:
             raise GeminiInputError("Не установлен пакет httpx.") from None
+        self._gpool = _pool_module()
+        if pool is None:
+            # ключи читаются здесь, при создании пула; в самом запросе окружение не трогаем
+            keys = self._gpool.load_gemini_keys(os.environ if environ is None else environ)
+            pool = self._gpool.KeyPool(keys, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit)
+        self._pool = pool
+        self._tpm = tpm_limit    # оценка токенов не должна превышать TPM пула
         _silence_http_logs()
         self._httpx = httpx
-        self._headers = {API_KEY_HEADER: key, "Content-Type": "application/json"}
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=timeout)
         self._base_url = base_url.rstrip("/")
@@ -876,6 +911,7 @@ class RealTransport:
         self.close()
 
     def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
+        gpool = self._gpool
         url = f"{self._base_url}/{model}:generateContent"
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
@@ -883,22 +919,49 @@ class RealTransport:
             "generationConfig": {"responseMimeType": "application/json",
                                  "responseJsonSchema": schema},
         }
+        tokens = min((len(system) + len(user)) // POOL_CHARS_PER_TOKEN + 1 + POOL_OUTPUT_RESERVE_TOKENS,
+                     self._tpm)
         try:
-            resp = self._client.post(url, headers=self._headers, json=body)
+            lease = self._pool.acquire(tokens=tokens)
+        except gpool.AllKeysExhaustedError:
+            # все ключи исчерпали суточную квоту: признак daily_quota, чтобы ManagedTransport сменил модель
+            # или остановил прогон (как раньше, без временного сбоя)
+            raise GeminiRuntimeError(
+                "Все ключи Gemini исчерпали суточную квоту.",
+                status=429, code="RESOURCE_EXHAUSTED", daily_quota=True) from None
+        # заголовок с ключом живёт только внутри этого вызова и никуда не передаётся
+        headers = {API_KEY_HEADER: lease.api_key, "Content-Type": "application/json"}
+        try:
+            resp = self._client.post(url, headers=headers, json=body)
         except self._httpx.HTTPError as e:
-            # В сообщение идёт только имя класса ошибки; объект запроса и цепочка не сохраняются.
+            # ключ не виноват: состояние не меняется; в сообщение идёт только имя класса ошибки
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR)
             raise GeminiRuntimeError(
                 f"Сбой сети при обращении к Gemini ({type(e).__name__}).") from None
         except Exception as e:
+            # любой сбой до ответа тоже без штрафа ключу
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR)
             raise GeminiRuntimeError(
                 f"Непредвиденный сбой при обращении к Gemini ({type(e).__name__}).") from None
 
-        if resp.status_code != 200:
+        status = resp.status_code
+        if status == 200:
+            self._pool.release(lease, gpool.Outcome.SUCCESS)
+        else:
             code, daily, retry = _safe_error_fields(resp)
+            if status == 429:
+                if daily:
+                    self._pool.release(lease, gpool.Outcome.DAILY_QUOTA)
+                else:
+                    self._pool.release(lease, gpool.Outcome.RATE_LIMITED,
+                                       retry_after=_retry_after_header(resp))
+            else:
+                # 500, 503, 504 и прочие ошибки (в том числе 4xx): ключ не виноват, состояние не меняется
+                self._pool.release(lease, gpool.Outcome.SERVER_ERROR)
             extra = f", код {code}" if code else ""
             raise GeminiRuntimeError(
-                f"Gemini вернул ошибку: HTTP {resp.status_code}{extra}.",
-                status=resp.status_code, code=code, daily_quota=daily, retry_after=retry)
+                f"Gemini вернул ошибку: HTTP {status}{extra}.",
+                status=status, code=code, daily_quota=daily, retry_after=retry)
         try:
             data = resp.json()
             parts = data["candidates"][0]["content"]["parts"]
