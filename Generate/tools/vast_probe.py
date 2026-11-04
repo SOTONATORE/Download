@@ -8,6 +8,8 @@
     полей verification и is_vm_deverified (до show_count), а в probe_result.json пишутся в блок
     verification_fields_unfiltered. Имена полей подтверждены живым ответом; смысл значений UNVERIFIED
     (проба не сопоставляет их с «verified» или «unverified»);
+  • тот же ответ, новых запросов нет: поиск полей CUDA и диска по DISCOVERY_MARKERS (имена, наличие,
+    сырые значения), блок field_discovery_unfiltered в probe_result.json;
   • POST /api/v0/bundles/                    — тот же поиск с verified=True (копия фильтра, запрос строится тем же
     VastClient._build_query); нужен только для сверки числа предложений, production не меняется;
   • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
@@ -135,6 +137,17 @@ HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определени�
 # и их значения у первых предложений. Если таких ключей нет, печатается VERIFY_FIELD_MISSING.
 VERIFY_KEY_MARKER = "verif"
 VERIFY_FIELD_MISSING = "поля verified в предложениях нет"
+
+# Поиск полей-кандидатов (UNVERIFIED): подстроки в именах ключей предложения, без учёта регистра.
+# Подстрока даёт и лишние совпадения («read» есть в «ready», «bw» — в «pcie_bw»); список печатается
+# целиком, чтобы владелец видел точные имена. Имена с признаками секретов не печатаются (_is_sensitive).
+DISCOVERY_MARKERS = (
+    "verif", "cuda", "disk", "bw", "read", "write", "speed", "ssd", "nvme", "perf", "bandwidth",
+)
+CUDA_MARKERS = ("cuda",)
+DISK_MARKERS = ("disk", "bw", "read", "write")
+DISCOVERY_STATUS = "UNVERIFIED"
+DISCOVERY_BLOCK_KEY = "field_discovery_unfiltered"
 
 # Поля подтверждения хоста в предложении из ответа БЕЗ фильтра verified (шаг 1а main()).
 # Имена подтверждены живым ответом. Смысл значений UNVERIFIED: проба выводит значения как есть и
@@ -515,17 +528,23 @@ def _offers_of(raw: Any) -> list:
     return []
 
 
-def _verify_field_names(offers: list) -> list[str]:
-    """UNVERIFIED (см. VERIFY_KEY_MARKER): имена полей предложений, в которых есть подстрока
-    VERIFY_KEY_MARKER. Имена с признаками секретов не берутся (_is_sensitive)."""
+def _names_with_markers(offers: list, markers: tuple[str, ...]) -> list[str]:
+    """Отсортированные имена полей предложений, в которых есть хотя бы одна подстрока из markers
+    (без учёта регистра). Имена с признаками секретов не возвращаются (_is_sensitive)."""
     names: set[str] = set()
     for offer in offers:
         if not isinstance(offer, dict):
             continue
         for key in offer:
-            if VERIFY_KEY_MARKER in str(key).lower() and not _is_sensitive(key):
+            low = str(key).lower()
+            if any(marker in low for marker in markers) and not _is_sensitive(key):
                 names.add(str(key))
     return sorted(names)
+
+
+def _verify_field_names(offers: list) -> list[str]:
+    """UNVERIFIED (см. VERIFY_KEY_MARKER): поля с подстрокой VERIFY_KEY_MARKER для поиска с verified=True."""
+    return _names_with_markers(offers, (VERIFY_KEY_MARKER,))
 
 
 def _raw_text(value: Any) -> str:
@@ -580,6 +599,75 @@ def _verification_fields_unfiltered(offers: list, show_count: int) -> dict[str, 
 
     for name in VERIFICATION_FIELDS:
         say(f"{name}: поле есть у {present_counts[name]} из {dict_count}")
+    return block
+
+
+def _say_key_rows(offers: list[dict], names: list[str]) -> None:
+    """По одной строке на имя ключа: сырое значение у каждого из первых предложений или «поля нет»."""
+    if not names:
+        say("  ключей нет")
+        return
+    for name in names:
+        cells = []
+        for index, offer in enumerate(offers, start=1):
+            shown = _snippet(_raw_text(offer[name])) if name in offer else FIELD_MISSING_TEXT
+            cells.append(f"#{index}={shown}")
+        say(f"  {name}: " + "; ".join(cells))
+
+
+def _discovery_block(offers: list, show_count: int) -> dict[str, Any]:
+    """UNVERIFIED: поиск полей CUDA и скорости диска по всем предложениям сырого ответа без фильтра verified.
+    Печатает: список имён ключей с маркерами DISCOVERY_MARKERS; для каждого имени, у скольких предложений
+    оно есть; сырые значения этих ключей у первых show_count предложений; отдельно строки по CUDA и по диску.
+    Значения ключей без маркера не печатаются, полный словарь предложения не печатается. Фильтры не
+    вычисляются, код выхода не меняет. Новых запросов не делает: работает с уже полученным ответом."""
+    dict_offers = [o for o in offers if isinstance(o, dict)]
+    total = len(dict_offers)
+    names = _names_with_markers(dict_offers, DISCOVERY_MARKERS)
+    cuda_names = [n for n in names if any(m in n.lower() for m in CUDA_MARKERS)]
+    disk_names = [n for n in names if any(m in n.lower() for m in DISK_MARKERS)]
+    presence = {name: {"present": sum(1 for o in dict_offers if name in o), "total": total} for name in names}
+    shown = dict_offers[:show_count]
+    block: dict[str, Any] = {
+        "status": DISCOVERY_STATUS,
+        "markers": list(DISCOVERY_MARKERS),
+        "offers_total": total,
+        "key_names": names,
+        "key_presence": presence,
+        "cuda_keys": cuda_names,
+        "disk_keys": disk_names,
+        "first_offers": [],
+    }
+    say(f"=== Поиск полей CUDA и диска в предложениях ({DISCOVERY_STATUS}) ===")
+    say("Имена и значения как есть: смысл и единицы не подтверждены. Ключи с признаками секретов скрыты.")
+    say("Маркеры поиска (подстроки): " + ", ".join(DISCOVERY_MARKERS))
+    if total == 0:
+        say("Предложений нет: поиск полей не выполнен.")
+        return block
+
+    say(f"Ключи с маркерами по всем предложениям ({total}): " + (", ".join(names) if names else "нет"))
+    for name in names:
+        say(f"  {name}: есть у {presence[name]['present']} из {total}")
+
+    say(f"Значения ключей с маркерами у первых {len(shown)} предложений:")
+    for index, offer in enumerate(shown, start=1):
+        entry: dict[str, Any] = {"index": index, "id": offer.get("id"), "values": {}}
+        cells = []
+        for name in names:
+            if name in offer:
+                entry["values"][name] = {"present": True, "value": offer[name]}
+                cells.append(f"{name}={_snippet(_raw_text(offer[name]))}")
+            else:
+                entry["values"][name] = {"present": False, "value": None}
+                cells.append(f"{name}={FIELD_MISSING_TEXT}")
+        block["first_offers"].append(entry)
+        tail = "; ".join(cells) if cells else "ключей с маркерами нет"
+        say(f"  #{index}: id={_value(offer, 'id')}; {tail}")
+
+    say("CUDA (ключи с подстрокой «cuda»):")
+    _say_key_rows(shown, cuda_names)
+    say("Диск и скорость (ключи с «disk», «bw», «read» или «write»):")
+    _say_key_rows(shown, disk_names)
     return block
 
 
@@ -666,6 +754,7 @@ def main() -> int:
     checks: dict[str, Any] = {}
     verified_check: dict[str, Any] = {}
     verification_block: dict[str, Any] = {}
+    discovery_block: dict[str, Any] = {}
     say("=== Проверка Vast.ai (только чтение) ===")
     say(f"Фильтр: {_filter_text(offer_filter)}")
 
@@ -680,7 +769,9 @@ def main() -> int:
             return 3
 
         if isinstance(raw, dict):
-            say("Ключи верхнего уровня ответа: " + ", ".join(sorted(map(str, raw.keys()))))
+            # Имена с признаками секретов не печатаются (_is_sensitive).
+            top_keys = sorted(str(k) for k in raw.keys() if not _is_sensitive(k))
+            say("Ключи верхнего уровня ответа: " + ", ".join(top_keys))
             offers_raw = raw.get("offers")
         else:
             say(f"Ответ не является объектом JSON: тип {type(raw).__name__}")
@@ -698,7 +789,8 @@ def main() -> int:
         if offers_raw:
             first = offers_raw[0]
             if isinstance(first, dict):
-                say("Ключи первого предложения: " + ", ".join(sorted(map(str, first.keys()))))
+                # Полный список имён не печатается: имена с признаками поиска — в блоке полей CUDA и диска ниже.
+                say(f"Ключей в первом предложении: {len(first)}")
             else:
                 say(f"Первый элемент не объект, тип {type(first).__name__}")
         else:
@@ -723,6 +815,9 @@ def main() -> int:
         # 1а. Поля подтверждения хоста (UNVERIFIED) из того же сырого ответа без фильтра: не зависят от
         # поиска с verified=True. Код выхода не меняет.
         verification_block = _verification_fields_unfiltered(offers_raw, show_count)
+
+        # 1в. Поиск полей CUDA и диска (UNVERIFIED) по тому же сырому ответу; новых запросов нет.
+        discovery_block = _discovery_block(offers_raw, show_count)
 
         # 1б. Сверка: тот же поиск с verified=True. Результат без фильтра выше не меняется;
         # сбой печатается и даёт код 3 в конце (см. docstring). production-фильтр не меняется.
@@ -764,6 +859,7 @@ def main() -> int:
     payload["account"] = account
     payload["search_verified_check"] = verified_check
     payload[VERIFICATION_BLOCK_KEY] = verification_block
+    payload[DISCOVERY_BLOCK_KEY] = discovery_block
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")
