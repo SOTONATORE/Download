@@ -141,15 +141,17 @@ def test_daily_quota_marks_only_one_key(gq):
     bad_name = KEYS[0][0]
     exhausted: dict = {}
     seen_by_bad = []
+    # Клиентов создаём один раз и запоминаем объект бракованного: сравниваем с ним же.
+    clients = _clients(KEYS)
+    bad_client = clients[bad_name]
 
     def run_one(client, model, task):
         # Клиент, помеченный как бракованный, отвечает дневной квотой.
-        if client is _clients(KEYS)[bad_name]:
+        if client is bad_client:
             seen_by_bad.append(task)
             raise gq.DailyQuotaExceededError(model, "quotaId perday")
         return {str(task): {"ok": True}}
 
-    clients = _clients(KEYS)
     results: dict = {}
     code, _ = gq._run_pool_tasks(
         pool, clients, list(range(6)), run_one, threading.Lock(),
