@@ -61,7 +61,7 @@ on:
       silent_host_timeout_min:
         description: "Таймаут до ответа воркера (healthcheck), минут"
         type: number
-        default: 20
+        default: 10
 
 # отдельная группа: тест не блокирует и не отменяет боевой generate и пилот; запущенный не отменять
 concurrency:

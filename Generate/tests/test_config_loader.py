@@ -35,7 +35,7 @@ def test_default_file_loads_and_matches_spec_values():
     assert cfg.gemini_models == ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
     assert cfg.gemini_batch_size == 50
     assert cfg.disk_gb == 100
-    assert cfg.silent_host_timeout_min == 20
+    assert cfg.silent_host_timeout_min == 10
     assert cfg.worker_idle_timeout_min == 2
     assert cfg.max_cards == 1
     assert cfg.limit_clips == 0

@@ -8,14 +8,16 @@
     полей verification и is_vm_deverified (до show_count), а в probe_result.json пишутся в блок
     verification_fields_unfiltered. Имена полей подтверждены живым ответом; смысл значений UNVERIFIED
     (проба не сопоставляет их с «verified» или «unverified»);
+  • тот же ответ, новых запросов нет: поиск полей CUDA и диска по DISCOVERY_MARKERS (имена, наличие,
+    сырые значения), блок field_discovery_unfiltered в probe_result.json;
   • POST /api/v0/bundles/                    — тот же поиск с verified=True (копия фильтра, запрос строится тем же
     VastClient._build_query); нужен только для сверки числа предложений, production не меняется;
   • POST /api/v0/bundles/                    — VastClient.search_offers по текущим правилам;
   • GET  /api/v0/users/current/              — баланс и кредит аккаунта (через _request, только чтение);
   • GET  /api/v0/instances/999999999/        — проверка пути одного экземпляра (id заведомо не существует);
   • GET  /api/v1/instances/999999999/        — то же для пути v1;
-  • HEAD <базовый адрес>/<подкаталог>/<имя>  — по одному на каждую строку download_model в
-    Generate/worker/setup.sh (Hugging Face, заголовок Authorization с HF_TOKEN, перенаправления выполняются).
+  • HEAD адрес каждого файла из weights.json профиля ltx25 (тот же список и тот же адрес, что у воркера:
+    Generate/core/weights_plan.py files; Hugging Face, заголовок Authorization с HF_TOKEN, перенаправления выполняются).
 
 Ключ Vast читается только из окружения (имя — ENV_KEY_NAME), токен Hugging Face — из переменной HF_TOKEN.
 Оба значения уходят только в заголовке Authorization. Всё, что печатается или пишется, проходит
@@ -118,13 +120,11 @@ SUMMARY_PREFIX = "Поиск предложений Vast"
 VAST_CHECK_INSTANCE_ID = 999999999
 VAST_CHECK_PATHS = ("/api/v0/instances/{id}/", "/api/v1/instances/{id}/")
 
-# Проверка файлов модели: адрес по умолчанию совпадает с HF_BASE_URL в setup.sh.
-SETUP_SCRIPT = REPO_ROOT / "Generate" / "worker" / "setup.sh"
-HF_DEFAULT_BASE_URL = "https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
+# Проверка файлов модели: список и базовый адрес из weights.json профиля (тот же файл, что читает воркер
+# через weights_plan.py files). Профиль ltx25: по нему проба проверяла LTX до переноса загрузки в weights.json.
+# Чтение только локальным файлом, без импорта пакета и без сети.
+WEIGHTS_JSON = REPO_ROOT / "Generate" / "model_profiles" / "models" / "ltx25" / "weights.json"
 HF_TIMEOUT_SEC = 30.0
-HF_BASE_RE = re.compile(r'^HF_BASE_URL="([^"]+)"\s*$', re.MULTILINE)
-HF_CALL_RE = re.compile(r'^\s*download_model\s+"([^"]+)"\s+"([^"]+)"\s*$')
-HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определение функции «download_model() {» не совпадает
 
 # Сверка с фильтром verified=True (только число предложений и вывод полей).
 # Ключ verified в запросе взят из production-кода (VastClient._build_query); живой ответ Vast
@@ -135,6 +135,17 @@ HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определени�
 # и их значения у первых предложений. Если таких ключей нет, печатается VERIFY_FIELD_MISSING.
 VERIFY_KEY_MARKER = "verif"
 VERIFY_FIELD_MISSING = "поля verified в предложениях нет"
+
+# Поиск полей-кандидатов (UNVERIFIED): подстроки в именах ключей предложения, без учёта регистра.
+# Подстрока даёт и лишние совпадения («read» есть в «ready», «bw» — в «pcie_bw»); список печатается
+# целиком, чтобы владелец видел точные имена. Имена с признаками секретов не печатаются (_is_sensitive).
+DISCOVERY_MARKERS = (
+    "verif", "cuda", "disk", "bw", "read", "write", "speed", "ssd", "nvme", "perf", "bandwidth",
+)
+CUDA_MARKERS = ("cuda",)
+DISK_MARKERS = ("disk", "bw", "read", "write")
+DISCOVERY_STATUS = "UNVERIFIED"
+DISCOVERY_BLOCK_KEY = "field_discovery_unfiltered"
 
 # Поля подтверждения хоста в предложении из ответа БЕЗ фильтра verified (шаг 1а main()).
 # Имена подтверждены живым ответом. Смысл значений UNVERIFIED: проба выводит значения как есть и
@@ -150,7 +161,7 @@ _secrets: list[str] = []
 
 
 class ProbeInputError(Exception):
-    """Неверные переменные окружения пробы или неразбираемый setup.sh."""
+    """Неверные переменные окружения пробы или нечитаемый weights.json профиля."""
 
 
 class _Capture(logging.Handler):
@@ -382,42 +393,37 @@ def _check_vast_paths(base_url: str, timeout: float, key: str) -> list[dict]:
     return results
 
 
-def _read_setup_models() -> tuple[str, str, list[tuple[str, str]], int]:
-    """Разбор setup.sh: (базовый адрес, источник адреса, пары (подкаталог, имя), число непонятых строк).
-    ProbeInputError — если файл не читается, адрес содержит переменную оболочки или строк нет совсем."""
+def _read_weights_plan() -> tuple[str, str, list[tuple[str, str, str]], int]:
+    """Список файлов из weights.json профиля: (базовый адрес, источник, тройки (подкаталог, имя, полный адрес), 0).
+    Адрес файла строится как download_url в weights_plan.py: база + путь в репо, если задан, иначе база/подкаталог/имя.
+    ProbeInputError — если файл не читается, не JSON, нет списка files или base_url."""
     try:
-        text = SETUP_SCRIPT.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ProbeInputError(
-            f"Generate/worker/setup.sh не прочитан ({type(exc).__name__})"
-        ) from None
-
-    match = HF_BASE_RE.search(text)
-    if match:
-        base, source = match.group(1), "setup.sh"
-    else:
-        base = HF_DEFAULT_BASE_URL
-        source = "значение по умолчанию: HF_BASE_URL в setup.sh не найден"
-    if "$" in base:
-        raise ProbeInputError("HF_BASE_URL в setup.sh содержит переменную оболочки, адрес не вычисляется")
-
-    files: list[tuple[str, str]] = []
-    unparsed = 0
-    for line in text.splitlines():
-        if not HF_CALL_PREFIX_RE.match(line):
-            continue
-        call = HF_CALL_RE.match(line)
-        if call and "$" not in call.group(1) + call.group(2):
-            files.append((call.group(1), call.group(2)))
+        data = json.loads(WEIGHTS_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ProbeInputError(f"weights.json профиля не читается ({WEIGHTS_JSON.name})") from None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list) or not data["files"]:
+        raise ProbeInputError("в weights.json профиля нет непустого списка files")
+    base = data.get("base_url")
+    if not isinstance(base, str) or not base or "$" in base:
+        raise ProbeInputError("в weights.json профиля не задан base_url")
+    files: list[tuple[str, str, str]] = []
+    for idx, entry in enumerate(data["files"], 1):
+        if not isinstance(entry, dict) or not entry.get("subdir") or not entry.get("name"):
+            raise ProbeInputError(f"у файла №{idx} в weights.json нет subdir или name")
+        file_base = entry.get("base_url", base)
+        if not isinstance(file_base, str) or not file_base:
+            raise ProbeInputError(f"у файла №{idx} в weights.json не задан base_url")
+        repo_path = entry.get("repo_path") or ""
+        if repo_path:
+            url = file_base + "/" + repo_path
         else:
-            unparsed += 1
-    if not files:
-        raise ProbeInputError("в Generate/worker/setup.sh нет разбираемых строк download_model")
-    return base, source, files, unparsed
+            url = file_base + "/" + entry["subdir"] + "/" + entry["name"]
+        files.append((entry["subdir"], entry["name"], url))
+    return base, "weights.json профиля ltx25", files, 0
 
 
 def _check_hf_files(token: str) -> dict[str, Any]:
-    """Проверка файлов модели: HEAD на каждый файл из setup.sh с заголовком Authorization.
+    """Проверка файлов модели: HEAD на каждый файл из weights.json профиля с заголовком Authorization.
     Перенаправления выполняются; заголовок с токеном не должен уйти на другой хост."""
     state: dict[str, Any] = {
         "status": None,
@@ -439,7 +445,7 @@ def _check_hf_files(token: str) -> dict[str, Any]:
         return state
 
     try:
-        base, source, files, unparsed = _read_setup_models()
+        base, source, files, unparsed = _read_weights_plan()
     except ProbeInputError as exc:
         state.update(status="ошибка разбора", reason=str(exc))
         err(
@@ -451,14 +457,13 @@ def _check_hf_files(token: str) -> dict[str, Any]:
 
     state.update(base_url=base, base_source=source, unparsed_lines=unparsed)
     say(f"Базовый адрес: {base} (источник: {source})")
-    say(f"Файлов в списке: {len(files)}; строк download_model, которые не разобраны: {unparsed}")
+    say(f"Файлов в списке: {len(files)}; строк списка, которые не разобраны: {unparsed}")
 
     auth = {"Authorization": f"Bearer {token}"}
     original_host = urlsplit(base).hostname
     stopped = False
     with httpx.Client(timeout=HF_TIMEOUT_SEC, follow_redirects=True) as http:
-        for index, (subdir, name) in enumerate(files, start=1):
-            url = f"{base}/{subdir}/{name}"
+        for index, (subdir, name, url) in enumerate(files, start=1):
             label = f"[{index}/{len(files)}] {subdir}/{name}"
             entry: dict[str, Any] = {"index": index, "subdir": subdir, "name": name, "url": url}
             try:
@@ -505,6 +510,7 @@ def _check_hf_files(token: str) -> dict[str, Any]:
         state["status"] = "выполнена"
         ok = sum(1 for f in state["files"] if f.get("status") == 200)
         say(f"Итог: проверено файлов {len(state['files'])}, доступно (200): {ok}")
+        say(f"Статус: выполнена (доступно {ok} из {len(files)})")
     return state
 
 
@@ -515,17 +521,23 @@ def _offers_of(raw: Any) -> list:
     return []
 
 
-def _verify_field_names(offers: list) -> list[str]:
-    """UNVERIFIED (см. VERIFY_KEY_MARKER): имена полей предложений, в которых есть подстрока
-    VERIFY_KEY_MARKER. Имена с признаками секретов не берутся (_is_sensitive)."""
+def _names_with_markers(offers: list, markers: tuple[str, ...]) -> list[str]:
+    """Отсортированные имена полей предложений, в которых есть хотя бы одна подстрока из markers
+    (без учёта регистра). Имена с признаками секретов не возвращаются (_is_sensitive)."""
     names: set[str] = set()
     for offer in offers:
         if not isinstance(offer, dict):
             continue
         for key in offer:
-            if VERIFY_KEY_MARKER in str(key).lower() and not _is_sensitive(key):
+            low = str(key).lower()
+            if any(marker in low for marker in markers) and not _is_sensitive(key):
                 names.add(str(key))
     return sorted(names)
+
+
+def _verify_field_names(offers: list) -> list[str]:
+    """UNVERIFIED (см. VERIFY_KEY_MARKER): поля с подстрокой VERIFY_KEY_MARKER для поиска с verified=True."""
+    return _names_with_markers(offers, (VERIFY_KEY_MARKER,))
 
 
 def _raw_text(value: Any) -> str:
@@ -580,6 +592,75 @@ def _verification_fields_unfiltered(offers: list, show_count: int) -> dict[str, 
 
     for name in VERIFICATION_FIELDS:
         say(f"{name}: поле есть у {present_counts[name]} из {dict_count}")
+    return block
+
+
+def _say_key_rows(offers: list[dict], names: list[str]) -> None:
+    """По одной строке на имя ключа: сырое значение у каждого из первых предложений или «поля нет»."""
+    if not names:
+        say("  ключей нет")
+        return
+    for name in names:
+        cells = []
+        for index, offer in enumerate(offers, start=1):
+            shown = _snippet(_raw_text(offer[name])) if name in offer else FIELD_MISSING_TEXT
+            cells.append(f"#{index}={shown}")
+        say(f"  {name}: " + "; ".join(cells))
+
+
+def _discovery_block(offers: list, show_count: int) -> dict[str, Any]:
+    """UNVERIFIED: поиск полей CUDA и скорости диска по всем предложениям сырого ответа без фильтра verified.
+    Печатает: список имён ключей с маркерами DISCOVERY_MARKERS; для каждого имени, у скольких предложений
+    оно есть; сырые значения этих ключей у первых show_count предложений; отдельно строки по CUDA и по диску.
+    Значения ключей без маркера не печатаются, полный словарь предложения не печатается. Фильтры не
+    вычисляются, код выхода не меняет. Новых запросов не делает: работает с уже полученным ответом."""
+    dict_offers = [o for o in offers if isinstance(o, dict)]
+    total = len(dict_offers)
+    names = _names_with_markers(dict_offers, DISCOVERY_MARKERS)
+    cuda_names = [n for n in names if any(m in n.lower() for m in CUDA_MARKERS)]
+    disk_names = [n for n in names if any(m in n.lower() for m in DISK_MARKERS)]
+    presence = {name: {"present": sum(1 for o in dict_offers if name in o), "total": total} for name in names}
+    shown = dict_offers[:show_count]
+    block: dict[str, Any] = {
+        "status": DISCOVERY_STATUS,
+        "markers": list(DISCOVERY_MARKERS),
+        "offers_total": total,
+        "key_names": names,
+        "key_presence": presence,
+        "cuda_keys": cuda_names,
+        "disk_keys": disk_names,
+        "first_offers": [],
+    }
+    say(f"=== Поиск полей CUDA и диска в предложениях ({DISCOVERY_STATUS}) ===")
+    say("Имена и значения как есть: смысл и единицы не подтверждены. Ключи с признаками секретов скрыты.")
+    say("Маркеры поиска (подстроки): " + ", ".join(DISCOVERY_MARKERS))
+    if total == 0:
+        say("Предложений нет: поиск полей не выполнен.")
+        return block
+
+    say(f"Ключи с маркерами по всем предложениям ({total}): " + (", ".join(names) if names else "нет"))
+    for name in names:
+        say(f"  {name}: есть у {presence[name]['present']} из {total}")
+
+    say(f"Значения ключей с маркерами у первых {len(shown)} предложений:")
+    for index, offer in enumerate(shown, start=1):
+        entry: dict[str, Any] = {"index": index, "id": offer.get("id"), "values": {}}
+        cells = []
+        for name in names:
+            if name in offer:
+                entry["values"][name] = {"present": True, "value": offer[name]}
+                cells.append(f"{name}={_snippet(_raw_text(offer[name]))}")
+            else:
+                entry["values"][name] = {"present": False, "value": None}
+                cells.append(f"{name}={FIELD_MISSING_TEXT}")
+        block["first_offers"].append(entry)
+        tail = "; ".join(cells) if cells else "ключей с маркерами нет"
+        say(f"  #{index}: id={_value(offer, 'id')}; {tail}")
+
+    say("CUDA (ключи с подстрокой «cuda»):")
+    _say_key_rows(shown, cuda_names)
+    say("Диск и скорость (ключи с «disk», «bw», «read» или «write»):")
+    _say_key_rows(shown, disk_names)
     return block
 
 
@@ -666,6 +747,7 @@ def main() -> int:
     checks: dict[str, Any] = {}
     verified_check: dict[str, Any] = {}
     verification_block: dict[str, Any] = {}
+    discovery_block: dict[str, Any] = {}
     say("=== Проверка Vast.ai (только чтение) ===")
     say(f"Фильтр: {_filter_text(offer_filter)}")
 
@@ -680,7 +762,9 @@ def main() -> int:
             return 3
 
         if isinstance(raw, dict):
-            say("Ключи верхнего уровня ответа: " + ", ".join(sorted(map(str, raw.keys()))))
+            # Имена с признаками секретов не печатаются (_is_sensitive).
+            top_keys = sorted(str(k) for k in raw.keys() if not _is_sensitive(k))
+            say("Ключи верхнего уровня ответа: " + ", ".join(top_keys))
             offers_raw = raw.get("offers")
         else:
             say(f"Ответ не является объектом JSON: тип {type(raw).__name__}")
@@ -698,7 +782,8 @@ def main() -> int:
         if offers_raw:
             first = offers_raw[0]
             if isinstance(first, dict):
-                say("Ключи первого предложения: " + ", ".join(sorted(map(str, first.keys()))))
+                # Полный список имён не печатается: имена с признаками поиска — в блоке полей CUDA и диска ниже.
+                say(f"Ключей в первом предложении: {len(first)}")
             else:
                 say(f"Первый элемент не объект, тип {type(first).__name__}")
         else:
@@ -723,6 +808,9 @@ def main() -> int:
         # 1а. Поля подтверждения хоста (UNVERIFIED) из того же сырого ответа без фильтра: не зависят от
         # поиска с verified=True. Код выхода не меняет.
         verification_block = _verification_fields_unfiltered(offers_raw, show_count)
+
+        # 1в. Поиск полей CUDA и диска (UNVERIFIED) по тому же сырому ответу; новых запросов нет.
+        discovery_block = _discovery_block(offers_raw, show_count)
 
         # 1б. Сверка: тот же поиск с verified=True. Результат без фильтра выше не меняется;
         # сбой печатается и даёт код 3 в конце (см. docstring). production-фильтр не меняется.
@@ -764,6 +852,7 @@ def main() -> int:
     payload["account"] = account
     payload["search_verified_check"] = verified_check
     payload[VERIFICATION_BLOCK_KEY] = verification_block
+    payload[DISCOVERY_BLOCK_KEY] = discovery_block
     text = _clean(json.dumps(_sanitize(payload), ensure_ascii=False, indent=2, default=str))
     try:
         Path(RESULT_FILE).write_text(text, encoding="utf-8")

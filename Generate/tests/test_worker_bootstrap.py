@@ -304,12 +304,18 @@ def test_setup_ready_flag_is_cleared_first_and_created_after_readiness():
 
 
 def test_setup_comfy_pid_is_used_only_by_restart():
-    """PID ComfyUI setup.sh трогает только в перезапуске (restart_comfy), больше нигде."""
+    """PID ComfyUI setup.sh читает и пишет в перезапуске (restart_comfy), а наблюдатель читает его
+    только через comfy_proc_dead. Больше нигде."""
     code = _setup_code()
-    body = code[code.index("restart_comfy() {"):]
-    body = body[:body.index("\n}\n")]
-    assert "COMFY_PID_FILE" in body
-    assert code.count("COMFY_PID_FILE") == body.count("COMFY_PID_FILE")
+    bodies = {}
+    for header in ("restart_comfy() {", "start_comfy_watch() {", "comfy_proc_dead() {"):
+        body = code[code.index(header):]
+        bodies[header] = body[:body.index("\n}\n")]
+    assert "COMFY_PID_FILE" in bodies["restart_comfy() {"]
+    # Наблюдатель (start_comfy_watch) разрешён для COMFY_PID_FILE через comfy_proc_dead: без чтения PID
+    # наблюдатель не отличит умершую ComfyUI от живой и не выставит WORKER_COMFY_DEAD_FLAG.
+    total = sum(body.count("COMFY_PID_FILE") for body in bodies.values())
+    assert code.count("COMFY_PID_FILE") == total
 
 
 # --- setup.sh: параллельная загрузка и загрузчик (Fix 1, Fix 4) ---
@@ -416,4 +422,4 @@ exit 0
 def test_config_docker_image_is_stock_vast_tag():
     yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    assert data["docker_image"] == "vastai/comfy:v0.41.0-cuda-13.2-py312"
+    assert data["docker_image"] == "vastai/comfy:v0.41.0-cuda-12.9-py312"
