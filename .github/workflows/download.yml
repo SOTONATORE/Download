@@ -94,7 +94,16 @@ jobs:
 
     - name: Generate search queries via Gemini
       env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GEMINI1: ${{ secrets.GEMINI1 }}
+        GEMINI2: ${{ secrets.GEMINI2 }}
+        GEMINI3: ${{ secrets.GEMINI3 }}
+        GEMINI4: ${{ secrets.GEMINI4 }}
+        GEMINI5: ${{ secrets.GEMINI5 }}
+        GEMINI6: ${{ secrets.GEMINI6 }}
+        GEMINI7: ${{ secrets.GEMINI7 }}
+        GEMINI8: ${{ secrets.GEMINI8 }}
+        GEMINI9: ${{ secrets.GEMINI9 }}
+        GEMINI10: ${{ secrets.GEMINI10 }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
