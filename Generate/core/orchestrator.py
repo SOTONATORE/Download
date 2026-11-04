@@ -44,6 +44,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .budget import BudgetError, BudgetTracker
     from .log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,
                             mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
+    from .log_setup import WORKER_LOG_EXTRA, print_worker_group  # строки карты: файл с префиксом, консоль группой
     from .missing import parse_missing
     from .segment_split import all_photo, select_video_segments, to_segments
     from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover
     from budget import BudgetError, BudgetTracker  # type: ignore
     from log_setup import (_MASK, CONSOLE_SKIP_EXTRA, INTERNAL_PORTS, KEY_EVENT_EXTRA, mask_external,  # type: ignore
                            mask_fetched_text, mask_remote_text, secret_mask_values, set_known_secrets)
+    from log_setup import WORKER_LOG_EXTRA, print_worker_group  # type: ignore  # строки карты: файл с префиксом, консоль группой
     from missing import parse_missing  # type: ignore
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
     from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
@@ -1159,7 +1161,8 @@ class Orchestrator:
     def _pull_card_logs(self, slot: _CardSlot, *, final: bool, timeout: float = LOGS_TIMEOUT_SEC) -> bool:
         """GET /logs карты с курсора предыдущего успешного ответа (SPEC 8.4).
 
-        Печатаются только строки после курсора, каждая с префиксом «[карта N]» и после маскирования.
+        Печатаются только строки после курсора, после маскирования. Каждая пишется в журнал файла с префиксом
+        «[карта N]»; в консоль строки одной группой на пачку (print_worker_group), без префикса.
         Курсор двигается только при успехе, поэтому при сбое строки запрашиваются снова и дублей нет.
         Сбой даёт одно предупреждение с именем типа исключения; текст исключения не печатается:
         в нём может быть адрес с заголовками.
@@ -1189,8 +1192,10 @@ class Orchestrator:
                 slot.weights_reason = reason  # снятие карты делает _pull_due_logs, не здесь (нет рекурсии)
         if final:
             log.info("Логи карты %d перед уничтожением: новых строк %d.", slot.instance_id, len(lines))
+        # журнал файла получает каждую строку с префиксом, как прежде; консоль печатает пачку группой
         for line in lines:
-            log.info("[карта %d] %s", slot.instance_id, line)
+            log.info("[карта %d] %s", slot.instance_id, line, extra=WORKER_LOG_EXTRA)
+        print_worker_group(slot.instance_id, lines)
         return True
 
     def _pull_due_logs(self, now: float) -> None:
