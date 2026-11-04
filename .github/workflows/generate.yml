@@ -378,10 +378,12 @@ jobs:
                   pass
           PY
 
-          {
-            echo '## Итоги генерации'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Сводка не должна ронять шаг: пустой или недоступный $GITHUB_STEP_SUMMARY не прерывает запуск.
+          # Если файл не открылся, блок не пишется, а фильтр сводки выводит одну строку предупреждения.
+          summary_written=0
+          if { echo '## Итоги генерации'; echo '```'; } 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; then
+            summary_written=1
+          fi
 
           # pipefail: код завершения берётся от python, а не от фильтра и tee;
           # rc сохраняем, чтобы закрыть блок кода и затем завершить шаг тем же кодом
@@ -390,7 +392,10 @@ jobs:
             | python3 -I -u "$mask_filter" \
             | python3 -I -u "$summary_filter" "$GITHUB_STEP_SUMMARY" \
             | tee -a "$RUN_LOG" || rc=$?
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # закрываем блок кода только если сводка открылась; ошибка записи не должна ронять шаг
+          if [ "$summary_written" = 1 ]; then
+            echo '```' 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+          fi
           exit "$rc"
 
       # Выполняется всегда. Останавливает наблюдателя (SPEC 8.3 а) и переносит его журнал в $RUN_LOG
