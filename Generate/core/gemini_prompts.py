@@ -41,9 +41,6 @@ except ImportError:
 
 log = logging.getLogger("Generate.gemini_prompts")
 
-# Имя переменной окружения с ключом собрано из частей: структурный тест запрещает
-# литерал секрета в коде (SPEC 0.1). Значение ключа в модуле нигде не хранится и не печатается.
-ENV_KEY_NAME = "GEN_" + "GEMINI_API_KEY"
 API_KEY_HEADER = "x-goog-api-key"
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
