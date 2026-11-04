@@ -20,7 +20,7 @@
 
 ## Секреты
 
-Используются только три секрета GitHub (Settings → Secrets and variables → Actions): `GEN_VAST_API_KEY`, `GEN_GEMINI_API_KEY`, `HF_TOKEN`. Они передаются в шаги workflow через переменные окружения и нигде не печатаются. Токен воркера создаётся заново при каждом запуске и нигде не хранится.
+Используются только три секрета GitHub (Settings → Secrets and variables → Actions): `GEN_VAST_API_KEY`, `GEMINI1…GEMINI10` (10 ключей из разных проектов Google Cloud, общий пул), `HF_TOKEN`. Они передаются в шаги workflow через переменные окружения и нигде не печатаются. Токен воркера создаётся заново при каждом запуске и нигде не хранится.
 
 ## Превью из prompts.txt
 
