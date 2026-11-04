@@ -625,6 +625,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         # версия CUDA драйвера и скорость диска из конфига (ключи min_cuda_max, min_disk_bw_mbps)
         min_cuda_max=float(cfg.min_cuda_max),
         min_disk_bw_mbps=float(cfg.min_disk_bw_mbps),
+        # страны, предложения из которых исключаются (ключ exclude_countries)
+        exclude_countries=list(cfg.exclude_countries),
     )
 
     # превью: ошибка входа до аренды карт (тот же проверяющий код, что в check)

@@ -103,6 +103,8 @@ class Config:
     max_inet_price_per_tb: float = _rule(gt=0)
     min_cuda_max: float = _rule(ge=0)
     min_disk_bw_mbps: float = _rule(ge=0)
+    # Исключаемые страны предложений (названия или коды). Пустой список = не исключать ничего.
+    exclude_countries: list[str] = _rule()
     max_cards: int = _rule(ge=1)
     budget_limit_usd: float = _rule(gt=0)
     min_balance_usd: float = _rule(ge=0)

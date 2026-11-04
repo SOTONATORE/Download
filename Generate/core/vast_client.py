@@ -59,6 +59,9 @@ _REJECT_LABELS = (
     ("disk_bw_unknown", "скорость диска не разобрана"),
     ("inet_price", "цена трафика выше максимума"),
     ("inet_price_unknown", "цена трафика не разобрана"),
+    ("country", "страна исключена"),
+    # страна не разобрана: предложение НЕ отбрасывается, счётчик информационный (см. search_offers)
+    ("country_unknown", "страна не разобрана"),
 )
 
 # Пути API Vast.ai (статус каждого: SPEC 8.3, блок «Эндпоинты Vast»).
@@ -87,6 +90,16 @@ CUDA_MAX_FIELD = "cuda_max_good"
 # Скорость чтения диска хоста. UNVERIFIED по единице: предполагается МБ/с (подтверждено в пробе: поле есть в 53 из 53).
 # Не читается — предложение отбрасывается. Поля nw_disk_* не используются (в пробе null).
 DISK_BW_FIELD = "disk_bw"
+# Страна предложения: строка «Регион, КОД», например «California, US». Подтверждено в пробе: поле есть в 41 из 41.
+# Пустой регион допустим («, CN»). Поле нет или не читается — предложение НЕ отбрасывается (см. _check_offer).
+COUNTRY_FIELD = "geolocation"
+# Известные названия стран для списка exclude_countries → код. Словарь намеренно маленький;
+# список обязан содержать только эти названия (или коды ISO), иначе сравнивается только строка целиком.
+# Vietnam/Viet Nam — UNVERIFIED: в пробе не встречалось предложение из Вьетнама.
+COUNTRY_NAME_CODES = {
+    "vietnam": "VN",
+    "viet nam": "VN",
+}
 # Текст статуса экземпляра (ошибка рантайма при неудачном старте, SPEC 8.2).
 # UNVERIFIED: имя поля не найдено ни в репозитории, ни в производственном логе; официальный
 # vast.py недоступен (403 политики egress, 13.10.2026). Поля нет или значение не строка:
@@ -385,6 +398,8 @@ class OfferFilter:
     min_cuda_max: float = 0.0
     # Минимальная скорость чтения диска, МБ/с (disk_bw); 0 = не проверять. Проверка клиентская. UNVERIFIED по единице.
     min_disk_bw_mbps: float = 0.0
+    # Исключаемые страны: названия (например «Vietnam») или коды («VN»); пустой список = ничего не исключать.
+    exclude_countries: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -444,6 +459,41 @@ def _to_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_country(value: Any) -> Optional[tuple[str, str]]:
+    """Разбор поля geolocation «Регион, КОД»: (строка целиком в нижнем регистре, код в верхнем) или None.
+
+    Делим по ПОСЛЕДНЕЙ запятой: часть после неё — код страны, часть до — регион (может быть пустой).
+    Пустой код или отсутствие запятой — не разобрано (None). Значения в лог не выводятся.
+    """
+    if not isinstance(value, str) or "," not in value:
+        return None
+    _region, _sep, code = value.rpartition(",")
+    code = code.strip().upper()
+    if not code:
+        return None
+    return value.strip().lower(), code
+
+
+def _country_excluded(country: tuple[str, str], excluded: list[str]) -> bool:
+    """True, если страна попадает в список исключений.
+
+    Два правила (любое): код страны совпадает с кодом из списка либо с кодом, который дан названием
+    по COUNTRY_NAME_CODES; либо вся строка geolocation (в нижнем регистре) содержит название из списка.
+    """
+    text, code = country
+    for entry in excluded:
+        name = entry.strip().lower()
+        if not name:
+            continue
+        if code == entry.strip().upper():
+            return True
+        if COUNTRY_NAME_CODES.get(name) == code:
+            return True
+        if name in text:
+            return True
+    return False
 
 
 def _to_price_or_none(value: Any) -> Optional[float]:
@@ -715,11 +765,20 @@ class VastClient:
         rejected = {key: 0 for key, _label in _REJECT_LABELS}
         for b in bundles:
             reason, offer = self._check_offer(b, filters)
+            if reason == "country_unknown":
+                # не отбрасывается: предложение остаётся в выборке, в счётчик попадает отдельно
+                rejected[reason] += 1
+                result.append(offer)
+                continue
             if reason is not None:
                 rejected[reason] += 1
                 continue
             result.append(offer)
         result.sort(key=lambda o: o.price_per_hr)
+        if rejected["country_unknown"] and filters.exclude_countries:
+            # одна строка предупреждения за запуск: без значения поля, только число предложений
+            log.warning("Страна предложения не разобрана у %d предложений: они оставлены в выборке.",
+                        rejected["country_unknown"], extra=_console_extra())
         parts = ", ".join(f"{label} {rejected[key]}" for key, label in _REJECT_LABELS)
         log.info("Поиск предложений Vast: получено %d, отброшено: %s; подходит %d.",
                  len(bundles), parts, len(result), extra=_console_extra())
@@ -767,6 +826,14 @@ class VastClient:
                 return "disk_bw_unknown", None
             if offer.disk_bw_mbps < filters.min_disk_bw_mbps:
                 return "disk_bw", None
+        # страна предложения: исключаемые страны (названия и коды). Поле не прочитано — предложение
+        # НЕ отбрасывается, а учитывается в счётчике «страна не разобрана» (см. search_offers)
+        if filters.exclude_countries:
+            country = _parse_country(b.get(COUNTRY_FIELD))
+            if country is None:
+                return "country_unknown", offer
+            if _country_excluded(country, filters.exclude_countries):
+                return "country", None
         # Цена трафика в обе стороны. Нечитаемая цена отбрасывается (fail-closed): предложение
         # без цены нельзя признать подходящим. Серверного фильтра по полю нет: имя в живом ответе
         # не подтверждено (UNVERIFIED).
