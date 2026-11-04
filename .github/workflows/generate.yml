@@ -350,6 +350,10 @@ jobs:
           # Строки, не начинающие запись, относятся к предыдущей записи (многострочное тело ответа).
           RECORD_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?\[[A-Z]+\] ")
           RAW_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?(?:\[[A-Z]+\] )?(?:Запрос Vast #|Ответ Vast #)")
+          # Группа лога воркера (print_worker_group): строки между маркерами и сами маркеры в сводку не идут;
+          # в консоли и в журнале они остаются. Маркеры распознаются только в начале строки.
+          GROUP_OPEN = "::group::"
+          GROUP_CLOSE = "::endgroup::"
 
           summary = None
           try:
@@ -358,12 +362,19 @@ jobs:
               sys.stderr.write("Сводка: файл итогов не открыт, в «Итоги генерации» ничего не попадёт\n")
 
           raw = False
+          in_group = False
           for line in sys.stdin:
-              if RECORD_RE.match(line):
-                  raw = RAW_RE.match(line) is not None
+              if line.startswith(GROUP_OPEN) or line.startswith(GROUP_CLOSE):
+                  in_group = line.startswith(GROUP_OPEN)
+                  raw = False
+                  skip = True  # сам маркер группы в сводку не пишем
+              else:
+                  skip = in_group
+                  if not in_group and RECORD_RE.match(line):
+                      raw = RAW_RE.match(line) is not None
               sys.stdout.write(line)
               sys.stdout.flush()
-              if summary is not None and not raw:
+              if summary is not None and not raw and not skip:
                   try:
                       summary.write(line)
                       summary.flush()
