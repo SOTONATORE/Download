@@ -1033,6 +1033,7 @@ class Orchestrator:
         self._video_queue: deque = deque()
         self._photo_queue: deque = deque()   # очередь фото (пуста без photo_profile)
         self._photo_nums: set = set()        # номера фото из распределения (STEP 3b)
+        self._prompt_abort: Optional[str] = None  # жёсткая ошибка промптов («волна, сегмент N»): аренды не будет
         self._role_plan = None               # роли первых карт запуска (plan_card_roles), один раз
         self._plan_idx = 0
         self._split = None  # результат распределения видео/фото (STEP 7, блок A): только журнал и состояние запуска
@@ -1472,7 +1473,12 @@ class Orchestrator:
         try:
             try:
                 ready = self._generate(needed) if needed else []
-                self._work(ready)
+                # жёсткая ошибка любой волны промптов: решение после обеих волн, до _work; аренды и рендера нет
+                if self._prompt_abort is not None:
+                    log.error("Прогон остановлен до аренды карт: ошибка генерации промптов (%s). "
+                              "Готовые промпты сохранены, карты не арендованы.", self._prompt_abort)
+                else:
+                    self._work(ready)
             finally:
                 self._cleanup()  # F1 (1)-(2): логи и JSON с лимитом времени, затем уничтожение по метке
         finally:
@@ -1791,11 +1797,13 @@ class Orchestrator:
         self._state = run.state
         self._prompts = self._state.setdefault("prompts", {})
         ready = run.ready
+        self._prompt_abort = run.abort
         for n in needed:
             if n not in ready:
                 self._failed.add(n)
                 self._mark(n, "failed")
-        if len(ready) < len(needed):
+        # предупреждение только для нехватки без жёсткой ошибки; при жёсткой ошибке итог — строка об остановке
+        if run.abort is None and len(ready) < len(needed):
             log.warning("Без готового промпта осталось клипов: %d.", len(needed) - len(ready))
         return ready
 
