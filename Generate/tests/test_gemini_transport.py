@@ -17,6 +17,8 @@ SECRET = "TESTKEY-TRANSPORT-98765"
 LEASE_NAME = "GEMINI" + "1"          # имя переменной собрано из частей (структурный тест SPEC 0.1)
 PER_DAY_QUOTA = "GenerateRequestsPerDayPerProjectPerModel"
 PER_MINUTE_QUOTA = "GenerateRequestsPerMinutePerProjectPerModel"
+MODEL = "m"                          # модель, которую передаёт _call; квота считается по паре (ключ, модель)
+POOL_LIMITS = dict(rpm_limit=15, tpm_limit=250_000, rpd_limit=500)   # обязательные лимиты RealTransport
 
 
 @pytest.fixture(autouse=True)
@@ -61,23 +63,23 @@ class FakePool:
         self.key = key
         self.exhausted = exhausted
         self.acquired = 0
-        self.released = []   # (имя ключа, исход, retry_after)
+        self.released = []   # (имя ключа, исход, модель, retry_after)
 
-    def acquire(self, timeout=None, tokens=0):
+    def acquire(self, model, tokens=0, timeout=None):
         if self.exhausted:
             raise gpool.AllKeysExhaustedError("Все ключи Gemini исчерпали суточную квоту до конца суток.")
         self.acquired += 1
         return gpool.KeyLease(name=LEASE_NAME, api_key=self.key)
 
-    def release(self, lease, outcome, retry_after=None):
-        self.released.append((lease.name, outcome, retry_after))
+    def release(self, lease, outcome, model, retry_after=None):
+        self.released.append((lease.name, outcome, model, retry_after))
 
 
 def _call(reply, pool=None):
     """Один вызов generate_json через RealTransport; возвращает (транспорт-пул, клиент, результат/исключение)."""
     pool = pool or FakePool()
     client = FakeClient(reply)
-    transport = gp.RealTransport(pool=pool, client=client)
+    transport = gp.RealTransport(pool=pool, client=client, **POOL_LIMITS)
     try:
         out = transport.generate_json("m", "SYS", "USR", {"type": "array"})
         return pool, client, out, None
@@ -102,7 +104,7 @@ def _error_body(code, quota_id=None, retry_delay=None, echo=None):
 def test_200_gives_success_and_releases_lease():
     pool, client, out, err = _call(FakeResponse(200, {"candidates": [{"content": {"parts": [{"text": "[]"}]}}]}))
     assert err is None and out == "[]"
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.SUCCESS, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.SUCCESS, MODEL, None)]
     assert pool.acquired == 1
     assert client.posts[0]["headers"][gp.API_KEY_HEADER] == SECRET
     assert SECRET not in client.posts[0]["url"]
@@ -112,7 +114,7 @@ def test_200_gives_success_and_releases_lease():
 
 def test_429_with_perday_quota_gives_daily_quota():
     pool, _, _, err = _call(FakeResponse(429, _error_body("RESOURCE_EXHAUSTED", quota_id=PER_DAY_QUOTA)))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.DAILY_QUOTA, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.DAILY_QUOTA, MODEL, None)]
     assert err.status == 429 and err.daily_quota is True
 
 
@@ -125,18 +127,18 @@ def test_429_perday_match_ignores_case():
 def test_429_without_perday_gives_rate_limited_with_retry_after_header():
     pool, _, _, err = _call(FakeResponse(429, _error_body("RESOURCE_EXHAUSTED", quota_id=PER_MINUTE_QUOTA),
                                          headers={"Retry-After": "12"}))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, 12.0)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, MODEL, 12.0)]
     assert err.status == 429 and err.daily_quota is False
 
 
 def test_429_without_retry_after_header_passes_none():
     pool, _, _, _ = _call(FakeResponse(429, _error_body("RESOURCE_EXHAUSTED")))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, MODEL, None)]
 
 
 def test_429_with_unparsable_retry_after_passes_none():
     pool, _, _, _ = _call(FakeResponse(429, None, headers={"Retry-After": "Wed, 04 Nov 2026 20:00:00 GMT"}))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.RATE_LIMITED, MODEL, None)]
 
 
 # ------------------------------------------------------------------ 500, 503, 504 и сеть: без штрафа
@@ -144,13 +146,13 @@ def test_429_with_unparsable_retry_after_passes_none():
 @pytest.mark.parametrize("status", [500, 503, 504])
 def test_5xx_gives_server_error_without_penalty(status):
     pool, _, _, err = _call(FakeResponse(status, _error_body("UNAVAILABLE")))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.SERVER_ERROR, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.SERVER_ERROR, MODEL, None)]
     assert err.status == status and err.daily_quota is False
 
 
 def test_network_error_gives_network_error_without_penalty():
     pool, _, _, err = _call(httpx.ConnectError("обрыв соединения"))
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.NETWORK_ERROR, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.NETWORK_ERROR, MODEL, None)]
     assert err.status is None and "ConnectError" in str(err)
 
 
@@ -160,7 +162,7 @@ def test_400_raises_runtime_error_and_releases_without_penalty():
     pool, _, _, err = _call(FakeResponse(400, _error_body("INVALID_ARGUMENT")))
     assert err.status == 400 and err.code == "INVALID_ARGUMENT" and err.daily_quota is False
     # ключ не виноват: исход не штрафует ключ (ни пауза, ни суточная блокировка)
-    assert pool.released == [(LEASE_NAME, gpool.Outcome.SERVER_ERROR, None)]
+    assert pool.released == [(LEASE_NAME, gpool.Outcome.SERVER_ERROR, MODEL, None)]
 
 
 # ------------------------------------------------------------------ ключ нигде не виден
@@ -189,7 +191,7 @@ def test_key_absent_from_exception_text_and_logs(caplog):
 def test_all_keys_exhausted_gives_daily_quota_error_without_post():
     pool = FakePool(exhausted=True)
     client = FakeClient(FakeResponse(200, {}))
-    transport = gp.RealTransport(pool=pool, client=client)
+    transport = gp.RealTransport(pool=pool, client=client, **POOL_LIMITS)
     with pytest.raises(gp.GeminiRuntimeError) as ei:
         transport.generate_json("m", "s", "u", {})
     assert ei.value.daily_quota is True and ei.value.status == 429
@@ -199,7 +201,7 @@ def test_all_keys_exhausted_gives_daily_quota_error_without_post():
 def test_managed_transport_reports_daily_quota_message_when_all_keys_exhausted():
     """Цепочка моделей при полном исчерпании: та же русская формулировка, что и раньше."""
     pool = FakePool(exhausted=True)
-    transport = gp.RealTransport(pool=pool, client=FakeClient(FakeResponse(200, {})))
+    transport = gp.RealTransport(pool=pool, client=FakeClient(FakeResponse(200, {})), **POOL_LIMITS)
     managed = ManagedTransport(transport, ("model-a", "model-b"), sleep=lambda s: None)
     with pytest.raises(gp.GeminiRuntimeError) as ei:
         managed.generate_json("", "s", "u", {})

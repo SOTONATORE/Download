@@ -840,11 +840,7 @@ def _safe_error_fields(response: Any) -> tuple:
         daily = True
     return code, daily, retry
 
-# Лимиты пула по умолчанию: совпадают с config.default.yaml (gemini_rpm_limit и т.д.).
-# Значения из конфига в RealTransport не передаются (cli создаёт транспорт без аргументов).
-DEFAULT_POOL_RPM = 15
-DEFAULT_POOL_TPM = 250_000
-DEFAULT_POOL_RPD = 500
+# Лимиты RPM, TPM и RPD задаёт вызывающий код из конфига (cli: gemini_rpm_limit и т.д.); значений по умолчанию нет.
 # Оценка токенов для TPM: те же константы, что в gemini_orchestrator (CHARS_PER_TOKEN, output_reserve_tokens).
 POOL_CHARS_PER_TOKEN = 3
 POOL_OUTPUT_RESERVE_TOKENS = 2000
@@ -876,8 +872,8 @@ class RealTransport:
 
     def __init__(self, *, pool: Any = None, timeout: float = 120.0, client: Any = None,
                  base_url: str = API_BASE_URL, environ: Any = None,
-                 rpm_limit: int = DEFAULT_POOL_RPM, tpm_limit: int = DEFAULT_POOL_TPM,
-                 rpd_limit: int = DEFAULT_POOL_RPD):
+                 rpm_limit: int, tpm_limit: int, rpd_limit: int):
+        # rpm_limit, tpm_limit, rpd_limit обязательны: без них лимиты конфига не дойдут до пула
         try:
             import httpx
         except ImportError:
@@ -922,7 +918,7 @@ class RealTransport:
         tokens = min((len(system) + len(user)) // POOL_CHARS_PER_TOKEN + 1 + POOL_OUTPUT_RESERVE_TOKENS,
                      self._tpm)
         try:
-            lease = self._pool.acquire(tokens=tokens)
+            lease = self._pool.acquire(model, tokens=tokens)
         except gpool.AllKeysExhaustedError:
             # все ключи исчерпали суточную квоту: признак daily_quota, чтобы ManagedTransport сменил модель
             # или остановил прогон (как раньше, без временного сбоя)
@@ -935,33 +931,38 @@ class RealTransport:
             resp = self._client.post(url, headers=headers, json=body)
         except self._httpx.HTTPError as e:
             # ключ не виноват: состояние не меняется; в сообщение идёт только имя класса ошибки
-            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR)
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR, model)
             raise GeminiRuntimeError(
                 f"Сбой сети при обращении к Gemini ({type(e).__name__}).") from None
         except Exception as e:
             # любой сбой до ответа тоже без штрафа ключу
-            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR)
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR, model)
             raise GeminiRuntimeError(
                 f"Непредвиденный сбой при обращении к Gemini ({type(e).__name__}).") from None
 
         status = resp.status_code
         if status == 200:
-            self._pool.release(lease, gpool.Outcome.SUCCESS)
+            self._pool.release(lease, gpool.Outcome.SUCCESS, model)
         else:
             code, daily, retry = _safe_error_fields(resp)
             if status == 429:
                 if daily:
-                    self._pool.release(lease, gpool.Outcome.DAILY_QUOTA)
+                    self._pool.release(lease, gpool.Outcome.DAILY_QUOTA, model)
                 else:
-                    self._pool.release(lease, gpool.Outcome.RATE_LIMITED,
+                    self._pool.release(lease, gpool.Outcome.RATE_LIMITED, model,
                                        retry_after=_retry_after_header(resp))
             else:
                 # 500, 503, 504 и прочие ошибки (в том числе 4xx): ключ не виноват, состояние не меняется
-                self._pool.release(lease, gpool.Outcome.SERVER_ERROR)
+                self._pool.release(lease, gpool.Outcome.SERVER_ERROR, model)
             extra = f", код {code}" if code else ""
-            raise GeminiRuntimeError(
+            err = GeminiRuntimeError(
                 f"Gemini вернул ошибку: HTTP {status}{extra}.",
                 status=status, code=code, daily_quota=daily, retry_after=retry)
+            if status == 429 and daily:
+                # квота исчерпана только у этого ключа для этой модели: пул может выдать другой ключ.
+                # ManagedTransport по этому признаку повторит модель, а не переключит её.
+                err.key_exhausted_only = True
+            raise err
         try:
             data = resp.json()
             parts = data["candidates"][0]["content"]["parts"]
