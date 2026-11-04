@@ -338,8 +338,17 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
             }
         state["model"] = managed.active_model
         state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-        atomic_write_json(prompts_path, state)
-        log.info("Сохранён батч: %d промптов, всего в файле: %d.", len(results), len(prompts))
+        # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
+        log.info("Сохранение промптов начато: файл %s, промптов к сохранению: %d.",
+                 prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
+        try:
+            atomic_write_json(prompts_path, state)
+        except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
+            log.warning("Не удалось сохранить промпты в файл %s: %s: %s.",
+                        prompts_path, type(exc).__name__, exc)
+            raise
+        log.info("Промпты сохранены: файл %s, всего в файле: %d.",
+                 prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
 
     gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch)
     return state

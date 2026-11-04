@@ -139,11 +139,11 @@ def test_console_progress_never_printed_without_known_total():
     clock.now += 5
     mon.feed([_aria(1000, 1000, 50, file=a_key)])                    # A 100%, B всё ещё без размера
     assert [pct for kind, pct in consoles if kind == "progress"] == []
-    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатается шаг 70% (без повторов)
+    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатаются шаги 10%…100% по порядку, каждый один раз
     mon.feed([_aria(500, 1000, 50, file=VAE_FILE)])
-    assert [pct for kind, pct in consoles if kind == "progress"] == [70]
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70]
     mon.feed([_aria(1000, 1000, 50, file=VAE_FILE)])
-    assert [pct for kind, pct in consoles if kind == "progress"] == [70, 100]
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 
 def test_console_start_once_and_loaded_at_stage_end():
@@ -152,8 +152,8 @@ def test_console_start_once_and_loaded_at_stage_end():
     mon.feed(["[setup] [1/2] Файл успешно загружен: " + NAME + " (1 байт)",
               "[setup] [2/2] Файл успешно загружен: " + VAE_NAME + " (1 байт)",
               "[setup] Все файлы модели LTX-2.5 на месте."])
-    # оба файла полностью на месте: итог 100% печатается один раз до строки «загружены»
-    assert consoles == [("start", 0), ("progress", 100), ("loaded", 0)], consoles
+    # оба файла полностью на месте: шаги 10%…100% печатаются по порядку, каждый один раз, до строки «загружены»
+    assert consoles == [("start", 0)] + [("progress", p) for p in range(10, 101, 10)] + [("loaded", 0)], consoles
 
 
 def test_completion_total_is_sum_of_final_file_sizes():
@@ -632,6 +632,142 @@ def test_monitor_writes_model_name_in_every_weight_line():
 
 
 # --- запуск как скрипт ----------------------------------------------------------------
+
+# --- шаги процентов: перескок, повторы, время строки ------------------------------
+
+def test_console_jump_0_to_70_prints_every_crossed_step_once_in_order():
+    """Один замер с 70% печатает 10..70 по порядку, каждый один раз (раньше печатался только 70)."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70]
+
+
+def test_console_second_sample_at_100_prints_80_90_100_once_each():
+    """После 70% следующий замер 100% даёт 80, 90, 100 и ничего лишнего."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    clock.now += 1
+    mon.feed([_aria(1000, 1000, 1)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    assert len(pcts) == len(set(pcts))
+
+
+def test_console_repeated_samples_at_same_percent_print_nothing_new():
+    """Повторные замеры того же процента новых строк не дают."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(700, 1000, 1)])
+    before = list(consoles)
+    for _ in range(3):
+        clock.now += 1
+        mon.feed([_aria(705, 1000, 1)])                # всё ещё 70%
+    assert consoles == before
+
+
+def test_console_unknown_total_prints_no_progress_at_all():
+    """Без известного итога процентов нет, даже при большом проценте одного файла."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(NAME, 1, 2), _start(VAE_NAME, 2, 2)])   # размер ни одного файла не известен
+    clock.now += 5
+    mon.feed([_aria(900, 1000, 50, file=NAME.rsplit("/", 1)[-1])])
+    assert [kind for kind, _ in consoles if kind == "progress"] == []
+
+
+def test_progress_time_is_card_time_when_summary_is_in_same_pull():
+    """Если в той же выгрузке есть сводка aria2, время строки шага — время карты."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(100, 1000, 1), "*** Download Progress Summary as of 11/04 13:50:07 ***"])
+    assert mon.progress_time_text == "время карты: 11/04 13:50:07"
+
+
+def test_progress_time_is_receipt_time_when_no_summary_in_pull():
+    """Без сводки в выгрузке время строки — «время получения» (не время карты)."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(100, 1000, 1)])
+    assert mon.progress_time_text.startswith("время получения: ")
+
+
+# --- общий процент этапа (новые тесты; существующие не меняются) ---------------
+
+AE_NAME = "vae/ae.safetensors"
+AE_FILE = "ae.safetensors"
+Z_NAME = "diffusion_models/z_image_turbo_bf16.safetensors"
+Z_FILE = "z_image_turbo_bf16.safetensors"
+Q_NAME = "text_encoders/qwen_3_4b.safetensors"
+Q_FILE = "qwen_3_4b.safetensors"
+
+
+def test_owner_sample_ae_z_qwen_prints_10_and_no_20():
+    """Образец владельца: ae 318 из 319, z 1229 из 11264, qwen 733 из 7578 МиБ.
+
+    Сумма: 2280 из 19161 МиБ = 11%. Значит печатается шаг 10%, а шага 20% быть не должно.
+    """
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 3), _start(Z_NAME, 2, 3), _start(Q_NAME, 3, 3)])
+    clock.now += 10
+    mon.feed([_aria(318, 319, 50, file=AE_FILE),
+              _aria(1229, 11264, 300, file=Z_FILE),
+              _aria(733, 7578, 200, file=Q_FILE)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10], pcts
+    assert 20 not in pcts
+
+
+def test_jump_from_0_to_40_prints_10_20_30_40_once_each():
+    """Скачок с 0% до 40% одним замером печатает 10, 20, 30, 40 по одному разу; на 0% шага нет."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(0, 1000, 1)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == []
+    clock.now += 1
+    mon.feed([_aria(400, 1000, 1)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40], pcts
+
+
+def test_step_within_one_response_uses_values_at_its_end_and_prints_once():
+    """Шаг печатается один раз на выгрузку по её последним значениям, даже если done-событие стоит посреди неё.
+
+    Файл A: 1000 МиБ, B: 1000 МиБ. В выгрузке A доходит до 50%, потом пришла строка «загружен» (A — 1000 МиБ),
+    B — 100 МиБ. Итог: 1100 из 2000 = 55%, шаги 10..50 по одному разу.
+    """
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 2), _start(Q_NAME, 2, 2)])
+    clock.now += 5
+    mon.feed([_aria(500, 1000, 50, file=AE_FILE),
+              "[setup] [1/2] Файл успешно загружен: " + AE_NAME + " (1048576000 байт)",
+              _aria(100, 1000, 50, file=Q_FILE)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40, 50], pcts
+    assert len(pcts) == len(set(pcts))
+
+
+def test_raw_aria2_lines_never_reach_console_callback():
+    """Сырые строки aria2 («[file=…] [#…», сводка, «FILE:») до консоли не доходят: в консоль идут только вид и процент."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 2), _start(Q_NAME, 2, 2)])
+    clock.now += 5
+    mon.feed([
+        "*** Download Progress Summary as of Wed Nov  4 12:05:16 2026 ***",
+        _aria(318, 319, 50, file=AE_FILE),
+        _aria(733, 7578, 200, file=Q_FILE),
+        "[file=" + Q_FILE + "] FILE: /opt/ComfyUI/models/text_encoders/" + Q_FILE,
+    ])
+    assert {kind for kind, _ in consoles} <= {"start", "progress", "loaded"}, consoles
+    assert all(isinstance(pct, int) for _, pct in consoles), consoles
+    assert not any("[#" in text or "[file=" in text for text in logs), logs
+
 
 def _run_all() -> int:
     failed = 0

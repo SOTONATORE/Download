@@ -139,8 +139,11 @@ VERIFY_FIELD_MISSING = "поля verified в предложениях нет"
 # Поиск полей-кандидатов (UNVERIFIED): подстроки в именах ключей предложения, без учёта регистра.
 # Подстрока даёт и лишние совпадения («read» есть в «ready», «bw» — в «pcie_bw»); список печатается
 # целиком, чтобы владелец видел точные имена. Имена с признаками секретов не печатаются (_is_sensitive).
+# Маркеры geo, country, location: поля страны и местоположения предложения (UNVERIFIED). Ищутся в том же
+# сыром ответе без фильтра; для них печатаются присутствие (есть у N из M) и сырые значения первых предложений.
 DISCOVERY_MARKERS = (
     "verif", "cuda", "disk", "bw", "read", "write", "speed", "ssd", "nvme", "perf", "bandwidth",
+    "geo", "country", "location",
 )
 CUDA_MARKERS = ("cuda",)
 DISK_MARKERS = ("disk", "bw", "read", "write")

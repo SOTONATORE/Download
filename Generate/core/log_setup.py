@@ -40,6 +40,12 @@ KEY_EVENT_EXTRA = {KEY_EVENT_ATTR: True}
 # отметка записи, которую консоль не выводит, а файл пишет (повтор предупреждения карты, см. _warn_card)
 CONSOLE_SKIP_ATTR = "console_skip"
 CONSOLE_SKIP_EXTRA = {CONSOLE_SKIP_ATTR: True}
+# отметка строки лога воркера: файл пишет её с префиксом «[карта N]», консоль печатает группой (print_worker_group)
+WORKER_LOG_ATTR = "worker_line"
+WORKER_LOG_EXTRA = {WORKER_LOG_ATTR: True}
+# маркеры сворачиваемой группы GitHub Actions: распознаются только в начале строки, без времени и уровня
+WORKER_GROUP_OPEN = "::group::"
+WORKER_GROUP_CLOSE = "::endgroup::"
 # предупреждения, которые в консоль не выводятся (проверка воркера /health: каждая попытка даёт строку)
 CONSOLE_DETAIL_RE = re.compile(r"проверка /health")
 # Режим маскирования (SPEC 0.1, п. 14; решение владельца 18.10.2026).
@@ -335,6 +341,8 @@ class ConsoleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if getattr(record, CONSOLE_SKIP_ATTR, False):
             return False
+        if getattr(record, WORKER_LOG_ATTR, False):  # строки карты печатает print_worker_group группами
+            return False
         if record.levelno >= logging.WARNING:
             try:
                 message = record.getMessage()
@@ -355,6 +363,31 @@ class JournalFilter(logging.Filter):
         except Exception:  # noqa: BLE001
             return True
         return not message.startswith(JOURNAL_PREFIXES)
+
+
+def print_worker_group(card_no: int, lines, stream=None) -> None:
+    """Печатает строки лога воркера одной сворачиваемой группой GitHub Actions.
+
+    Маркеры пишутся прямо в поток, мимо логгера: без отметки времени и уровня (GitHub читает их только
+    в начале строки) и мимо обработчиков журнала, поэтому в debug.log их нет. Строки печатаются без
+    префикса «[карта N]» (он в заголовке группы). Строка, начинающаяся с «::», пишется с пробелом
+    впереди, чтобы GitHub не принял её за команду workflow. Пустой список: ничего не печатается.
+    """
+    if not lines:
+        return
+    out = stream if stream is not None else sys.stderr
+    title = mask_text(f"карта {card_no}: лог воркера (строк: {len(lines)})")
+    try:
+        out.write(f"{WORKER_GROUP_OPEN}{title}\n")
+        for line in lines:
+            text = mask_text(line)  # строки уже замаскированы в оркестраторе; здесь маскируем ещё раз
+            if text.startswith("::"):
+                text = " " + text
+            out.write(text + "\n")
+        out.write(WORKER_GROUP_CLOSE + "\n")
+        out.flush()
+    except OSError:  # вывод не должен ронять уборку карт
+        pass
 
 
 def setup_logging(level: str, artifact_dir: Optional[str]) -> tuple[list[logging.Handler], Optional[str]]:

@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Callable, Optional
 
 try:  # пакетный и «плоский» импорт; общие константы — в model_constants (без цикла)
@@ -80,6 +81,8 @@ ARIA_IGNORE_RE = re.compile(
     r"Redirecting to |Download Progress Summary|Download Results|^FILE: "
     r"|^gid\s*\|\s*stat\s*\||^[0-9a-f]+\|(?:OK|ERR|INPR|RM)\b|^=+"
 )
+# «*** Download Progress Summary as of <время> ***» в логе карты: время самой карты (не времени получения)
+SUMMARY_TIME_RE = re.compile(r"Download Progress Summary as of (?P<t>.+?)\s*(?:\*+\s*)?$")
 ARIA_MARK = "[#"
 
 # адрес с query-частью: «https://host/path?...» -> «https://host/path»
@@ -229,6 +232,16 @@ class _FileState:
     recognised: int = 0          # распознанных строк прогресса по файлу
 
 
+def _summary_time(lines) -> Optional[str]:
+    """Время последней строки сводки aria2 в выгрузке; None, если сводки в этой выгрузке нет."""
+    found = None
+    for line in lines:
+        m = SUMMARY_TIME_RE.search(line)
+        if m:
+            found = m.group("t")
+    return found
+
+
 @dataclass
 class WeightsMonitor:
     clock: Callable[[], float]
@@ -261,6 +274,8 @@ class WeightsMonitor:
     window_note_logged: bool = False
     reason_sent: bool = False                    # причину снятия уже отдали: повторов нет
     console_step: int = 0                        # последний напечатанный шаг процентов
+    progress_time_text: str = ""                # время строки шага: «время карты: …» или «время получения: …»
+    _card_time: Optional[str] = None             # время из сводки aria2 текущей выгрузки (время карты), иначе None
     start_noted: bool = False
     unrecognised: int = 0                        # строк «[#» с «%», которые не разобрались
     _unknown_warned: bool = False
@@ -273,15 +288,20 @@ class WeightsMonitor:
     act_last_t: Optional[float] = None                # время последнего замера этапа
     act_last_bytes: float = 0.0                       # байт в последнем замере
     complete_noted: bool = False                      # строка «этап завершён» уже записана
+    _loaded_due: bool = False                         # строку «загружены» отдать консоли после шага процентов выгрузки
 
     def feed(self, lines) -> Optional[str]:
         """Обрабатывает одну выгрузку (ответ GET /logs) по порядку. Возвращает причину снятия (первую) или None.
 
         Вся выгрузка имеет одну отметку времени. Строки прогресса копятся по файлам, и из каждого файла
         остаётся последняя; они применяются перед событиями файла (начало, завершение, ошибка) и в конце выгрузки.
+        Шаг процентов для консоли считается один раз на выгрузку, в конце, по последним значениям файлов:
+        промежуточные состояния внутри выгрузки (между событиями) в консоль не попадают.
         """
         now = self.clock()
         self._pull_sampled = False
+        lines = list(lines)
+        self._card_time = _summary_time(lines)
         for line in lines:
             ev = parse_line(line)
             if ev.kind == "progress":
@@ -297,6 +317,12 @@ class WeightsMonitor:
             if reason:
                 return reason
         reason = self._flush(now)
+        # один шаг процентов на выгрузку: по последним значениям каждого файла этой выгрузки и её времени карты
+        self._update_percent()
+        # «загружены» — после шага 100%, если он есть в этой выгрузке
+        if self._loaded_due:
+            self._loaded_due = False
+            self._console("loaded")
         self._check_complete()
         return reason
 
@@ -403,7 +429,7 @@ class WeightsMonitor:
             self.active.pop(key, None)
             self.last_change = now
             self._log(f"Веса: {ev.name} загружен ({ev.total_bytes / MIB:.1f} МиБ).")
-            self._update_percent()
+            # шаг процентов здесь не считается: его даёт конец выгрузки (см. feed)
             return None
         if ev.kind == "aria_done":
             # aria2 сообщил о завершении файла: снимаем его с контроля зависания и считаем полным.
@@ -413,7 +439,7 @@ class WeightsMonitor:
                 state.done_bytes = state.total_bytes
             self.active.pop(ev.name, None)
             self.last_change = now
-            self._update_percent()
+            # шаг процентов здесь не считается: его даёт конец выгрузки (см. feed)
             return None
         if ev.kind == "error":
             self.active.pop(_key(ev.name), None)
@@ -424,7 +450,8 @@ class WeightsMonitor:
             self.stage_done = True
             self._log(f"Веса: этап загрузки весов завершён; итого {self._final_total() / MIB:.1f} МиБ; "
                      f"строк прогресса не распознано: {self.unrecognised}.")
-            self._console("loaded")
+            # консоль получит «загружены» в конце выгрузки, после шага 100% (см. feed)
+            self._loaded_due = True
             return None
         if ev.kind == "aria_unknown":
             self.unrecognised += 1
@@ -479,7 +506,6 @@ class WeightsMonitor:
             self._active_sample(now)
         if changed:
             self._log(self._status_text(now))
-        self._update_percent()
         return self._check_speed(now)
 
     # --- агрегат этапа ---------------------------------------------------------
@@ -550,16 +576,29 @@ class WeightsMonitor:
                 f"средняя {avg_text}, {left_text}.")
 
     def _update_percent(self) -> None:
-        """Шаги процентов для консоли: по одной строке на каждый 10%-шаг, только при известном итоге."""
+        """Шаги процентов для консоли: каждый 10%-шаг печатается один раз, по возрастанию; только при известном итоге.
+
+        Общий процент — сумма полученных байт всех файлов этапа, делённая на сумму их размеров, в одной единице (байты).
+        Вызывается один раз на выгрузку, в конце feed: значения каждого файла — последние из этой выгрузки.
+        Если процент перескочил сразу несколько шагов (между двумя выгрузками), печатаются все пересечённые шаги.
+        """
         total = self._agg_total()
         if not total:
             return
         pct = min(100, int(self._agg_done() * 100 // total))
         step_pct = self.progress_step_pct
         step = (pct // step_pct) * step_pct
-        if step > 0 and step > self.console_step:
-            self.console_step = step
-            self._console("progress", step)
+        # время строки: время карты из сводки aria2 той же выгрузки, если она есть;
+        # иначе «время получения» — момент, когда этот замер получен монитором (времени карты здесь нет)
+        if self._card_time:
+            time_text = f"время карты: {self._card_time}"
+        else:
+            time_text = f"время получения: {datetime.now():%H:%M:%S}"
+        # console_step — последний напечатанный шаг; range даёт только шаги выше него и не выше текущего
+        for crossed in range(self.console_step + step_pct, step + 1, step_pct):
+            self.console_step = crossed
+            self.progress_time_text = time_text
+            self._console("progress", crossed)
 
     # --- правила ---------------------------------------------------------------
 
