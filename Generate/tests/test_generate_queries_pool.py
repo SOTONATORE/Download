@@ -17,8 +17,13 @@ SCRIPT = REPO / "Download" / "generate_queries.py"
 def _load_module():
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
+    # Повторное использование уже загруженного модуля в этой сессии.
+    if "generate_queries_under_test" in sys.modules:
+        return sys.modules["generate_queries_under_test"]
     spec = importlib.util.spec_from_file_location("generate_queries_under_test", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
+    # регистрируем модуль до выполнения: @dataclass ищет модуль класса в sys.modules
+    sys.modules[mod.__name__] = mod
     spec.loader.exec_module(mod)
     return mod
 
