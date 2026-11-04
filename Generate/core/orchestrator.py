@@ -962,7 +962,6 @@ class Orchestrator:
         self._last_heartbeat_tick = -1e9
         self._probe_notes_logged = False
         self._weights_source_noted = False
-        self._weights_start_noted = False   # «Веса ltx25 начало загрузки» печатается один раз за запуск
         self._deadline_sec = job_deadline_min * 60.0
         self._silent_sec = silent_host_timeout_min * 60.0
         # логи Vast при снятии карты без логов воркера (SPEC 8.4): число попыток и пауза из конфига
@@ -1139,16 +1138,15 @@ class Orchestrator:
 
         def console(kind: str, pct: int = 0, _slot=slot) -> None:
             if kind == "start":
-                if self._weights_start_noted:
-                    return
-                self._weights_start_noted = True
-                log.info("Веса %s начало загрузки", model_name, extra=KEY_EVENT_EXTRA)
+                # раз за монитор, то есть раз за карту и этап: флаг start_noted уже стоит в WeightsMonitor
+                log.info("карта %d: Веса %s начало загрузки", _slot.instance_id, model_name,
+                         extra=KEY_EVENT_EXTRA)
             elif kind == "progress":
                 # время строки берёт монитор: «время карты» (сводка aria2) или «время получения»
                 log.info("карта %d: Веса %s %d%% (%s)", _slot.instance_id, model_name, pct,
                          mon.progress_time_text, extra=KEY_EVENT_EXTRA)
             elif kind == "loaded":
-                log.info("Веса %s загружены", model_name, extra=KEY_EVENT_EXTRA)
+                log.info("карта %d: Веса %s загружены", _slot.instance_id, model_name, extra=KEY_EVENT_EXTRA)
 
         mon = wl.WeightsMonitor(
             clock=self.clock, log=emit, speed_check_pct=self.speed_check_at_pct,
