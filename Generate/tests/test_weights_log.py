@@ -697,6 +697,78 @@ def test_progress_time_is_receipt_time_when_no_summary_in_pull():
     assert mon.progress_time_text.startswith("время получения: ")
 
 
+# --- общий процент этапа (новые тесты; существующие не меняются) ---------------
+
+AE_NAME = "vae/ae.safetensors"
+AE_FILE = "ae.safetensors"
+Z_NAME = "diffusion_models/z_image_turbo_bf16.safetensors"
+Z_FILE = "z_image_turbo_bf16.safetensors"
+Q_NAME = "text_encoders/qwen_3_4b.safetensors"
+Q_FILE = "qwen_3_4b.safetensors"
+
+
+def test_owner_sample_ae_z_qwen_prints_10_and_no_20():
+    """Образец владельца: ae 318 из 319, z 1229 из 11264, qwen 733 из 7578 МиБ.
+
+    Сумма: 2280 из 19161 МиБ = 11%. Значит печатается шаг 10%, а шага 20% быть не должно.
+    """
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 3), _start(Z_NAME, 2, 3), _start(Q_NAME, 3, 3)])
+    clock.now += 10
+    mon.feed([_aria(318, 319, 50, file=AE_FILE),
+              _aria(1229, 11264, 300, file=Z_FILE),
+              _aria(733, 7578, 200, file=Q_FILE)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10], pcts
+    assert 20 not in pcts
+
+
+def test_jump_from_0_to_40_prints_10_20_30_40_once_each():
+    """Скачок с 0% до 40% одним замером печатает 10, 20, 30, 40 по одному разу; на 0% шага нет."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(total=1)])
+    clock.now += 1
+    mon.feed([_aria(0, 1000, 1)])
+    assert [pct for kind, pct in consoles if kind == "progress"] == []
+    clock.now += 1
+    mon.feed([_aria(400, 1000, 1)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40], pcts
+
+
+def test_step_within_one_response_uses_values_at_its_end_and_prints_once():
+    """Шаг печатается один раз на выгрузку по её последним значениям, даже если done-событие стоит посреди неё.
+
+    Файл A: 1000 МиБ, B: 1000 МиБ. В выгрузке A доходит до 50%, потом пришла строка «загружен» (A — 1000 МиБ),
+    B — 100 МиБ. Итог: 1100 из 2000 = 55%, шаги 10..50 по одному разу.
+    """
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 2), _start(Q_NAME, 2, 2)])
+    clock.now += 5
+    mon.feed([_aria(500, 1000, 50, file=AE_FILE),
+              "[setup] [1/2] Файл успешно загружен: " + AE_NAME + " (1048576000 байт)",
+              _aria(100, 1000, 50, file=Q_FILE)])
+    pcts = [pct for kind, pct in consoles if kind == "progress"]
+    assert pcts == [10, 20, 30, 40, 50], pcts
+    assert len(pcts) == len(set(pcts))
+
+
+def test_raw_aria2_lines_never_reach_console_callback():
+    """Сырые строки aria2 («[file=…] [#…», сводка, «FILE:») до консоли не доходят: в консоль идут только вид и процент."""
+    mon, clock, logs, consoles = _monitor()
+    mon.feed([_start(AE_NAME, 1, 2), _start(Q_NAME, 2, 2)])
+    clock.now += 5
+    mon.feed([
+        "*** Download Progress Summary as of Wed Nov  4 12:05:16 2026 ***",
+        _aria(318, 319, 50, file=AE_FILE),
+        _aria(733, 7578, 200, file=Q_FILE),
+        "[file=" + Q_FILE + "] FILE: /opt/ComfyUI/models/text_encoders/" + Q_FILE,
+    ])
+    assert {kind for kind, _ in consoles} <= {"start", "progress", "loaded"}, consoles
+    assert all(isinstance(pct, int) for _, pct in consoles), consoles
+    assert not any("[#" in text or "[file=" in text for text in logs), logs
+
+
 def _run_all() -> int:
     failed = 0
     names = [n for n in sorted(globals()) if n.startswith("test_")]

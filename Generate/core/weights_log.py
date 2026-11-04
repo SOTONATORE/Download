@@ -288,12 +288,15 @@ class WeightsMonitor:
     act_last_t: Optional[float] = None                # время последнего замера этапа
     act_last_bytes: float = 0.0                       # байт в последнем замере
     complete_noted: bool = False                      # строка «этап завершён» уже записана
+    _loaded_due: bool = False                         # строку «загружены» отдать консоли после шага процентов выгрузки
 
     def feed(self, lines) -> Optional[str]:
         """Обрабатывает одну выгрузку (ответ GET /logs) по порядку. Возвращает причину снятия (первую) или None.
 
         Вся выгрузка имеет одну отметку времени. Строки прогресса копятся по файлам, и из каждого файла
         остаётся последняя; они применяются перед событиями файла (начало, завершение, ошибка) и в конце выгрузки.
+        Шаг процентов для консоли считается один раз на выгрузку, в конце, по последним значениям файлов:
+        промежуточные состояния внутри выгрузки (между событиями) в консоль не попадают.
         """
         now = self.clock()
         self._pull_sampled = False
@@ -314,6 +317,12 @@ class WeightsMonitor:
             if reason:
                 return reason
         reason = self._flush(now)
+        # один шаг процентов на выгрузку: по последним значениям каждого файла этой выгрузки и её времени карты
+        self._update_percent()
+        # «загружены» — после шага 100%, если он есть в этой выгрузке
+        if self._loaded_due:
+            self._loaded_due = False
+            self._console("loaded")
         self._check_complete()
         return reason
 
@@ -420,7 +429,7 @@ class WeightsMonitor:
             self.active.pop(key, None)
             self.last_change = now
             self._log(f"Веса: {ev.name} загружен ({ev.total_bytes / MIB:.1f} МиБ).")
-            self._update_percent()
+            # шаг процентов здесь не считается: его даёт конец выгрузки (см. feed)
             return None
         if ev.kind == "aria_done":
             # aria2 сообщил о завершении файла: снимаем его с контроля зависания и считаем полным.
@@ -430,7 +439,7 @@ class WeightsMonitor:
                 state.done_bytes = state.total_bytes
             self.active.pop(ev.name, None)
             self.last_change = now
-            self._update_percent()
+            # шаг процентов здесь не считается: его даёт конец выгрузки (см. feed)
             return None
         if ev.kind == "error":
             self.active.pop(_key(ev.name), None)
@@ -441,7 +450,8 @@ class WeightsMonitor:
             self.stage_done = True
             self._log(f"Веса: этап загрузки весов завершён; итого {self._final_total() / MIB:.1f} МиБ; "
                      f"строк прогресса не распознано: {self.unrecognised}.")
-            self._console("loaded")
+            # консоль получит «загружены» в конце выгрузки, после шага 100% (см. feed)
+            self._loaded_due = True
             return None
         if ev.kind == "aria_unknown":
             self.unrecognised += 1
@@ -496,7 +506,6 @@ class WeightsMonitor:
             self._active_sample(now)
         if changed:
             self._log(self._status_text(now))
-        self._update_percent()
         return self._check_speed(now)
 
     # --- агрегат этапа ---------------------------------------------------------
@@ -569,6 +578,8 @@ class WeightsMonitor:
     def _update_percent(self) -> None:
         """Шаги процентов для консоли: каждый 10%-шаг печатается один раз, по возрастанию; только при известном итоге.
 
+        Общий процент — сумма полученных байт всех файлов этапа, делённая на сумму их размеров, в одной единице (байты).
+        Вызывается один раз на выгрузку, в конце feed: значения каждого файла — последние из этой выгрузки.
         Если процент перескочил сразу несколько шагов (между двумя выгрузками), печатаются все пересечённые шаги.
         """
         total = self._agg_total()
