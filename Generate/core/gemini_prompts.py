@@ -840,7 +840,10 @@ def _safe_error_fields(response: Any) -> tuple:
         daily = True
     return code, daily, retry
 
-# Лимиты RPM, TPM и RPD задаёт вызывающий код из конфига (cli: gemini_rpm_limit и т.д.); значений по умолчанию нет.
+# Значения по умолчанию для лимитов пула: совпадают с config.default.yaml. Конфиг (cli) передаёт свои значения явно.
+DEFAULT_POOL_RPM = 15         # запросов в минуту
+DEFAULT_POOL_TPM = 250_000    # токенов в минуту
+DEFAULT_POOL_RPD = 500        # запросов в сутки на одну модель
 # Оценка токенов для TPM: те же константы, что в gemini_orchestrator (CHARS_PER_TOKEN, output_reserve_tokens).
 POOL_CHARS_PER_TOKEN = 3
 POOL_OUTPUT_RESERVE_TOKENS = 2000
@@ -872,8 +875,9 @@ class RealTransport:
 
     def __init__(self, *, pool: Any = None, timeout: float = 120.0, client: Any = None,
                  base_url: str = API_BASE_URL, environ: Any = None,
-                 rpm_limit: int, tpm_limit: int, rpd_limit: int):
-        # rpm_limit, tpm_limit, rpd_limit обязательны: без них лимиты конфига не дойдут до пула
+                 rpm_limit: int = DEFAULT_POOL_RPM, tpm_limit: int = DEFAULT_POOL_TPM,
+                 rpd_limit: int = DEFAULT_POOL_RPD):
+        # лимиты передаются в пул; без явных значений берутся DEFAULT_POOL_* (совпадают с конфигом по умолчанию)
         try:
             import httpx
         except ImportError:
