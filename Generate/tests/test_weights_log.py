@@ -139,9 +139,9 @@ def test_console_progress_never_printed_without_known_total():
     clock.now += 5
     mon.feed([_aria(1000, 1000, 50, file=a_key)])                    # A 100%, B всё ещё без размера
     assert [pct for kind, pct in consoles if kind == "progress"] == []
-    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатается шаг 70% (без повторов)
+    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатаются шаги 10%…70% по порядку, каждый один раз
     mon.feed([_aria(500, 1000, 50, file=VAE_FILE)])
-    assert [pct for kind, pct in consoles if kind == "progress"] == [70]
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70]
     mon.feed([_aria(1000, 1000, 50, file=VAE_FILE)])
     assert [pct for kind, pct in consoles if kind == "progress"] == [70, 100]
 
@@ -152,8 +152,8 @@ def test_console_start_once_and_loaded_at_stage_end():
     mon.feed(["[setup] [1/2] Файл успешно загружен: " + NAME + " (1 байт)",
               "[setup] [2/2] Файл успешно загружен: " + VAE_NAME + " (1 байт)",
               "[setup] Все файлы модели LTX-2.5 на месте."])
-    # оба файла полностью на месте: итог 100% печатается один раз до строки «загружены»
-    assert consoles == [("start", 0), ("progress", 100), ("loaded", 0)], consoles
+    # оба файла полностью на месте: шаги 10%…100% печатаются по порядку, каждый один раз, до строки «загружены»
+    assert consoles == [("start", 0)] + [("progress", p) for p in range(10, 101, 10)] + [("loaded", 0)], consoles
 
 
 def test_completion_total_is_sum_of_final_file_sizes():
