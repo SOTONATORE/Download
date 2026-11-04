@@ -31,6 +31,14 @@ except ImportError:  # pragma: no cover
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # type: ignore
 
+try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
+    from .log_setup import KEY_EVENT_EXTRA
+except ImportError:
+    try:
+        from log_setup import KEY_EVENT_EXTRA  # type: ignore
+    except ImportError:  # log_setup тянет vast_client, а тот — httpx; без httpx модуль грузится, значение то же
+        KEY_EVENT_EXTRA = {"console_key": True}
+
 log = logging.getLogger("Generate.gemini_prompts")
 
 # Имя переменной окружения с ключом собрано из частей: структурный тест запрещает
@@ -745,12 +753,13 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     t_all = time.monotonic()
     batches = builder.batches(builder.wanted)
     log.info("Генерация промптов начата: модель %s, клипов к описанию: %d, батчей: %d.",
-             model, len(builder.wanted), len(batches))
+             model, len(builder.wanted), len(batches), extra=KEY_EVENT_EXTRA)
     logged = _LoggedTransport(transport)  # журнал неудачных попыток; ответы не меняет
     out: dict = {}
     for batch_no, batch in enumerate(batches, start=1):
         logged.start_batch(batch_no)
-        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums))
+        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
+                 extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
         batch_res = _run_batch(logged, model, builder, batch)
         for r in batch_res.values():
@@ -773,7 +782,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                         batch_no, ", ".join(str(n) for n in review_nums))
         with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
         log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
-                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch)
+                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch, extra=KEY_EVENT_EXTRA)
         out.update(batch_res)
         if on_batch is not None:
             on_batch([batch_res[n] for n in batch.nums])
@@ -785,7 +794,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     no_text = sum(1 for r in results if not r.prompt.strip())
     to_review = sum(1 for r in results if r.prompt.strip() and r.needs_review)
     log.info("Генерация промптов завершена: готово %d, без текста %d, требуют проверки %d, всего %.1f с.",
-             ready, no_text, to_review, time.monotonic() - t_all)
+             ready, no_text, to_review, time.monotonic() - t_all, extra=KEY_EVENT_EXTRA)
     return results
 
 

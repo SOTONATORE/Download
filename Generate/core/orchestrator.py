@@ -1804,8 +1804,9 @@ class Orchestrator:
     def _save_state(self) -> None:
         try:
             go.atomic_write_json(self.prompts_path, self._state)
-        except OSError:
-            log.warning("Не удалось сохранить файл промптов.")
+        except OSError as exc:
+            log.warning("Не удалось сохранить файл промптов %s: %s: %s.",
+                        self.prompts_path, type(exc).__name__, exc)
 
     def _mark(self, num: int, status: str) -> None:
         entry = self._prompts.get(str(num))

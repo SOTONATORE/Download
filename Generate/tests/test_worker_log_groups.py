@@ -117,3 +117,77 @@ def test_debug_log_keeps_prefixed_lines_and_no_markers(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "[карта" not in err
     assert err.count("::group::") == 1 and err.count("::endgroup::") == 1
+
+
+# ---------------------------------------------------------------------------
+# Фильтр «Итоги генерации» в generate.yml: группы воркера в сводку не попадают.
+# Скрипт фильтра берётся из самого workflow, запускается локально; сети нет.
+# ---------------------------------------------------------------------------
+
+def _summary_filter_source() -> str:
+    import re
+    import textwrap
+    from pathlib import Path
+
+    import yaml
+
+    wf = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "generate.yml"
+    doc = yaml.safe_load(wf.read_text(encoding="utf-8"))
+    for job in doc["jobs"].values():
+        for step in job.get("steps", []):
+            run = step.get("run") or ""
+            if "RAW_RE = re.compile" in run and "summary_filter" in run:
+                m = re.search(r"cat > \"\$summary_filter\" <<'PY'\n(.*?)\n[ \t]*PY\n", run, re.S)
+                assert m, "не найден текст скрипта фильтра сводки"
+                return textwrap.dedent(m.group(1))
+    raise AssertionError("фильтр сводки не найден в generate.yml")
+
+
+def _run_summary_filter(tmp_path, text: str):
+    import subprocess
+    import sys
+
+    script = tmp_path / "summary_filter.py"
+    script.write_text(_summary_filter_source(), encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    summary.write_text("", encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script), str(summary)], input=text,
+                          capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout, summary.read_text(encoding="utf-8")
+
+
+def test_summary_filter_skips_worker_group_but_keeps_stdout(tmp_path):
+    """Строки между ::group:: и ::endgroup:: (и сами маркеры) в сводку не идут; в stdout они остаются."""
+    text = (
+        "2026-11-04 10:00:00,000 [INFO] Старт прогона\n"
+        "::group::карта 101: лог воркера (строк: 2)\n"
+        "строка воркера один\n"
+        "строка воркера два\n"
+        "::endgroup::\n"
+        "2026-11-04 10:00:05,000 [INFO] Готово\n"
+    )
+    stdout, summary = _run_summary_filter(tmp_path, text)
+    assert stdout == text
+    assert summary == (
+        "2026-11-04 10:00:00,000 [INFO] Старт прогона\n"
+        "2026-11-04 10:00:05,000 [INFO] Готово\n"
+    )
+    assert "::group::" not in summary and "::endgroup::" not in summary
+
+
+def test_summary_filter_group_stays_open_for_escaped_lines_and_resumes_after(tmp_path):
+    """Строка внутри группы, начинающаяся с «::» (с пробелом впереди), не закрывает группу.
+    После ::endgroup:: обычные строки снова попадают в сводку; сырые строки Vast по-прежнему режутся."""
+    text = (
+        "::group::карта 7: лог воркера (строк: 2)\n"
+        "первая строка\n"
+        " ::endgroup::\n"
+        "всё ещё внутри группы\n"
+        "::endgroup::\n"
+        "2026-11-04 10:01:00,000 [INFO] Запрос Vast #3 GET /x\n"
+        "тело запроса\n"
+        "2026-11-04 10:01:01,000 [INFO] Итог\n"
+    )
+    _, summary = _run_summary_filter(tmp_path, text)
+    assert summary == "2026-11-04 10:01:01,000 [INFO] Итог\n"
