@@ -898,6 +898,39 @@ def _safe_error_fields(response: Any) -> tuple:
         daily = True
     return code, daily, retry
 
+
+def _quota_log_fields(response: Any) -> list:
+    """Безопасные поля тела 429 для диагностики: какая квота исчерпана. Только перечисленные ключи;
+    error.message, содержимое запроса и ключ API не берутся. Для сбоя разбора возвращается неполный список."""
+    def _text(value: Any) -> str:
+        if value is None or isinstance(value, (dict, list)):
+            return ""  # вложенные структуры в лог не пишем
+        return str(value)[:200]
+
+    out: list = []
+    try:
+        err = response.json().get("error", {})
+        if not isinstance(err, dict):
+            return out
+        out.append({"status": _text(err.get("status")), "code": _text(err.get("code"))})
+        for d in err.get("details", []) or []:
+            if not isinstance(d, dict):
+                continue
+            item = {"@type": _text(d.get("@type"))}
+            for key in ("quotaId", "quotaMetric", "quotaValue", "retryDelay"):
+                if key in d:
+                    item[key] = _text(d.get(key))
+            violations = [
+                {k: _text(v.get(k)) for k in ("quotaMetric", "quotaId", "quotaValue") if k in v}
+                for v in (d.get("violations", []) or []) if isinstance(v, dict)
+            ]
+            if violations:
+                item["violations"] = violations
+            out.append(item)
+    except Exception:
+        pass
+    return out
+
 # Значения по умолчанию для лимитов пула: совпадают с config.default.yaml. Конфиг (cli) передаёт свои значения явно.
 DEFAULT_POOL_RPM = 15         # запросов в минуту
 DEFAULT_POOL_TPM = 250_000    # токенов в минуту
@@ -1020,6 +1053,11 @@ class RealTransport:
             err = GeminiRuntimeError(
                 f"Gemini вернул ошибку: HTTP {status}{extra}.",
                 status=status, code=code, daily_quota=daily, retry_after=retry)
+            if status == 429:
+                # диагностика: какая квота исчерпана; ключ, промпт и текст ответа в лог не пишутся
+                log.warning("HTTP 429 от Gemini, модель %s: признаки квоты %s; оценка входных токенов: %d.",
+                            model, json.dumps(_quota_log_fields(resp), ensure_ascii=False),
+                            round((len(system) + len(user)) / 4))
             if status == 429 and daily:
                 # квота исчерпана только у этого ключа для этой модели: пул может выдать другой ключ.
                 # ManagedTransport по этому признаку повторит модель, а не переключит её.
