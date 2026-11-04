@@ -16,8 +16,8 @@
   • GET  /api/v0/users/current/              — баланс и кредит аккаунта (через _request, только чтение);
   • GET  /api/v0/instances/999999999/        — проверка пути одного экземпляра (id заведомо не существует);
   • GET  /api/v1/instances/999999999/        — то же для пути v1;
-  • HEAD <базовый адрес>/<подкаталог>/<имя>  — по одному на каждую строку download_model в
-    Generate/worker/setup.sh (Hugging Face, заголовок Authorization с HF_TOKEN, перенаправления выполняются).
+  • HEAD адрес каждого файла из weights.json профиля ltx25 (тот же список и тот же адрес, что у воркера:
+    Generate/core/weights_plan.py files; Hugging Face, заголовок Authorization с HF_TOKEN, перенаправления выполняются).
 
 Ключ Vast читается только из окружения (имя — ENV_KEY_NAME), токен Hugging Face — из переменной HF_TOKEN.
 Оба значения уходят только в заголовке Authorization. Всё, что печатается или пишется, проходит
@@ -120,13 +120,11 @@ SUMMARY_PREFIX = "Поиск предложений Vast"
 VAST_CHECK_INSTANCE_ID = 999999999
 VAST_CHECK_PATHS = ("/api/v0/instances/{id}/", "/api/v1/instances/{id}/")
 
-# Проверка файлов модели: адрес по умолчанию совпадает с HF_BASE_URL в setup.sh.
-SETUP_SCRIPT = REPO_ROOT / "Generate" / "worker" / "setup.sh"
-HF_DEFAULT_BASE_URL = "https://huggingface.co/Lightricks/LTX-2.5/resolve/main"
+# Проверка файлов модели: список и базовый адрес из weights.json профиля (тот же файл, что читает воркер
+# через weights_plan.py files). Профиль ltx25: по нему проба проверяла LTX до переноса загрузки в weights.json.
+# Чтение только локальным файлом, без импорта пакета и без сети.
+WEIGHTS_JSON = REPO_ROOT / "Generate" / "model_profiles" / "models" / "ltx25" / "weights.json"
 HF_TIMEOUT_SEC = 30.0
-HF_BASE_RE = re.compile(r'^HF_BASE_URL="([^"]+)"\s*$', re.MULTILINE)
-HF_CALL_RE = re.compile(r'^\s*download_model\s+"([^"]+)"\s+"([^"]+)"\s*$')
-HF_CALL_PREFIX_RE = re.compile(r"^\s*download_model\s")  # определение функции «download_model() {» не совпадает
 
 # Сверка с фильтром verified=True (только число предложений и вывод полей).
 # Ключ verified в запросе взят из production-кода (VastClient._build_query); живой ответ Vast
@@ -163,7 +161,7 @@ _secrets: list[str] = []
 
 
 class ProbeInputError(Exception):
-    """Неверные переменные окружения пробы или неразбираемый setup.sh."""
+    """Неверные переменные окружения пробы или нечитаемый weights.json профиля."""
 
 
 class _Capture(logging.Handler):
@@ -395,42 +393,37 @@ def _check_vast_paths(base_url: str, timeout: float, key: str) -> list[dict]:
     return results
 
 
-def _read_setup_models() -> tuple[str, str, list[tuple[str, str]], int]:
-    """Разбор setup.sh: (базовый адрес, источник адреса, пары (подкаталог, имя), число непонятых строк).
-    ProbeInputError — если файл не читается, адрес содержит переменную оболочки или строк нет совсем."""
+def _read_weights_plan() -> tuple[str, str, list[tuple[str, str, str]], int]:
+    """Список файлов из weights.json профиля: (базовый адрес, источник, тройки (подкаталог, имя, полный адрес), 0).
+    Адрес файла строится как download_url в weights_plan.py: база + путь в репо, если задан, иначе база/подкаталог/имя.
+    ProbeInputError — если файл не читается, не JSON, нет списка files или base_url."""
     try:
-        text = SETUP_SCRIPT.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ProbeInputError(
-            f"Generate/worker/setup.sh не прочитан ({type(exc).__name__})"
-        ) from None
-
-    match = HF_BASE_RE.search(text)
-    if match:
-        base, source = match.group(1), "setup.sh"
-    else:
-        base = HF_DEFAULT_BASE_URL
-        source = "значение по умолчанию: HF_BASE_URL в setup.sh не найден"
-    if "$" in base:
-        raise ProbeInputError("HF_BASE_URL в setup.sh содержит переменную оболочки, адрес не вычисляется")
-
-    files: list[tuple[str, str]] = []
-    unparsed = 0
-    for line in text.splitlines():
-        if not HF_CALL_PREFIX_RE.match(line):
-            continue
-        call = HF_CALL_RE.match(line)
-        if call and "$" not in call.group(1) + call.group(2):
-            files.append((call.group(1), call.group(2)))
+        data = json.loads(WEIGHTS_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ProbeInputError(f"weights.json профиля не читается ({WEIGHTS_JSON.name})") from None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list) or not data["files"]:
+        raise ProbeInputError("в weights.json профиля нет непустого списка files")
+    base = data.get("base_url")
+    if not isinstance(base, str) or not base or "$" in base:
+        raise ProbeInputError("в weights.json профиля не задан base_url")
+    files: list[tuple[str, str, str]] = []
+    for idx, entry in enumerate(data["files"], 1):
+        if not isinstance(entry, dict) or not entry.get("subdir") or not entry.get("name"):
+            raise ProbeInputError(f"у файла №{idx} в weights.json нет subdir или name")
+        file_base = entry.get("base_url", base)
+        if not isinstance(file_base, str) or not file_base:
+            raise ProbeInputError(f"у файла №{idx} в weights.json не задан base_url")
+        repo_path = entry.get("repo_path") or ""
+        if repo_path:
+            url = file_base + "/" + repo_path
         else:
-            unparsed += 1
-    if not files:
-        raise ProbeInputError("в Generate/worker/setup.sh нет разбираемых строк download_model")
-    return base, source, files, unparsed
+            url = file_base + "/" + entry["subdir"] + "/" + entry["name"]
+        files.append((entry["subdir"], entry["name"], url))
+    return base, "weights.json профиля ltx25", files, 0
 
 
 def _check_hf_files(token: str) -> dict[str, Any]:
-    """Проверка файлов модели: HEAD на каждый файл из setup.sh с заголовком Authorization.
+    """Проверка файлов модели: HEAD на каждый файл из weights.json профиля с заголовком Authorization.
     Перенаправления выполняются; заголовок с токеном не должен уйти на другой хост."""
     state: dict[str, Any] = {
         "status": None,
@@ -452,7 +445,7 @@ def _check_hf_files(token: str) -> dict[str, Any]:
         return state
 
     try:
-        base, source, files, unparsed = _read_setup_models()
+        base, source, files, unparsed = _read_weights_plan()
     except ProbeInputError as exc:
         state.update(status="ошибка разбора", reason=str(exc))
         err(
@@ -464,14 +457,13 @@ def _check_hf_files(token: str) -> dict[str, Any]:
 
     state.update(base_url=base, base_source=source, unparsed_lines=unparsed)
     say(f"Базовый адрес: {base} (источник: {source})")
-    say(f"Файлов в списке: {len(files)}; строк download_model, которые не разобраны: {unparsed}")
+    say(f"Файлов в списке: {len(files)}; строк списка, которые не разобраны: {unparsed}")
 
     auth = {"Authorization": f"Bearer {token}"}
     original_host = urlsplit(base).hostname
     stopped = False
     with httpx.Client(timeout=HF_TIMEOUT_SEC, follow_redirects=True) as http:
-        for index, (subdir, name) in enumerate(files, start=1):
-            url = f"{base}/{subdir}/{name}"
+        for index, (subdir, name, url) in enumerate(files, start=1):
             label = f"[{index}/{len(files)}] {subdir}/{name}"
             entry: dict[str, Any] = {"index": index, "subdir": subdir, "name": name, "url": url}
             try:
@@ -518,6 +510,7 @@ def _check_hf_files(token: str) -> dict[str, Any]:
         state["status"] = "выполнена"
         ok = sum(1 for f in state["files"] if f.get("status") == 200)
         say(f"Итог: проверено файлов {len(state['files'])}, доступно (200): {ok}")
+        say(f"Статус: выполнена (доступно {ok} из {len(files)})")
     return state
 
 

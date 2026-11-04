@@ -111,7 +111,7 @@
 
 ## 7. Изменения для vastai/comfy
 
-Разделы 1–6 описывают прежний путь с портом 8188. Для образа `vastai/comfy:v0.41.0-cuda-13.2-py312` (ComfyUI v0.41.0 в `/opt/workspace-internal/ComfyUI`, venv `/venv/main`) действует этот раздел: стоковый путь образа через supervisor на Vast в ssh-режиме не работает (нужны запись в `/etc/portal.yaml` и `/workspace`, а в ssh-режиме `/workspace` не создаётся). Пилот запускает ComfyUI напрямую: `python main.py $COMFYUI_ARGS` из `/opt/workspace-internal/ComfyUI` (если каталога нет, клон v0.41.0); ComfyUI слушает порт **18188** только на loopback карты; наружу порт не публикуется, проба идёт через SSH-туннель к `127.0.0.1`. Пилот не передаёт токены. Боевой путь `generate` не меняется.
+Разделы 1–6 описывают прежний путь с портом 8188. Для образа `vastai/comfy:v0.41.0-cuda-12.9-py312` (ComfyUI v0.41.0 в `/opt/workspace-internal/ComfyUI`, venv `/venv/main`; наблюдения ниже сделаны на прежнем образе cuda-13.2, для cuda-12.9 не проверены до первого прогона) действует этот раздел: стоковый путь образа через supervisor на Vast в ssh-режиме не работает (нужны запись в `/etc/portal.yaml` и `/workspace`, а в ssh-режиме `/workspace` не создаётся). Пилот запускает ComfyUI напрямую: `python main.py $COMFYUI_ARGS` из `/opt/workspace-internal/ComfyUI` (если каталога нет, клон v0.41.0); ComfyUI слушает порт **18188** только на loopback карты; наружу порт не публикуется, проба идёт через SSH-туннель к `127.0.0.1`. Пилот не передаёт токены. Боевой путь `generate` не меняется.
 
 ### 7.1. Изменённые строки (номера в текущих файлах)
 

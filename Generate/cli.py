@@ -622,6 +622,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         verified=cfg.verified,
         # диск предложения не меньше запрошенного (disk_gb входа); пилот этим фильтром не ограничивается
         min_disk_gb=0.0 if _pilot_mode(args) else float(cfg.disk_gb),
+        # версия CUDA драйвера и скорость диска из конфига (ключи min_cuda_max, min_disk_bw_mbps)
+        min_cuda_max=float(cfg.min_cuda_max),
+        min_disk_bw_mbps=float(cfg.min_disk_bw_mbps),
     )
 
     # превью: ошибка входа до аренды карт (тот же проверяющий код, что в check)

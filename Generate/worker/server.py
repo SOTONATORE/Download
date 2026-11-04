@@ -94,6 +94,9 @@ FAILED_FLAG_SUFFIX = ".failed"
 # Файл «ComfyUI отвечает» (Правило A): setup.sh создаёт его на первом ответе ComfyUI; поле comfy_alive в /health
 COMFY_FLAG_ENV = "WORKER_COMFY_FLAG"
 DEFAULT_COMFY_FLAG = "/opt/worker/comfy_alive"
+# Файл «ComfyUI умер» (Part 4): setup.sh пишет его, если процесс умер до первого ответа; поле comfy_state в /health
+COMFY_DEAD_FLAG_ENV = "WORKER_COMFY_DEAD_FLAG"
+DEFAULT_COMFY_DEAD_FLAG = "/opt/worker/comfy_dead"
 WEIGHTS_FAILED_REASON = "weights_failed"
 # Лог setup.sh и aria2 (onstart перенаправляет туда вывод bootstrap.sh): хвост идёт в буфер GET /logs (SPEC 8.1)
 BOOTSTRAP_LOG_ENV = "WORKER_BOOTSTRAP_LOG"
@@ -1029,7 +1032,8 @@ def _make_handler(app: "WorkerApp") -> type:
                     "gpu": gpu, "vram_free": vram_free,
                     "busy": app.manager.busy(),
                     "profile": app.profile_name, "switch": app.switch_state,
-                    "comfy_alive": app.comfy_alive()}
+                    "comfy_alive": app.comfy_alive(),
+                    "comfy_state": app.comfy_state()}
             reason = app.failure_reason()
             if reason:  # только при отказе весов: при обычном ожидании ответ прежний (SPEC 8.1)
                 body["reason"] = reason
@@ -1200,6 +1204,7 @@ class WorkerApp:
                  telemetry_interval_check: float = 1.0,
                  ready_flag: Optional[str] = None,
                  comfy_flag: Optional[str] = None,
+                 comfy_dead_flag: Optional[str] = None,
                  bootstrap_log_path: Optional[str] = None,
                  template_log_path: Optional[str] = None,
                  log_dir: Optional[str] = None,
@@ -1248,6 +1253,8 @@ class WorkerApp:
         self.failed_flag: Optional[Path] = Path(str(ready_flag) + FAILED_FLAG_SUFFIX) if ready_flag else None
         # Файл «ComfyUI отвечает» (Правило A): без пути поле comfy_alive всегда false
         self.comfy_flag: Optional[Path] = Path(comfy_flag) if comfy_flag else None
+        # Файл «ComfyUI умер» (Part 4): без пути состояние dead не выставляется
+        self.comfy_dead_flag: Optional[Path] = Path(comfy_dead_flag) if comfy_dead_flag else None
         # Лог setup.sh и aria2: хвост с начала файла, маска и срез query-частей адресов (SPEC 8.1, 0.1)
         self.bootstrap_reader: Optional[ComfyOutputReader] = None
         if bootstrap_log_path:
@@ -1399,6 +1406,15 @@ class WorkerApp:
         """Файл «ComfyUI отвечает» есть (Правило A): setup.sh создал его на первом ответе 200. Без пути — false."""
         return self.comfy_flag is not None and self.comfy_flag.exists()
 
+    def comfy_state(self) -> str:
+        """Состояние ComfyUI по файлам: alive (есть файл «отвечает»), dead (есть файл «умер»), иначе starting.
+        Проверка alive идёт первой: отвечающий ComfyUI не может считаться мёртвым даже при старом файле смерти."""
+        if self.comfy_alive():
+            return "alive"
+        if self.comfy_dead_flag is not None and self.comfy_dead_flag.exists():
+            return "dead"
+        return "starting"
+
     def failure_reason(self) -> str:
         """Причина, по которой воркер не готов и сервер ждёт (fix 2): «weights_failed» или пусто.
         Пусто, если готовность уже есть или файла причины нет (обычная загрузка, ожидание ComfyUI)."""
@@ -1531,6 +1547,7 @@ def main() -> int:
                     # пустое значение не отключает проверку: иначе /health отдал бы ok=true до готовности
                     ready_flag=os.environ.get(READY_FLAG_ENV) or DEFAULT_READY_FLAG,
                     comfy_flag=os.environ.get(COMFY_FLAG_ENV) or DEFAULT_COMFY_FLAG,
+                    comfy_dead_flag=os.environ.get(COMFY_DEAD_FLAG_ENV) or DEFAULT_COMFY_DEAD_FLAG,
                     bootstrap_log_path=os.environ.get(BOOTSTRAP_LOG_ENV) or DEFAULT_BOOTSTRAP_LOG,
                     log_dir=worker_log_dir())
     try:

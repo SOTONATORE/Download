@@ -291,6 +291,8 @@ class _CardSlot:
     comfy_checked: bool = False       # /health ответил 200 с полем comfy_alive (Правило A)
     comfy_answered: bool = False      # comfy_alive был true: ComfyUI ответил на карте (Правило A); не сбрасывается
     comfy_missing_noted: bool = False  # строка «воркер не отдаёт comfy_alive» уже выведена для карты
+    comfy_state: str = ""             # comfy_state из последнего /health: starting, alive или dead (Part 4)
+    comfy_dead_noted: bool = False    # строка «ComfyUI процесс умер» уже выведена для карты (Part 4)
     vast_logs_refused: bool = False   # request_logs вернул 403: повторов логов Vast по карте нет (Правило B)
     weights_wait_since: Optional[float] = None  # воркер отвечает, строк весов нет: с какого момента ждём весы
     wait_log_at: float = -1e9         # время последней строки состояния ожидания (не чаще WAIT_LOG_INTERVAL_SEC)
@@ -2480,7 +2482,12 @@ class Orchestrator:
             if reason:
                 self._retire_bad(slot, reason)
                 return
+            # Part 4: процесс ComfyUI на карте умер до ответа (comfy_state dead): снимаем сразу, без ожидания 5 мин
+            if slot.comfy_state == "dead":
+                self._retire(slot, "ComfyUI процесс умер", bad=True)
+                return
             # Правило A: воркер отвечает, но ComfyUI на карте не ответил (comfy_alive не стал true) за 5 мин от аренды
+            # состояние starting (или без поля) — прежнее правило 5 мин без изменений
             if slot.comfy_checked and not slot.comfy_answered and age >= COMFY_ANSWER_LIMIT_SEC:
                 self._retire(slot, "ComfyUI не ответил за 5 мин", bad=True)
                 return
@@ -2626,6 +2633,14 @@ class Orchestrator:
         """Правило A: поле comfy_alive из ответа /health. Учитывается только 200; без поля — одна строка на карту."""
         if status_code != 200:
             return
+        # comfy_state (Part 4): dead = процесс ComfyUI умер до ответа; строка в лог один раз на карту
+        state = data.get("comfy_state")
+        if isinstance(state, str):
+            slot.comfy_state = state
+            if state == "dead" and not slot.comfy_dead_noted:
+                slot.comfy_dead_noted = True
+                log.warning("Rule A: ComfyUI процесс умер на карте %d (comfy_state dead), карта снимается",
+                            slot.instance_id)
         if "comfy_alive" not in data:
             if not slot.comfy_missing_noted:
                 slot.comfy_missing_noted = True

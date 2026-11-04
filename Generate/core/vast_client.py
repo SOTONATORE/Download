@@ -53,6 +53,10 @@ _REJECT_LABELS = (
     ("vram", "VRAM"),
     ("gpu_name", "имя GPU"),
     ("disk", "диск меньше запрошенного"),
+    ("cuda", "CUDA ниже минимума"),
+    ("cuda_unknown", "версия CUDA не разобрана"),
+    ("disk_bw", "скорость диска ниже минимума"),
+    ("disk_bw_unknown", "скорость диска не разобрана"),
     ("inet_price", "цена трафика выше максимума"),
     ("inet_price_unknown", "цена трафика не разобрана"),
 )
@@ -77,6 +81,12 @@ INET_DOWN_COST_FIELD = "inet_down_cost"    # UNVERIFIED в ответе API; USD
 # взято как «disk_space» по имени фильтра vast-cli. Поле нет или не читается: предложение не отбрасывается
 # по диску при поиске, а размер диска карты проверяется после аренды (оркестратор, _check_disk).
 DISK_SPACE_FIELD = "disk_space"
+# Максимальная версия CUDA, которую поддерживает драйвер хоста (например 12.9). Подтверждено в пробе:
+# поле есть в 53 из 53 предложений, значения 12.8–13.4. Не читается — предложение отбрасывается (fail-closed).
+CUDA_MAX_FIELD = "cuda_max_good"
+# Скорость чтения диска хоста. UNVERIFIED по единице: предполагается МБ/с (подтверждено в пробе: поле есть в 53 из 53).
+# Не читается — предложение отбрасывается. Поля nw_disk_* не используются (в пробе null).
+DISK_BW_FIELD = "disk_bw"
 # Текст статуса экземпляра (ошибка рантайма при неудачном старте, SPEC 8.2).
 # UNVERIFIED: имя поля не найдено ни в репозитории, ни в производственном логе; официальный
 # vast.py недоступен (403 политики egress, 13.10.2026). Поля нет или значение не строка:
@@ -371,6 +381,10 @@ class OfferFilter:
     max_inet_price_per_tb: float = 4.1
     # Минимальный размер диска, ГБ (обычно disk_gb запуска); 0 = не проверять. Поле диска не прочитано — не отбрасывает.
     min_disk_gb: float = 0.0
+    # Минимальная версия CUDA драйвера хоста (cuda_max_good); 0 = не проверять. Проверка клиентская.
+    min_cuda_max: float = 0.0
+    # Минимальная скорость чтения диска, МБ/с (disk_bw); 0 = не проверять. Проверка клиентская. UNVERIFIED по единице.
+    min_disk_bw_mbps: float = 0.0
 
 
 @dataclass
@@ -392,6 +406,10 @@ class GpuOffer:
     dph_total: float = 0.0
     # размер диска предложения, ГБ (см. DISK_SPACE_FIELD); None = поля нет или не читается
     disk_gb: Optional[float] = None
+    # максимальная версия CUDA драйвера (см. CUDA_MAX_FIELD); None = поля нет или не читается
+    cuda_max_good: Optional[float] = None
+    # скорость чтения диска, МБ/с (см. DISK_BW_FIELD); None = поля нет или не читается
+    disk_bw_mbps: Optional[float] = None
 
 
 @dataclass
@@ -669,6 +687,8 @@ class VastClient:
             inet_down_price_per_tb=_per_tb_or_none(b.get(INET_DOWN_COST_FIELD)),
             dph_total=_to_float(b.get("dph_total")),
             disk_gb=_to_price_or_none(b.get(DISK_SPACE_FIELD)),
+            cuda_max_good=_to_price_or_none(b.get(CUDA_MAX_FIELD)),
+            disk_bw_mbps=_to_price_or_none(b.get(DISK_BW_FIELD)),
         )
 
     def search_offers(self, filters: OfferFilter) -> list[GpuOffer]:
@@ -735,6 +755,18 @@ class VastClient:
         # диск предложения меньше запрошенного; поле не прочитано — предложение не отбрасывается (см. DISK_SPACE_FIELD)
         if filters.min_disk_gb > 0 and offer.disk_gb is not None and offer.disk_gb < filters.min_disk_gb:
             return "disk", None
+        # CUDA драйвера хоста: нечитаемое значение отбрасывается (fail-closed), серверного ключа нет
+        if filters.min_cuda_max > 0:
+            if offer.cuda_max_good is None:
+                return "cuda_unknown", None
+            if offer.cuda_max_good < filters.min_cuda_max:
+                return "cuda", None
+        # скорость чтения диска: нечитаемое значение отбрасывается (fail-closed), единица МБ/с не подтверждена
+        if filters.min_disk_bw_mbps > 0:
+            if offer.disk_bw_mbps is None:
+                return "disk_bw_unknown", None
+            if offer.disk_bw_mbps < filters.min_disk_bw_mbps:
+                return "disk_bw", None
         # Цена трафика в обе стороны. Нечитаемая цена отбрасывается (fail-closed): предложение
         # без цены нельзя признать подходящим. Серверного фильтра по полю нет: имя в живом ответе
         # не подтверждено (UNVERIFIED).
