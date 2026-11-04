@@ -139,11 +139,11 @@ def test_console_progress_never_printed_without_known_total():
     clock.now += 5
     mon.feed([_aria(1000, 1000, 50, file=a_key)])                    # A 100%, B всё ещё без размера
     assert [pct for kind, pct in consoles if kind == "progress"] == []
-    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатаются шаги 10%…70% по порядку, каждый один раз
+    # B получает размер: общий итог 2000 МиБ, сделано 1500 МиБ = 75%, печатаются шаги 10%…100% по порядку, каждый один раз
     mon.feed([_aria(500, 1000, 50, file=VAE_FILE)])
     assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70]
     mon.feed([_aria(1000, 1000, 50, file=VAE_FILE)])
-    assert [pct for kind, pct in consoles if kind == "progress"] == [70, 100]
+    assert [pct for kind, pct in consoles if kind == "progress"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 
 def test_console_start_once_and_loaded_at_stage_end():
