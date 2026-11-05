@@ -369,8 +369,23 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
 
 
-# ключи окружения семейств: в выводе показываются только имена (значения не выводятся)
-_TEXT_KEY_NAMES = {"gemini": "GEMINI1…GEMINI10", "openrouter": "OPENROUTER1…OPENROUTER10"}
+def _key_names_range(provider: str) -> str:
+    """Диапазон имён переменных ключей семейства для вывода (значения ключей не выводятся).
+
+    Имена собираются из констант модулей ключей, поэтому литеральных имён переменных в коде cli нет.
+    Импорт ленивый: без модуля OpenRouter путь gemini работает как раньше.
+    """
+    if provider == "openrouter":
+        try:
+            from Generate.core.openrouter_transport import KEY_ENV_COUNT, KEY_ENV_PREFIX
+        except ImportError:  # плоский импорт, как в остальных модулях core
+            from core.openrouter_transport import KEY_ENV_COUNT, KEY_ENV_PREFIX  # type: ignore
+    else:
+        try:
+            from Generate.core.gemini_pool import KEY_ENV_COUNT, KEY_ENV_PREFIX
+        except ImportError:  # плоский импорт
+            from core.gemini_pool import KEY_ENV_COUNT, KEY_ENV_PREFIX  # type: ignore
+    return f"{KEY_ENV_PREFIX}1…{KEY_ENV_PREFIX}{KEY_ENV_COUNT}"
 
 
 def resolve_text_family(cfg: Config, requested: Optional[str]) -> tuple[str, str, Optional[list[str]]]:
@@ -397,7 +412,7 @@ def _text_family_line(cfg: Config, family: tuple) -> str:
     """Строка для check: семейство, провайдер, модели по порядку и имена ключей (значения ключей не выводятся)."""
     name, provider, _models = family
     return (f"Текстовая модель: семейство {name}, провайдер {provider}, "
-            f"модели: {', '.join(_text_chain(cfg, family))}, ключи: {_TEXT_KEY_NAMES[provider]}")
+            f"модели: {', '.join(_text_chain(cfg, family))}, ключи: {_key_names_range(provider)}")
 
 
 def _gemini_options(cfg: Config, family: tuple) -> dict:
@@ -496,7 +511,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         except ImportError:  # плоский импорт
             from core.openrouter_transport import load_openrouter_keys  # type: ignore
         try:
-            load_openrouter_keys(os.environ)
+            load_openrouter_keys()
         except GeminiInputError as e:
             _err(str(e))
             return EXIT_INPUT
@@ -660,25 +675,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         if input_code is not None:
             return input_code
 
+    # текущий шаг подготовки: нужен, чтобы при ошибке назвать место, не раскрывая текст чужого исключения
+    stage = "таймингов и промптов"
     try:
         timing = _build_timing(cfg, cfg.model_profile)
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
+        stage = "текстового транспорта"
         transport = None if _pilot_mode(args) else _make_transport(cfg, family)
+        stage = "хранилища Release"
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
+        stage = "клиента Vast"
         vast = VastClient(debug_logs=bool(getattr(args, "debug_logs", False)))
     except VastError as e:
         _err(f"Ошибка запуска: {e}")
         return EXIT_INPUT if e.exit_code == EXIT_INPUT else EXIT_RUNTIME
     except Exception as e:  # noqa: BLE001
         exit_code = EXIT_INPUT if getattr(e, "exit_code", None) == EXIT_INPUT else EXIT_RUNTIME
-        # текст берём только у своих ошибок проекта (у них есть exit_code); иначе только тип
         if hasattr(e, "exit_code"):
+            # свои ошибки проекта: текст уже безопасен (у них есть exit_code)
             _err(f"Ошибка подготовки запуска: {e}")
         else:
-            _err(f"Ошибка подготовки запуска ({type(e).__name__}).")
+            # чужое исключение: тип и место; текст не печатаем, он может содержать значения ключей (SPEC 0.1)
+            _err(f"Ошибка подготовки запуска ({type(e).__name__}) на этапе «{stage}».")
         return exit_code
 
     offer_filter = OfferFilter(

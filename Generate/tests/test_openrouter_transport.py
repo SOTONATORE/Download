@@ -190,7 +190,7 @@ def test_empty_choices_raises_empty_response():
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     assert info.value.code == "EMPTY_RESPONSE"
-    assert info.value.status == 502
+    assert info.value.status == 500
     assert released == [(Outcome.SERVER_ERROR, None)]
 
 

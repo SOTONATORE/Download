@@ -171,7 +171,7 @@ def run_env(monkeypatch):
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
                         lambda profile, batch_size, preset="none": ("CFG", profile, batch_size))
-    monkeypatch.setattr(cli, "_make_transport", lambda cfg: "TRANSPORT")
+    monkeypatch.setattr(cli, "_make_transport", lambda cfg, family: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
 
@@ -524,7 +524,7 @@ def test_credit_http_error_does_not_leak_key(capsys, run_env, missing_file, monk
 
 
 def test_run_setup_error_hides_text(capsys, run_env, missing_file, monkeypatch):
-    def boom(cfg):
+    def boom(cfg, family):
         raise ValueError(SECRET_VALUE)
 
     monkeypatch.setattr(cli, "_make_transport", boom)

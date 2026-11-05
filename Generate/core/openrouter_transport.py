@@ -64,16 +64,19 @@ def _silence_http_logs() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def load_openrouter_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
-    """Читает переменные OPENROUTER с номерами 1..10 из environ. Пустые значения пропускаются.
+def load_openrouter_keys(environ: Optional[Mapping[str, str]] = None) -> list[tuple[str, str]]:
+    """Читает переменные OPENROUTER с номерами 1..10. Пустые значения пропускаются.
 
+    Без аргумента читается os.environ: так ключи получает cli.py, не трогая окружение сам.
     Возвращает пары (имя переменной, значение) в порядке номеров.
     В лог пишется только количество ключей.
     """
+    # чтение окружения здесь, а не в вызывающем коде: значения ключей нигде не печатаются
+    source = os.environ if environ is None else environ
     keys: list[tuple[str, str]] = []
     for i in range(1, KEY_ENV_COUNT + 1):
         name = KEY_ENV_PREFIX + str(i)
-        value = (environ.get(name) or "").strip()
+        value = (source.get(name) or "").strip()
         if value:
             keys.append((name, value))
     if not keys:
@@ -140,7 +143,7 @@ class OpenRouterTransport:
         if pool is None:
             if keys is None:
                 # окружение читается здесь, при создании; в самом запросе окружение не трогаем
-                keys = load_openrouter_keys(os.environ if environ is None else environ)
+                keys = load_openrouter_keys(environ)
             pool = self._gpool.KeyPool(keys, rpm_limit=DEFAULT_RPM, tpm_limit=DEFAULT_TPM,
                                        rpd_limit=DEFAULT_RPD, model_limits=model_limits)
         self._pool = pool
