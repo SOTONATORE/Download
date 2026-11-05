@@ -1,0 +1,198 @@
+# .github/workflows/probe_openrouter.yml
+name: Probe OpenRouter (diagnostics)
+
+# Только ручной запуск: один диагностический запрос к модели OpenRouter.
+# Без пайплайна, без Vast, без релиза. Печатает HTTP-статус, id, finish_reason, usage
+# и длину content. Значения ключей никогда не выводятся.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Модель OpenRouter для запроса"
+        type: choice
+        options:
+          - nvidia/nemotron-3-ultra-550b-a55b:free
+          - google/gemma-4-31b-it:free
+          - nvidia/nemotron-3.5-super-vl:free
+        default: nvidia/nemotron-3-ultra-550b-a55b:free
+      max_tokens:
+        description: "Значение max_tokens для запроса"
+        type: choice
+        options:
+          - "4000"
+          - "16000"
+        default: "4000"
+      prompt:
+        description: "Текст запроса пользователя"
+        type: string
+        default: "Ответь одним словом: привет"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Диагностика OpenRouter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка httpx
+        run: pip install httpx
+
+      - name: Один запрос к OpenRouter
+        env:
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
+          MODEL: ${{ inputs.model }}
+          MAX_TOKENS: ${{ inputs.max_tokens }}
+          PROMPT: ${{ inputs.prompt }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python - <<'PY'
+          # Диагностика: один POST в OpenRouter. Разбор ответа идёт напрямую, без _extract_content.
+          import json
+          import os
+          import sys
+
+          import httpx
+
+          ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+          TIMEOUT_SECONDS = 300
+          SUMMARY_HEADING = "## Probe OpenRouter"
+
+          MODEL = os.environ.get("MODEL", "").strip()
+          MAX_TOKENS = os.environ.get("MAX_TOKENS", "4000").strip()
+          PROMPT = os.environ.get("PROMPT", "")
+
+          # Собираем непустые ключи OPENROUTER1..OPENROUTER10. Значения ключей не печатаются.
+          key_values = []
+          for index in range(1, 11):
+              value = os.environ.get(f"OPENROUTER{index}", "").strip()
+              if value:
+                  key_values.append(value)
+
+          if not key_values:
+              print("Ошибка: ни один из секретов OPENROUTER1..OPENROUTER10 не задан.")
+              sys.exit(1)
+
+          # Все значения ключей заменяются на *** во всех строках лога и сводки.
+          secret_values = list(key_values)
+          summary_lines = []
+
+
+          def mask(text) -> str:
+              text = str(text)
+              for value in secret_values:
+                  text = text.replace(value, "***")
+              return text
+
+
+          def say(text: str = "") -> None:
+              line = mask(text)
+              print(line)
+              summary_lines.append(line)
+
+
+          def write_summary() -> None:
+              path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+              if not path:
+                  return
+              body = "\n".join(summary_lines)
+              with open(path, "a", encoding="utf-8") as handle:
+                  handle.write(f"{SUMMARY_HEADING}\n\n```text\n{body}\n```\n")
+
+
+          def finish(code: int) -> None:
+              write_summary()
+              sys.exit(code)
+
+
+          def length_or_type(value) -> str:
+              if value is None:
+                  return "null"
+              if isinstance(value, str):
+                  return str(len(value))
+              return f"не строка ({type(value).__name__})"
+
+
+          api_key = key_values[0]
+          headers = {
+              "Authorization": f"Bearer {api_key}",
+              "Content-Type": "application/json",
+          }
+          body = {
+              "model": MODEL,
+              "messages": [{"role": "user", "content": PROMPT}],
+              "max_tokens": int(MAX_TOKENS),
+              "temperature": 0,
+          }
+
+          say(f"Модель: {MODEL}")
+          say(f"max_tokens: {MAX_TOKENS}")
+          say(f"Длина промпта: {len(PROMPT)} символов")
+          say(f"Найдено непустых ключей: {len(key_values)} (используется первый)")
+
+          try:
+              response = httpx.post(ENDPOINT, headers=headers, json=body, timeout=TIMEOUT_SECONDS)
+          except httpx.HTTPError as error:
+              say(f"Ошибка сети при запросе: {type(error).__name__}")
+              finish(1)
+
+          say(f"HTTP-статус: {response.status_code}")
+
+          if response.status_code != 200:
+              say("Тело ответа (статус не 200):")
+              say(response.text)
+              finish(1)
+
+          try:
+              data = response.json()
+          except ValueError:
+              say("Статус 200, но тело ответа не является JSON:")
+              say(response.text[:2000])
+              finish(1)
+
+          if not isinstance(data, dict):
+              say("Статус 200, но JSON не является объектом.")
+              finish(1)
+
+          choices = data.get("choices") or []
+          first = choices[0] if choices else {}
+          message = first.get("message") or {}
+          content = message.get("content")
+
+          say(f"id ответа: {data.get('id')}")
+          say(f"choices[0].finish_reason: {first.get('finish_reason')}")
+          say("usage: " + json.dumps(data.get("usage"), ensure_ascii=False))
+          say(f"Ключи choices[0].message: {list(message.keys())}")
+          say(f"Длина choices[0].message.content: {length_or_type(content)}")
+
+          reasoning_found = False
+          for field in ("reasoning", "reasoning_content"):
+              if field in message:
+                  reasoning_found = True
+                  say(f"Поле message.{field}: длина {length_or_type(message.get(field))}")
+          if not reasoning_found:
+              say("Поля message.reasoning и message.reasoning_content: отсутствуют")
+
+          if isinstance(content, str) and content:
+              say("Первые 200 символов content:")
+              say(content[:200])
+          else:
+              say("content пустой или отсутствует.")
+
+          finish(0)
+          PY
