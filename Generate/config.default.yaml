@@ -49,6 +49,27 @@ gemini_model_limits:
     tpm: 250000
     rpd: 500
 
+# --- Семейства текстовых моделей (выбор: --text-model или default_text_model) ---
+# gemini: модели из gemini_models выше (models: null). Провайдер openrouter: ключи OPENROUTER1…OPENROUTER10 из окружения.
+default_text_model: "gemini"
+text_model_families:
+  gemini:
+    provider: "gemini"
+    models: null
+  gemma:
+    provider: "openrouter"
+    models: ["google/gemma-4-31b-it:free"]
+  nemotron:
+    provider: "openrouter"
+    models: ["nvidia/nemotron-3-ultra:free"]
+openrouter_base_url: "https://openrouter.ai/api/v1"
+# на ключ; лимит аккаунта может быть общим, проверить в панели OpenRouter
+openrouter_limits:
+  rpm: 20
+  tpm: 1000000
+  rpd: 1000
+openrouter_max_output_tokens: 4000
+
 # --- Профиль модели и тайминги ---
 # Файл из Generate/model_profiles/ (без расширения).
 model_profile: ltx25

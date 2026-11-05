@@ -38,6 +38,9 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4000
 POOL_CHARS_PER_TOKEN = 3   # грубая оценка токенов входа для TPM
 PREVIEW_CHARS = 300        # сколько символов тела 429 попадает в лог
 
+# Признак суточной квоты в теле 429: «perday», «per day», «per-day» или слово «daily» (слово «today» не подходит).
+_DAILY_PATTERN = re.compile(r"per[\s-]?day|\bdaily\b")
+
 # Похожее на ключ в теле ответа заменяется на *** до записи в лог.
 _SECRET_PATTERNS = (
     re.compile(r"AIza[0-9A-Za-z_\-]{8,}"),
@@ -208,8 +211,9 @@ class OpenRouterTransport:
             if content is None:
                 # пустой или неожиданный ответ: ключ не виноват, но ответа нет
                 self._pool.release(lease, gpool.Outcome.SERVER_ERROR, model)
+                # 500 переводит в переходные ошибки, и оркестратор повторит запрос
                 raise GeminiRuntimeError("OpenRouter вернул ответ без текста.",
-                                         status=502, code="EMPTY_RESPONSE")
+                                         status=500, code="EMPTY_RESPONSE")
             self._pool.release(lease, gpool.Outcome.SUCCESS, model)
             return content
 
@@ -217,7 +221,7 @@ class OpenRouterTransport:
             text = _body_text(resp)
             # день или минута по тексту тела: признак пока не проверен на реальных ответах OpenRouter
             lowered = text.lower()
-            daily = "day" in lowered or "daily" in lowered
+            daily = _DAILY_PATTERN.search(lowered) is not None
             retry = None if daily else _retry_after(resp)
             outcome = gpool.Outcome.DAILY_QUOTA if daily else gpool.Outcome.RATE_LIMITED
             self._pool.release(lease, outcome, model, retry_after=retry)
