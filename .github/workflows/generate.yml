@@ -71,6 +71,14 @@ on:
           - "zimage_turbo"
           - "none"
         default: "zimage_turbo"
+      text_model:
+        description: "Семейство текстовой модели для промптов: gemini (по умолчанию), gemma или nemotron"
+        type: choice
+        options:
+          - "gemini"
+          - "gemma"
+          - "nemotron"
+        default: "gemini"
       video_percent:
         description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
         required: false
@@ -203,12 +211,14 @@ jobs:
           PROMPTS_COUNT: ${{ inputs.prompts_count }}
           # фото-профиль для превью: пусто, если фото-модель выключена (превью без неё не запускаются)
           PREVIEW_PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
+          TEXT_MODEL: ${{ inputs.text_model }}
         run: |
           # пустой SCAN_SEC (не задан) не переопределяет config.default.yaml; число проверяется здесь, до аренды
           # превью: при «выкл» файл промптов не читается; при 1..4 проверяются файл и фото-модель, до аренды
           python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" --scan-sec "$SCAN_SEC" \
             --prompts-file "$PROMPTS_FILE" --prompts-count "$PROMPTS_COUNT" \
-            --photo-profile "$PREVIEW_PHOTO_PROFILE"
+            --photo-profile "$PREVIEW_PHOTO_PROFILE" \
+            --text-model "$TEXT_MODEL"
 
       # Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс, который запускается до шага run и
       # читает файл heartbeat, пишущийся оркестратором. При тишине уничтожает карты запуска.
@@ -246,6 +256,16 @@ jobs:
           GEMINI8: ${{ secrets.GEMINI8 }}
           GEMINI9: ${{ secrets.GEMINI9 }}
           GEMINI10: ${{ secrets.GEMINI10 }}
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -260,6 +280,7 @@ jobs:
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
+          TEXT_MODEL: ${{ inputs.text_model }}
           # STEP 3b: распределение видео/фото (distribution.json); читает оркестратор до промптов
           VIDEO_PERCENT: ${{ inputs.video_percent }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
@@ -299,6 +320,7 @@ jobs:
             --budget-limit "$BUDGET_LIMIT"
             --min-balance-usd "$MIN_BALANCE"
             --model-profile "$MODEL_PROFILE"
+            --text-model "$TEXT_MODEL"
             --preset "$PRESET"
             --gpu-name "$GPU_NAME"
             --min-price-per-hour "$MIN_PRICE"
