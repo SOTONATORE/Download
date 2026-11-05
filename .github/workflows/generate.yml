@@ -72,12 +72,13 @@ on:
           - "none"
         default: "zimage_turbo"
       text_model:
-        description: "Семейство текстовой модели для промптов: gemini (по умолчанию), gemma или nemotron"
+        description: "Семейство текстовой модели для промптов: gemini (по умолчанию), gemma, nemotron или nemotron-super-vl"
         type: choice
         options:
           - "gemini"
           - "gemma"
           - "nemotron"
+          - "nemotron-super-vl"
         default: "gemini"
       video_percent:
         description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
