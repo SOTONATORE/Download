@@ -93,7 +93,7 @@ jobs:
       run: python Download/normalize_srt.py "${{ inputs.srt_path }}" final.srt
 
     - name: Install query-generation deps
-      run: pip install -U google-genai
+      run: pip install -U google-genai pyyaml httpx
 
     # Чекпоинт между запусками НЕ используется: каждый прогон генерирует запросы с нуля
     # (иначе после правок промпта/режима подтягивались бы старые батчи из кэша).
