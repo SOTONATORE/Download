@@ -61,7 +61,7 @@ text_model_families:
     models: ["google/gemma-4-31b-it:free"]
   nemotron:
     provider: "openrouter"
-    models: ["nvidia/nemotron-3-ultra:free"]
+    models: ["nvidia/nemotron-3-ultra-550b-a55b:free"]
 openrouter_base_url: "https://openrouter.ai/api/v1"
 # на ключ; лимит аккаунта может быть общим, проверить в панели OpenRouter
 openrouter_limits:
