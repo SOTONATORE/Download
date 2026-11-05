@@ -47,7 +47,7 @@ DATA_SRT = GEN / "tests" / "data" / "final.srt"
 
 SECRET = "TESTKEY-12345"
 # Имена переменных собраны из частей: литерал GEN_..._API_KEY в коде Generate/ запрещён (SPEC 0.1).
-GEMINI_ENV = "GEN_" + "GEMINI_API_KEY"
+GEMINI_ENV = "GEMINI" + "1"
 VAST_ENV = "GEN_" + "VAST_API_KEY"
 
 SEGMENTS = [

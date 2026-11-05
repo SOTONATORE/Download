@@ -13,7 +13,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, PromptConfig
 from Generate.core.srt_parser import Segment, srt_hash
 
-ENV_NAME = "GEN_" + "GEMINI_API_KEY"
+ENV_NAME = "GEMINI" + "1"
 TESTKEY = "TESTKEY-12345"
 M1, M2 = "model-a", "model-b"
 TIMING = go.TimingParams(24, {"kind": "8k+1"}, 2.5, 5.0, 10.0, 0.5)
@@ -208,22 +208,40 @@ def test_all_models_exhausted_keeps_progress(tmp_path):
 
 
 def test_rpd_counter_switches_model(tmp_path):
-    t = FakeTransport([ok([1, 2]), ok([3, 4])])
-    run(tmp_path, t, [1, 2, 3, 4], cfg=cfg(tmp_path, batch_size=2), rpd_limit=1)
-    assert t.calls == [M1, M2]
+    # суточная квота по паре (ключ, модель): модель меняется только после DAILY_QUOTA от транспорта
+    t = FakeTransport([ok([1, 2]), quota(), ok([3, 4])])
+    run(tmp_path, t, [1, 2, 3, 4], cfg=cfg(tmp_path, batch_size=2))
+    assert t.calls == [M1, M1, M2]
 
 
 def test_rpd_used_from_previous_runs(tmp_path):
-    t = FakeTransport([ok([1])])
+    # счётчики прошлых запусков не учитываются: первый запрос идёт на M1, переключение только после DAILY_QUOTA
+    t = FakeTransport([quota(), ok([1])])
     run(tmp_path, t, [1], rpd_used={M1: 500})
-    assert t.calls == [M2]
+    assert t.calls == [M1, M2]
 
 
-def test_rpd_exhausted_everywhere_before_first_call(tmp_path):
-    t = FakeTransport([])
-    with pytest.raises(GeminiRuntimeError):
-        run(tmp_path, t, [1], rpd_used={M1: 500, M2: 500})
-    assert t.calls == []
+def test_rpd_exhausted_everywhere_before_first_call(tmp_path, monkeypatch):
+    import httpx
+    from Generate.core import gemini_pool as gpool
+    clock = FakeClock()
+    pool = gpool.KeyPool([(ENV_NAME, TESTKEY)], rpm_limit=15, tpm_limit=250_000, rpd_limit=500,
+                         clock=clock.now, poll_interval=0.001)
+    # исчерпываем каждую пару (ключ, модель) через пул, без сетевых запросов
+    for model in (M1, M2):
+        lease = pool.acquire(model)
+        pool.release(lease, gpool.Outcome.DAILY_QUOTA, model)
+    seen = []
+
+    def handler(request):
+        seen.append(request)                  # запрос в сеть не должен уйти
+        return httpx.Response(200, json={})
+    real = gp.RealTransport(pool=pool, client=httpx.Client(transport=httpx.MockTransport(handler)),
+                            rpm_limit=15, tpm_limit=250_000, rpd_limit=500)
+    with pytest.raises(GeminiRuntimeError) as ei:
+        run(tmp_path, real, [1], clock=clock)
+    assert ei.value.daily_quota is True
+    assert seen == []
 
 
 # ------------------------------------------------ временные ошибки (500/503/504, сеть)
@@ -419,16 +437,32 @@ def test_network_error_from_real_transport_is_retried(tmp_path, monkeypatch):
 
 
 def test_limiter_runs_before_every_transient_attempt(tmp_path, monkeypatch):
-    calls = []
-    real_acquire = go.RateLimiter.acquire
+    import httpx
+    from Generate.core import gemini_pool as gpool
+    clock = FakeClock()
+    pool = gpool.KeyPool([(ENV_NAME, TESTKEY)], rpm_limit=15, tpm_limit=250_000, rpd_limit=500,
+                         clock=clock.now, poll_interval=0.001)
+    events = []                               # порядок: вызов пула (acquire) и HTTP-запрос (post)
+    real_acquire = pool.acquire
 
-    def spy(self, tokens):
-        calls.append(tokens)
-        return real_acquire(self, tokens)
-    monkeypatch.setattr(go.RateLimiter, "acquire", spy)
-    t = FakeTransport([unavail(), unavail(), unavail(), ok([1])])
-    run(tmp_path, t, [1])
-    assert len(calls) == 4 and len(set(calls)) == 1
+    def spy(*args, **kwargs):
+        events.append("acquire")
+        return real_acquire(*args, **kwargs)
+    monkeypatch.setattr(pool, "acquire", spy)
+    statuses = [503, 503, 503, 200]
+
+    def handler(request):
+        events.append("post")
+        status = statuses.pop(0)
+        if status == 200:
+            body = {"candidates": [{"content": {"parts": [{"text": json.dumps(ok([1]))}]}}]}
+            return httpx.Response(200, json=body)
+        return httpx.Response(status, json={"error": {"status": "UNAVAILABLE", "message": "тест"}})
+    real = gp.RealTransport(pool=pool, client=httpx.Client(transport=httpx.MockTransport(handler)),
+                            rpm_limit=15, tpm_limit=250_000, rpd_limit=500)
+    run(tmp_path, real, [1], clock=clock)
+    # перед каждой из четырёх попыток (включая три повторные) пул выдаёт ключ
+    assert events == ["acquire", "post"] * 4
 
 
 def test_transient_errors_leave_no_key_or_prompt_text_in_logs(tmp_path, monkeypatch, caplog):
@@ -478,12 +512,40 @@ def test_oversized_request_does_not_deadlock():
     go.RateLimiter(15, 100, c.now, c.sleep).acquire(10_000)
 
 
-def test_managed_transport_paces_requests(tmp_path):
+def test_managed_transport_paces_requests(tmp_path, monkeypatch):
+    import httpx
+    from Generate.core import gemini_pool as gpool
     c = FakeClock()
-    t = FakeTransport([ok([1]), ok([2]), ok([3])])
+    pool = gpool.KeyPool([(ENV_NAME, TESTKEY)], rpm_limit=2, tpm_limit=250_000, rpd_limit=500,
+                         clock=c.now, poll_interval=1.0)
+
+    class FakeCondition:
+        # ожидание пула идёт по фейковым часам: wait() продвигает время, а не реальное время
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def wait(self, timeout=None):
+            c.sleep(timeout)
+            return True
+
+        def notify_all(self):
+            pass
+    monkeypatch.setattr(pool, "_cond", FakeCondition())
+    texts = [json.dumps(ok([n])) for n in (1, 2, 3)]
+    seen = []
+
+    def handler(request):
+        seen.append(1)
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": texts[len(seen) - 1]}]}}]})
+    real = gp.RealTransport(pool=pool, client=httpx.Client(transport=httpx.MockTransport(handler)),
+                            rpm_limit=2, tpm_limit=250_000, rpd_limit=500)
     start = c.t
-    run(tmp_path, t, [1, 2, 3], clock=c, rpm_limit=2, cfg=cfg(tmp_path, batch_size=1))
-    assert len(t.calls) == 3 and c.t - start >= 60.0
+    run(tmp_path, real, [1, 2, 3], clock=c, cfg=cfg(tmp_path, batch_size=1))
+    # третий запрос на том же ключе ждёт окна RPM (60 с) на фейковых часах пула
+    assert len(seen) == 3 and c.t - start >= 60.0
 
 
 # --------------------------------------------------------------- атомарность

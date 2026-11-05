@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -63,6 +64,8 @@ def _transient_wait(err: gp.GeminiRuntimeError) -> float:
 # Лимитер RPM/TPM (скользящее окно 60 с)
 # ---------------------------------------------------------------------------
 
+# ВНИМАНИЕ: ManagedTransport этот класс больше не использует, лимиты ведёт пул ключей (gemini_pool).
+# Класс оставлен без изменений, пока на него опираются его собственные тесты.
 class RateLimiter:
     """Не пускает больше rpm запросов и tpm токенов за любые 60 с. clock/sleep подменяются в тестах."""
 
@@ -102,8 +105,15 @@ class RateLimiter:
 # ---------------------------------------------------------------------------
 
 class ManagedTransport:
-    """Обёртка над transport.generate_json: лимитер, счётчик RPD, смена модели только при суточной квоте,
+    """Обёртка над transport.generate_json: смена модели только при суточной квоте,
     повтор при RPM, повтор временных ошибок (500/503/504, сеть) на той же модели без смены.
+
+    Лимиты RPM, TPM и RPD здесь больше не ведутся: их держит пул ключей (gemini_pool) внутри транспорта,
+    по каждому ключу. Параметры rpm_limit, tpm_limit, rpd_limit и rpd_used сохранены для совместимости
+    вызовов, но в этот класс не передаются и не действуют.
+    Суточная квота переключает модель цепочки только тогда, когда транспорт сообщает, что ключей для модели
+    не осталось (ошибка без признака key_exhausted_only). Если исчерпан один ключ, а другие ещё есть,
+    модель повторяется: пул выдаст следующий ключ.
 
     Аргумент model, который передаёт generate_prompts, игнорируется: модель выбирает цепочка.
     """
@@ -119,34 +129,26 @@ class ManagedTransport:
             raise gp.GeminiInputError("Цепочка моделей Gemini пуста.")
         if rpd_limit <= 0:
             raise gp.GeminiInputError("Лимит RPD должен быть больше нуля.")
+        if rpd_used:
+            log.warning("Счётчики RPD из прошлых запусков не учитываются: их ведёт пул ключей.")
         self._inner = inner
-        self._rpd_limit = rpd_limit
         self._reserve = max(0, output_reserve_tokens)
         self._max_retries = max_rate_retries
         self._sleep = sleep
         self._clock = clock
-        self._limiters = {m: RateLimiter(rpm_limit, tpm_limit, clock, sleep) for m in self._models}
-        self._used = {m: int((rpd_used or {}).get(m, 0)) for m in self._models}
-        self._exhausted: set = set()
+        # замок защищает состояние цепочки моделей; на время сетевого вызова он не берётся
+        self._lock = threading.Lock()
+        self._exhausted: set = set()               # модели, отключённые на этот прогон (суточная квота)
         self._last_transient: tuple = (None, "")   # (status, code) последней временной ошибки
         self.active_model: str = self._models[0]
 
-    @property
-    def requests_used(self) -> dict:
-        return dict(self._used)
-
     def _usable(self, m: str) -> bool:
-        if m in self._exhausted:
-            return False
-        if self._used[m] >= self._rpd_limit:
-            self._exhausted.add(m)
-            log.warning("Модель %s: достигнут суточный лимит запросов (%d).", m, self._rpd_limit)
-            return False
-        return True
+        return m not in self._exhausted
 
     def _transient_exhausted(self, model: str) -> gp.GeminiRuntimeError:
         """Ошибка после TRANSIENT_ATTEMPTS неудачных попыток подряд на модели; тело ответа в сообщение не входит."""
-        status, code = self._last_transient
+        with self._lock:
+            status, code = self._last_transient
         return gp.GeminiRuntimeError(
             f"Модель {model} не ответила за {TRANSIENT_ATTEMPTS} попыток подряд (около 10 минут), "
             f"прогон остановлен; последняя ошибка: {_describe(status, code)}. "
@@ -154,20 +156,20 @@ class ManagedTransport:
             status=status, code=code)
 
     def _pick_model(self) -> str:
-        for m in self._models:
-            if not self._usable(m):
-                continue
-            if m != self.active_model:
-                log.warning("Переключение на запасную модель: %s.", m)
-            self.active_model = m
-            return m
+        with self._lock:   # выбор и смена active_model идут под замком: потоки не портят друг другу состояние
+            for m in self._models:
+                if not self._usable(m):
+                    continue
+                if m != self.active_model:
+                    log.warning("Переключение на запасную модель: %s.", m)
+                self.active_model = m
+                return m
         raise gp.GeminiRuntimeError(
             "Суточная квота исчерпана у всех моделей цепочки; прогресс сохранён, "
             "повторите запуск после сброса квоты.",
             status=429, code="RESOURCE_EXHAUSTED", daily_quota=True)
 
     def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
-        tokens = (len(system) + len(user)) // CHARS_PER_TOKEN + 1 + self._reserve
         rate_retries = 0
         tries = 0                  # неудачные попытки подряд на текущей модели, только для этого запроса
         tries_model = None
@@ -175,8 +177,6 @@ class ManagedTransport:
             m = self._pick_model()
             if m != tries_model:   # счётчик обнуляется при смене модели (по суточной квоте)
                 tries, tries_model = 0, m
-            self._limiters[m].acquire(tokens)
-            self._used[m] += 1
             t0 = self._clock()
             try:
                 text = self._inner.generate_json(m, system, user, schema)
@@ -185,7 +185,12 @@ class ManagedTransport:
                 return text
             except gp.GeminiRuntimeError as e:
                 if e.daily_quota:
-                    self._exhausted.add(m)
+                    if getattr(e, "key_exhausted_only", False):
+                        # квота исчерпана у одного ключа для этой модели: модель не меняем, пул выдаст другой ключ
+                        log.warning("Модель %s: суточная квота исчерпана у одного ключа, пробуем другой ключ.", m)
+                        continue
+                    with self._lock:
+                        self._exhausted.add(m)
                     log.warning("Модель %s: суточная квота исчерпана, модель отключена.", m)
                     rate_retries = 0
                     continue
@@ -204,7 +209,8 @@ class ManagedTransport:
                 if not is_transient(e):
                     raise
                 tries += 1
-                self._last_transient = (e.status, e.code)
+                with self._lock:
+                    self._last_transient = (e.status, e.code)
                 if tries < TRANSIENT_ATTEMPTS:
                     wait = _transient_wait(e)
                     log.warning("Модель %s: временная ошибка (%s), пауза %.1f с (попытка %d из %d).",

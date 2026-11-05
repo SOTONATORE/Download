@@ -94,13 +94,67 @@ jobs:
 
     - name: Generate search queries via Gemini
       env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        GEMINI1: ${{ secrets.GEMINI1 }}
+        GEMINI2: ${{ secrets.GEMINI2 }}
+        GEMINI3: ${{ secrets.GEMINI3 }}
+        GEMINI4: ${{ secrets.GEMINI4 }}
+        GEMINI5: ${{ secrets.GEMINI5 }}
+        GEMINI6: ${{ secrets.GEMINI6 }}
+        GEMINI7: ${{ secrets.GEMINI7 }}
+        GEMINI8: ${{ secrets.GEMINI8 }}
+        GEMINI9: ${{ secrets.GEMINI9 }}
+        GEMINI10: ${{ secrets.GEMINI10 }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
         PYTHONUNBUFFERED: "1"
       run: python Download/generate_queries.py --input final.srt --output requests.json
+
+    # Маскировка ключей Gemini в файлах, которые уходят в артефакты этого job.
+    # Значения берутся только из env шага и нигде не печатаются. Отсутствующие файлы пропускаются.
+    # Ошибка чтения или записи существующего файла валит job: непромаскированный файл не должен уйти в артефакт.
+    # if: always() - шаг нужен и при падении генерации, когда requests.json уже записан (strict=1).
+    - name: Mask Gemini keys in artifact files
+      if: always()
+      env:
+        GEMINI1: ${{ secrets.GEMINI1 }}
+        GEMINI2: ${{ secrets.GEMINI2 }}
+        GEMINI3: ${{ secrets.GEMINI3 }}
+        GEMINI4: ${{ secrets.GEMINI4 }}
+        GEMINI5: ${{ secrets.GEMINI5 }}
+        GEMINI6: ${{ secrets.GEMINI6 }}
+        GEMINI7: ${{ secrets.GEMINI7 }}
+        GEMINI8: ${{ secrets.GEMINI8 }}
+        GEMINI9: ${{ secrets.GEMINI9 }}
+        GEMINI10: ${{ secrets.GEMINI10 }}
+      run: |
+        python3 -I -c '
+        import os
+        from pathlib import Path
+
+        # Явный список имён ключей.
+        KEY_NAMES = ("GEMINI1", "GEMINI2", "GEMINI3", "GEMINI4", "GEMINI5",
+                     "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10")
+        # Файлы артефактов. search-links создаётся в job search_media, здесь его нет;
+        # имена перечислены для полноты (отсутствующие файлы пропускаются).
+        FILES = ("requests.json", "final.srt", "links.txt", "backup_links.txt",
+                 "missing.txt", "backup_missing.txt", "min_durations.json")
+
+        # Непустые значения; длинные первыми, чтобы более длинное совпадение заменялось раньше.
+        values = sorted({os.environ.get(k, "").strip() for k in KEY_NAMES} - {""}, key=len, reverse=True)
+
+        for name in FILES:
+            path = Path(name)
+            if not path.is_file():
+                continue
+            data = path.read_bytes()
+            masked = data
+            for v in values:
+                masked = masked.replace(v.encode("utf-8"), b"***")
+            if masked != data:
+                path.write_bytes(masked)
+        '
 
     # always(): при падении проверки запросов (код 1 при strict=1) requests.json всё равно можно скачать.
     # Поиск при этом не стартует: search_media требует needs.generate_queries.result == 'success'.

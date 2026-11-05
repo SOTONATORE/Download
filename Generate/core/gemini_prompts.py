@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -41,9 +42,6 @@ except ImportError:
 
 log = logging.getLogger("Generate.gemini_prompts")
 
-# Имя переменной окружения с ключом собрано из частей: структурный тест запрещает
-# литерал секрета в коде (SPEC 0.1). Значение ключа в модуле нигде не хранится и не печатается.
-ENV_KEY_NAME = "GEN_" + "GEMINI_API_KEY"
 API_KEY_HEADER = "x-goog-api-key"
 API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -733,9 +731,14 @@ class _LoggedTransport:
             raise
 
 
+# Максимум параллельных батчей в generate_prompts (не больше числа ключей Gemini)
+MAX_PARALLEL_BATCHES = 10
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
-                     on_batch: Optional[Callable[[list], None]] = None) -> list:
+                     on_batch: Optional[Callable[[list], None]] = None,
+                     max_workers: Optional[int] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -743,9 +746,15 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     и needs_review=True: решение, пускать ли такой в генерацию, за оркестратором.
 
     on_batch(results): необязательный колбэк. Вызывается после каждого готового батча (с учётом
-    retry), до начала следующего; results: list[PromptResult] этого батча по возрастанию номера,
+    retry) под общим замком; при параллельных батчах порядок вызовов соответствует порядку завершения батчей, а не номеру. results: list[PromptResult] этого батча по возрастанию номера,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
     отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
+
+    max_workers: число потоков. По умолчанию берётся число ключей Gemini из окружения (тот же
+    источник, что у RealTransport), не больше MAX_PARALLEL_BATCHES и числа батчей. При одном потоке
+    работа идёт в вызывающем потоке, как раньше. Батчи берутся из очереди по порядку; вызовы
+    on_batch идут под одним замком в порядке завершения батчей. Первая ошибка останавливает взятие
+    новых батчей; уже запущенные батчи доходят до конца, после чего ошибка пробрасывается.
     """
     builder = _Builder(segments, wanted_nums, cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
@@ -754,38 +763,87 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     batches = builder.batches(builder.wanted)
     log.info("Генерация промптов начата: модель %s, клипов к описанию: %d, батчей: %d.",
              model, len(builder.wanted), len(batches), extra=KEY_EVENT_EXTRA)
-    logged = _LoggedTransport(transport)  # журнал неудачных попыток; ответы не меняет
+
+    # число потоков: без явного значения — число ключей из окружения; если ключей нет, идём в один поток
+    if max_workers is None:
+        try:
+            max_workers = len(_pool_module().load_gemini_keys(os.environ))
+        except Exception:
+            max_workers = 1
+    n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
+    log.info("Батчи выполняются в %d потоках.", n_workers)
+
     out: dict = {}
-    for batch_no, batch in enumerate(batches, start=1):
-        logged.start_batch(batch_no)
-        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
-                 extra=KEY_EVENT_EXTRA)
-        t_batch = time.monotonic()
-        batch_res = _run_batch(logged, model, builder, batch)
-        for r in batch_res.values():
-            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
-            if r.prompt.strip():
-                r.prompt = attach_style(r.prompt, style_text)
-        # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
-        review_nums = []
-        for n in batch.nums:
-            r = batch_res.get(n)
-            if r is None:
-                continue
-            if r.needs_review:
-                review_nums.append(n)
-            elif r.prompt.strip():
-                digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
-                log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
-        if review_nums:
-            log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
-                        batch_no, ", ".join(str(n) for n in review_nums))
-        with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
-        log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
-                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch, extra=KEY_EVENT_EXTRA)
-        out.update(batch_res)
-        if on_batch is not None:
-            on_batch([batch_res[n] for n in batch.nums])
+    queue_lock = threading.Lock()    # очередь батчей, флаг остановки и первая ошибка
+    out_lock = threading.Lock()      # out и вызов on_batch: один замок на весь колбэк
+    stop = threading.Event()
+    first_error: list = []           # первая ошибка; последующие не сохраняются (их видно в журнале попыток)
+    next_idx = 0
+
+    def worker() -> None:
+        nonlocal next_idx
+        # журнал свой у каждого потока: номер батча и попытка не делятся между потоками
+        logged = _LoggedTransport(transport)
+        while True:
+            with queue_lock:
+                if stop.is_set() or next_idx >= len(batches):
+                    return
+                idx = next_idx
+                next_idx += 1
+            batch_no = idx + 1
+            batch = batches[idx]
+            try:
+                logged.start_batch(batch_no)
+                log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
+                         extra=KEY_EVENT_EXTRA)
+                t_batch = time.monotonic()
+                batch_res = _run_batch(logged, model, builder, batch)
+                for r in batch_res.values():
+                    # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+                    if r.prompt.strip():
+                        r.prompt = attach_style(r.prompt, style_text)
+                # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
+                review_nums = []
+                for n in batch.nums:
+                    r = batch_res.get(n)
+                    if r is None:
+                        continue
+                    if r.needs_review:
+                        review_nums.append(n)
+                    elif r.prompt.strip():
+                        digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
+                        log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
+                if review_nums:
+                    log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
+                                batch_no, ", ".join(str(n) for n in review_nums))
+                with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
+                log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
+                         batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
+                         extra=KEY_EVENT_EXTRA)
+                with out_lock:
+                    out.update(batch_res)
+                    if on_batch is not None:
+                        on_batch([batch_res[n] for n in batch.nums])
+            except BaseException as exc:
+                # ошибка не глотается: запоминаем первую, новые батчи не берём, запущенные доходят до конца
+                with queue_lock:
+                    if not first_error:
+                        first_error.append(exc)
+                    stop.set()
+                return
+
+    if n_workers == 1:
+        worker()   # один ключ: тот же поток, та же последовательность, что раньше
+    else:
+        threads = [threading.Thread(target=worker, name=f"gemini-batch-{i + 1}")
+                   for i in range(n_workers)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+    if first_error:
+        raise first_error[0]
+
     results = [out[n] for n in builder.wanted]
     flagged = sum(1 for r in results if r.needs_review)
     log.info("Промпты готовы: %d, из них требуют проверки: %d.", len(results), flagged)
@@ -826,7 +884,8 @@ def _safe_error_fields(response: Any) -> tuple:
                 continue
             for v in d.get("violations", []) or []:
                 qid = str(v.get("quotaId", "")) if isinstance(v, dict) else ""
-                if "PerDay" in qid:
+                # суточная квота: как _is_daily_quota_error в Download/generate_queries.py (без учёта регистра)
+                if "perday" in qid.lower():
                     daily = True
             delay = d.get("retryDelay")
             if isinstance(delay, str):
@@ -840,22 +899,89 @@ def _safe_error_fields(response: Any) -> tuple:
     return code, daily, retry
 
 
-class RealTransport:
-    """Реальный транспорт Gemini на httpx. Ключ читается из окружения при создании и уходит
-    только в заголовок x-goog-api-key; в URL, логи и исключения он не попадает."""
+def _quota_log_fields(response: Any) -> list:
+    """Безопасные поля тела 429 для диагностики: какая квота исчерпана. Только перечисленные ключи;
+    error.message, содержимое запроса и ключ API не берутся. Для сбоя разбора возвращается неполный список."""
+    def _text(value: Any) -> str:
+        if value is None or isinstance(value, (dict, list)):
+            return ""  # вложенные структуры в лог не пишем
+        return str(value)[:200]
 
-    def __init__(self, *, api_key_env: str = ENV_KEY_NAME, timeout: float = 120.0,
-                 client: Any = None, base_url: str = API_BASE_URL):
-        key = os.environ.get(api_key_env, "")
-        if not key:
-            raise GeminiInputError(f"Не задана переменная окружения {api_key_env} с ключом Gemini.")
+    out: list = []
+    try:
+        err = response.json().get("error", {})
+        if not isinstance(err, dict):
+            return out
+        out.append({"status": _text(err.get("status")), "code": _text(err.get("code"))})
+        for d in err.get("details", []) or []:
+            if not isinstance(d, dict):
+                continue
+            item = {"@type": _text(d.get("@type"))}
+            for key in ("quotaId", "quotaMetric", "quotaValue", "retryDelay"):
+                if key in d:
+                    item[key] = _text(d.get(key))
+            violations = [
+                {k: _text(v.get(k)) for k in ("quotaMetric", "quotaId", "quotaValue") if k in v}
+                for v in (d.get("violations", []) or []) if isinstance(v, dict)
+            ]
+            if violations:
+                item["violations"] = violations
+            out.append(item)
+    except Exception:
+        pass
+    return out
+
+# Значения по умолчанию для лимитов пула: совпадают с config.default.yaml. Конфиг (cli) передаёт свои значения явно.
+DEFAULT_POOL_RPM = 15         # запросов в минуту
+DEFAULT_POOL_TPM = 250_000    # токенов в минуту
+DEFAULT_POOL_RPD = 500        # запросов в сутки на одну модель
+# Оценка токенов для TPM: те же константы, что в gemini_orchestrator (CHARS_PER_TOKEN, output_reserve_tokens).
+POOL_CHARS_PER_TOKEN = 3
+POOL_OUTPUT_RESERVE_TOKENS = 2000
+
+
+def _pool_module():
+    """Модуль пула подгружается при создании транспорта: gemini_pool сам импортирует gemini_prompts."""
+    try:
+        from . import gemini_pool as gpool
+    except ImportError:  # плоский импорт, как в остальных модулях core
+        import gemini_pool as gpool  # type: ignore
+    return gpool
+
+
+def _retry_after_header(response: Any) -> Optional[float]:
+    """Заголовок Retry-After в секундах. Дата в HTTP-формате или мусор дают None."""
+    try:
+        value = float(response.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+class RealTransport:
+    """Реальный транспорт Gemini на httpx поверх общего пула ключей (gemini_pool).
+
+    Для каждого вызова generate_json берётся ключ (lease) из пула; ключ уходит только в заголовок
+    x-goog-api-key; в URL, логи и исключения он не попадает. Исход запроса возвращается в пул."""
+
+    def __init__(self, *, pool: Any = None, timeout: float = 120.0, client: Any = None,
+                 base_url: str = API_BASE_URL, environ: Any = None,
+                 rpm_limit: int = DEFAULT_POOL_RPM, tpm_limit: int = DEFAULT_POOL_TPM,
+                 rpd_limit: int = DEFAULT_POOL_RPD):
+        # лимиты передаются в пул; без явных значений берутся DEFAULT_POOL_* (совпадают с конфигом по умолчанию)
         try:
             import httpx
         except ImportError:
             raise GeminiInputError("Не установлен пакет httpx.") from None
+        self._gpool = _pool_module()
+        if pool is None:
+            # ключи читаются здесь, при создании пула; в самом запросе окружение не трогаем
+            keys = self._gpool.load_gemini_keys(os.environ if environ is None else environ)
+            pool = self._gpool.KeyPool(keys, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit)
+        self._pool = pool
+        self._tpm = tpm_limit    # оценка токенов не должна превышать TPM пула
         _silence_http_logs()
         self._httpx = httpx
-        self._headers = {API_KEY_HEADER: key, "Content-Type": "application/json"}
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=timeout)
         self._base_url = base_url.rstrip("/")
@@ -876,6 +1002,7 @@ class RealTransport:
         self.close()
 
     def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
+        gpool = self._gpool
         url = f"{self._base_url}/{model}:generateContent"
         body = {
             "systemInstruction": {"parts": [{"text": system}]},
@@ -883,22 +1010,59 @@ class RealTransport:
             "generationConfig": {"responseMimeType": "application/json",
                                  "responseJsonSchema": schema},
         }
+        tokens = min((len(system) + len(user)) // POOL_CHARS_PER_TOKEN + 1 + POOL_OUTPUT_RESERVE_TOKENS,
+                     self._tpm)
         try:
-            resp = self._client.post(url, headers=self._headers, json=body)
+            lease = self._pool.acquire(model, tokens=tokens)
+        except gpool.AllKeysExhaustedError:
+            # все ключи исчерпали суточную квоту: признак daily_quota, чтобы ManagedTransport сменил модель
+            # или остановил прогон (как раньше, без временного сбоя)
+            raise GeminiRuntimeError(
+                "Все ключи Gemini исчерпали суточную квоту.",
+                status=429, code="RESOURCE_EXHAUSTED", daily_quota=True) from None
+        # заголовок с ключом живёт только внутри этого вызова и никуда не передаётся
+        headers = {API_KEY_HEADER: lease.api_key, "Content-Type": "application/json"}
+        try:
+            resp = self._client.post(url, headers=headers, json=body)
         except self._httpx.HTTPError as e:
-            # В сообщение идёт только имя класса ошибки; объект запроса и цепочка не сохраняются.
+            # ключ не виноват: состояние не меняется; в сообщение идёт только имя класса ошибки
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR, model)
             raise GeminiRuntimeError(
                 f"Сбой сети при обращении к Gemini ({type(e).__name__}).") from None
         except Exception as e:
+            # любой сбой до ответа тоже без штрафа ключу
+            self._pool.release(lease, gpool.Outcome.NETWORK_ERROR, model)
             raise GeminiRuntimeError(
                 f"Непредвиденный сбой при обращении к Gemini ({type(e).__name__}).") from None
 
-        if resp.status_code != 200:
+        status = resp.status_code
+        if status == 200:
+            self._pool.release(lease, gpool.Outcome.SUCCESS, model)
+        else:
             code, daily, retry = _safe_error_fields(resp)
+            if status == 429:
+                if daily:
+                    self._pool.release(lease, gpool.Outcome.DAILY_QUOTA, model)
+                else:
+                    self._pool.release(lease, gpool.Outcome.RATE_LIMITED, model,
+                                       retry_after=_retry_after_header(resp))
+            else:
+                # 500, 503, 504 и прочие ошибки (в том числе 4xx): ключ не виноват, состояние не меняется
+                self._pool.release(lease, gpool.Outcome.SERVER_ERROR, model)
             extra = f", код {code}" if code else ""
-            raise GeminiRuntimeError(
-                f"Gemini вернул ошибку: HTTP {resp.status_code}{extra}.",
-                status=resp.status_code, code=code, daily_quota=daily, retry_after=retry)
+            err = GeminiRuntimeError(
+                f"Gemini вернул ошибку: HTTP {status}{extra}.",
+                status=status, code=code, daily_quota=daily, retry_after=retry)
+            if status == 429:
+                # диагностика: какая квота исчерпана; ключ, промпт и текст ответа в лог не пишутся
+                log.warning("HTTP 429 от Gemini, модель %s: признаки квоты %s; оценка входных токенов: %d.",
+                            model, json.dumps(_quota_log_fields(resp), ensure_ascii=False),
+                            round((len(system) + len(user)) / 4))
+            if status == 429 and daily:
+                # квота исчерпана только у этого ключа для этой модели: пул может выдать другой ключ.
+                # ManagedTransport по этому признаку повторит модель, а не переключит её.
+                err.key_exhausted_only = True
+            raise err
         try:
             data = resp.json()
             parts = data["candidates"][0]["content"]["parts"]

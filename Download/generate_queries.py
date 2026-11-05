@@ -11,7 +11,7 @@ response_schema).
     python generate_queries.py --sources-mode 1 --strict 1
 
 Переменные окружения:
-    GEMINI_API_KEY       - обязателен, ключ Gemini API
+    GEMINI1..GEMINI10    - обязательна хотя бы одна, ключи Gemini API (общий пул; пустые пропускаются)
     GENQ_MODEL           - опционально, основная модель (по умолчанию gemini-3.5-flash-lite)
     GENQ_FALLBACK_MODELS - опционально, через запятую - модели для переключения при
                            исчерпании дневного лимита основной (по умолчанию
@@ -70,6 +70,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import Counter
 from functools import partial
@@ -81,6 +82,19 @@ import httpx
 from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
+
+# Корень репозитория (родитель Download/) - чтобы импортировать общий пул ключей из Generate/.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from Generate.core.gemini_pool import (  # noqa: E402
+    AllKeysExhaustedError,
+    KeyLease,
+    KeyPool,
+    Outcome,
+    load_gemini_keys,
+)
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -111,6 +125,15 @@ REPAIR2_CONTEXT_WINDOW = 10
 # сегментов на каждую сторону (на текст без пунктуации предложение может быть бесконечным).
 REPAIR_MAX_EXPAND_SEGMENTS = 20
 MAX_RETRIES = 5
+# Лимиты пула на один ключ (RPM/TPM - окно 60 с, RPD - сутки по паре ключ+модель).
+# лимиты на один ключ (проект Google Cloud), как в Generate/config.default.yaml
+POOL_RPM_LIMIT = 15
+POOL_TPM_LIMIT = 250000
+POOL_RPD_LIMIT = 500
+# Максимум параллельных батчей (не больше числа ключей, см. main).
+POOL_MAX_WORKERS = 10
+# Оценка токенов одного запроса для TPM (грубая, батч 100 сегментов).
+POOL_TOKENS_PER_REQUEST = 20000
 INITIAL_BACKOFF_SECONDS = 4
 # Практический потолок ожидания для НЕ-дневных 429 (RPM/TPM) внутри одного запуска -
 # дневную квоту (часы ожидания) всё равно нет смысла ждать в рамках одной CI-джобы.
@@ -580,12 +603,13 @@ class Segment:
 
 
 class DailyQuotaExceededError(RuntimeError):
-    """Дневной лимит запросов (RPD) для конкретной модели исчерпан - ретраить эту же
-    модель бессмысленно до сброса квоты."""
+    """Дневной лимит запросов (RPD) для пары (ключ, модель) исчерпан - ретраить этот же ключ
+    и эту модель бессмысленно до сброса квоты. Имя ключа - только имя переменной, не значение."""
 
-    def __init__(self, model: str, message: str):
+    def __init__(self, model: str, message: str, key_name: str = ""):
         super().__init__(message)
         self.model = model
+        self.key_name = key_name
 
 
 class AllModelsQuotaExhaustedError(RuntimeError):
@@ -2015,10 +2039,120 @@ def save_checkpoint(path: str, src_hash: str, results: dict, exhausted_models: d
 # Повторный запрос REPAIR и завершение
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Общий пул ключей: параллельный запуск батчей и чанков REPAIR
+# ---------------------------------------------------------------------------
+
+class PoolRunStop(Exception):
+    """Внутренний сигнал: жёсткая ошибка одного работника останавливает новые задания."""
+
+
+def _make_client_cache(keys_pairs, http_timeout_ms: int) -> dict[str, "genai.Client"]:
+    """Один genai.Client на каждый ключ пула (кэш по имени переменной, не по значению)."""
+    cache: dict[str, "genai.Client"] = {}
+    for name, value in keys_pairs:
+        cache[name] = genai.Client(
+            api_key=value,
+            http_options=types.HttpOptions(timeout=http_timeout_ms),
+        )
+    return cache
+
+
+def _run_pool_tasks(
+    pool: "KeyPool",
+    clients: dict[str, "genai.Client"],
+    tasks: list,
+    run_one,
+    lock: "threading.Lock",
+    on_done,
+    model_for_pool: str,
+    max_workers: int,
+    exhausted_pairs: Optional[dict] = None,
+    on_quota=None,
+) -> tuple[Optional[int], str]:
+    """Выполняет tasks параллельно через пул ключей.
+
+    run_one(client, model, task) -> результат; вызывается с клиентом выданного ключа.
+    on_done(task, result) вызывается под общим lock (запись результатов и чекпоинт).
+    Возвращает (код, модель): код None - всё выполнено; 3 - дневная квота у всех ключей;
+    1 - жёсткая ошибка (новые задания не стартуют, начатые доделываются).
+    Значения ключей в логах и исключениях не появляются.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    state = {"code": None, "model": model_for_pool}
+    if exhausted_pairs is None:
+        exhausted_pairs = {}
+    stop = threading.Event()
+    pending = list(tasks)
+    pending_lock = threading.Lock()
+
+    def next_task():
+        with pending_lock:
+            if stop.is_set() or not pending:
+                return None
+            return pending.pop(0)
+
+    def worker():
+        while True:
+            task = next_task()
+            if task is None:
+                return
+            model = state["model"]
+            try:
+                lease: KeyLease = pool.acquire(model, tokens=POOL_TOKENS_PER_REQUEST)
+            except AllKeysExhaustedError:
+                # Все ключи исчерпали квоту для этой модели: возвращаем задание в начало очереди
+                # и выходим; код 3 выставит основной поток.
+                with pending_lock:
+                    pending.insert(0, task)
+                with lock:
+                    state["code"] = 3 if state["code"] is None else state["code"]
+                stop.set()
+                return
+            client = clients[lease.name]
+            try:
+                result = run_one(client, model, task)
+                pool.release(lease, Outcome.SUCCESS, model)
+                with lock:
+                    on_done(task, result)
+            except DailyQuotaExceededError as e:
+                pool.release(lease, Outcome.DAILY_QUOTA, model)
+                with lock:
+                    exhausted_pairs[f"{lease.name}|{e.model}"] = _now_iso()
+                    if on_quota is not None:
+                        on_quota()  # сохранение чекпоинта сразу, под тем же lock
+                logging.warning(
+                    "Дневной лимит исчерпан для ключа %s, модель %s; ключ выведен на сутки, "
+                    "остальные ключи продолжают работу.", lease.name, e.model,
+                )
+                # Задание не выполнено: возвращаем в очередь, другой ключ его возьмёт.
+                with pending_lock:
+                    pending.insert(0, task)
+            except Exception as e:  # структурная/жёсткая ошибка
+                pool.release(lease, Outcome.SERVER_ERROR, model)
+                logging.error("Задание не обработано: %s", e)
+                with lock:
+                    state["code"] = 1
+                stop.set()
+                return
+
+    workers = max(1, min(len(clients), max_workers))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(worker) for _ in range(workers)]
+        for f in futures:
+            f.result()
+
+    if state["code"] is None and pending:
+        # Остались задания, но ключей нет и ошибки не было - это дневная квота всех ключей.
+        state["code"] = 3
+    return state["code"], state["model"]
+
+
 def _run_repair_round(
-    client: "genai.Client",
+    pool: "KeyPool",
+    clients: dict[str, "genai.Client"],
     current_model: str,
-    fallback_queue: list[str],
     segments: list[Segment],
     results: dict[str, dict],
     exhausted_models: dict[str, str],
@@ -2029,17 +2163,18 @@ def _run_repair_round(
     round_num: int,
     call_batch_fn=call_gemini_batch,
     sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
+    max_workers: int = POOL_MAX_WORKERS,
 ) -> tuple[Optional[int], str]:
-    """Один круг REPAIR по номерам indices (чанки по chunk_repair_indices). Обновляет results,
-    fallback_queue, exhausted_models и чекпоинт на месте. Возвращает (код, модель): код None -
-    круг завершён, иначе код возврата процесса (3 - квоты исчерпаны, 1 - ошибка вызова)."""
+    """Один круг REPAIR по номерам indices (чанки по chunk_repair_indices), параллельно через пул.
+    Все чанки круга выполняются до перехода к перепроверке, результаты применяются
+    в порядке номеров сегментов. Возвращает (код, модель): None - круг завершён, иначе код
+    возврата процесса (3 - квоты исчерпаны, 1 - ошибка вызова)."""
     seg_by_idx = {s.index: s for s in segments}
     repair_chunks = chunk_repair_indices(indices, max_size=125)
-    # Строка соседей (format_neighbors_context): круг 1 - +-CONTEXT_WINDOW, подписи Context
-    # BEFORE/AFTER внутри строки; круг 2 - +-REPAIR2_CONTEXT_WINDOW с пометками distance N. В обоих
-    # кругах окно расширено до границ целых предложений (sentence_index), соседи - только текст SRT.
     neighbors_window = REPAIR2_CONTEXT_WINDOW if round_num == 2 else CONTEXT_WINDOW
 
+    # Подготовка всех чанков заранее (детерминированно, по порядку номеров).
+    prepared = []
     for chunk_num, chunk_indices in enumerate(repair_chunks, start=1):
         chunk_segs = [seg_by_idx[i] for i in chunk_indices]
         first_idx, last_idx = chunk_segs[0].index, chunk_segs[-1].index
@@ -2064,54 +2199,46 @@ def _run_repair_round(
                 "round": round_num,
                 "mode": sources_mode,
             }
+        prepared.append((chunk_num, chunk_segs, ctx_before, ctx_after, chunk_repair_info, first_idx, last_idx))
 
+    lock = threading.Lock()
+
+    def run_one(client, model, task):
+        chunk_num, chunk_segs, ctx_before, ctx_after, info, first_idx, last_idx = task
         logging.info(
             "REPAIR круг %s/2: чанк %s/%s: %s сегментов [%s..%s] (модель: %s)",
-            round_num, chunk_num, len(repair_chunks), len(chunk_segs), first_idx, last_idx, current_model,
+            round_num, chunk_num, len(repair_chunks), len(chunk_segs), first_idx, last_idx, model,
+        )
+        return call_batch_fn(
+            client, model, chunk_segs, ctx_before, ctx_after,
+            mode=sources_mode, repair_info=info, sentence_index=sentence_index,
         )
 
-        while True:
-            try:
-                repaired_batch = call_batch_fn(
-                    client, current_model, chunk_segs, ctx_before, ctx_after,
-                    mode=sources_mode, repair_info=chunk_repair_info,
-                    sentence_index=sentence_index,
-                )
-                break
-            except DailyQuotaExceededError as e:
-                logging.warning(
-                    "Дневной лимит исчерпан для модели %s: %s", e.model, e
-                )
-                exhausted_models[e.model] = _now_iso()
-                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                if not fallback_queue:
-                    logging.error(
-                        "Дневной лимит исчерпан во время REPAIR, а запасных моделей больше нет. "
-                        "Прогресс сохранён в чекпоинте %s.", checkpoint_path,
-                    )
-                    return 3, current_model
-                current_model = fallback_queue.pop(0)
-                logging.warning("Переключаюсь на запасную модель: %s", current_model)
-                continue
-            except Exception as e:
-                logging.error(
-                    "REPAIR круг %s/2, чанк %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
-                    "requests.json НЕ будет записан (чекпоинт сохранён в %s).",
-                    round_num, first_idx, last_idx, MAX_RETRIES, e, checkpoint_path,
-                )
-                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                return 1, current_model
+    collected: dict[int, dict] = {}
 
-        # visual_value ремонт не меняет: сохраняем прежнюю оценку (модель обязана вернуть поле
-        # по схеме, но её новое значение отбрасывается, если у сегмента оценка уже была)
+    def on_done(task, repaired_batch):
+        # visual_value ремонт не меняет: сохраняем прежнюю оценку
         for idx_str, new_entry in repaired_batch.items():
             old_vv = results.get(idx_str, {}).get("visual_value")
             if old_vv is not None:
                 new_entry["visual_value"] = old_vv
+        collected[task[0]] = repaired_batch
         results.update(repaired_batch)
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
 
-    return None, current_model
+    code, model_out = _run_pool_tasks(
+        pool, clients, prepared, run_one, lock, on_done, current_model, max_workers,
+        exhausted_pairs=exhausted_models,
+        on_quota=lambda: save_checkpoint(checkpoint_path, src_hash, results, exhausted_models),
+    )
+    if code is not None:
+        logging.error(
+            "REPAIR круг %s/2 прерван (код %s). Прогресс сохранён в чекпоинте %s.",
+            round_num, code, checkpoint_path,
+        )
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+        return code, model_out
+    return None, model_out
 
 
 def summarize_visual_values(entries: dict[str, dict]) -> str:
@@ -2130,23 +2257,38 @@ def summarize_visual_values(entries: dict[str, dict]) -> str:
 
 
 def run_repair_cycle(
-    client: "genai.Client",
-    current_model: str,
-    fallback_queue: list[str],
-    segments: list[Segment],
-    results: dict[str, dict],
-    exhausted_models: dict[str, str],
-    checkpoint_path: str,
-    src_hash: str,
-    sources_mode: int,
-    strict_mode: int,
-    output_path: str,
+    pool: "KeyPool" = None,
+    clients: dict[str, "genai.Client"] = None,
+    current_model: str = "",
+    segments: list[Segment] = None,
+    results: dict[str, dict] = None,
+    exhausted_models: dict[str, str] = None,
+    checkpoint_path: str = "",
+    src_hash: str = "",
+    sources_mode: int = SOURCES_MIX,
+    strict_mode: int = 2,
+    output_path: str = "",
     call_batch_fn=call_gemini_batch,
     sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
+    client=None,
+    fallback_queue: list[str] | None = None,
 ) -> int:
-    """Выполняет пост-проверку записей, до двух кругов исправления REPAIR через Gemini
+    """Выполняет пост-проверку записей, до двух кругов исправления REPAIR через пул ключей
     (круг 2 - только для номеров, оставшихся с нарушениями после круга 1; третьего круга нет),
-    логирует статистику источников и сохраняет requests.json."""
+    логирует статистику источников и сохраняет requests.json.
+
+    Для self-tests (без сети) поддержана прежняя форма вызова: client=... вместо pool/clients.
+    Тогда строится пул из одного фиктивного ключа; fallback_queue в пуле не используется.
+    """
+    if pool is None:
+        # Форма для self-tests: один клиент, ключ с условным именем (значение не используется).
+        pool = KeyPool(
+            [("TEST1", "test-only")],
+            rpm_limit=10_000, tpm_limit=10**12, rpd_limit=10**9,
+        )
+        clients = {"TEST1": client}
+    if exhausted_models is None:
+        exhausted_models = {}
     # Склейка в предложения - один раз по всему списку (main передаёт готовый индекс)
     if sentence_index is None:
         sentence_index = merge_segments_into_sentences(segments)
@@ -2162,7 +2304,7 @@ def run_repair_cycle(
             len(problem_indices),
         )
         code, current_model = _run_repair_round(
-            client, current_model, fallback_queue, segments, results, exhausted_models,
+            pool, clients, current_model, segments, results, exhausted_models,
             checkpoint_path, src_hash, sources_mode, problem_indices, 1, call_batch_fn,
             sentence_index,
         )
@@ -2179,7 +2321,7 @@ def run_repair_cycle(
                 len(round2_indices),
             )
             code, current_model = _run_repair_round(
-                client, current_model, fallback_queue, segments, results, exhausted_models,
+                pool, clients, current_model, segments, results, exhausted_models,
                 checkpoint_path, src_hash, sources_mode, round2_indices, 2, call_batch_fn,
                 sentence_index,
             )
@@ -3550,9 +3692,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logging.error("Переменная окружения GEMINI_API_KEY не задана.")
+    # Пул ключей GEMINI1..GEMINI10. Значения ключей в лог не выводятся.
+    try:
+        key_pairs = load_gemini_keys(os.environ)
+    except Exception:
+        logging.error(
+            "Не задан ни один ключ Gemini: задайте хотя бы одну переменную GEMINI1..GEMINI10."
+        )
         return 1
 
     if not os.path.isfile(args.input):
@@ -3604,17 +3750,24 @@ def main() -> int:
         return 1
     # HttpOptions.timeout в google-genai - миллисекунды. Действует на все вызовы клиента,
     # включая call_gemini_batch.
-    client = genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=int(http_timeout_s * 1000)),
+    # Один genai.Client на каждый ключ пула, кэш по имени переменной (не по значению).
+    clients = _make_client_cache(key_pairs, int(http_timeout_s * 1000))
+    logging.info("HTTP-таймаут запроса к Gemini: %.1fs; ключей в пуле: %d", http_timeout_s, len(key_pairs))
+
+    pool = KeyPool(
+        key_pairs,
+        rpm_limit=POOL_RPM_LIMIT,
+        tpm_limit=POOL_TPM_LIMIT,
+        rpd_limit=POOL_RPD_LIMIT,
     )
-    logging.info("HTTP-таймаут запроса к Gemini: %.1fs", http_timeout_s)
 
     fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
     candidates = [args.model] + [m for m in fallback_models if m != args.model]
 
+    # pick_working_model сохраняет прежний контракт (модель, остаток очереди). Проверку модели
+    # выполняет первый ключ пула; квота дальше ведётся по каждому ключу в пуле.
     try:
-        current_model, fallback_queue = pick_working_model(client, candidates, exhausted_models)
+        current_model, fallback_queue = pick_working_model(clients[key_pairs[0][0]], candidates, exhausted_models)
     except AllModelsQuotaExhaustedError as e:
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
         logging.error(
@@ -3648,7 +3801,7 @@ def main() -> int:
         # просто фиксируем цифру на каждом прогоне и смотрим, повторяется ли она дальше.
         preflight_start = time.monotonic()
         try:
-            schema_preflight_check(client, current_model)
+            schema_preflight_check(clients[key_pairs[0][0]], current_model)
         except Exception as e:
             logging.error(
                 "Preflight по response_schema не пройден за %.2fs: %s. Основной цикл не запускается.",
@@ -3661,6 +3814,8 @@ def main() -> int:
     sentence_index = merge_segments_into_sentences(segments)
     batches = make_batches(segments, args.batch_size, CONTEXT_WINDOW)
 
+    # Батчи, ещё не попавшие в чекпоинт. Выполняются параллельно через пул ключей.
+    todo = []
     for batch_num, (batch, context_before, context_after) in enumerate(batches, start=1):
         if all(str(s.index) in results for s in batch):
             logging.info(
@@ -3668,62 +3823,58 @@ def main() -> int:
                 batch_num, len(batches), batch[0].index, batch[-1].index,
             )
             continue
+        todo.append((batch_num, batch, context_before, context_after))
 
+    lock = threading.Lock()
+
+    def run_batch(client, model, task):
+        batch_num, batch, context_before, context_after = task
         logging.info(
             "Батч %s/%s: сегменты %s..%s (модель: %s)",
-            batch_num, len(batches), batch[0].index, batch[-1].index, current_model,
+            batch_num, len(batches), batch[0].index, batch[-1].index, model,
+        )
+        return call_batch(
+            client, model, batch, context_before, context_after,
+            mode=sources_mode, sentence_index=sentence_index,
         )
 
-        while True:
-            try:
-                batch_result = call_batch(
-                    client, current_model, batch, context_before, context_after,
-                    mode=sources_mode, sentence_index=sentence_index,
-                )
-                break
-            except DailyQuotaExceededError as e:
-                logging.warning(
-                    "Дневной лимит исчерпан для модели %s: %s", e.model, e
-                )
-                exhausted_models[e.model] = _now_iso()
-                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                if not fallback_queue:
-                    logging.error(
-                        "Дневной лимит исчерпан, а запасных моделей больше нет. Прогресс "
-                        "(%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
-                        "повторно позже или добавьте больше моделей в --fallback-models.",
-                        len(results), len(segments), checkpoint_path,
-                    )
-                    return 3
-                current_model = fallback_queue.pop(0)
-                logging.warning("Переключаюсь на запасную модель: %s", current_model)
-                continue
-            except Exception as e:
-                # Структурная ошибка (не квота): жёсткое падение, но чекпоинт с уже
-                # готовыми батчами остаётся на диске - requests.json не пишется.
-                logging.error(
-                    "Батч %s..%s не обработан после %s попыток: %s. Прерываю выполнение, "
-                    "requests.json НЕ будет записан (чекпоинт с %s готовыми сегментами "
-                    "сохранён в %s).",
-                    batch[0].index, batch[-1].index, MAX_RETRIES, e, len(results), checkpoint_path,
-                )
-                save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-                return 1
-
+    def on_batch_done(task, batch_result):
+        batch_num = task[0]
         results.update(batch_result)
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-
         progress_pct = len(results) / len(segments) * 100
         logging.info(
             "Батч %s/%s готов (%.0f%% сегментов): %s из %s",
             batch_num, len(batches), progress_pct, len(results), len(segments),
         )
 
+    code, current_model = _run_pool_tasks(
+        pool, clients, todo, run_batch, lock, on_batch_done, current_model, POOL_MAX_WORKERS,
+        exhausted_pairs=exhausted_models,
+        on_quota=lambda: save_checkpoint(checkpoint_path, src_hash, results, exhausted_models),
+    )
+    if code is not None:
+        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+        if code == 3:
+            logging.error(
+                "Дневной лимит исчерпан у всех ключей пула. Прогресс (%s из %s сегментов) сохранён в "
+                "чекпоинте %s. Запустите скрипт повторно позже (лимит сбрасывается в полночь по "
+                "тихоокеанскому времени) или добавьте ключи/модели.",
+                len(results), len(segments), checkpoint_path,
+            )
+        else:
+            logging.error(
+                "Батч не обработан после %s попыток. Прерываю выполнение, requests.json НЕ будет "
+                "записан (чекпоинт с %s готовыми сегментами сохранён в %s).",
+                MAX_RETRIES, len(results), checkpoint_path,
+            )
+        return code
+
     # Пост-проверка, исправление REPAIR, статистика и завершение
     return run_repair_cycle(
-        client=client,
+        pool=pool,
+        clients=clients,
         current_model=current_model,
-        fallback_queue=fallback_queue,
         segments=segments,
         results=results,
         exhausted_models=exhausted_models,

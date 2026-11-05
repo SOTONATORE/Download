@@ -374,10 +374,12 @@ def _gemini_options(cfg: Config) -> dict:
             "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit}
 
 
-def _make_transport():
+def _make_transport(cfg: Config):
     cls = _find_symbol("RealTransport", ("gemini_client", "gemini_transport",
                                           "gemini_orchestrator", "gemini_prompts"))
-    return cls()  # ключ читается внутри класса
+    # лимиты из конфига попадают в пул ключей; ключ читается внутри класса
+    return cls(rpm_limit=cfg.gemini_rpm_limit, tpm_limit=cfg.gemini_tpm_limit,
+               rpd_limit=cfg.gemini_rpd_limit)
 
 
 def _make_release_store(repo: str):
@@ -596,7 +598,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
-        transport = None if _pilot_mode(args) else _make_transport()
+        transport = None if _pilot_mode(args) else _make_transport(cfg)
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
         vast = VastClient(debug_logs=bool(getattr(args, "debug_logs", False)))
     except VastError as e:
@@ -1429,7 +1431,7 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
     photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                  if photo_profile is not None else None)
-    counting = _ReworkCounter(_make_transport())
+    counting = _ReworkCounter(_make_transport(cfg))
     gemini_options = _gemini_options(cfg)
 
     # распределение до промптов, как в _run_body: по всем номерам, потом лимит

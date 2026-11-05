@@ -21,7 +21,7 @@
 - `PromptResult(num, prompt, needs_review, review_reason, extra)`; `extra` хранит дополнительные поля из `response_format` профиля.
 - `strip_user_only(text)`: вырезает блоки `<!-- USER_ONLY_START -->...<!-- USER_ONLY_END -->`; непарный маркер вызывает `GeminiInputError`.
 - `merge_segments_into_sentences(segments)`: склейка в предложения.
-- `RealTransport(api_key_env=..., timeout=120, client=None)`: httpx. `close()` и `with` закрывают только внутренний клиент (повтор безопасен); переданный снаружи `client` не закрывается. Ключ читается из окружения при создании (имя: `gp.ENV_KEY_NAME`), уходит только в заголовок `x-goog-api-key`. Запрос: `POST {base}/{model}:generateContent`, `generationConfig.responseMimeType="application/json"`, `generationConfig.responseJsonSchema`.
+- `RealTransport(*, pool=None, timeout=120.0, client=None, base_url=API_BASE_URL, environ=None, rpm_limit=DEFAULT_POOL_RPM, tpm_limit=DEFAULT_POOL_TPM, rpd_limit=DEFAULT_POOL_RPD)`: httpx поверх общего пула ключей (`gemini_pool.py`). Без `pool` ключи читаются из `environ` (по умолчанию `os.environ`) при создании: переменные GEMINI1…GEMINI10, пустые пропускаются. На каждый запрос `generate_json` берёт ключ (lease) из пула; ключ уходит только в заголовок `x-goog-api-key`, в URL, логи и исключения не попадает. `close()` и `with` закрывают только внутренний клиент (повтор безопасен); переданный снаружи `client` не закрывается. Запрос: `POST {base}/{model}:generateContent`, `generationConfig.responseMimeType="application/json"`, `generationConfig.responseJsonSchema`.
 
 ## Что проверяет валидатор
 
@@ -56,7 +56,7 @@
 
 ## Сверка с документацией
 
-- Подтверждено живым запросом 2026-10-05 (GitHub Actions, секрет `GEN_GEMINI_API_KEY`): `POST /v1beta/models/gemini-3.5-flash-lite:generateContent`, заголовок `x-goog-api-key`, `generationConfig.responseMimeType="application/json"` и `responseJsonSchema` дают HTTP 200 и JSON по схеме. Ответ: `candidates[0].content.parts[].text`. Модель с неверным именем даёт 404, `error.status="NOT_FOUND"`.
+- Подтверждено живым запросом 2026-10-05 (GitHub Actions, один из ключей GEMINI1…GEMINI10): `POST /v1beta/models/gemini-3.5-flash-lite:generateContent`, заголовок `x-goog-api-key`, `generationConfig.responseMimeType="application/json"` и `responseJsonSchema` дают HTTP 200 и JSON по схеме. Ответ: `candidates[0].content.parts[].text`. Модель с неверным именем даёт 404, `error.status="NOT_FOUND"`.
 - Документация Google (ai.google.dev/gemini-api/docs/structured-output) описывает Interactions API; он тоже отвечает, но мы его не используем.
 - Подтверждено страницей: ID `gemini-3.5-flash-lite` и `gemini-3.1-flash-lite` (ai.google.dev/gemini-api/docs/models/...), заголовок `x-goog-api-key`.
 - НЕ подтверждено, проверить живым 429 в Actions: признак суточной квоты (`quotaId` с `PerDay` в `details[].violations[]`) и формат `retryDelay` (`"34s"`). Пока признак не найден, 429 считается минутным (RPM).

@@ -155,7 +155,7 @@ def scrub_secrets(text: str, tokens: Sequence[str] = ()) -> str:
 
 # Имена переменных окружения, которые получает процесс gh (SPEC 0.1; этап 9а, G09, F25).
 # PATH — поиск исполняемого файла gh; HOME — каталог настроек gh (~/.config/gh); GH_TOKEN — токен для gh.
-# Всё остальное не передаётся: в частности GEN_VAST_API_KEY, GEN_GEMINI_API_KEY, HF_TOKEN, WORKER_TOKEN, GITHUB_TOKEN.
+# Всё остальное не передаётся: в частности GEN_VAST_API_KEY, GEMINI1…GEMINI10, HF_TOKEN, WORKER_TOKEN, GITHUB_TOKEN.
 # Для запуска gh на Windows (локальный запуск) могут понадобиться USERPROFILE, APPDATA, SYSTEMROOT: НЕ ПРОВЕРЕНО, в константу не добавлены.
 GH_ENV_NAMES = ("PATH", "HOME", "GH_TOKEN")
 
