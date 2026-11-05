@@ -123,6 +123,7 @@ class KeyPool:
         self._tpm = tpm_limit
         self._rpd = rpd_limit
         self._entries = [_KeyEntry(name=n, value=v) for n, v in keys]
+        self._cursor = 0  # индекс, с которого начинается следующий поиск ключа (round-robin)
         self._by_name = {e.name: e for e in self._entries}
         self._clock = clock
         self._poll = poll_interval
@@ -169,8 +170,12 @@ class KeyPool:
         return used + tokens <= self._tpm
 
     def _take(self, now: float, model: str, tokens: int) -> Optional[KeyLease]:
-        for e in self._entries:
+        n = len(self._entries)
+        for i in range(n):
+            idx = (self._cursor + i) % n
+            e = self._entries[idx]
             if self._can_take(e, model, tokens):
+                self._cursor = (idx + 1) % n   # следующий поиск начнётся со следующего ключа
                 e.state = KeyState.BUSY
                 e.request_times.append(now)
                 e.token_uses.append((now, tokens))

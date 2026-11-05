@@ -62,9 +62,9 @@ def test_rpm_is_counted_per_key():
     pool.release(a, Outcome.SUCCESS, MODEL)
     b = pool.acquire(MODEL, timeout=0)
     pool.release(b, Outcome.SUCCESS, MODEL)
-    assert a.name == b.name == "K1"       # K1 получил два запроса за окно
+    assert a.name == "K1" and b.name == "K2"  # round-robin: очередь переходит от K1 к K2
     c = pool.acquire(MODEL, timeout=0)
-    assert c.name == "K2"                 # K1 исчерпал RPM, работает K2
+    assert c.name == "K1"                 # round-robin: очередь вернулась к K1, он ещё не исчерпал RPM
     pool.release(c, Outcome.SUCCESS, MODEL)
     d = pool.acquire(MODEL, timeout=0)
     assert d.name == "K2"
