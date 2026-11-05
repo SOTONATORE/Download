@@ -1,7 +1,7 @@
 """Общий конвейер промптов для видео и фото (STEP 7, блок B2; вынесено из orchestrator.py).
 
 Единственное место, где готовятся промпты. Генерация (Orchestrator._generate) и проверка
-(cli.prepare_prompts_only, workflow verify_gemini) вызывают build_prompts с одними и теми же входами.
+(cli.prepare_prompts_only, workflow verify_prompts) вызывают build_prompts с одними и теми же входами.
 Проверки запрещённых типов кадров и незаполненных маркеров, а также переписывание (rework loop)
 выполняются внутри gemini_prompts.generate_prompts (шаг 6), поэтому идут по этому пути автоматически.
 """

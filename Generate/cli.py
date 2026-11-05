@@ -1354,7 +1354,7 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     return EXIT_RUNTIME if pub.failures else EXIT_OK
 
 
-# --- проверка промптов (workflow verify_gemini) -----------------------------
+# --- проверка промптов (workflow verify_prompts) -----------------------------
 # Подготовка промптов как в cmd_run, но без Vast, релиза и воркера: тот же build_prompts,
 # то же распределение (plan_split), те же профили и тайминг (_build_timing, _build_prompt_config).
 

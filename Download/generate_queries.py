@@ -62,6 +62,7 @@ response_schema).
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import logging
@@ -94,6 +95,12 @@ from Generate.core.gemini_pool import (  # noqa: E402
     KeyPool,
     Outcome,
     load_gemini_keys,
+)
+from Generate.core.config_loader import load_config  # noqa: E402
+from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError  # noqa: E402
+from Generate.core.openrouter_transport import (  # noqa: E402
+    OpenRouterTransport,
+    load_openrouter_keys,
 )
 
 # ---------------------------------------------------------------------------
@@ -592,6 +599,33 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
 )
 
 RESPONSE_SCHEMA = types.Schema(type=types.Type.ARRAY, items=SEGMENT_ENTRY_SCHEMA)
+
+
+def _genai_schema_to_json(schema: types.Schema) -> dict:
+    """types.Schema -> обычная JSON-схема. Берутся только поля, которые задаёт RESPONSE_SCHEMA."""
+    out: dict = {}
+    if schema.type is not None:
+        type_name = schema.type.value.lower()
+        out["type"] = [type_name, "null"] if schema.nullable else type_name
+    if schema.description:
+        out["description"] = schema.description
+    if schema.enum:
+        out["enum"] = list(schema.enum)
+    if schema.properties:
+        out["properties"] = {k: _genai_schema_to_json(v) for k, v in schema.properties.items()}
+    if schema.required:
+        out["required"] = list(schema.required)
+    if schema.items is not None:
+        out["items"] = _genai_schema_to_json(schema.items)
+    return out
+
+
+# OpenRouter принимает в корне JSON-объект, поэтому тот же массив завёрнут в {"segments": [...]}.
+OPENROUTER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"segments": _genai_schema_to_json(RESPONSE_SCHEMA)},
+    "required": ["segments"],
+}
 
 
 @dataclass
@@ -1748,6 +1782,44 @@ def format_neighbors_context(
 # Вызов Gemini с ретраями
 # ---------------------------------------------------------------------------
 
+def _segments_from_items(items: list, batch: list[Segment], media_mode: int) -> dict[str, dict]:
+    """Разбор списка сегментов ответа: нормализация записей и проверка номеров.
+
+    Общая часть для Gemini и OpenRouter: одни и те же правила проверки после разбора JSON.
+    """
+    expected_indices = {s.index for s in batch}
+    result: dict[str, dict] = {}
+    fix_stats: Counter = Counter()
+    seg_texts = {s.index: s.text for s in batch}
+    for item in items:
+        if not isinstance(item, dict) or "segment_index" not in item:
+            raise ValueError(f"В элементе ответа нет segment_index: {item}")
+        idx = item.pop("segment_index")
+        result[str(idx)] = _normalize_entry(item, idx, fix_stats, seg_texts.get(idx), media_mode=media_mode)
+
+    got_indices = {int(k) for k in result.keys()}
+    missing = expected_indices - got_indices
+    extra = got_indices - expected_indices
+    if missing or extra:
+        raise ValueError(
+            f"Несовпадение номеров сегментов в ответе батча [{batch[0].index}.."
+            f"{batch[-1].index}]: не хватает {sorted(missing)}, лишние {sorted(extra)}"
+        )
+
+    fixed_entries = fix_stats.pop("_entries", 0)
+    years_cut_total = fix_stats.pop("_years_cut", 0)
+    entity_derived_total = fix_stats.pop("_entity_derived", 0)
+    logging.info(
+        "Нормализация батча [%s..%s]: исправлено записей %s из %s, вырезано годов: %s, "
+        "is_entity выведен из ключевых слов: %s%s",
+        batch[0].index, batch[-1].index, fixed_entries, len(result), years_cut_total,
+        entity_derived_total,
+        ("; причины: " + ", ".join(f"{k}={v}" for k, v in sorted(fix_stats.items())))
+        if fix_stats else "",
+    )
+    return result
+
+
 def call_gemini_batch(
     client: "genai.Client",
     model: str,
@@ -1770,7 +1842,6 @@ def call_gemini_batch(
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 
-    expected_indices = {s.index for s in batch}
     last_error: Optional[Exception] = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -1785,36 +1856,7 @@ def call_gemini_batch(
                     f"Ожидался JSON-массив, получен {type(parsed).__name__}: {str(parsed)[:300]}"
                 )
 
-            result: dict[str, dict] = {}
-            fix_stats: Counter = Counter()
-            seg_texts = {s.index: s.text for s in batch}
-            for item in parsed:
-                if not isinstance(item, dict) or "segment_index" not in item:
-                    raise ValueError(f"В элементе ответа нет segment_index: {item}")
-                idx = item.pop("segment_index")
-                result[str(idx)] = _normalize_entry(item, idx, fix_stats, seg_texts.get(idx), media_mode=media_mode)
-
-            got_indices = {int(k) for k in result.keys()}
-            missing = expected_indices - got_indices
-            extra = got_indices - expected_indices
-            if missing or extra:
-                raise ValueError(
-                    f"Несовпадение номеров сегментов в ответе батча [{batch[0].index}.."
-                    f"{batch[-1].index}]: не хватает {sorted(missing)}, лишние {sorted(extra)}"
-                )
-
-            fixed_entries = fix_stats.pop("_entries", 0)
-            years_cut_total = fix_stats.pop("_years_cut", 0)
-            entity_derived_total = fix_stats.pop("_entity_derived", 0)
-            logging.info(
-                "Нормализация батча [%s..%s]: исправлено записей %s из %s, вырезано годов: %s, "
-                "is_entity выведен из ключевых слов: %s%s",
-                batch[0].index, batch[-1].index, fixed_entries, len(result), years_cut_total,
-                entity_derived_total,
-                ("; причины: " + ", ".join(f"{k}={v}" for k, v in sorted(fix_stats.items())))
-                if fix_stats else "",
-            )
-            return result
+            return _segments_from_items(parsed, batch, media_mode)
 
         except genai_errors.ClientError as e:
             code = _extract_status_code(e)
@@ -1868,6 +1910,119 @@ def call_gemini_batch(
         f"Не удалось получить ответ для батча [{batch[0].index}..{batch[-1].index}] "
         f"после {MAX_RETRIES} попыток: {last_error}"
     )
+
+
+# Добавка к промпту для OpenRouter: формат ответа (схему передаёт транспорт в json_schema).
+OPENROUTER_JSON_NOTE = (
+    "\n\nRespond with ONLY one JSON object of the form {\"segments\": [...]}. The array must contain "
+    "exactly one object per segment of this batch, following the JSON schema of this request. "
+    "No prose, no markdown."
+)
+
+
+def call_openrouter_batch(
+    transport: "OpenRouterTransport",
+    model: str,
+    batch: list[Segment],
+    context_before: list[Segment] | None = None,
+    context_after: list[Segment] | None = None,
+    mode: int = DEFAULT_SOURCES_MODE,
+    repair_info: dict[int, dict] | None = None,
+    sentence_index: tuple[list[Sentence], dict[int, Sentence]] | None = None,
+    media_mode: int = DEFAULT_MEDIA_MODE,
+) -> dict:
+    """То же, что call_gemini_batch, но через OpenRouter: ответ - JSON-объект {"segments": [...]}.
+
+    Разбор и проверка номеров - общие с Gemini (_segments_from_items). Повторы и паузы - как у Gemini.
+    """
+    prompt = build_prompt(
+        batch, context_before, context_after, repair_info=repair_info, sentence_index=sentence_index
+    ) + OPENROUTER_JSON_NOTE
+    system = build_system_instruction(mode, media_mode=media_mode)
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            text = transport.generate_json(model, system, prompt, OPENROUTER_RESPONSE_SCHEMA)
+            if not text:
+                raise ValueError("Пустой ответ от OpenRouter")
+
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("segments"), list):
+                raise ValueError(
+                    f"Ожидался JSON-объект с массивом segments: {str(parsed)[:300]}"
+                )
+            return _segments_from_items(parsed["segments"], batch, media_mode)
+
+        except GeminiRuntimeError as e:
+            if e.daily_quota:
+                # дневная квота у OpenRouter: тот же сигнал смены ключа, что и у Gemini
+                raise DailyQuotaExceededError(model, str(e)) from e
+            if e.status is not None and 400 <= e.status < 500 and e.status != 429:
+                # структурная ошибка запроса или ключа - ретраить бессмысленно (тело ответа не выводим)
+                logging.error(
+                    "Клиентская ошибка OpenRouter (код %s), запрос некорректен либо ключ невалиден - НЕ ретраю.",
+                    e.status,
+                )
+                raise
+            last_error = e  # 429 (не дневная квота) и 5xx - временные, повторяем
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            last_error = e
+        except Exception as e:  # сетевые сбои и т.п.
+            last_error = e
+
+        if attempt < MAX_RETRIES:
+            wait = INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            logging.warning(
+                "Батч [%s..%s]: попытка %s/%s не удалась (%s). Повтор через %ss.",
+                batch[0].index, batch[-1].index, attempt, MAX_RETRIES, last_error, wait,
+            )
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"Не удалось получить ответ для батча [{batch[0].index}..{batch[-1].index}] "
+        f"после {MAX_RETRIES} попыток: {last_error}"
+    )
+
+
+def _resolve_text_family(cfg, requested: Optional[str]) -> tuple[str, str, Optional[list[str]]]:
+    """Семейство текстовой модели, как cli.resolve_text_family: --text-model или default_text_model.
+
+    Продублировано здесь, чтобы не импортировать cli (тяжёлый импорт всего конвейера).
+    Возвращает (имя, провайдер, модели); у gemini модели None - берутся из gemini_models.
+    """
+    name = requested or cfg.default_text_model
+    if name not in cfg.text_model_families:
+        raise GeminiInputError(
+            f"Ошибка входных данных: неизвестное семейство текстовой модели «{name}». "
+            f"Доступны: {', '.join(sorted(cfg.text_model_families))}.")
+    spec = cfg.text_model_families[name]
+    return name, spec["provider"], spec["models"]
+
+
+def _make_openrouter_clients(cfg, models: list[str], key_pairs) -> dict[str, "OpenRouterTransport"]:
+    """Один OpenRouterTransport на каждый ключ пула (кэш по имени переменной, как у genai.Client).
+
+    Каждый транспорт видит только свой ключ: выбор ключа делает внешний KeyPool. Лимиты - как в
+    cli._make_transport (openrouter_limits на каждую модель семейства).
+    """
+    limits = (cfg.openrouter_limits["rpm"], cfg.openrouter_limits["tpm"], cfg.openrouter_limits["rpd"])
+    model_limits = {m: limits for m in models}
+    return {
+        name: OpenRouterTransport(
+            keys=[(name, value)],
+            model_limits=model_limits,
+            base_url=cfg.openrouter_base_url,
+            max_output_tokens=cfg.openrouter_max_output_tokens,
+        )
+        for name, value in key_pairs
+    }
+
+
+def _close_transports(transports: dict) -> None:
+    """Закрывает httpx-клиенты транспортов при выходе из процесса."""
+    for transport in transports.values():
+        transport.close()
 
 
 def pick_working_model(
@@ -3690,16 +3845,37 @@ def main() -> int:
         "--skip-schema-preflight", action="store_true",
         help="Пропустить проверку response_schema на 2 синтетических сегментах (не рекомендуется).",
     )
+    parser.add_argument(
+        "--text-model", default=None,
+        help="семейство текстовой модели: gemini, gemma, nemotron, nemotron-super-vl (по умолчанию из конфига)",
+    )
     args = parser.parse_args()
 
-    # Пул ключей GEMINI1..GEMINI10. Значения ключей в лог не выводятся.
+    # Семейство текстовой модели: --text-model или default_text_model из конфига (как в cli).
     try:
-        key_pairs = load_gemini_keys(os.environ)
-    except Exception:
-        logging.error(
-            "Не задан ни один ключ Gemini: задайте хотя бы одну переменную GEMINI1..GEMINI10."
-        )
-        return 1
+        cfg = load_config()
+        text_family, text_provider, text_models = _resolve_text_family(cfg, args.text_model)
+    except GeminiInputError as e:
+        logging.error("%s", e)
+        return 2
+    logging.info("Текстовая модель: семейство %s, провайдер %s", text_family, text_provider)
+
+    if text_provider == "openrouter":
+        # Ключи OPENROUTER1..OPENROUTER10: та же проверка и то же сообщение, что у cli (до ключей Gemini).
+        try:
+            key_pairs = load_openrouter_keys(os.environ)
+        except GeminiInputError as e:
+            logging.error("%s", e)
+            return 2
+    else:
+        # Пул ключей GEMINI1..GEMINI10. Значения ключей в лог не выводятся.
+        try:
+            key_pairs = load_gemini_keys(os.environ)
+        except Exception:
+            logging.error(
+                "Не задан ни один ключ Gemini: задайте хотя бы одну переменную GEMINI1..GEMINI10."
+            )
+            return 1
 
     if not os.path.isfile(args.input):
         logging.error("Входной файл не найден: %s", args.input)
@@ -3714,7 +3890,8 @@ def main() -> int:
         logging.error("%s", e)
         return 1
     # Режим типа медиа доходит до call_gemini_batch через partial (и в основном цикле, и в REPAIR)
-    call_batch = partial(call_gemini_batch, media_mode=media_mode)
+    call_fn = call_openrouter_batch if text_provider == "openrouter" else call_gemini_batch
+    call_batch = partial(call_fn, media_mode=media_mode)
     logging.info("Режим типа медиа: %s (%s)", media_mode, MEDIA_MODE_NAMES[media_mode])
 
     mode_names = {SOURCES_MIX: "микс", SOURCES_ARCHIVE: "только архив", SOURCES_STOCK: "только сток"}
@@ -3751,8 +3928,13 @@ def main() -> int:
     # HttpOptions.timeout в google-genai - миллисекунды. Действует на все вызовы клиента,
     # включая call_gemini_batch.
     # Один genai.Client на каждый ключ пула, кэш по имени переменной (не по значению).
-    clients = _make_client_cache(key_pairs, int(http_timeout_s * 1000))
-    logging.info("HTTP-таймаут запроса к Gemini: %.1fs; ключей в пуле: %d", http_timeout_s, len(key_pairs))
+    if text_provider == "openrouter":
+        clients = _make_openrouter_clients(cfg, text_models or [], key_pairs)
+        atexit.register(_close_transports, clients)
+        logging.info("Ключей в пуле OpenRouter: %d", len(key_pairs))
+    else:
+        clients = _make_client_cache(key_pairs, int(http_timeout_s * 1000))
+        logging.info("HTTP-таймаут запроса к Gemini: %.1fs; ключей в пуле: %d", http_timeout_s, len(key_pairs))
 
     pool = KeyPool(
         key_pairs,
@@ -3761,41 +3943,56 @@ def main() -> int:
         rpd_limit=POOL_RPD_LIMIT,
     )
 
-    fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
-    candidates = [args.model] + [m for m in fallback_models if m != args.model]
+    if text_provider == "openrouter":
+        # Для OpenRouter цепочка моделей берётся из семейства; --model и --fallback-models не используются.
+        candidates = list(text_models or [])
+        if not candidates:
+            logging.error("В семействе %s не задано ни одной модели.", text_family)
+            return 2
+    else:
+        fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()]
+        candidates = [args.model] + [m for m in fallback_models if m != args.model]
 
     # pick_working_model сохраняет прежний контракт (модель, остаток очереди). Проверку модели
     # выполняет первый ключ пула; квота дальше ведётся по каждому ключу в пуле.
-    try:
-        current_model, fallback_queue = pick_working_model(clients[key_pairs[0][0]], candidates, exhausted_models)
-    except AllModelsQuotaExhaustedError as e:
-        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-        logging.error(
-            "Не удалось найти рабочую модель среди %s - дневной лимит исчерпан у всех (%s). "
-            "Прогресс (%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
-            "повторно позже (лимит сбрасывается в полночь по тихоокеанскому времени) или "
-            "добавьте больше моделей в --fallback-models / GENQ_FALLBACK_MODELS.",
-            candidates, e, len(results), len(segments), checkpoint_path,
-        )
-        return 3
-    except ModelUnavailableError as e:
-        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-        logging.error(
-            "Не удалось найти рабочую модель среди %s - это НЕ подтверждённая дневная квота, "
-            "а временная недоступность: %s. Прогресс (%s из %s сегментов) сохранён в "
-            "чекпоинте %s. Повторите запуск позже.",
-            candidates, e, len(results), len(segments), checkpoint_path,
-        )
-        return 4
-    except Exception:
-        save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
-        logging.exception(
-            "Preflight модели завершился неожиданной ошибкой (не квота). Чекпоинт сохранён в %s.",
-            checkpoint_path,
-        )
-        return 1
+    if text_provider == "openrouter":
+        # Проверку доступности модели у OpenRouter не делаем: ошибки видны в батчах и повторяются там.
+        current_model = candidates[0]
+        fallback_queue = candidates[1:]
+        logging.info("Текстовая модель OpenRouter: %s (проверка доступности пропущена)", current_model)
+    else:
+        try:
+            current_model, fallback_queue = pick_working_model(clients[key_pairs[0][0]], candidates, exhausted_models)
+        except AllModelsQuotaExhaustedError as e:
+            save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+            logging.error(
+                "Не удалось найти рабочую модель среди %s - дневной лимит исчерпан у всех (%s). "
+                "Прогресс (%s из %s сегментов) сохранён в чекпоинте %s. Запустите скрипт "
+                "повторно позже (лимит сбрасывается в полночь по тихоокеанскому времени) или "
+                "добавьте больше моделей в --fallback-models / GENQ_FALLBACK_MODELS.",
+                candidates, e, len(results), len(segments), checkpoint_path,
+            )
+            return 3
+        except ModelUnavailableError as e:
+            save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+            logging.error(
+                "Не удалось найти рабочую модель среди %s - это НЕ подтверждённая дневная квота, "
+                "а временная недоступность: %s. Прогресс (%s из %s сегментов) сохранён в "
+                "чекпоинте %s. Повторите запуск позже.",
+                candidates, e, len(results), len(segments), checkpoint_path,
+            )
+            return 4
+        except Exception:
+            save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
+            logging.exception(
+                "Preflight модели завершился неожиданной ошибкой (не квота). Чекпоинт сохранён в %s.",
+                checkpoint_path,
+            )
+            return 1
 
-    if not args.skip_schema_preflight:
+    if text_provider != "gemini":
+        logging.info("Preflight по response_schema пропущен: провайдер %s без response_schema.", text_provider)
+    elif not args.skip_schema_preflight:
         # Явный тайминг preflight-звонка (логику намеренно не трогаем - см. обсуждение):
         # пока не ясно, разовая ли это задержка Gemini или повторяющаяся аномалия, поэтому
         # просто фиксируем цифру на каждом прогоне и смотрим, повторяется ли она дальше.
