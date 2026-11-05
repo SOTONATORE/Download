@@ -79,7 +79,7 @@ def test_text_model_argument_on_run_and_check():
 def test_default_file_has_new_fields_and_gemini_unchanged():
     cfg = _cfg()
     assert cfg.default_text_model == "gemini"
-    assert set(cfg.text_model_families) == {"gemini", "gemma", "nemotron"}
+    assert set(cfg.text_model_families) == {"gemini", "gemma", "nemotron", "nemotron-super-vl"}
     assert cfg.text_model_families["gemini"] == {"provider": "gemini", "models": None}
     assert cfg.openrouter_base_url == "https://openrouter.ai/api/v1"
     assert cfg.openrouter_limits == {"rpm": 20, "tpm": 1000000, "rpd": 1000}
