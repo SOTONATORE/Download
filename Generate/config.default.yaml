@@ -62,6 +62,10 @@ text_model_families:
   nemotron:
     provider: "openrouter"
     models: ["nvidia/nemotron-3-ultra-550b-a55b:free"]
+  # запасная модель: NVIDIA Nemotron Super VL (резерв, если основная недоступна)
+  nemotron-super-vl:
+    provider: "openrouter"
+    models: ["nvidia/nemotron-3.5-super-vl:free"]
 openrouter_base_url: "https://openrouter.ai/api/v1"
 # на ключ; лимит аккаунта может быть общим, проверить в панели OpenRouter
 openrouter_limits:
