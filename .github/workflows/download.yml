@@ -18,6 +18,12 @@ on:
         type: choice
         options: ["1", "2", "3"]
         default: "1"
+      text_model:
+        description: 'Семейство текстовой модели для генерации запросов: gemini (по умолчанию), gemma, nemotron или nemotron-super-vl'
+        required: false
+        type: choice
+        options: ["gemini", "gemma", "nemotron", "nemotron-super-vl"]
+        default: "gemini"
       strict:
         description: 'Проверка запросов: 1 = калибровка (стоп), 2 = мягко (варнинг)'
         required: false
@@ -104,12 +110,23 @@ jobs:
         GEMINI8: ${{ secrets.GEMINI8 }}
         GEMINI9: ${{ secrets.GEMINI9 }}
         GEMINI10: ${{ secrets.GEMINI10 }}
+        OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+        OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+        OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+        OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+        OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+        OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+        OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+        OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+        OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+        OPENROUTER10: ${{ secrets.OPENROUTER10 }}
         GENQ_HTTP_TIMEOUT_SECONDS: "180"
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
+        TEXT_MODEL: ${{ inputs.text_model }}
         PYTHONUNBUFFERED: "1"
-      run: python Download/generate_queries.py --input final.srt --output requests.json
+      run: python Download/generate_queries.py --input final.srt --output requests.json --text-model "$TEXT_MODEL"
 
     # Маскировка ключей Gemini в файлах, которые уходят в артефакты этого job.
     # Значения берутся только из env шага и нигде не печатаются. Отсутствующие файлы пропускаются.
@@ -128,6 +145,16 @@ jobs:
         GEMINI8: ${{ secrets.GEMINI8 }}
         GEMINI9: ${{ secrets.GEMINI9 }}
         GEMINI10: ${{ secrets.GEMINI10 }}
+        OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+        OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+        OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+        OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+        OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+        OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+        OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+        OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+        OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+        OPENROUTER10: ${{ secrets.OPENROUTER10 }}
       run: |
         python3 -I -c '
         import os
@@ -135,7 +162,9 @@ jobs:
 
         # Явный список имён ключей.
         KEY_NAMES = ("GEMINI1", "GEMINI2", "GEMINI3", "GEMINI4", "GEMINI5",
-                     "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10")
+                     "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10",
+                     "OPENROUTER1", "OPENROUTER2", "OPENROUTER3", "OPENROUTER4", "OPENROUTER5",
+                     "OPENROUTER6", "OPENROUTER7", "OPENROUTER8", "OPENROUTER9", "OPENROUTER10")
         # Файлы артефактов. search-links создаётся в job search_media, здесь его нет;
         # имена перечислены для полноты (отсутствующие файлы пропускаются).
         FILES = ("requests.json", "final.srt", "links.txt", "backup_links.txt",
