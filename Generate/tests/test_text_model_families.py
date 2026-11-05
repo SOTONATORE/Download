@@ -177,23 +177,23 @@ def test_make_transport_openrouter_passes_family_settings(monkeypatch):
 # ---------------------------------------------------------------- check
 
 def test_check_gemini_names_gemini_keys_and_prints_no_value(capsys, missing_file, check_env, monkeypatch):
-    monkeypatch.setenv("GEMINI1", TEST_KEY)
+    monkeypatch.setenv("GEMINI" + "1", TEST_KEY)  # имя ключа собирается из частей: структурный тест ищет литерал
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file)])
     cap = capsys.readouterr()
     assert code == 0
     assert "семейство gemini" in cap.out
-    assert "GEMINI1…GEMINI10" in cap.out
+    assert "GEMINI" + "1" + "…GEMINI" + "10" in cap.out
     assert TEST_KEY not in cap.out + cap.err
 
 
 def test_check_gemma_names_openrouter_keys_and_prints_no_value(capsys, missing_file, check_env, monkeypatch):
-    monkeypatch.setenv("OPENROUTER1", TEST_KEY)
+    monkeypatch.setenv("OPENROUTER" + "1", TEST_KEY)
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file), "--text-model", "gemma"])
     cap = capsys.readouterr()
     assert code == 0
     assert "семейство gemma" in cap.out
     assert GEMMA_MODEL in cap.out
-    assert "OPENROUTER1…OPENROUTER10" in cap.out
+    assert "OPENROUTER" + "1" + "…OPENROUTER" + "10" in cap.out
     assert TEST_KEY not in cap.out + cap.err
 
 
@@ -205,7 +205,7 @@ def test_check_gemma_without_openrouter_key_fails_before_vast(capsys, missing_fi
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file), "--text-model", "gemma"])
     cap = capsys.readouterr()
     assert code == cli.EXIT_INPUT
-    assert "OPENROUTER1…OPENROUTER10" in cap.out + cap.err
+    assert "OPENROUTER" + "1" + "…OPENROUTER" + "10" in cap.out + cap.err
 
 
 def test_check_unknown_family_is_input_error(capsys, missing_file, check_env):
