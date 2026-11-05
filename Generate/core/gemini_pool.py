@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Mapping, Optional, Sequence
@@ -72,8 +72,9 @@ class _KeyEntry:
     value: str
     state: KeyState = KeyState.FREE
     paused_until: float = 0.0
-    request_times: deque = field(default_factory=deque)   # времена запросов в окне (RPM)
-    token_uses: deque = field(default_factory=deque)      # (время, токены) в окне (TPM)
+    # окна RPM и TPM ведутся отдельно по каждой модели на этом ключе: лимиты заданы по модели
+    request_times: dict = field(default_factory=lambda: defaultdict(deque))  # модель -> времена запросов (RPM)
+    token_uses: dict = field(default_factory=lambda: defaultdict(deque))     # модель -> (время, токены) (TPM)
 
     def __repr__(self) -> str:
         return f"_KeyEntry(name={self.name!r}, state={self.state.value})"
@@ -107,7 +108,9 @@ class KeyPool:
 
     def __init__(self, keys: Sequence[tuple[str, str]], *, rpm_limit: int, tpm_limit: int,
                  rpd_limit: int, clock: Callable[[], float] = time.time,
-                 poll_interval: float = 1.0) -> None:
+                 poll_interval: float = 1.0,
+                 model_limits: Optional[Mapping[str, tuple[int, int, int]]] = None) -> None:
+        # model_limits: модель -> (rpm, tpm, rpd) на каждый ключ; модели не из словаря берут общие rpm/tpm/rpd
         if not keys:
             raise GeminiInputError("Пул ключей Gemini пуст: нет ни одного ключа.")
         names = [name for name, _ in keys]
@@ -122,6 +125,12 @@ class KeyPool:
         self._rpm = rpm_limit
         self._tpm = tpm_limit
         self._rpd = rpd_limit
+        self._model_limits: dict[str, tuple[int, int, int]] = {}
+        for model, (m_rpm, m_tpm, m_rpd) in (model_limits or {}).items():
+            for label, limit in (("RPM", m_rpm), ("TPM", m_tpm), ("RPD", m_rpd)):
+                if limit < 1:
+                    raise GeminiInputError(f"Лимит {label} для модели {model} должен быть не меньше 1.")
+            self._model_limits[model] = (m_rpm, m_tpm, m_rpd)
         self._entries = [_KeyEntry(name=n, value=v) for n, v in keys]
         self._cursor = 0  # индекс, с которого начинается следующий поиск ключа (round-robin)
         self._by_name = {e.name: e for e in self._entries}
@@ -149,25 +158,32 @@ class KeyPool:
         if e.state is KeyState.PAUSED and now >= e.paused_until:
             e.state = KeyState.FREE
         cutoff = now - WINDOW_SECONDS
-        while e.request_times and e.request_times[0] <= cutoff:
-            e.request_times.popleft()
-        while e.token_uses and e.token_uses[0][0] <= cutoff:
-            e.token_uses.popleft()
+        for times in e.request_times.values():
+            while times and times[0] <= cutoff:
+                times.popleft()
+        for uses in e.token_uses.values():
+            while uses and uses[0][0] <= cutoff:
+                uses.popleft()
+
+    def _limits(self, model: str) -> tuple[int, int, int]:
+        """(rpm, tpm, rpd) для модели: свои лимиты, если они заданы, иначе общие."""
+        return self._model_limits.get(model, (self._rpm, self._tpm, self._rpd))
 
     def _can_take(self, e: _KeyEntry, model: str, tokens: int) -> bool:
         """Можно ли выдать ключ для модели сейчас. Пара, исчерпавшая RPD, отмечается как исчерпанная."""
         if e.state is not KeyState.FREE:
             return False
+        rpm, tpm, rpd = self._limits(model)
         pair = (e.name, model)
         if pair in self._day_exhausted:
             return False
-        if self._day_count.get(pair, 0) >= self._rpd:
+        if self._day_count.get(pair, 0) >= rpd:
             self._day_exhausted.add(pair)
             return False
-        if len(e.request_times) >= self._rpm:
+        if len(e.request_times.get(model, ())) >= rpm:
             return False
-        used = sum(t for _, t in e.token_uses)
-        return used + tokens <= self._tpm
+        used = sum(t for _, t in e.token_uses.get(model, ()))
+        return used + tokens <= tpm
 
     def _take(self, now: float, model: str, tokens: int) -> Optional[KeyLease]:
         n = len(self._entries)
@@ -177,8 +193,8 @@ class KeyPool:
             if self._can_take(e, model, tokens):
                 self._cursor = (idx + 1) % n   # следующий поиск начнётся со следующего ключа
                 e.state = KeyState.BUSY
-                e.request_times.append(now)
-                e.token_uses.append((now, tokens))
+                e.request_times[model].append(now)
+                e.token_uses[model].append((now, tokens))
                 pair = (e.name, model)
                 self._day_count[pair] = self._day_count.get(pair, 0) + 1
                 return KeyLease(name=e.name, api_key=e.value)

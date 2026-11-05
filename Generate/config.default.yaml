@@ -14,17 +14,40 @@ filename_template: "{num}.mp4"
 clip_name_width: 0
 
 # --- Gemini ---
-# Цепочка моделей по порядку: основная Gemini 3.5 Flash Lite, запасная 3.1 Flash Lite.
-# Переход на следующую модель только при исчерпании суточной квоты.
+# Цепочка моделей по порядку: 3.5 Flash Lite, 3.6 Flash, 3.8 Flash, 3.1 Flash Lite.
+# Модель выбывает из цепочки только при суточной квоте на последнем ключе; переход назад не делается.
+# Временные ошибки (503, сеть) переводят на следующую модель после gemini_transient_switch_after подряд.
 gemini_models:
   - "gemini-3.5-flash-lite"
+  - "gemini-3.6-flash"
+  - "gemini-3.8-flash"
   - "gemini-3.1-flash-lite"
 # Сегментов в одном пакете запроса.
 gemini_batch_size: 50
-# Лимиты для активной модели; значения даны пользователем, сверить с документацией Google на этапе 4.
+# Лимиты по умолчанию: для моделей, которых нет в gemini_model_limits; значения даны пользователем, сверить с документацией Google на этапе 4.
 gemini_rpm_limit: 15       # запросов в минуту
 gemini_tpm_limit: 250000   # токенов в минуту
 gemini_rpd_limit: 500      # запросов в сутки на ОДНУ модель
+# Временных ошибок подряд на одной модели (503 или сеть), после которых переходим к следующей модели.
+gemini_transient_switch_after: 15
+# лимиты на один ключ по моделям, из панели AI Studio; проверить перед запуском
+gemini_model_limits:
+  "gemini-3.5-flash-lite":
+    rpm: 15
+    tpm: 250000
+    rpd: 500
+  "gemini-3.6-flash":
+    rpm: 5
+    tpm: 250000
+    rpd: 20
+  "gemini-3.8-flash":
+    rpm: 5
+    tpm: 250000
+    rpd: 20
+  "gemini-3.1-flash-lite":
+    rpm: 15
+    tpm: 250000
+    rpd: 500
 
 # --- Профиль модели и тайминги ---
 # Файл из Generate/model_profiles/ (без расширения).

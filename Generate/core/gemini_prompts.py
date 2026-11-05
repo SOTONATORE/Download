@@ -967,8 +967,9 @@ class RealTransport:
     def __init__(self, *, pool: Any = None, timeout: float = 120.0, client: Any = None,
                  base_url: str = API_BASE_URL, environ: Any = None,
                  rpm_limit: int = DEFAULT_POOL_RPM, tpm_limit: int = DEFAULT_POOL_TPM,
-                 rpd_limit: int = DEFAULT_POOL_RPD):
+                 rpd_limit: int = DEFAULT_POOL_RPD, model_limits: Any = None):
         # лимиты передаются в пул; без явных значений берутся DEFAULT_POOL_* (совпадают с конфигом по умолчанию)
+        # model_limits: модель -> (rpm, tpm, rpd); для остальных моделей действуют общие лимиты
         try:
             import httpx
         except ImportError:
@@ -977,7 +978,8 @@ class RealTransport:
         if pool is None:
             # ключи читаются здесь, при создании пула; в самом запросе окружение не трогаем
             keys = self._gpool.load_gemini_keys(os.environ if environ is None else environ)
-            pool = self._gpool.KeyPool(keys, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit)
+            pool = self._gpool.KeyPool(keys, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
+                                       model_limits=model_limits)
         self._pool = pool
         self._tpm = tpm_limit    # оценка токенов не должна превышать TPM пула
         _silence_http_logs()

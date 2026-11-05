@@ -75,6 +75,10 @@ class Config:
     gemini_rpm_limit: int = _rule(ge=1)
     gemini_tpm_limit: int = _rule(ge=1)
     gemini_rpd_limit: int = _rule(ge=1)
+    # необязательный раздел: лимиты по моделям; отсутствие или null = один набор лимитов для всех (как раньше)
+    gemini_model_limits: Optional[dict[str, dict[str, int]]] = field(
+        default=None, kw_only=True, metadata={"optional": True})
+    gemini_transient_switch_after: int = field(default=15, kw_only=True, metadata={"ge": 1})
 
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,
@@ -177,6 +181,9 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
             raise _Bad(f"«{name}»: пустые элементы в списке недопустимы")
         return list(value)
 
+    if get_origin(base) is dict:
+        return _check_model_limits(name, value)
+
     if base is int:
         if isinstance(value, bool) or not isinstance(value, int):
             raise _Bad(f"«{name}»: нужно {_TYPE_WORDS[int]}")
@@ -204,6 +211,25 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
     raise TypeError(f"неподдерживаемый тип схемы для {name}: {hint!r}")  # ошибка разработчика
 
 
+_MODEL_LIMIT_KEYS = ("rpm", "tpm", "rpd")
+
+
+def _check_model_limits(name: str, value: Any) -> dict[str, dict[str, int]]:
+    """Лимиты по моделям: {имя модели: {rpm, tpm, rpd}}, все целые не меньше 1. Значения в текст ошибки не выводим."""
+    if not isinstance(value, dict) or not all(isinstance(k, str) and k.strip() for k in value):
+        raise _Bad(f"«{name}»: нужен набор «имя модели: лимиты» с непустыми именами моделей")
+    out: dict[str, dict[str, int]] = {}
+    for model, limits in value.items():
+        if not isinstance(limits, dict) or set(limits) != set(_MODEL_LIMIT_KEYS):
+            raise _Bad(f"«{name}» / {model}: нужны ровно три поля: rpm, tpm, rpd")
+        for key in _MODEL_LIMIT_KEYS:
+            number = limits[key]
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise _Bad(f"«{name}» / {model}: «{key}» должно быть целым числом не меньше 1")
+        out[model] = {key: limits[key] for key in _MODEL_LIMIT_KEYS}
+    return out
+
+
 def _check_bounds(name: str, number: float, meta: Mapping[str, Any]) -> float:
     # Значение из файла в текст ошибки не выводим (SPEC 0.1, задание этапа 1): только имя ключа и правило.
     if "gt" in meta and not number > meta["gt"]:
@@ -217,6 +243,13 @@ def _check_bounds(name: str, number: float, meta: Mapping[str, Any]) -> float:
 
 def _cross_checks(v: Mapping[str, Any]) -> list[str]:
     problems = []
+    # лимиты только для моделей из цепочки: опечатка в имени модели иначе молча не действует
+    limits = v["gemini_model_limits"]
+    if limits is not None:
+        unknown = sorted(set(limits) - set(v["gemini_models"]))
+        if unknown:
+            problems.append("«gemini_model_limits»: лимиты заданы для моделей, которых нет в «gemini_models»: "
+                            + ", ".join(unknown))
     if v["clip_max_sec"] < v["clip_min_sec"]:
         problems.append("«clip_max_sec» не может быть меньше «clip_min_sec»")
     if v["max_price_per_hour"] <= v["min_price_per_hour"]:

@@ -35,6 +35,7 @@ MAX_WAIT_SEC = 120.0         # потолок одной паузы после 4
 TRANSIENT_STATUSES = frozenset({500, 503, 504})  # сеть: HTTP-статуса нет (status None)
 TRANSIENT_ATTEMPTS = 60      # неудачных попыток подряд на одной модели; после последней прогон останавливается
 TRANSIENT_PAUSE_SEC = 10.0   # пауза перед каждой повторной попыткой (если в ответе нет retry_after)
+TRANSIENT_SWITCH_AFTER = 15  # временных сбоев подряд на модели, после которых переходим к следующей (config: gemini_transient_switch_after)
 
 
 def is_transient(err: gp.GeminiRuntimeError) -> bool:
@@ -111,9 +112,12 @@ class ManagedTransport:
     Лимиты RPM, TPM и RPD здесь больше не ведутся: их держит пул ключей (gemini_pool) внутри транспорта,
     по каждому ключу. Параметры rpm_limit, tpm_limit, rpd_limit и rpd_used сохранены для совместимости
     вызовов, но в этот класс не передаются и не действуют.
-    Суточная квота переключает модель цепочки только тогда, когда транспорт сообщает, что ключей для модели
+    Суточная квота исключает модель из цепочки только тогда, когда транспорт сообщает, что ключей для модели
     не осталось (ошибка без признака key_exhausted_only). Если исчерпан один ключ, а другие ещё есть,
     модель повторяется: пул выдаст следующий ключ.
+    Временные сбои (503, сеть) подряд на модели: после switch_after сбоев переходим к следующей модели цепочки.
+    Переход только вперёд: модель, с которой ушли, в этом прогоне не возвращается.
+    Потолок TRANSIENT_ATTEMPTS общий на один запрос, на смену модели он не сбрасывается.
 
     Аргумент model, который передаёт generate_prompts, игнорируется: модель выбирает цепочка.
     """
@@ -122,6 +126,7 @@ class ManagedTransport:
                  tpm_limit: int = 250_000, rpd_limit: int = 500,
                  output_reserve_tokens: int = 2000, max_rate_retries: int = 6,
                  rpd_used: Optional[dict] = None,
+                 transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep):
         self._models = list(models)
@@ -129,16 +134,21 @@ class ManagedTransport:
             raise gp.GeminiInputError("Цепочка моделей Gemini пуста.")
         if rpd_limit <= 0:
             raise gp.GeminiInputError("Лимит RPD должен быть больше нуля.")
+        if transient_switch_after < 1:
+            raise gp.GeminiInputError("Порог переключения после временных ошибок должен быть не меньше 1.")
         if rpd_used:
             log.warning("Счётчики RPD из прошлых запусков не учитываются: их ведёт пул ключей.")
         self._inner = inner
         self._reserve = max(0, output_reserve_tokens)
         self._max_retries = max_rate_retries
+        self._switch_after = transient_switch_after
         self._sleep = sleep
         self._clock = clock
         # замок защищает состояние цепочки моделей; на время сетевого вызова он не берётся
         self._lock = threading.Lock()
         self._exhausted: set = set()               # модели, отключённые на этот прогон (суточная квота)
+        self._pos = 0                              # позиция текущей модели в цепочке; назад не возвращаемся
+        self._streak: dict = {}                    # модель -> временных сбоев подряд (сброс: успех или смена модели)
         self._last_transient: tuple = (None, "")   # (status, code) последней временной ошибки
         self.active_model: str = self._models[0]
 
@@ -157,9 +167,11 @@ class ManagedTransport:
 
     def _pick_model(self) -> str:
         with self._lock:   # выбор и смена active_model идут под замком: потоки не портят друг другу состояние
-            for m in self._models:
+            for i in range(self._pos, len(self._models)):   # модели левее текущей уже не берём
+                m = self._models[i]
                 if not self._usable(m):
                     continue
+                self._pos = i
                 if m != self.active_model:
                     log.warning("Переключение на запасную модель: %s.", m)
                 self.active_model = m
@@ -169,17 +181,28 @@ class ManagedTransport:
             "повторите запуск после сброса квоты.",
             status=429, code="RESOURCE_EXHAUSTED", daily_quota=True)
 
+    def _switch_after_transient(self, model: str) -> Optional[str]:
+        """Переход после серии временных сбоев: следующая доступная модель цепочки или None, если её нет."""
+        with self._lock:
+            if self._models[self._pos] != model:   # другой поток уже перешёл дальше
+                return None
+            for i in range(self._pos + 1, len(self._models)):
+                if self._usable(self._models[i]):
+                    self._pos = i
+                    self._streak[model] = 0
+                    return self._models[i]
+        return None
+
     def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
         rate_retries = 0
-        tries = 0                  # неудачные попытки подряд на текущей модели, только для этого запроса
-        tries_model = None
+        tries = 0                  # неудачные попытки подряд в этом запросе: потолок TRANSIENT_ATTEMPTS на весь запрос
         while True:
             m = self._pick_model()
-            if m != tries_model:   # счётчик обнуляется при смене модели (по суточной квоте)
-                tries, tries_model = 0, m
             t0 = self._clock()
             try:
                 text = self._inner.generate_json(m, system, user, schema)
+                with self._lock:
+                    self._streak[m] = 0            # успех сбрасывает серию временных сбоев модели
                 log.info("Модель %s: ответ получен за %.1f с (сбоев подряд до этого: %d).",
                          m, self._clock() - t0, tries)
                 return text
@@ -211,6 +234,14 @@ class ManagedTransport:
                 tries += 1
                 with self._lock:
                     self._last_transient = (e.status, e.code)
+                    self._streak[m] = self._streak.get(m, 0) + 1
+                    streak = self._streak[m]
+                if streak >= self._switch_after:
+                    # серия временных сбоев на модели: переходим к следующей; если её нет, повторы идут до потолка
+                    nxt = self._switch_after_transient(m)
+                    if nxt is not None:
+                        log.warning("Модель %s: %d подряд временных ошибок, переключаюсь на %s.",
+                                    m, self._switch_after, nxt)
                 if tries < TRANSIENT_ATTEMPTS:
                     wait = _transient_wait(e)
                     log.warning("Модель %s: временная ошибка (%s), пауза %.1f с (попытка %d из %d).",
@@ -298,6 +329,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        models=DEFAULT_MODELS, rpm_limit: int = 15, tpm_limit: int = 250_000,
                        rpd_limit: int = 500, rpd_used: Optional[dict] = None,
                        output_reserve_tokens: int = 2000, max_rate_retries: int = 6,
+                       transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep) -> dict:
     """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state."""
@@ -327,7 +359,8 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     managed = ManagedTransport(
         inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
         rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
-        max_rate_retries=max_rate_retries, clock=clock, sleep=sleep)
+        max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
+        clock=clock, sleep=sleep)
 
     def on_batch(results: list) -> None:
         for r in results:

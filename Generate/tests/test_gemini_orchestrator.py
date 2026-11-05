@@ -317,7 +317,7 @@ def test_503_on_every_attempt_stops_after_60_on_one_model(tmp_path, monkeypatch,
     clock = FakeClock()
     t = FakeTransport([unavail() for _ in range(60)])
     with pytest.raises(GeminiRuntimeError) as ei:
-        run(tmp_path, t, [1], clock=clock)
+        run(tmp_path, t, [1], clock=clock, models=(M1,))   # одна модель: переключать некуда, потолок 60 на запрос
     e = ei.value
     assert t.calls == [M1] * 60                       # ни одного вызова другой модели
     assert e.exit_code == 3 and e.status == 503 and e.code == "UNAVAILABLE" and not e.daily_quota

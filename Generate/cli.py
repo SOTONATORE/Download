@@ -371,15 +371,18 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
 
 def _gemini_options(cfg: Config) -> dict:
     return {"models": tuple(cfg.gemini_models), "rpm_limit": cfg.gemini_rpm_limit,
-            "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit}
+            "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit,
+            "transient_switch_after": cfg.gemini_transient_switch_after}
 
 
 def _make_transport(cfg: Config):
     cls = _find_symbol("RealTransport", ("gemini_client", "gemini_transport",
                                           "gemini_orchestrator", "gemini_prompts"))
+    # лимиты по моделям из раздела gemini_model_limits; раздела нет: один набор лимитов для всех моделей (как раньше)
+    model_limits = {m: (v["rpm"], v["tpm"], v["rpd"]) for m, v in (cfg.gemini_model_limits or {}).items()}
     # лимиты из конфига попадают в пул ключей; ключ читается внутри класса
     return cls(rpm_limit=cfg.gemini_rpm_limit, tpm_limit=cfg.gemini_tpm_limit,
-               rpd_limit=cfg.gemini_rpd_limit)
+               rpd_limit=cfg.gemini_rpd_limit, model_limits=model_limits or None)
 
 
 def _make_release_store(repo: str):
