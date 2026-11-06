@@ -1375,10 +1375,24 @@ class _ReworkCounter:
         self._inner = inner
         self.rework_nums: set = set()
 
-    def generate_json(self, model, system, user, schema) -> str:
+    def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
         m = VERIFY_REWORK_RE.match(user or "")
         if m:
             self.rework_nums.add(int(m.group(1)))
+        if reasoning_effort is None:
+            # без параметра вызов такой же, как раньше
+            return self._inner.generate_json(model, system, user, schema)
+        # reasoning_effort уходит внутреннему транспорту только если он его объявляет (Gemini не объявляет)
+        import inspect  # локально: модуль нужен только здесь
+        try:
+            accepts = "reasoning_effort" in inspect.signature(self._inner.generate_json).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return self._inner.generate_json(model, system, user, schema, reasoning_effort=reasoning_effort)
+        if not getattr(self, "_reasoning_warned", False):
+            self._reasoning_warned = True  # предупреждение один раз на обёртку
+            log.warning("Транспорт не принимает reasoning_effort: запрос идёт с настройками по умолчанию.")
         return self._inner.generate_json(model, system, user, schema)
 
 

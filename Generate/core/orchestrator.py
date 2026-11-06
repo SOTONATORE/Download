@@ -564,13 +564,46 @@ def _all_video(segs, intro_seconds) -> dict:
     }
 
 
+def _transport_provider(transport) -> str:
+    """Провайдер текстового транспорта: атрибут provider у него самого или у внутренней обёртки (_inner).
+
+    Нужен, потому что _ReworkCounter в cli.py не объявляет provider и хранит настоящий транспорт в _inner.
+    Без атрибута считается gemini, как в gemini_orchestrator.
+    """
+    current = transport
+    for _ in range(3):  # обёрток на практике одна; предел защищает от цикла
+        provider = getattr(current, "provider", None)
+        if isinstance(provider, str):
+            return provider
+        current = getattr(current, "_inner", None)
+        if current is None:
+            break
+    return "gemini"
+
+
+def _value_workers(transport) -> int:
+    """Число потоков оценки video_value.
+
+    Для OpenRouter: число ключей из того же источника, что у генерации промптов (gemini_prompts),
+    но не больше MAX_PARALLEL_BATCHES (10). Для Gemini и прочих транспортов: 1, как раньше.
+    """
+    if _transport_provider(transport) != "openrouter":
+        return 1
+    try:
+        keys = gp._provider_key_count("openrouter")
+    except Exception:  # ключей нет или их не удалось прочитать: один поток, как раньше
+        return 1
+    return max(1, min(keys, gp.MAX_PARALLEL_BATCHES))
+
+
 def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_seconds,
-                  send, distribution_path, photo_on=True) -> dict:
+                  send, distribution_path, photo_on=True, workers: int = 1) -> dict:
     """STEP 3b: распределение видео/фото для номеров из missing.txt, до любых промптов.
 
     video_model == "none": все сегменты в фото, send не вызывается.
     photo_on False (фото-профиля нет): все сегменты в видео, send не вызывается.
     иначе: оценка video_value через send (Gemini), затем select_video_segments.
+    workers: число параллельных батчей оценки (передаётся в score_segments; по умолчанию 1).
     Ошибка оценки останавливает запуск: запасного значения по умолчанию нет.
     distribution_path None: файл не пишется, распределение всё равно считается и записывается в журнал.
     """
@@ -582,16 +615,24 @@ def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_se
         values = {}
         result = _all_video(segs, intro_seconds)
     else:
+        batches = math.ceil(len(segs) / SCORE_BATCH_SIZE)
+        parallel = max(1, min(workers, batches))
+        # баннер начала: видно в журнале GitHub до первого запроса оценки
+        log.info("=== Генерация распределения видео/фото: VIDEO_PERCENT %.1f%%, сегментов %d, батчей %d, "
+                 "параллельно %d ===", video_percent, len(segs), batches, parallel)
         # журнал плана батчей до первого запроса
         log.info("Оценка video_value: сегментов %d, батчей %d по %d, VIDEO_PERCENT %.1f%%",
-                 len(segs), math.ceil(len(segs) / SCORE_BATCH_SIZE), SCORE_BATCH_SIZE, video_percent)
+                 len(segs), batches, SCORE_BATCH_SIZE, video_percent)
         try:
-            values = score_segments(segs, send)
+            values = score_segments(segs, send, workers=workers)
         except ValueError as exc:
+            log.info("=== Распределение видео/фото не удалось: %s ===", exc)
             raise gp.GeminiRuntimeError(
                 f"Оценка video_value через Gemini не удалась: {exc} Запуск остановлен, запасного значения нет."
             ) from None
         result = select_video_segments(segs, values, video_percent, intro_seconds)
+        log.info("=== Распределение видео/фото готово: видео %d сегментов, фото %d сегментов ===",
+                 len(result["video"]), len(result["photo"]))
     if distribution_path is not None:
         write_distribution(distribution_path, result, segs, values)
         log.info("Распределение записано в файл: %s.", distribution_path)
@@ -608,11 +649,14 @@ def plan_split(srt_segments, missing, *, video_model, video_percent, intro_secon
                gemini_options: dict, photo_on: bool, distribution_path) -> dict:
     """Единое правило распределения для запуска и для проверки: оценка Gemini только при обоих видах."""
     send = None
+    workers = 1
     if video_model != "none" and photo_on:
         send = make_value_sender(transport, gemini_options)
+        # параллельность по ключам OpenRouter; для Gemini остаётся один поток
+        workers = _value_workers(transport)
     return split_for_run(srt_segments, missing, video_model=video_model, video_percent=video_percent,
                          intro_seconds=intro_seconds, send=send, distribution_path=distribution_path,
-                         photo_on=photo_on)
+                         photo_on=photo_on, workers=workers)
 
 
 class ReleaseStartError(gp.GeminiInputError):
