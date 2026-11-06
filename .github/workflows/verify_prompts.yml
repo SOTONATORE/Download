@@ -51,14 +51,14 @@ on:
           - "test"
         default: "none"
       text_model:
-        description: "Семейство текстовой модели для промптов: gemini (по умолчанию), gemma, nemotron или nemotron-super-vl"
+        description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"
         type: choice
         options:
+          - "nemotron-super-vl"
           - "gemini"
           - "gemma"
           - "nemotron"
-          - "nemotron-super-vl"
-        default: "gemini"
+        default: "nemotron-super-vl"
 
 concurrency:
   group: verify-gemini

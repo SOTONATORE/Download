@@ -6,6 +6,7 @@ on:
         description: 'Путь к SRT-файлу в репозитории (для генерации поисковых запросов через Gemini, а затем автоматического подбора медиа через search.py). Оставь пустым, если сейчас не нужно.'
         required: false
         type: string
+        default: 'result.srt'
       sources:
         description: 'Источники: 1 = микс, 2 = архив, 3 = сток'
         required: false
@@ -19,11 +20,11 @@ on:
         options: ["1", "2", "3"]
         default: "1"
       text_model:
-        description: 'Семейство текстовой модели для генерации запросов: gemini (по умолчанию), gemma, nemotron или nemotron-super-vl'
+        description: 'Семейство текстовой модели для генерации запросов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron'
         required: false
         type: choice
-        options: ["gemini", "gemma", "nemotron", "nemotron-super-vl"]
-        default: "gemini"
+        options: ["nemotron-super-vl", "gemini", "gemma", "nemotron"]
+        default: "nemotron-super-vl"
       strict:
         description: 'Проверка запросов: 1 = калибровка (стоп), 2 = мягко (варнинг)'
         required: false
