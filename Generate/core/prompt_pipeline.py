@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -109,50 +110,64 @@ def _abort_text(wave: str, exc) -> str:
 
 
 def _video_step(needed: list, *, segments, cfg, transport, prompts_path, profile, timing,
-                gemini_options: dict, errors: list, aborts: list) -> dict:
-    """Промпты для видео: generate_and_store дописывает prompts.json после каждого батча."""
+                gemini_options: dict, errors: list, aborts: list,
+                managed=None, state=None, lock=None) -> dict:
+    """Промпты для видео: generate_and_store дописывает prompts.json после каждого батча.
+
+    managed, state, lock: общие цепочка, состояние и замок прогона (передаются из build_prompts).
+    """
     watch = _TransportWatch(transport)
     try:
         return go.generate_and_store(
             segments, needed, cfg, watch, prompts_path,
-            profile=profile, timing=timing, **gemini_options)
+            profile=profile, timing=timing, managed=managed, state=state, lock=lock, **gemini_options)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
         if _is_hard(exc, watch):
             aborts.append(_abort_text("видео", exc))
             log.error("Генерация промптов (видео) остановлена: %s.", exc)
-            return read_state(prompts_path)
+            return state if state is not None else read_state(prompts_path)
         log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)
-        return read_state(prompts_path)
+        return state if state is not None else read_state(prompts_path)
 
 
 def _photo_step(needed: list, *, segments, photo_profile, photo_cfg, transport, prompts_path,
-                gemini_options: dict, errors: list, aborts: list) -> None:
-    """Промпты для фото: профиль photo_profile, без тайминга; num_frames всегда 1 (STEP 7, блок B2)."""
+                gemini_options: dict, errors: list, aborts: list,
+                managed=None, state=None, lock=None) -> None:
+    """Промпты для фото: профиль photo_profile, без тайминга; num_frames всегда 1 (STEP 7, блок B2).
+
+    managed, state, lock: общие цепочка, состояние и замок прогона (передаются из build_prompts).
+    Без них состояние читается из файла и цепочка создаётся здесь, как раньше.
+    """
     watch = _TransportWatch(transport)
     try:
-        state = go.load_state(prompts_path, segments, photo_profile)
+        if state is None:
+            state = go.load_state(prompts_path, segments, photo_profile)
+        guard = lock if lock is not None else threading.Lock()
         prompts = state["prompts"]
         pending = go.missing_segments(prompts, needed)
         if not pending:
             return
-        managed = go.ManagedTransport(
-            watch, gemini_options.get("models", go.DEFAULT_MODELS),
-            rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
-            rpd_limit=gemini_options.get("rpd_limit", 500))
+        if managed is None:
+            managed = go.ManagedTransport(
+                watch, gemini_options.get("models", go.DEFAULT_MODELS),
+                rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+                rpd_limit=gemini_options.get("rpd_limit", 500))
 
         def on_batch(results: list) -> None:
-            for r in results:
-                old = prompts.get(str(r.num)) or {}
-                prompts[str(r.num)] = {
-                    "num": r.num, "num_frames": PHOTO_NUM_FRAMES, "prompt": r.prompt,
-                    "status": "ready" if r.prompt.strip() else "failed",
-                    "attempts": int(old.get("attempts", 0)) + 1,
-                    "error": r.review_reason, "needs_review": r.needs_review, "extra": r.extra,
-                }
-            state["model"] = managed.active_model
-            state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-            go.atomic_write_json(prompts_path, state)
+            # под замком: видео и фото пишут один общий state, слияние и запись не должны перемешиваться
+            with guard:
+                for r in results:
+                    old = prompts.get(str(r.num)) or {}
+                    prompts[str(r.num)] = {
+                        "num": r.num, "num_frames": PHOTO_NUM_FRAMES, "prompt": r.prompt,
+                        "status": "ready" if r.prompt.strip() else "failed",
+                        "attempts": int(old.get("attempts", 0)) + 1,
+                        "error": r.review_reason, "needs_review": r.needs_review, "extra": r.extra,
+                    }
+                state["model"] = managed.active_model
+                state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+                go.atomic_write_json(prompts_path, state)
 
         # провайдер у транспорта (через _TransportWatch); для gemini аргумент не передаётся, вызов как раньше
         provider = getattr(watch, "provider", "gemini")
@@ -167,6 +182,13 @@ def _photo_step(needed: list, *, segments, photo_profile, photo_cfg, transport, 
         log.error("Генерация промптов для фото прервана: %s. Используем уже сохранённые.", exc)
 
 
+def _load_shared(state, prompts_path, segments, profile) -> dict:
+    """Общий словарь состояния прогона: читается из файла один раз, при первом запуске волны."""
+    if state is None:
+        return go.load_state(prompts_path, segments, profile)
+    return state
+
+
 def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str, timing,
                   photo_profile: Optional[str], photo_cfg, transport, gemini_options: dict,
                   prompts_path) -> PromptRun:
@@ -179,22 +201,34 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
     """
     errors: list = []
     aborts: list = []  # жёсткие ошибки волн; решение об остановке принимает оркестратор после обеих волн
+    # общие объекты прогона: один словарь состояния, один замок и одна цепочка моделей на оба вида
+    # файл читается только тогда, когда волна действительно запускается (как раньше)
+    state = None
+    lock = threading.Lock()
+    managed = go.ManagedTransport(
+        transport, gemini_options.get("models", go.DEFAULT_MODELS),
+        rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+        rpd_limit=gemini_options.get("rpd_limit", 500))
     if photo_profile is None:
         state = _video_step(needed, segments=segments, cfg=cfg, transport=transport,
                             prompts_path=prompts_path, profile=profile, timing=timing,
-                            gemini_options=gemini_options, errors=errors, aborts=aborts)
+                            gemini_options=gemini_options, errors=errors, aborts=aborts,
+                            managed=managed, state=_load_shared(state, prompts_path, segments, profile), lock=lock)
     else:
         video = [n for n in needed if n not in photo_nums]
         photo = [n for n in needed if n in photo_nums]
         if video:
-            _video_step(video, segments=segments, cfg=cfg, transport=transport,
-                        prompts_path=prompts_path, profile=profile, timing=timing,
-                        gemini_options=gemini_options, errors=errors, aborts=aborts)
+            state = _video_step(video, segments=segments, cfg=cfg, transport=transport,
+                                prompts_path=prompts_path, profile=profile, timing=timing,
+                                gemini_options=gemini_options, errors=errors, aborts=aborts,
+                                managed=managed, state=_load_shared(state, prompts_path, segments, profile), lock=lock)
         if photo:
+            state = _load_shared(state, prompts_path, segments, photo_profile)
             _photo_step(photo, segments=segments, photo_profile=photo_profile, photo_cfg=photo_cfg,
                         transport=transport, prompts_path=prompts_path,
-                        gemini_options=gemini_options, errors=errors, aborts=aborts)
-        state = read_state(prompts_path)  # после фото: состояние файла с обоими видами
+                        gemini_options=gemini_options, errors=errors, aborts=aborts,
+                        managed=managed, state=state, lock=lock)
+        state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]
     return PromptRun(ready=ready, state=state, errors=errors, abort=aborts[0] if aborts else None)

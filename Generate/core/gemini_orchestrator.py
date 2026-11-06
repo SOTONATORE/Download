@@ -352,8 +352,13 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        output_reserve_tokens: int = 2000, max_rate_retries: int = 6,
                        transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                        clock: Callable[[], float] = time.monotonic,
-                       sleep: Callable[[float], None] = time.sleep) -> dict:
-    """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state."""
+                       sleep: Callable[[float], None] = time.sleep,
+                       managed=None, state=None, lock=None) -> dict:
+    """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state.
+
+    managed: общий ManagedTransport прогона (цепочка моделей одна на оба вида); None: создаётся здесь.
+    state, lock: общий словарь состояния и замок; без них поведение прежнее (файл читается здесь).
+    """
     wanted = sorted(set(wanted_nums))
     if not wanted:
         raise gp.GeminiInputError("Список нужных номеров пуст: нечего генерировать.")
@@ -362,7 +367,11 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     if absent:
         raise gp.GeminiInputError("Номера отсутствуют в SRT: " + ", ".join(map(str, absent)) + ".")
 
-    state = load_state(prompts_path, segments, profile)
+    # общее состояние прогона передано извне: читаем файл только когда его не передали
+    shared_state = state
+    state = shared_state if shared_state is not None else load_state(prompts_path, segments, profile)
+    # замок общего состояния: слияние и запись в файл идут под ним; без общего состояния замка не нужно
+    guard = lock if lock is not None else threading.Lock()
     try:
         timings = {t.num: t for t in compute_timings(
             segments, timing.fps, timing.frame_rule, timing.clip_min_sec,
@@ -377,38 +386,42 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         return state
     log.info("К генерации: %d из %d запрошенных номеров.", len(pending), len(wanted))
 
-    managed = ManagedTransport(
-        inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
-        rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
-        max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
-        clock=clock, sleep=sleep)
+    # цепочка моделей: общая (передана managed) или своя на этот вызов, как раньше
+    if managed is None:
+        managed = ManagedTransport(
+            inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
+            rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
+            max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
+            clock=clock, sleep=sleep)
 
     def on_batch(results: list) -> None:
-        for r in results:
-            t = timings[r.num]
-            old = prompts.get(str(r.num)) or {}
-            prompts[str(r.num)] = {
-                "num": r.num, "start_ms": t.start_ms, "end_ms": t.end_ms,
-                "clip_ms": t.clip_ms, "num_frames": t.num_frames,
-                "prompt": r.prompt,
-                "status": "ready" if r.prompt.strip() else "failed",
-                "attempts": int(old.get("attempts", 0)) + 1,
-                "error": r.review_reason, "needs_review": r.needs_review,
-                "extra": r.extra,
-            }
-        state["model"] = managed.active_model
-        state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-        # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
-        log.info("Сохранение промптов начато: файл %s, промптов к сохранению: %d.",
-                 prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
-        try:
-            atomic_write_json(prompts_path, state)
-        except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
-            log.warning("Не удалось сохранить промпты в файл %s: %s: %s.",
-                        prompts_path, type(exc).__name__, exc)
-            raise
-        log.info("Промпты сохранены: файл %s, всего в файле: %d.",
-                 prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
+        # под замком: второй вид может писать в тот же файл параллельно (на данный момент волны идут по очереди)
+        with guard:
+            for r in results:
+                t = timings[r.num]
+                old = prompts.get(str(r.num)) or {}
+                prompts[str(r.num)] = {
+                    "num": r.num, "start_ms": t.start_ms, "end_ms": t.end_ms,
+                    "clip_ms": t.clip_ms, "num_frames": t.num_frames,
+                    "prompt": r.prompt,
+                    "status": "ready" if r.prompt.strip() else "failed",
+                    "attempts": int(old.get("attempts", 0)) + 1,
+                    "error": r.review_reason, "needs_review": r.needs_review,
+                    "extra": r.extra,
+                }
+            state["model"] = managed.active_model
+            state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+            # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
+            log.info("Сохранение промптов начато: файл %s, промптов к сохранению: %d.",
+                     prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
+            try:
+                atomic_write_json(prompts_path, state)
+            except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
+                log.warning("Не удалось сохранить промпты в файл %s: %s: %s.",
+                            prompts_path, type(exc).__name__, exc)
+                raise
+            log.info("Промпты сохранены: файл %s, всего в файле: %d.",
+                     prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
 
     # провайдер берётся у транспорта (openrouter считает свои ключи для числа потоков);
     # для gemini аргумент не передаётся, чтобы вызов остался прежним (совместимость с gemini_prompts без provider)
