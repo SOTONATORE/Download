@@ -145,9 +145,16 @@ jobs:
           GEMINI_NAMES = ("GEMINI1", "GEMINI2", "GEMINI3", "GEMINI4", "GEMINI5",
                           "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10")
           OPENROUTER_NAMES = tuple(f"OPENROUTER{i}" for i in range(1, 11))
-          # маскируются значения обоих наборов
-          secret_values = sorted({os.environ.get(k, "").strip() for k in GEMINI_NAMES + OPENROUTER_NAMES} - {""},
-                                 key=len, reverse=True)
+          # Маскируются только значения длиной не меньше MASK_MIN_LEN (оба набора). Короче — не маскируются:
+          # выводится предупреждение без значения. Длина каждого непустого секрета печатается один раз.
+          MASK_MIN_LEN = 20
+          secret_all = {k: os.environ.get(k, "").strip() for k in GEMINI_NAMES + OPENROUTER_NAMES}
+          for k, value in secret_all.items():
+              if value:
+                  print(f"{k}: длина {len(value)}")
+                  if len(value) < MASK_MIN_LEN:
+                      print(f"Секрет {k} короче {MASK_MIN_LEN} символов (длина {len(value)}): маскировка для него пропущена, проверьте значение в настройках репозитория.")
+          secret_values = sorted({v for v in secret_all.values() if len(v) >= MASK_MIN_LEN}, key=len, reverse=True)
           SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY")
 
 
