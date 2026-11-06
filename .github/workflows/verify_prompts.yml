@@ -302,8 +302,28 @@ jobs:
               say(line)
 
           if prep.problems or prep.failures:
+              # «промпт не готов» печатаем одной сводкой (номера клипов диапазонами), а не строкой на клип;
+              # остальные проблемы — по одной строке, как раньше
+              not_ready = []
               for p in prep.problems:
-                  say("ПРОБЛЕМА: " + p)
+                  head, tail = "клип ", ": промпт не готов"
+                  middle = p[len(head):-len(tail)] if p.startswith(head) and p.endswith(tail) else ""
+                  if middle.isdigit():
+                      not_ready.append(int(middle))
+                  else:
+                      say("ПРОБЛЕМА: " + p)
+              if not_ready:
+                  nums = sorted(set(not_ready))
+                  ranges = []  # [первый, последний] подряд идущих номеров клипов
+                  for n in nums:
+                      if ranges and n == ranges[-1][1] + 1:
+                          ranges[-1][1] = n
+                      else:
+                          ranges.append([n, n])
+                  parts = [str(a) if a == b else f"{a}–{b}" for a, b in ranges[:20]]
+                  more = f" и ещё {len(ranges) - 20} диапазонов" if len(ranges) > 20 else ""
+                  say(f"ПРОБЛЕМА: промпт не готов у клипов: {len(nums)}")
+                  say("Номера клипов: " + ", ".join(parts) + more)
               sys.exit(1)
           say(f"Проверка пройдена: промптов {len(prep.missing)}")
           PY
