@@ -179,7 +179,8 @@ class OpenRouterTransport:
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
 
-    def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
+    def generate_json(self, model: str, system: str, user: str, schema: dict,
+                      reasoning_effort: "str | None" = None) -> str:
         gpool = self._gpool
         url = f"{self._base_url}/chat/completions"
         if self._use_json_schema:
@@ -192,9 +193,10 @@ class OpenRouterTransport:
             "max_tokens": self._max_output_tokens,
             "response_format": response_format,
         }
-        # рассуждения: параметр reasoning отправляется, если уровень не none; при none ключа в запросе нет
-        if self._reasoning_effort != "none":
-            body["reasoning"] = {"effort": self._reasoning_effort}
+        # рассуждения: уровень запроса, если задан, иначе уровень транспорта; при none ключа в запросе нет
+        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort
+        if effort != "none":
+            body["reasoning"] = {"effort": effort}
         tokens = min((len(system) + len(user)) // POOL_CHARS_PER_TOKEN, self._tpm)
         try:
             lease = self._pool.acquire(model, tokens=tokens)

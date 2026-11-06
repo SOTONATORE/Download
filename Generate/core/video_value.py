@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -15,7 +16,11 @@ try:
 except ImportError:  # запуск без пакета (плоская раскладка)
     from segment_split import Segment  # type: ignore
 
+log = logging.getLogger("Generate.video_value")
+
 MAX_ATTEMPTS = 2
+# сегментов в одном запросе оценки; большой запрос упирается в лимит вывода рассуждениями
+SCORE_BATCH_SIZE = 25
 
 _FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
@@ -90,23 +95,37 @@ def parse_value_response(text: str, expected_ids: Sequence[int]) -> dict:
 
 
 def score_segments(segments: Sequence[Segment], send: Callable[[str], str]) -> dict:
-    """Получает video_value для всех сегментов. Не больше MAX_ATTEMPTS попыток.
+    """Получает video_value для всех сегментов, батчами по SCORE_BATCH_SIZE.
 
+    Не больше MAX_ATTEMPTS попыток на каждый батч.
     send — отправитель запроса: принимает строку промпта, возвращает текст ответа.
-    Если обе попытки неудачны, бросает ValueError с сообщением о сегментах.
+    Если обе попытки какого-либо батча неудачны, бросает ValueError с номерами сегментов этого батча.
     """
     if not segments:
         return {}
-    prompt = build_value_prompt(segments)
-    expected = [s.id for s in segments]
-    for _ in range(MAX_ATTEMPTS):
-        try:
-            text = send(prompt)
-            return parse_value_response(text, expected)
-        except Exception:  # любая неудача отправки или разбора: повтор, если попытки остались
-            continue
-    ids = ", ".join(str(i) for i in expected)
-    raise ValueError(f"Не удалось получить video_value для сегментов: {ids}")
+    # батчи идут по времени начала, затем по номеру: порядок стабилен между запусками
+    ordered = sorted(segments, key=lambda s: (s.start, s.id))
+    chunks = [ordered[i:i + SCORE_BATCH_SIZE] for i in range(0, len(ordered), SCORE_BATCH_SIZE)]
+    result: dict = {}
+    for no, chunk in enumerate(chunks, start=1):
+        prompt = build_value_prompt(chunk)
+        expected = [s.id for s in chunk]
+        parsed = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            log.info("Оценка video_value: батч %d из %d, сегменты %s–%s, попытка %d",
+                     no, len(chunks), expected[0], expected[-1], attempt)
+            try:
+                text = send(prompt)
+                parsed = parse_value_response(text, expected)
+                break
+            except Exception:  # любая неудача отправки или разбора: повтор, если попытки остались
+                continue
+        if parsed is None:
+            ids = ", ".join(str(i) for i in expected)
+            raise ValueError(f"Не удалось получить video_value для сегментов: {ids}")
+        result.update(parsed)
+        log.info("Оценка video_value: батч %d готов, результатов %d", no, len(parsed))
+    return result
 
 
 def write_distribution(

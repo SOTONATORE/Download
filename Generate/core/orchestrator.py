@@ -48,7 +48,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .missing import parse_missing
     from .segment_split import all_photo, select_video_segments, to_segments
     from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
-    from .video_value import score_segments, write_distribution
+    from .video_value import SCORE_BATCH_SIZE, score_segments, write_distribution
     from .config_loader import DEFAULT_MODEL_PROFILE
     from .naming import clip_filename
     from . import previews
@@ -73,7 +73,7 @@ except ImportError:  # pragma: no cover
     from missing import parse_missing  # type: ignore
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
     from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
-    from video_value import score_segments, write_distribution  # type: ignore
+    from video_value import SCORE_BATCH_SIZE, score_segments, write_distribution  # type: ignore
     from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
     from naming import clip_filename  # type: ignore
     import previews  # type: ignore
@@ -543,7 +543,9 @@ def make_value_sender(transport, gemini_options: dict):
         transport, opts.get("models", go.DEFAULT_MODELS),
         rpm_limit=opts.get("rpm_limit", 15), tpm_limit=opts.get("tpm_limit", 250_000),
         rpd_limit=opts.get("rpd_limit", 500))
-    return lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA)  # noqa: E731
+    # оценка video_value: рассуждения выключены, чтобы весь вывод шёл в JSON
+    return lambda prompt: managed.generate_json("", "", prompt, VALUE_SCHEMA,
+                                                reasoning_effort="none")  # noqa: E731
 
 
 def _all_video(segs, intro_seconds) -> dict:
@@ -580,6 +582,9 @@ def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_se
         values = {}
         result = _all_video(segs, intro_seconds)
     else:
+        # журнал плана батчей до первого запроса
+        log.info("Оценка video_value: сегментов %d, батчей %d по %d, VIDEO_PERCENT %.1f%%",
+                 len(segs), math.ceil(len(segs) / SCORE_BATCH_SIZE), SCORE_BATCH_SIZE, video_percent)
         try:
             values = score_segments(segs, send)
         except ValueError as exc:
@@ -592,9 +597,10 @@ def split_for_run(srt_segments, missing, *, video_model, video_percent, intro_se
         log.info("Распределение записано в файл: %s.", distribution_path)
     else:
         log.warning("Папка артефакта не задана: распределение записано только в журнал.")
-    log.info("Распределение видео/фото: видео %d сегментов, фото %d сегментов; "
+    log.info("Распределение видео/фото: видео %d сегментов, фото %d сегментов; VIDEO_PERCENT %.1f%%; "
              "бюджет видео %.1f с, видео %.1f с.",
-             len(result["video"]), len(result["photo"]), result["budget_seconds"], result["video_seconds"])
+             len(result["video"]), len(result["photo"]), video_percent,
+             result["budget_seconds"], result["video_seconds"])
     return result
 
 

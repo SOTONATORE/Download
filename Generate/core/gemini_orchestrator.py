@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -105,6 +106,14 @@ class RateLimiter:
 # Транспорт с лимитером и цепочкой моделей
 # ---------------------------------------------------------------------------
 
+def _accepts_reasoning(fn) -> bool:
+    """Есть ли у метода generate_json транспорта именованный параметр reasoning_effort."""
+    try:
+        return "reasoning_effort" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class ManagedTransport:
     """Обёртка над transport.generate_json: смена модели только при суточной квоте,
     повтор при RPM, повтор временных ошибок (500/503/504, сеть) на той же модели без смены.
@@ -139,6 +148,9 @@ class ManagedTransport:
         if rpd_used:
             log.warning("Счётчики RPD из прошлых запусков не учитываются: их ведёт пул ключей.")
         self._inner = inner
+        # reasoning_effort передаём внутреннему транспорту только если он его принимает
+        self._reasoning_ok = _accepts_reasoning(getattr(inner, "generate_json", None))
+        self._reasoning_warned = False
         self._reserve = max(0, output_reserve_tokens)
         self._max_retries = max_rate_retries
         self._switch_after = transient_switch_after
@@ -193,14 +205,23 @@ class ManagedTransport:
                     return self._models[i]
         return None
 
-    def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
+    def generate_json(self, model: str, system: str, user: str, schema: dict,
+                      reasoning_effort: Optional[str] = None) -> str:
         rate_retries = 0
         tries = 0                  # неудачные попытки подряд в этом запросе: потолок TRANSIENT_ATTEMPTS на весь запрос
+        # None: поведение как раньше; иначе параметр уходит только к транспорту, который его понимает
+        extra = {}
+        if reasoning_effort is not None:
+            if self._reasoning_ok:
+                extra = {"reasoning_effort": reasoning_effort}
+            elif not self._reasoning_warned:
+                self._reasoning_warned = True
+                log.warning("Транспорт не принимает reasoning_effort: запрос идёт с настройками по умолчанию.")
         while True:
             m = self._pick_model()
             t0 = self._clock()
             try:
-                text = self._inner.generate_json(m, system, user, schema)
+                text = self._inner.generate_json(m, system, user, schema, **extra)
                 with self._lock:
                     self._streak[m] = 0            # успех сбрасывает серию временных сбоев модели
                 log.info("Модель %s: ответ получен за %.1f с (сбоев подряд до этого: %d).",
