@@ -389,7 +389,9 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
         log.info("Промпты сохранены: файл %s, всего в файле: %d.",
                  prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
 
-    # провайдер берётся у транспорта (openrouter считает свои ключи для числа потоков); gemini — как раньше
-    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
-                        provider=getattr(inner_transport, "provider", "gemini"))
+    # провайдер берётся у транспорта (openrouter считает свои ключи для числа потоков);
+    # для gemini аргумент не передаётся, чтобы вызов остался прежним (совместимость с gemini_prompts без provider)
+    provider = getattr(inner_transport, "provider", "gemini")
+    extra = {} if provider == "gemini" else {"provider": provider}
+    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch, **extra)
     return state

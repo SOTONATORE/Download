@@ -736,7 +736,7 @@ MAX_PARALLEL_BATCHES = 10
 
 
 def _provider_key_count(provider: str) -> int:
-    """Число ключей провайдера в окружении. openrouter: OPENROUTER1…OPENROUTER10; иначе GEMINI1…GEMINI10, как раньше.
+    """Число ключей провайдера в окружении: ключи провайдера openrouter из окружения; для остальных — ключи Gemini из окружения, как раньше.
 
     Ключи нигде не выводятся. Если ключей нет, load_* бросает исключение: вызывающий код считает это нулём."""
     if provider == "openrouter":
