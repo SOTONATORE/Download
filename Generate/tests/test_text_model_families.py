@@ -51,8 +51,9 @@ def check_env(monkeypatch):
 # ---------------------------------------------------------------- выбор семейства
 
 def test_default_family_is_gemini():
+    # семейство по умолчанию теперь nemotron-super-vl (openrouter); имя теста оставлено прежним
     name, provider, models = cli.resolve_text_family(_cfg(), None)
-    assert (name, provider, models) == ("gemini", "gemini", None)
+    assert (name, provider, models) == ("nemotron-super-vl", "openrouter", ["nvidia/nemotron-3.5-super-vl:free"])
 
 
 def test_requested_gemma_selects_openrouter_family():
@@ -125,7 +126,8 @@ def test_gemini_family_accepts_explicit_model_list():
 
 def test_gemini_options_gemini_family_uses_gemini_models_as_before():
     cfg = _cfg()
-    opts = cli._gemini_options(cfg, cli.resolve_text_family(cfg, None))
+    # семейство задано явно: по умолчанию теперь openrouter
+    opts = cli._gemini_options(cfg, cli.resolve_text_family(cfg, "gemini"))
     assert opts == {
         "models": tuple(cfg.gemini_models),
         "rpm_limit": cfg.gemini_rpm_limit,
@@ -150,7 +152,8 @@ def test_make_transport_gemini_keeps_realtransport_kwargs(monkeypatch):
 
     monkeypatch.setattr(cli, "_find_symbol", lambda name, modules: FakeRealTransport)
     cfg = _cfg()
-    cli._make_transport(cfg, cli.resolve_text_family(cfg, None))
+    # семейство задано явно: по умолчанию теперь openrouter
+    cli._make_transport(cfg, cli.resolve_text_family(cfg, "gemini"))
     assert captured["rpm_limit"] == cfg.gemini_rpm_limit
     assert captured["tpm_limit"] == cfg.gemini_tpm_limit
     assert captured["rpd_limit"] == cfg.gemini_rpd_limit
@@ -178,7 +181,7 @@ def test_make_transport_openrouter_passes_family_settings(monkeypatch):
 
 def test_check_gemini_names_gemini_keys_and_prints_no_value(capsys, missing_file, check_env, monkeypatch):
     monkeypatch.setenv("GEMINI" + "1", TEST_KEY)  # имя ключа собирается из частей: структурный тест ищет литерал
-    code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file)])
+    code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file), "--text-model", "gemini"])
     cap = capsys.readouterr()
     assert code == 0
     assert "семейство gemini" in cap.out

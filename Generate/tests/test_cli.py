@@ -36,7 +36,9 @@ def hf_token(monkeypatch):
 
 # ---------------------------------------------------------------- check
 
-def test_check_ok(capsys, missing_file, hf_token):
+def test_check_ok(capsys, missing_file, hf_token, monkeypatch):
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     code = cli.main(["check", "--srt", str(DATA), "--missing", str(missing_file)])
     out = capsys.readouterr().out
     segs = parse_srt(str(DATA))
@@ -45,14 +47,18 @@ def test_check_ok(capsys, missing_file, hf_token):
     assert srt_hash(segs) in out
 
 
-def test_check_does_not_parse_missing(capsys, tmp_path, hf_token):
+def test_check_does_not_parse_missing(capsys, tmp_path, hf_token, monkeypatch):
     """Содержимое missing.txt не разбирается: любой текст допустим."""
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     m = tmp_path / "missing.txt"
     m.write_text("это вообще не список номеров\n", encoding="utf-8")
     assert cli.main(["check", "--srt", str(DATA), "--missing", str(m)]) == 0
 
 
-def test_check_no_srt(capsys, missing_file, tmp_path, hf_token):
+def test_check_no_srt(capsys, missing_file, tmp_path, hf_token, monkeypatch):
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     code = cli.main(["check", "--srt", str(tmp_path / "нет.srt"),
                      "--missing", str(missing_file)])
     err = capsys.readouterr().err
@@ -60,7 +66,9 @@ def test_check_no_srt(capsys, missing_file, tmp_path, hf_token):
     assert "SRT" in err and "Traceback" not in err
 
 
-def test_check_no_missing(capsys, tmp_path, hf_token):
+def test_check_no_missing(capsys, tmp_path, hf_token, monkeypatch):
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     code = cli.main(["check", "--srt", str(DATA),
                      "--missing", str(tmp_path / "нет.txt")])
     err = capsys.readouterr().err
@@ -97,6 +105,8 @@ def test_check_not_utf8(capsys, missing_file, tmp_path, hf_token):
 
 def test_defaults_are_in_cwd(capsys, tmp_path, monkeypatch, hf_token):
     """Без параметров ищутся final.srt и missing.txt в текущей папке."""
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     monkeypatch.chdir(tmp_path)
     assert cli.main(["check"]) == 2  # файлов нет
     (tmp_path / "final.srt").write_bytes(DATA.read_bytes())
@@ -841,7 +851,9 @@ def _check_args(missing, *extra):
     return ["check", "--srt", str(DATA), "--missing", str(missing), *extra]
 
 
-def test_check_without_image_args_passes(capsys, missing_file):
+def test_check_without_image_args_passes(capsys, missing_file, monkeypatch):
+    # семейство по умолчанию openrouter: preflight требует ключ; значение фиктивное, сеть не используется
+    monkeypatch.setenv("OPENROUTER1", "test-key-not-used")
     assert cli.main(_check_args(missing_file)) == 0
 
 
