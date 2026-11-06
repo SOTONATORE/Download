@@ -1360,8 +1360,6 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
 # то же распределение (plan_split), те же профили и тайминг (_build_timing, _build_prompt_config).
 
 VERIFY_REWORK_RE = re.compile(r"Prompt for segment_index (\d+):")
-_FORBIDDEN_TAG = "запрещённый тип кадра"
-_LEFTOVER_TAG = "незаполненный маркер"
 
 
 class _ReworkCounter:
@@ -1426,7 +1424,8 @@ def _failure_reason(num: int, entry, errors: list) -> str:
 
 def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
     """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
-    from Generate.core.prompt_check import find_problems
+    from Generate.core.prompt_check import (PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
+                                            find_problems, problem_code, problem_ru)
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
 
     ready = forbidden = leftover = frames_bad = 0
@@ -1439,12 +1438,13 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             continue
         ready += 1
         for p in find_problems(entry["prompt"]):
-            if p.startswith(_FORBIDDEN_TAG):
+            code = problem_code(p)
+            if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
-                problems.append(f"{label} клип {n}: {p}")
-            elif p.startswith(_LEFTOVER_TAG):
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code == PROBLEM_LEFTOVER_MARKER:
                 leftover += 1
-                problems.append(f"{label} клип {n}: {p}")
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
         want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
         if entry.get("num_frames") != want:
             frames_bad += 1

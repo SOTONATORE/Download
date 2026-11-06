@@ -27,20 +27,24 @@ _FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
 
 def build_value_prompt(segments: Sequence[Segment]) -> str:
-    """Строит русскоязычную инструкцию для Gemini: оценить video_value каждого сегмента."""
+    """Builds the English instruction for Gemini: rate the video_value (0-100) of each segment.
+
+    The segment text is passed unchanged, whatever language the subtitles are in.
+    """
+    # инструкция на английском; текст сегментов добавляется как есть, на любом языке
     lines = [
-        "Ты оцениваешь, насколько каждый сегмент видеоролика подходит для показа в виде видео,",
-        "а не статичного фото.",
+        "You rate how well each segment of a video suits being shown as a moving video",
+        "rather than as a static photo.",
         "",
-        "Для каждого сегмента поставь целое число video_value от 0 до 100:",
-        "- движение или действие: 70–100;",
-        "- статичный кадр: 0–30;",
-        "- смешанный случай: 31–69.",
+        "For every segment give an integer video_value from 0 to 100:",
+        "- movement or action: 70–100;",
+        "- static frame: 0–30;",
+        "- mixed case: 31–69.",
         "",
-        "Верни ТОЛЬКО JSON-список объектов вида {\"id\": <номер>, \"video_value\": <целое число>},",
-        "по одному объекту на каждый номер сегмента. Никакого текста до или после JSON.",
+        "Return ONLY a JSON list of objects of the form {\"id\": <number>, \"video_value\": <integer>},",
+        "one object for each segment number. No text before or after the JSON.",
         "",
-        "Сегменты:",
+        "Segments:",
     ]
     for seg in sorted(segments, key=lambda s: (s.start, s.id)):
         lines.append(f"id {seg.id} ({seg.start:.2f}–{seg.end:.2f} с): {seg.text}")

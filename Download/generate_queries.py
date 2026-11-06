@@ -1043,9 +1043,7 @@ def build_prompt(
             # Заголовок, Timing, Text, Sentence с маркером, Note и Before/After - как в обычном режиме
             lines.append(build_segment_block(s, sentences, by_segment))
             # Для сегментов с мусорным словом прежний кадр не показываем: модель на нём якорится
-            has_junk = any(
-                "forbidden shot type" in iss or "запрещённый тип кадра" in iss for iss in issues_list
-            )
+            has_junk = any(FORBIDDEN_SHOT_TYPE_CODE in iss for iss in issues_list)
             if not has_junk:
                 lines.append(f"Previous scene: {prev.get('scene', '')}")
                 lines.append(f"Previous sites: {json.dumps(prev.get('sites', []))}")
@@ -1520,6 +1518,10 @@ def _normalize_entry(
 # Валидация записей и подготовка повторного запроса
 # ---------------------------------------------------------------------------
 
+# Машинный код запрещённого типа кадра: по нему решается, мусорный ли сегмент (has_junk в промпте REPAIR).
+FORBIDDEN_SHOT_TYPE_CODE = "forbidden_shot_type"
+
+
 def _collect_entry_issues(
     entry: dict, mode: int, rx_check: re.Pattern
 ) -> list[tuple[str, str]]:
@@ -1538,7 +1540,7 @@ def _collect_entry_issues(
                 words_uniq = ", ".join(sorted(set(w.lower() for w in found)))
                 found_issues.append((
                     f"в поле {field} запрещённый тип кадра: {words_uniq}",
-                    f"forbidden shot type '{words_uniq}' in field {field}",
+                    f"{FORBIDDEN_SHOT_TYPE_CODE}: forbidden shot type '{words_uniq}' in field {field}",
                 ))
 
     # 2. Соответствие sites режиму
@@ -2910,14 +2912,14 @@ def run_self_tests() -> int:
         # REPAIR-правило: нет 'narration text', есть ссылка на реальные источники контекста
         _rp = build_prompt(
             [_nb_t[2]],
-            repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 1, "mode": SOURCES_MIX}},
+            repair_info={3: {"entry": {}, "issues": ["forbidden_shot_type: forbidden shot type 'map' in field scene"], "neighbors": "NB", "round": 1, "mode": SOURCES_MIX}},
         )
         check("этап 3а: REPAIR-правило без 'narration text', со ссылкой на Sentence/Neighbors",
               ("narration text" in _rp, "Sentence, Before, After lines and the Neighbors block" in _rp), (False, False))
         # этап 3б (изменён прежний тест: старая ссылка на After/Neighbors как источник сцены заменена лесенкой)
         check("этап 3б: REPAIR круг 1 и 2 ссылаются на лесенку и запрет After, старой формулировки нет",
               [("SOURCE LADDER" in x and "NEVER a source for the scene" in x and "using only the words of this segment and the context" not in x)
-               for x in (_rp, build_prompt([_nb_t[2]], repair_info={3: {"entry": {}, "issues": ["forbidden shot type: map"], "neighbors": "NB", "round": 2, "mode": SOURCES_ARCHIVE}}))], [True, True])
+               for x in (_rp, build_prompt([_nb_t[2]], repair_info={3: {"entry": {}, "issues": ["forbidden_shot_type: forbidden shot type 'map' in field scene"], "neighbors": "NB", "round": 2, "mode": SOURCES_ARCHIVE}}))], [True, True])
 
         # 7б. VARIETY: пункт в промпте всех режимов, без людей и имён, на своём месте
         for md, pm in ((SOURCES_MIX, p_mix), (SOURCES_ARCHIVE, p_arch), (SOURCES_STOCK, p_stock)):
@@ -2965,7 +2967,7 @@ def run_self_tests() -> int:
         rep_data = {
             42: {
                 "entry": entry(scene="Looking at a map of battles", query_narrow="battle map"),
-                "issues": ["forbidden shot type 'map' in field scene"],
+                "issues": ["forbidden_shot_type: forbidden shot type 'map' in field scene"],
                 "neighbors": "  [41] Text: Before\n  [43] Text: After",
             }
         }
@@ -3187,8 +3189,8 @@ def run_self_tests() -> int:
             finally:
                 logging.getLogger().removeHandler(lh)
             check("repair mock: в call_batch_fn английские проблемы",
-                  captured.get(2, {}).get("issues"), ["forbidden shot type 'map' in field scene",
-                                                      "forbidden shot type 'map' in field query_narrow"])
+                  captured.get(2, {}).get("issues"), ["forbidden_shot_type: forbidden shot type 'map' in field scene",
+                                                      "forbidden_shot_type: forbidden shot type 'map' in field query_narrow"])
             check("repair mock: лог по-прежнему русский (Сегмент N: ...)",
                   any(m.startswith("Сегмент 2: в поле scene запрещённый тип кадра: map") for m in lh.msgs), True)
 

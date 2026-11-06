@@ -25,12 +25,14 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .srt_parser import Segment
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
-    from .prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # проверка промптов (шаг 6)
+    from .prompt_check import (MAX_REWORK_ATTEMPTS, PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
+                           make_problem, problem_ru, rework_remark)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
-    from prompt_check import MAX_REWORK_ATTEMPTS, find_camera_motion, find_problems, rework_remark  # type: ignore
+    from prompt_check import (MAX_REWORK_ATTEMPTS, PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
+                          make_problem, problem_ru, rework_remark)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -386,7 +388,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "You receive subtitle segments of a narrated video. For every segment write ONE "
         + kind + ", in English, that visually illustrates what the segment says, "
         "following the style guide below. Use the Sentence, Before and After lines only to "
-        "understand the meaning; the >>marked<< part is the passage to illustrate.\n\n"
+        "understand the meaning; the >>marked<< part is the passage to illustrate. The source subtitle text may be in any language. Always write the output in English.\n\n"
         "# Output contract\n"
         "Return a JSON array with exactly one object per requested segment: "
         "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
@@ -627,7 +629,7 @@ def _find_all_problems(text: str, cfg: PromptConfig) -> list:
     """Нарушения промпта: запрещённые типы кадра и маркеры; для фото ещё движение камеры."""
     problems = find_problems(text)
     if cfg.media == "image":
-        problems += [f"движение камеры: «{m}»" for m in find_camera_motion(text)]
+        problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     return list(dict.fromkeys(problems))
 
 
@@ -659,7 +661,7 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
         # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.
         raise GeminiRuntimeError(
             f"Сегмент {res.num}: в промпте остались запрещённые типы кадра или маркеры "
-            f"после {attempt} переписываний: {'; '.join(problems)}. Прогон остановлен."
+            f"после {attempt} переписываний: {'; '.join(problem_ru(p) for p in problems)}. Прогон остановлен."
         )
     res.prompt = text
     return res
@@ -777,16 +779,19 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
     t_all = time.monotonic()
     batches = builder.batches(builder.wanted)
-    log.info("Генерация промптов начата: модель %s, клипов к описанию: %d, батчей: %d.",
-             model, len(builder.wanted), len(batches), extra=KEY_EVENT_EXTRA)
+    # ключи для баннера: те же ключи провайдера, что и для числа потоков; ошибка чтения — ноль
+    try:
+        key_count = _provider_key_count(provider)
+    except Exception:
+        key_count = 0
+    kind = "видео" if cfg.media == "video" else "фото"
+    log.info("=== Генерация %s-промптов: клипов %d, батчей %d, ключей %d ===",
+             kind, len(builder.wanted), len(batches), key_count, extra=KEY_EVENT_EXTRA)
 
     # число потоков: без явного значения — число ключей провайдера семейства из окружения;
     # если ключей нет или их не удалось прочитать, идём в один поток
     if max_workers is None:
-        try:
-            max_workers = _provider_key_count(provider)
-        except Exception:
-            max_workers = 0
+        max_workers = key_count
         if max_workers < 1:
             log.info("Ключей провайдера %s не найдено, батчи идут в один поток.", provider)
             max_workers = 1
@@ -867,12 +872,11 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     results = [out[n] for n in builder.wanted]
     flagged = sum(1 for r in results if r.needs_review)
     log.info("Промпты готовы: %d, из них требуют проверки: %d.", len(results), flagged)
-    # итог прогона: готово / без текста / требуют проверки (клипы с текстом, но с отметкой проверки)
+    # итог прогона: готово / без текста; клипы с отметкой проверки в эти числа не входят (их число в строке «Промпты готовы»)
     ready = sum(1 for r in results if r.prompt.strip() and not r.needs_review)
     no_text = sum(1 for r in results if not r.prompt.strip())
-    to_review = sum(1 for r in results if r.prompt.strip() and r.needs_review)
-    log.info("Генерация промптов завершена: готово %d, без текста %d, требуют проверки %d, всего %.1f с.",
-             ready, no_text, to_review, time.monotonic() - t_all, extra=KEY_EVENT_EXTRA)
+    log.info("=== Генерация %s-промптов готова: готово %d, без текста %d, за %.1f с ===",
+             kind, ready, no_text, time.monotonic() - t_all, extra=KEY_EVENT_EXTRA)
     return results
 
 

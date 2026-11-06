@@ -11,7 +11,11 @@ from Generate.core.gemini_prompts import GeminiRuntimeError, PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
     find_camera_motion,
+    PROBLEM_FORBIDDEN_FORMAT,
+    PROBLEM_FORBIDDEN_SHOT_TYPE,
+    PROBLEM_LEFTOVER_MARKER,
     find_problems,
+    make_problem,
     rework_remark,
 )
 from Generate.core.srt_parser import Segment
@@ -105,10 +109,11 @@ def test_format_is_not_form():
 # ---------------------------------------------------------------- rework_remark
 
 def test_rework_remark_contains_each_problem():
-    problems = ["запрещённый тип кадра: «map»", "незаполненный маркер: «[CHAR_1]»"]
+    problems = [make_problem(PROBLEM_FORBIDDEN_SHOT_TYPE, "map"), make_problem(PROBLEM_LEFTOVER_MARKER, "[CHAR_1]")]
     remark = rework_remark(problems)
-    for p in problems:
-        assert p in remark
+    assert "forbidden shot type: «map»" in remark
+    assert "unfilled marker: «[CHAR_1]»" in remark
+    assert "запрещённый" not in remark  # модель получает только английский текст
 
 
 def test_max_rework_attempts_is_two():
@@ -177,7 +182,7 @@ def test_camera_motion_not_found(text):
 def test_format_terms_are_forbidden(text):
     problems = find_problems(text)
     assert len(problems) == 1
-    assert "формат кадра" in problems[0]
+    assert problems[0].startswith(PROBLEM_FORBIDDEN_FORMAT)
 
 
 def test_blank_sheet_is_forbidden():

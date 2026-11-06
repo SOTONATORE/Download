@@ -51,7 +51,7 @@ gemini_model_limits:
 
 # --- Семейства текстовых моделей (выбор: --text-model или default_text_model) ---
 # gemini: модели из gemini_models выше (models: null). Провайдер openrouter: ключи OPENROUTER1…OPENROUTER10 из окружения.
-default_text_model: "gemini"
+default_text_model: "nemotron-super-vl"
 text_model_families:
   gemini:
     provider: "gemini"
