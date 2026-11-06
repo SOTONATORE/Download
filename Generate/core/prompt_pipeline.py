@@ -178,6 +178,8 @@ def _video_step(needed: list, *, segments, cfg, watch, prompts_path, profile, ti
         if _is_hard(exc, seen, mark):
             aborts.append(_abort_text("видео", exc))
             log.error("Генерация промптов (видео) остановлена: %s.", exc)
+            if pool is not None:
+                pool.fail(exc)  # вторая волна доберёт текущие батчи, сохранит их и не возьмёт новых
             return state if state is not None else read_state(prompts_path)
         log.error("Генерация промптов прервана: %s. Используем уже сохранённые.", exc)
         return state if state is not None else read_state(prompts_path)
@@ -231,6 +233,8 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         if _is_hard(exc, seen, mark):
             aborts.append(_abort_text("фото", exc))
             log.error("Генерация промптов для фото остановлена: %s.", exc)
+            if pool is not None:
+                pool.fail(exc)  # вторая волна доберёт текущие батчи, сохранит их и не возьмёт новых
             return
         log.error("Генерация промптов для фото прервана: %s. Используем уже сохранённые.", exc)
     finally:
@@ -351,4 +355,8 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
         state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]
+    if aborts:
+        # итог до остановки: сколько клипов уже в prompts.json после обеих волн; недостающие догенерируются при повторном запуске
+        log.warning("Остановка промптов: готовы промпты для %d из %d клипов, они сохранены в prompts.json.",
+                    len(ready), len(needed))
     return PromptRun(ready=ready, state=state, errors=errors, abort=aborts[0] if aborts else None)

@@ -659,9 +659,13 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
     if problems:
         # GeminiRuntimeError со status=None: сбой-класс, который cli уже обрабатывает; повтор на транспорте
         # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.
+        # причина остановки: лимит переписываний исчерпан и нарушение осталось; число уже сохранённых клипов
+        # здесь неизвестно (батч ещё не записан), его пишет prompt_pipeline.build_prompts после обеих волн
         raise GeminiRuntimeError(
-            f"Сегмент {res.num}: в промпте остались запрещённые типы кадра или маркеры "
-            f"после {attempt} переписываний: {'; '.join(problem_ru(p) for p in problems)}. Прогон остановлен."
+            f"Сегмент {res.num}: лимит переписываний исчерпан ({attempt} из {MAX_REWORK_ATTEMPTS}), "
+            f"в промпте остались запрещённые типы кадра или маркеры: "
+            f"{'; '.join(problem_ru(p) for p in problems)}. "
+            "Прогон остановлен; готовые промпты сохранены, при повторном запуске догенерируются только недостающие."
         )
     res.prompt = text
     return res
@@ -700,9 +704,16 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                     best = PromptResult(n, "")
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
     # шаг 6: проверка до прикрепления стиля в generate_prompts (текст стиля сам содержит слова вроде «documents»)
+    checked: dict = {}  # клипы батча, прошедшие проверку шага 6: их отдаём наверх, если прогон остановится
     for n in list(final):
         if final[n].prompt.strip():
-            final[n] = _check_forbidden(transport, model, builder, final[n])
+            try:
+                final[n] = _check_forbidden(transport, model, builder, final[n])
+            except GeminiRuntimeError as exc:
+                # остановка: уже проверенные клипы батча не теряем, process запишет их перед выходом
+                exc.partial = dict(checked)
+                raise
+            checked[n] = final[n]
     return final
 
 
@@ -781,7 +792,22 @@ class _WaveJob:
         log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(self.batches), len(batch.nums),
                  extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
-        batch_res = _run_batch(logged, self.model, self.builder, batch)
+        try:
+            batch_res = _run_batch(logged, self.model, self.builder, batch)
+        except GeminiRuntimeError as exc:
+            partial = getattr(exc, "partial", None)
+            if partial:
+                # прогон останавливается: готовые клипы батча пишем под out_lock тем же путём, что обычный батч
+                for r in partial.values():
+                    if r.prompt.strip():
+                        r.prompt = attach_style(r.prompt, self.style_text)
+                log.warning("Батч %d: до остановки сохранено готовых клипов: %d из %d.",
+                            batch_no, len(partial), len(batch.nums))
+                with self.out_lock:
+                    self.out.update(partial)
+                    if self.on_batch is not None:
+                        self.on_batch([partial[n] for n in batch.nums if n in partial])
+            raise
         for r in batch_res.values():
             # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
             if r.prompt.strip():
