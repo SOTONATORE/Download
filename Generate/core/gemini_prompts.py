@@ -750,14 +750,190 @@ def _provider_key_count(provider: str) -> int:
     return len(_pool_module().load_gemini_keys(os.environ))
 
 
+class _WaveJob:
+    """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
+
+    Поля очереди (next_idx, stopped, first_error, inflight) меняются под замком очереди: своим у одиночной волны
+    или общим у SharedBatchPool. Модель вызывается вне всех замков.
+    """
+
+    def __init__(self, wave: str, builder, batches: list, transport, model: str, style_text: str,
+                 on_batch: Optional[Callable[[list], None]]) -> None:
+        self.wave = wave                 # имя волны: по нему пул учитывает вызовы модели
+        self.builder = builder
+        self.batches = batches
+        self.transport = transport
+        self.model = model
+        self.style_text = style_text
+        self.on_batch = on_batch
+        self.out: dict = {}
+        self.out_lock = threading.Lock()  # out и вызов on_batch под одним замком; не держится при вызове модели
+        self.next_idx = 0                 # следующий непринятый батч
+        self.stopped = False              # первая ошибка волны (или остановка пула): новые батчи не берём
+        self.first_error: list = []       # первая ошибка волны; последующие не сохраняются
+        self.inflight = 0                 # батчи, которые выполняются сейчас (в любом потоке)
+
+    def process(self, logged, idx: int) -> None:
+        """Выполняет батч idx: запрос, стиль, журнал, затем out и on_batch под out_lock. Исключения не глотает."""
+        batch_no = idx + 1
+        batch = self.batches[idx]
+        logged.start_batch(batch_no)
+        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(self.batches), len(batch.nums),
+                 extra=KEY_EVENT_EXTRA)
+        t_batch = time.monotonic()
+        batch_res = _run_batch(logged, self.model, self.builder, batch)
+        for r in batch_res.values():
+            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
+            if r.prompt.strip():
+                r.prompt = attach_style(r.prompt, self.style_text)
+        # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
+        review_nums = []
+        for n in batch.nums:
+            r = batch_res.get(n)
+            if r is None:
+                continue
+            if r.needs_review:
+                review_nums.append(n)
+            elif r.prompt.strip():
+                digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
+                log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
+        if review_nums:
+            log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
+                        batch_no, ", ".join(str(n) for n in review_nums))
+        with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
+        log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
+                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
+                 extra=KEY_EVENT_EXTRA)
+        with self.out_lock:
+            self.out.update(batch_res)
+            if self.on_batch is not None:
+                self.on_batch([batch_res[n] for n in batch.nums])
+
+
+class SharedBatchPool:
+    """Общий пул батчей двух волн (видео и фото): поток берёт батч из своей волны, иначе из чужой.
+
+    shares: число потоков на волну (ключи делятся пополам: видео floor(K/2), фото ceil(K/2)).
+    Если чужая волна в пул не пришла (вышла, не дойдя до батчей), её потоки достаются этой волне.
+    bind: необязательный колбэк bind(имя волны | None) вокруг каждого батча в потоке пула; нужен для учёта вызовов по волнам.
+
+    Замки: self._cond — очередь пула; его не держат при вызове модели и колбэка. out_lock волны и замок
+    состояния файла от него независимы; вложенного захвата в обратном порядке нет.
+    Барьер: ни один батч не берётся, пока обе волны не пришли в пул (или не вышли через leave). Так все
+    чтения общего состояния идут до первого on_batch, и обе волны пишут в один словарь prompts.
+    """
+
+    def __init__(self, shares: dict, bind: Optional[Callable] = None) -> None:
+        self._shares = dict(shares)
+        self._bind = bind
+        self._cond = threading.Condition()   # очередь батчей пула
+        self._arrived: set = set()           # волны, которые пришли в пул или вышли
+        self._jobs: dict = {}                # волна -> _WaveJob
+        self._fatal: Optional[BaseException] = None  # первая ошибка не-Gemini: останавливает все волны
+
+    def leave(self, wave: str) -> None:
+        """Волна вышла, не дойдя до пула (работы нет или ошибка до запросов). Повторный вызов безвреден."""
+        with self._cond:
+            self._arrived.add(wave)
+            self._cond.notify_all()
+
+    def arrive_and_wait(self, wave: str, job: "_WaveJob") -> int:
+        """Регистрирует батчи волны, ждёт прихода обеих волн и возвращает число потоков этой волны."""
+        if wave not in self._shares:
+            raise ValueError(f"волна {wave!r} не объявлена в общем пуле")
+        with self._cond:
+            self._jobs[wave] = job
+            self._arrived.add(wave)
+            self._cond.notify_all()
+            self._cond.wait_for(lambda: set(self._shares) <= self._arrived)
+            other_has_work = any(j is not None and j.batches for w, j in self._jobs.items() if w != wave)
+            if other_has_work:
+                return int(self._shares[wave])
+            return sum(int(v) for v in self._shares.values())
+
+    def _set_fatal(self, exc: BaseException) -> None:
+        """Под замком очереди: первая ошибка не-Gemini останавливает все волны."""
+        if self._fatal is None:
+            self._fatal = exc
+        for job in self._jobs.values():
+            if job is not None:
+                job.stopped = True
+
+    def fail(self, exc: BaseException) -> None:
+        """Остановка всего пула из вызывающего кода (например, ошибка видео вне батчей)."""
+        with self._cond:
+            self._set_fatal(exc)
+            self._cond.notify_all()
+
+    def failure(self) -> Optional[BaseException]:
+        """Первая ошибка пула (не-Gemini) или None."""
+        with self._cond:
+            return self._fatal
+
+    def _take(self, own: str):
+        """Следующий батч: сначала из очереди своей волны, затем из чужой. None, если работы нет нигде."""
+        with self._cond:
+            if self._fatal is not None:
+                return None
+            order = [own] + [w for w in self._shares if w != own]
+            for w in order:
+                job = self._jobs.get(w)
+                if job is None or job.stopped or job.next_idx >= len(job.batches):
+                    continue
+                idx = job.next_idx
+                job.next_idx += 1
+                job.inflight += 1
+                return job, idx
+            return None
+
+    def _finish(self, job: "_WaveJob", exc: Optional[BaseException]) -> None:
+        with self._cond:
+            job.inflight -= 1
+            if exc is not None:
+                # ошибка не глотается: первая ошибка волны; новые батчи волны не берём, запущенные доходят до конца
+                if not job.first_error:
+                    job.first_error.append(exc)
+                job.stopped = True
+                if not isinstance(exc, GeminiRuntimeError):
+                    self._set_fatal(exc)
+            self._cond.notify_all()
+
+    def wait_job(self, job: "_WaveJob") -> None:
+        """Ждёт, пока все батчи волны выполнены (или волна остановлена) и никто не выполняет её батч."""
+        with self._cond:
+            self._cond.wait_for(lambda: job.inflight == 0 and (
+                job.next_idx >= len(job.batches) or job.stopped or self._fatal is not None))
+
+    def run_worker(self, own: str) -> None:
+        """Тело потока пула: берёт батчи, пока есть работа. Ошибка батча не останавливает поток."""
+        while True:
+            got = self._take(own)
+            if got is None:
+                return
+            job, idx = got
+            logged = _LoggedTransport(job.transport)   # журнал свой у каждого батча: номер попытки сбрасывается
+            exc: Optional[BaseException] = None
+            if self._bind is not None:
+                self._bind(job.wave)
+            try:
+                job.process(logged, idx)
+            except BaseException as err:
+                exc = err
+            finally:
+                if self._bind is not None:
+                    self._bind(None)
+            self._finish(job, exc)
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
                      on_batch: Optional[Callable[[list], None]] = None,
-                     max_workers: Optional[int] = None, provider: str = "gemini") -> list:
+                     max_workers: Optional[int] = None, provider: str = "gemini",
+                     pool: Optional["SharedBatchPool"] = None, wave: Optional[str] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
-    (GeminiRuntimeError) не перехватываются. Номер без пригодного текста получает prompt ""
+    (GeminiRuntimeError) не перехватываются. Номер без пригодного текста получает prompt \"\"
     и needs_review=True: решение, пускать ли такой в генерацию, за оркестратором.
 
     on_batch(results): необязательный колбэк. Вызывается после каждого готового батча (с учётом
@@ -773,6 +949,11 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
 
     provider: провайдер текстовой модели (gemini по умолчанию или openrouter). От него зависит,
     чьи ключи считаются для числа потоков, если max_workers не задан.
+
+    pool, wave: общий пул батчей двух волн (SharedBatchPool) и имя этой волны в нём. Без пула (по умолчанию)
+    работа идёт как раньше: своя очередь и потоки по числу ключей. С пулом число потоков и очередь задаёт пул,
+    max_workers не используется; вызов возвращается, когда выполнены все батчи его волны, даже если их
+    выполняли потоки другой волны. Ошибка волны пробрасывается ей, ошибка не-Gemini останавливает весь пул.
     """
     builder = _Builder(segments, wanted_nums, cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
@@ -788,86 +969,71 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     log.info("=== Генерация %s-промптов: клипов %d, батчей %d, ключей %d ===",
              kind, len(builder.wanted), len(batches), key_count, extra=KEY_EVENT_EXTRA)
 
-    # число потоков: без явного значения — число ключей провайдера семейства из окружения;
-    # если ключей нет или их не удалось прочитать, идём в один поток
-    if max_workers is None:
-        max_workers = key_count
-        if max_workers < 1:
-            log.info("Ключей провайдера %s не найдено, батчи идут в один поток.", provider)
-            max_workers = 1
-    n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
-    log.info("Батчи выполняются в %d потоках.", n_workers)
+    if pool is None:
+        # одиночная волна: число потоков по числу ключей провайдера; без ключей — один поток (как раньше)
+        if max_workers is None:
+            max_workers = key_count
+            if max_workers < 1:
+                log.info("Ключей провайдера %s не найдено, батчи идут в один поток.", provider)
+                max_workers = 1
+        n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
+        log.info("Батчи выполняются в %d потоках.", n_workers)
 
-    out: dict = {}
-    queue_lock = threading.Lock()    # очередь батчей, флаг остановки и первая ошибка
-    out_lock = threading.Lock()      # out и вызов on_batch: один замок на весь колбэк
-    stop = threading.Event()
-    first_error: list = []           # первая ошибка; последующие не сохраняются (их видно в журнале попыток)
-    next_idx = 0
+        job = _WaveJob(kind, builder, batches, transport, model, style_text, on_batch)
+        queue_lock = threading.Lock()    # очередь батчей, флаг остановки и первая ошибка
+        stop = threading.Event()
+        first_error: list = []           # первая ошибка; последующие не сохраняются (их видно в журнале попыток)
 
-    def worker() -> None:
-        nonlocal next_idx
-        # журнал свой у каждого потока: номер батча и попытка не делятся между потоками
-        logged = _LoggedTransport(transport)
-        while True:
-            with queue_lock:
-                if stop.is_set() or next_idx >= len(batches):
-                    return
-                idx = next_idx
-                next_idx += 1
-            batch_no = idx + 1
-            batch = batches[idx]
-            try:
-                logged.start_batch(batch_no)
-                log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(batches), len(batch.nums),
-                         extra=KEY_EVENT_EXTRA)
-                t_batch = time.monotonic()
-                batch_res = _run_batch(logged, model, builder, batch)
-                for r in batch_res.values():
-                    # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
-                    if r.prompt.strip():
-                        r.prompt = attach_style(r.prompt, style_text)
-                # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
-                review_nums = []
-                for n in batch.nums:
-                    r = batch_res.get(n)
-                    if r is None:
-                        continue
-                    if r.needs_review:
-                        review_nums.append(n)
-                    elif r.prompt.strip():
-                        digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
-                        log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
-                if review_nums:
-                    log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
-                                batch_no, ", ".join(str(n) for n in review_nums))
-                with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
-                log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
-                         batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
-                         extra=KEY_EVENT_EXTRA)
-                with out_lock:
-                    out.update(batch_res)
-                    if on_batch is not None:
-                        on_batch([batch_res[n] for n in batch.nums])
-            except BaseException as exc:
-                # ошибка не глотается: запоминаем первую, новые батчи не берём, запущенные доходят до конца
+        def worker() -> None:
+            # журнал свой у каждого потока: номер батча и попытка не делятся между потоками
+            logged = _LoggedTransport(transport)
+            while True:
                 with queue_lock:
-                    if not first_error:
-                        first_error.append(exc)
-                    stop.set()
-                return
+                    if stop.is_set() or job.next_idx >= len(job.batches):
+                        return
+                    idx = job.next_idx
+                    job.next_idx += 1
+                try:
+                    job.process(logged, idx)
+                except BaseException as exc:
+                    # ошибка не глотается: запоминаем первую, новые батчи не берём, запущенные доходят до конца
+                    with queue_lock:
+                        if not first_error:
+                            first_error.append(exc)
+                        stop.set()
+                    return
 
-    if n_workers == 1:
-        worker()   # один ключ: тот же поток, та же последовательность, что раньше
+        if n_workers == 1:
+            worker()   # один ключ: тот же поток, та же последовательность, что раньше
+        else:
+            threads = [threading.Thread(target=worker, name=f"gemini-batch-{i + 1}")
+                       for i in range(n_workers)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+        if first_error:
+            raise first_error[0]
+        out = job.out
     else:
-        threads = [threading.Thread(target=worker, name=f"gemini-batch-{i + 1}")
+        # общий пул: батчи этой волны выполняют потоки пула (свои и чужие), число потоков задаёт пул
+        job = _WaveJob(wave if wave is not None else kind, builder, batches, transport, model, style_text, on_batch)
+        n_workers = pool.arrive_and_wait(job.wave, job)
+        log.info("Батчи выполняются в %d потоках (общий пул волн).", n_workers)
+        threads = [threading.Thread(target=pool.run_worker, args=(job.wave,), name=f"gemini-{job.wave}-{i + 1}")
                    for i in range(n_workers)]
         for th in threads:
             th.start()
         for th in threads:
             th.join()
-    if first_error:
-        raise first_error[0]
+        # батчи этой волны могут выполнять потоки другой волны: ждём их конца, прежде чем отдать результат
+        pool.wait_job(job)
+        if job.first_error:
+            raise job.first_error[0]
+        failure = pool.failure()
+        if failure is not None:
+            raise failure
+        out = job.out
 
     results = [out[n] for n in builder.wanted]
     flagged = sum(1 for r in results if r.needs_review)

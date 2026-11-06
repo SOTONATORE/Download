@@ -353,11 +353,12 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
-                       managed=None, state=None, lock=None) -> dict:
+                       managed=None, state=None, lock=None, pool=None, wave=None) -> dict:
     """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state.
 
     managed: общий ManagedTransport прогона (цепочка моделей одна на оба вида); None: создаётся здесь.
     state, lock: общий словарь состояния и замок; без них поведение прежнее (файл читается здесь).
+    pool, wave: общий пул батчей обеих волн и имя этой волны; без пула батчи идут своей очередью, как раньше.
     """
     wanted = sorted(set(wanted_nums))
     if not wanted:
@@ -427,5 +428,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     # для gemini аргумент не передаётся, чтобы вызов остался прежним (совместимость с gemini_prompts без provider)
     provider = getattr(inner_transport, "provider", "gemini")
     extra = {} if provider == "gemini" else {"provider": provider}
-    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch, **extra)
+    # пул передаётся только при общем пуле: вызов для одной волны остаётся прежним
+    pool_kw = {} if pool is None else {"pool": pool, "wave": wave}
+    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch, **extra, **pool_kw)
     return state
