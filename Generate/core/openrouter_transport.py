@@ -35,7 +35,8 @@ DEFAULT_RPM = 20
 DEFAULT_RPD = 1000
 # OpenRouter не публикует TPM для бесплатных моделей; значение ниже — заглушка, его нужно проверить.
 DEFAULT_TPM = 1_000_000
-DEFAULT_MAX_OUTPUT_TOKENS = 4000
+# лимит ответа по умолчанию; рассуждения моделей занимают основную часть лимита
+DEFAULT_MAX_OUTPUT_TOKENS = 32000
 DEFAULT_REASONING_EFFORT = "low"
 # генерация с рассуждениями может занимать до нескольких минут
 OPENROUTER_TIMEOUT_SEC = 600.0
@@ -228,11 +229,13 @@ class OpenRouterTransport:
             if content is None:
                 # пустой или неожиданный ответ: ключ не виноват, но ответа нет
                 # диагностика: что вернул OpenRouter, без текста ответа и без заголовков
+                _finish_for_retry = None
                 try:
                     _data = resp.json()
                     _choice = _data.get("choices", [{}])[0] if isinstance(_data, dict) else {}
                     _msg = _choice.get("message") or {}
                     _finish = _choice.get("finish_reason") or "нет"
+                    _finish_for_retry = _finish
                     _usage = _data.get("usage") if isinstance(_data, dict) else None
                     _usage_text = json.dumps(_usage, ensure_ascii=False) if _usage is not None else "нет"
                     if "reasoning" in _msg:
@@ -250,6 +253,11 @@ class OpenRouterTransport:
                 except Exception:
                     log.warning("Пустой ответ OpenRouter, модель %s, диагностика недоступна", model)
                 self._pool.release(lease, gpool.Outcome.SERVER_ERROR, model)
+                if _finish_for_retry == "length":
+                    # лимит вывода исчерпан рассуждениями: тот же запрос даст тот же пустой ответ,
+                    # поэтому статус вне переходных (500/503/504), и оркестратор не повторяет запрос
+                    raise GeminiRuntimeError("OpenRouter исчерпал лимит вывода без текста.",
+                                             status=422, code="EMPTY_RESPONSE_LENGTH")
                 # 500 переводит в переходные ошибки, и оркестратор повторит запрос
                 raise GeminiRuntimeError("OpenRouter вернул ответ без текста.",
                                          status=500, code="EMPTY_RESPONSE")

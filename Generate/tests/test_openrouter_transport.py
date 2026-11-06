@@ -94,7 +94,7 @@ def test_200_returns_content_and_releases_success():
     assert call["json"]["model"] == MODEL
     assert call["json"]["messages"] == [{"role": "system", "content": "sys"},
                                         {"role": "user", "content": "usr"}]
-    assert call["json"]["max_tokens"] == 4000
+    assert call["json"]["max_tokens"] == 32000
     assert call["json"]["response_format"] == {
         "type": "json_schema", "json_schema": {"name": "segments", "schema": SCHEMA}}
 
