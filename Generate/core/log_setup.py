@@ -68,6 +68,8 @@ ALLOWED_NAMES = frozenset({
     "id", "name", "component", "identity", "address", "hash", "event", "connIndex", "threshold",
     "device", "protocol", "location",
     "max_tokens", "num_tokens", "token_count", "tokenizer",
+    # поля usage ответа OpenRouter: числа токенов, без значений секретов; добавлены по решению владельца
+    "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens",
 })
 # Сравнение без учёта регистра: имя connIndex в списке написано с заглавной буквой, сверяем в нижнем регистре.
 _ALLOWED_LOWER = frozenset(n.lower() for n in ALLOWED_NAMES)
