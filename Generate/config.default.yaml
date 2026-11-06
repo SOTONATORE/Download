@@ -72,8 +72,10 @@ openrouter_limits:
   rpm: 20
   tpm: 1000000
   rpd: 1000
-# 16000: лимит ответа для OpenRouter; рассуждения моделей могут занимать много токенов, поэтому лимит не ставим слишком низким
-openrouter_max_output_tokens: 16000
+# 32000: лимит ответа для OpenRouter; рассуждения моделей занимают основную часть лимита, поэтому лимит держим с запасом
+openrouter_max_output_tokens: 32000
+# уровень рассуждений для OpenRouter: low, medium, high или none (параметр reasoning в запросе; none не отправляет параметр)
+openrouter_reasoning_effort: "low"
 
 # --- Профиль модели и тайминги ---
 # Файл из Generate/model_profiles/ (без расширения).

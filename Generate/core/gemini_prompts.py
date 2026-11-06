@@ -735,10 +735,23 @@ class _LoggedTransport:
 MAX_PARALLEL_BATCHES = 10
 
 
+def _provider_key_count(provider: str) -> int:
+    """Число ключей провайдера в окружении. openrouter: OPENROUTER1…OPENROUTER10; иначе GEMINI1…GEMINI10, как раньше.
+
+    Ключи нигде не выводятся. Если ключей нет, load_* бросает исключение: вызывающий код считает это нулём."""
+    if provider == "openrouter":
+        try:
+            from . import openrouter_transport as ort
+        except ImportError:  # плоский импорт, как в остальных модулях core
+            import openrouter_transport as ort  # type: ignore
+        return len(ort.load_openrouter_keys(os.environ))
+    return len(_pool_module().load_gemini_keys(os.environ))
+
+
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
                      on_batch: Optional[Callable[[list], None]] = None,
-                     max_workers: Optional[int] = None) -> list:
+                     max_workers: Optional[int] = None, provider: str = "gemini") -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -750,11 +763,14 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     включая needs_review. Если позже случится GeminiRuntimeError, уже готовые батчи колбэку
     отданы. Исключения колбэка не перехватываются. Без колбэка поведение прежнее.
 
-    max_workers: число потоков. По умолчанию берётся число ключей Gemini из окружения (тот же
-    источник, что у RealTransport), не больше MAX_PARALLEL_BATCHES и числа батчей. При одном потоке
+    max_workers: число потоков. По умолчанию берётся число ключей провайдера provider из окружения
+    (для gemini тот же источник, что у RealTransport), не больше MAX_PARALLEL_BATCHES и числа батчей. При одном потоке
     работа идёт в вызывающем потоке, как раньше. Батчи берутся из очереди по порядку; вызовы
     on_batch идут под одним замком в порядке завершения батчей. Первая ошибка останавливает взятие
     новых батчей; уже запущенные батчи доходят до конца, после чего ошибка пробрасывается.
+
+    provider: провайдер текстовой модели (gemini по умолчанию или openrouter). От него зависит,
+    чьи ключи считаются для числа потоков, если max_workers не задан.
     """
     builder = _Builder(segments, wanted_nums, cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
@@ -764,11 +780,15 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     log.info("Генерация промптов начата: модель %s, клипов к описанию: %d, батчей: %d.",
              model, len(builder.wanted), len(batches), extra=KEY_EVENT_EXTRA)
 
-    # число потоков: без явного значения — число ключей из окружения; если ключей нет, идём в один поток
+    # число потоков: без явного значения — число ключей провайдера семейства из окружения;
+    # если ключей нет или их не удалось прочитать, идём в один поток
     if max_workers is None:
         try:
-            max_workers = len(_pool_module().load_gemini_keys(os.environ))
+            max_workers = _provider_key_count(provider)
         except Exception:
+            max_workers = 0
+        if max_workers < 1:
+            log.info("Ключей провайдера %s не найдено, батчи идут в один поток.", provider)
             max_workers = 1
     n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
     log.info("Батчи выполняются в %d потоках.", n_workers)

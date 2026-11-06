@@ -154,7 +154,10 @@ def _photo_step(needed: list, *, segments, photo_profile, photo_cfg, transport, 
             state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
             go.atomic_write_json(prompts_path, state)
 
-        gp.generate_prompts(segments, pending, photo_cfg, managed, managed.active_model, on_batch=on_batch)
+        # провайдер у транспорта (через _TransportWatch); для gemini аргумент не передаётся, вызов как раньше
+        provider = getattr(watch, "provider", "gemini")
+        extra = {} if provider == "gemini" else {"provider": provider}
+        gp.generate_prompts(segments, pending, photo_cfg, managed, managed.active_model, on_batch=on_batch, **extra)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
         if _is_hard(exc, watch):

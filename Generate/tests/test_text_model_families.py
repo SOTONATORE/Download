@@ -83,7 +83,7 @@ def test_default_file_has_new_fields_and_gemini_unchanged():
     assert cfg.text_model_families["gemini"] == {"provider": "gemini", "models": None}
     assert cfg.openrouter_base_url == "https://openrouter.ai/api/v1"
     assert cfg.openrouter_limits == {"rpm": 20, "tpm": 1000000, "rpd": 1000}
-    assert cfg.openrouter_max_output_tokens == 16000
+    assert cfg.openrouter_max_output_tokens == 32000
     assert cfg.gemini_models == ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash",
                                  "gemini-3.1-flash-lite"]
 

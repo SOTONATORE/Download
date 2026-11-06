@@ -61,6 +61,10 @@ def _rule(**meta: Any):
     return field(metadata=meta)
 
 
+# уровни рассуждений OpenRouter; none означает, что параметр reasoning в запросе не отправляется
+REASONING_EFFORTS = ("none", "low", "medium", "high")
+
+
 @dataclass(frozen=True)
 class Config:
     """Схема и значения конфигурации. Порядок полей совпадает с config.default.yaml."""
@@ -88,6 +92,8 @@ class Config:
     # лимиты на один ключ OpenRouter (rpm, tpm, rpd); общие для всех моделей семейств openrouter
     openrouter_limits: dict[str, int] = _rule(flat_limits=True)
     openrouter_max_output_tokens: int = _rule(ge=1)
+    # уровень рассуждений OpenRouter (параметр reasoning); none не отправляет параметр; kw_only: умолчание не ломает порядок
+    openrouter_reasoning_effort: str = field(default="low", kw_only=True, metadata={"choices": REASONING_EFFORTS})
 
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,

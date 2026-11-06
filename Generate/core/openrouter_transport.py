@@ -36,6 +36,9 @@ DEFAULT_RPD = 1000
 # OpenRouter не публикует TPM для бесплатных моделей; значение ниже — заглушка, его нужно проверить.
 DEFAULT_TPM = 1_000_000
 DEFAULT_MAX_OUTPUT_TOKENS = 4000
+DEFAULT_REASONING_EFFORT = "low"
+# генерация с рассуждениями может занимать до нескольких минут
+OPENROUTER_TIMEOUT_SEC = 600.0
 
 POOL_CHARS_PER_TOKEN = 3   # грубая оценка токенов входа для TPM
 PREVIEW_CHARS = 300        # сколько символов тела 429 попадает в лог
@@ -131,10 +134,12 @@ class OpenRouterTransport:
     Authorization; в URL, логи и исключения он не попадает. Исход запроса возвращается в пул.
     """
 
+    provider = "openrouter"  # читает gemini_prompts при расчёте числа потоков
+
     def __init__(self, *, pool: Any = None, keys: Any = None, environ: Any = None,
-                 model_limits: Any = None, base_url: str = DEFAULT_BASE_URL, timeout: float = 120.0,
+                 model_limits: Any = None, base_url: str = DEFAULT_BASE_URL, timeout: float = OPENROUTER_TIMEOUT_SEC,
                  client: Any = None, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
-                 use_json_schema: bool = True):
+                 use_json_schema: bool = True, reasoning_effort: str = DEFAULT_REASONING_EFFORT):
         # Если пул не передан, он создаётся из ключей (переданных или прочитанных из окружения).
         try:
             import httpx
@@ -152,6 +157,7 @@ class OpenRouterTransport:
         self._tpm = getattr(pool, "_tpm", DEFAULT_TPM)   # оценка токенов не должна превышать TPM пула
         self._max_output_tokens = max_output_tokens
         self._use_json_schema = use_json_schema
+        self._reasoning_effort = reasoning_effort
         _silence_http_logs()
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=timeout)
@@ -185,6 +191,9 @@ class OpenRouterTransport:
             "max_tokens": self._max_output_tokens,
             "response_format": response_format,
         }
+        # рассуждения: параметр reasoning отправляется, если уровень не none; при none ключа в запросе нет
+        if self._reasoning_effort != "none":
+            body["reasoning"] = {"effort": self._reasoning_effort}
         tokens = min((len(system) + len(user)) // POOL_CHARS_PER_TOKEN, self._tpm)
         try:
             lease = self._pool.acquire(model, tokens=tokens)
