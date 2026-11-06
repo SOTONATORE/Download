@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Mapping, Optional
 
 try:
@@ -195,8 +196,11 @@ class OpenRouterTransport:
 
         # заголовок с ключом живёт только внутри этого вызова и никуда не передаётся
         headers = {"Authorization": f"Bearer {lease.api_key}", "Content-Type": "application/json"}
+        log.info("OpenRouter: запрос к модели %s, max_tokens %s", model, self._max_output_tokens)
+        start = time.monotonic()
         try:
             resp = self._client.post(url, headers=headers, json=body)
+            log.info("OpenRouter: ответ за %.1f с, статус %s", time.monotonic() - start, resp.status_code)
         except (self._httpx.TransportError, self._httpx.TimeoutException):
             # ключ не виноват: состояние не меняется; в сообщение не попадает ничего из запроса
             self._pool.release(lease, gpool.Outcome.NETWORK_ERROR, model)
