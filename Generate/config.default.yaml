@@ -22,8 +22,8 @@ gemini_models:
   - "gemini-3.6-flash"
   - "gemini-3.8-flash"
   - "gemini-3.1-flash-lite"
-# Сегментов в одном пакете запроса.
-gemini_batch_size: 50
+# Сегментов в одном пакете запроса: 25, потому что на пакетах по 50 рассуждения модели занимали весь лимит ответа.
+gemini_batch_size: 25
 # Лимиты по умолчанию: для моделей, которых нет в gemini_model_limits; значения даны пользователем, сверить с документацией Google на этапе 4.
 gemini_rpm_limit: 15       # запросов в минуту
 gemini_tpm_limit: 250000   # токенов в минуту
@@ -72,8 +72,8 @@ openrouter_limits:
   rpm: 20
   tpm: 1000000
   rpd: 1000
-# 32000: лимит ответа для OpenRouter; рассуждения моделей занимают основную часть лимита, поэтому лимит держим с запасом
-openrouter_max_output_tokens: 32000
+# 96000: лимит ответа для OpenRouter; при 32000 рассуждения моделей не оставляли места для ответа, поэтому лимит держим с запасом
+openrouter_max_output_tokens: 96000
 # уровень рассуждений для OpenRouter: low, medium, high или none (параметр reasoning в запросе; none не отправляет параметр)
 openrouter_reasoning_effort: "low"
 

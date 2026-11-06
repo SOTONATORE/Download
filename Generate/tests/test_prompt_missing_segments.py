@@ -96,4 +96,4 @@ def test_batches_of_fifty(tmp_path):
 
 def test_config_default_batch_size_is_fifty():
     text = (pathlib.Path(__file__).resolve().parents[1] / "config.default.yaml").read_text(encoding="utf-8")
-    assert "gemini_batch_size: 50\n" in text
+    assert "gemini_batch_size: 25\n" in text
