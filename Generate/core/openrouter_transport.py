@@ -12,6 +12,7 @@ daily_quota, retry_after, key_exhausted_only), поэтому оркестрат
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -213,6 +214,28 @@ class OpenRouterTransport:
             content = _extract_content(resp)
             if content is None:
                 # пустой или неожиданный ответ: ключ не виноват, но ответа нет
+                # диагностика: что вернул OpenRouter, без текста ответа и без заголовков
+                try:
+                    _data = resp.json()
+                    _choice = _data.get("choices", [{}])[0] if isinstance(_data, dict) else {}
+                    _msg = _choice.get("message") or {}
+                    _finish = _choice.get("finish_reason") or "нет"
+                    _usage = _data.get("usage") if isinstance(_data, dict) else None
+                    _usage_text = json.dumps(_usage, ensure_ascii=False) if _usage is not None else "нет"
+                    if "reasoning" in _msg:
+                        _reasoning = _msg.get("reasoning")
+                    elif "reasoning_content" in _msg:
+                        _reasoning = _msg.get("reasoning_content")
+                    else:
+                        _reasoning = None
+                    _reasoning_len = len(_reasoning) if isinstance(_reasoning, str) else "нет"
+                    _content_val = _msg.get("content")
+                    _content_len = len(_content_val) if isinstance(_content_val, str) else "null"
+                    log.warning("Пустой ответ OpenRouter, модель %s, finish_reason %s, usage %s, "
+                                "длина reasoning %s, длина content %s",
+                                model, _finish, _usage_text, _reasoning_len, _content_len)
+                except Exception:
+                    log.warning("Пустой ответ OpenRouter, модель %s, диагностика недоступна", model)
                 self._pool.release(lease, gpool.Outcome.SERVER_ERROR, model)
                 # 500 переводит в переходные ошибки, и оркестратор повторит запрос
                 raise GeminiRuntimeError("OpenRouter вернул ответ без текста.",
