@@ -92,15 +92,18 @@ class _TransportWatch:
         return getattr(self._inner, name)
 
 
-def _is_hard(exc, watch: "_TransportWatch") -> bool:
+def _is_hard(exc, watch: "_TransportWatch", mark: int = 0) -> bool:
     """Жёсткая ошибка: любой сбой, кроме временного, и ошибка шага после успешных вызовов.
 
-    Временный сбой (is_transient) после исчерпания повторов или без вызовов транспорта остаётся
+    mark: число вызовов транспорта на начало волны; учитываются только вызовы этой волны.
+    Временный сбой (is_transient) после исчерпания повторов или без вызовов волны остаётся
     возвратом к сохранённым промптам, как раньше.
+    Ошибка шага без статуса (status None) для is_transient выглядит как сетевой сбой, поэтому
+    решает счётчик вызовов: успешный вызов в этой волне и последний вызов не временный.
     """
     if not go.is_transient(exc):
         return True
-    return watch.calls > 0 and not watch.last_transient
+    return watch.calls > mark and not watch.last_transient
 
 
 def _abort_text(wave: str, exc) -> str:
@@ -109,21 +112,22 @@ def _abort_text(wave: str, exc) -> str:
     return f"{wave}, сегмент {m.group(1) if m else 'н/д'}"
 
 
-def _video_step(needed: list, *, segments, cfg, transport, prompts_path, profile, timing,
+def _video_step(needed: list, *, segments, cfg, watch, prompts_path, profile, timing,
                 gemini_options: dict, errors: list, aborts: list,
                 managed=None, state=None, lock=None) -> dict:
     """Промпты для видео: generate_and_store дописывает prompts.json после каждого батча.
 
-    managed, state, lock: общие цепочка, состояние и замок прогона (передаются из build_prompts).
+    watch: общий наблюдатель прогона (через него идут все вызовы, включая цепочку managed).
+    managed, state, lock: общие цепочка, состояние и замок прогона; None — generate_and_store создаёт их сам.
     """
-    watch = _TransportWatch(transport)
+    mark = watch.calls  # вызовы этой волны начинаются отсюда
     try:
         return go.generate_and_store(
             segments, needed, cfg, watch, prompts_path,
             profile=profile, timing=timing, managed=managed, state=state, lock=lock, **gemini_options)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
-        if _is_hard(exc, watch):
+        if _is_hard(exc, watch, mark):
             aborts.append(_abort_text("видео", exc))
             log.error("Генерация промптов (видео) остановлена: %s.", exc)
             return state if state is not None else read_state(prompts_path)
@@ -131,28 +135,22 @@ def _video_step(needed: list, *, segments, cfg, transport, prompts_path, profile
         return state if state is not None else read_state(prompts_path)
 
 
-def _photo_step(needed: list, *, segments, photo_profile, photo_cfg, transport, prompts_path,
+def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
                 gemini_options: dict, errors: list, aborts: list,
-                managed=None, state=None, lock=None) -> None:
-    """Промпты для фото: профиль photo_profile, без тайминга; num_frames всегда 1 (STEP 7, блок B2).
+                managed, state: dict, lock) -> None:
+    """Промпты для фото: без тайминга; num_frames всегда 1 (STEP 7, блок B2).
 
-    managed, state, lock: общие цепочка, состояние и замок прогона (передаются из build_prompts).
-    Без них состояние читается из файла и цепочка создаётся здесь, как раньше.
+    watch: общий наблюдатель прогона; managed: общая цепочка, построенная на нём;
+    state, lock: общие состояние и замок прогона. Профиль фото в состояние не пишется:
+    поле profile файла задаёт build_prompts до волн и волна его не перезаписывает.
     """
-    watch = _TransportWatch(transport)
+    mark = watch.calls  # вызовы этой волны начинаются отсюда
     try:
-        if state is None:
-            state = go.load_state(prompts_path, segments, photo_profile)
-        guard = lock if lock is not None else threading.Lock()
+        guard = lock
         prompts = state["prompts"]
         pending = go.missing_segments(prompts, needed)
         if not pending:
             return
-        if managed is None:
-            managed = go.ManagedTransport(
-                watch, gemini_options.get("models", go.DEFAULT_MODELS),
-                rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
-                rpd_limit=gemini_options.get("rpd_limit", 500))
 
         def on_batch(results: list) -> None:
             # под замком: видео и фото пишут один общий state, слияние и запись не должны перемешиваться
@@ -175,7 +173,7 @@ def _photo_step(needed: list, *, segments, photo_profile, photo_cfg, transport, 
         gp.generate_prompts(segments, pending, photo_cfg, managed, managed.active_model, on_batch=on_batch, **extra)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
-        if _is_hard(exc, watch):
+        if _is_hard(exc, watch, mark):
             aborts.append(_abort_text("фото", exc))
             log.error("Генерация промптов для фото остановлена: %s.", exc)
             return
@@ -194,40 +192,45 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                   prompts_path) -> PromptRun:
     """Единый конвейер промптов для списка номеров needed.
 
-    photo_profile None: все номера идут в видео (photo_nums не читается).
+    photo_profile None: все номера идут в видео (photo_nums не читается); состояние и цепочку
+    создаёт generate_and_store, фото-путь не вызывается.
     Иначе номера из photo_nums идут в фото, остальные в видео; сначала видео, потом фото,
     затем состояние читается из файла (оно содержит оба вида).
-    Порядок и аргументы вызовов совпадают с прежним Orchestrator._generate.
+    Поле profile в файле одно: профиль видео, если видео есть в прогоне, иначе профиль фото.
+    Значение зависит только от состава прогона, а не от порядка волн.
     """
     errors: list = []
     aborts: list = []  # жёсткие ошибки волн; решение об остановке принимает оркестратор после обеих волн
-    # общие объекты прогона: один словарь состояния, один замок и одна цепочка моделей на оба вида
-    # файл читается только тогда, когда волна действительно запускается (как раньше)
-    state = None
+    # общие объекты прогона: один наблюдатель транспорта, один замок и одна цепочка моделей на оба вида
+    watch = _TransportWatch(transport)  # все вызовы Gemini идут через него, и видео, и фото
     lock = threading.Lock()
-    managed = go.ManagedTransport(
-        transport, gemini_options.get("models", go.DEFAULT_MODELS),
-        rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
-        rpd_limit=gemini_options.get("rpd_limit", 500))
+    state = None
     if photo_profile is None:
-        state = _video_step(needed, segments=segments, cfg=cfg, transport=transport,
+        state = _video_step(list(needed), segments=segments, cfg=cfg, watch=watch,
                             prompts_path=prompts_path, profile=profile, timing=timing,
                             gemini_options=gemini_options, errors=errors, aborts=aborts,
-                            managed=managed, state=_load_shared(state, prompts_path, segments, profile), lock=lock)
+                            managed=None, state=None, lock=lock)
     else:
         video = [n for n in needed if n not in photo_nums]
         photo = [n for n in needed if n in photo_nums]
+        # цепочка строится на наблюдателе: её вызовы видны _TransportWatch и для видео, и для фото
+        managed = go.ManagedTransport(
+            watch, gemini_options.get("models", go.DEFAULT_MODELS),
+            rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+            rpd_limit=gemini_options.get("rpd_limit", 500))
+        # профиль файла: видео, если в прогоне есть видео; иначе фото (решается до волн, не по порядку)
+        file_profile = profile if video else photo_profile
         if video:
-            state = _video_step(video, segments=segments, cfg=cfg, transport=transport,
+            state = _load_shared(state, prompts_path, segments, file_profile)
+            state = _video_step(video, segments=segments, cfg=cfg, watch=watch,
                                 prompts_path=prompts_path, profile=profile, timing=timing,
                                 gemini_options=gemini_options, errors=errors, aborts=aborts,
-                                managed=managed, state=_load_shared(state, prompts_path, segments, profile), lock=lock)
+                                managed=managed, state=state, lock=lock)
         if photo:
-            state = _load_shared(state, prompts_path, segments, photo_profile)
-            _photo_step(photo, segments=segments, photo_profile=photo_profile, photo_cfg=photo_cfg,
-                        transport=transport, prompts_path=prompts_path,
-                        gemini_options=gemini_options, errors=errors, aborts=aborts,
-                        managed=managed, state=state, lock=lock)
+            state = _load_shared(state, prompts_path, segments, file_profile)
+            _photo_step(photo, segments=segments, photo_cfg=photo_cfg, watch=watch,
+                        prompts_path=prompts_path, gemini_options=gemini_options,
+                        errors=errors, aborts=aborts, managed=managed, state=state, lock=lock)
         state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]
