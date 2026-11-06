@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -158,17 +159,18 @@ def _abort_text(wave: str, exc) -> str:
 
 def _video_step(needed: list, *, segments, cfg, watch, prompts_path, profile, timing,
                 gemini_options: dict, errors: list, aborts: list,
-                managed=None, state=None, lock=None, pool=None) -> dict:
+                managed=None, state=None, lock=None, pool=None, progress=None) -> dict:
     """Промпты для видео: generate_and_store дописывает prompts.json после каждого батча.
 
     watch: общий наблюдатель прогона (через него идут все вызовы, включая цепочку managed).
     managed, state, lock: общие цепочка, состояние и замок прогона; None — generate_and_store создаёт их сам.
     pool: общий пул батчей обеих волн; None — прежний путь одной волны.
+    progress: строка прогресса обеих волн (только при пуле); None — строк прогресса нет.
     """
     # при пуле ошибка классифицируется по вызовам этой волны; без пула — по общим счётчикам, как раньше
     seen = watch.view(VIDEO_WAVE) if pool is not None else watch
     mark = 0 if pool is not None else watch.calls  # вызовы этой волны начинаются отсюда
-    pool_kw = {} if pool is None else {"pool": pool, "wave": VIDEO_WAVE}
+    pool_kw = {} if pool is None else {"pool": pool, "wave": VIDEO_WAVE, "progress": progress}
     try:
         return go.generate_and_store(
             segments, needed, cfg, watch, prompts_path,
@@ -190,13 +192,14 @@ def _video_step(needed: list, *, segments, cfg, watch, prompts_path, profile, ti
 
 def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
                 gemini_options: dict, errors: list, aborts: list,
-                managed, state: dict, lock, pool=None) -> None:
+                managed, state: dict, lock, pool=None, progress=None) -> None:
     """Промпты для фото: без тайминга; num_frames всегда 1 (STEP 7, блок B2).
 
     watch: общий наблюдатель прогона; managed: общая цепочка, построенная на нём;
     state, lock: общие состояние и замок прогона. Профиль фото в состояние не пишется:
     поле profile файла задаёт build_prompts до волн и волна его не перезаписывает.
     pool: общий пул батчей обеих волн; None — прежний путь одной волны.
+    progress: строка прогресса обеих волн (только при пуле); None — строк прогресса нет.
     """
     seen = watch.view(PHOTO_WAVE) if pool is not None else watch
     mark = 0 if pool is not None else watch.calls  # вызовы этой волны начинаются отсюда
@@ -221,6 +224,9 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
                 state["model"] = managed.active_model
                 state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
                 go.atomic_write_json(prompts_path, state)
+                if progress is not None:
+                    # прогресс обеих волн: из того же словаря, под тем же замком, уже после записи файла
+                    log.info(progress(prompts), extra=gp.KEY_EVENT_EXTRA)
 
         # провайдер у транспорта (через _TransportWatch); для gemini аргумент не передаётся, вызов как раньше
         provider = getattr(watch, "provider", "gemini")
@@ -258,9 +264,16 @@ def _pool_threads(provider: str) -> int:
     return min(max(keys, 1), gp.MAX_PARALLEL_BATCHES)
 
 
+def _progress_for(video: list, photo: list, started: float):
+    """Функция строки прогресса для колбэков сохранения пула: читает словарь prompts и вызывается под замком состояния."""
+    def progress(prompts: dict) -> str:
+        return go.progress_line(prompts, video, photo, started)
+    return progress
+
+
 def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, watch, managed,
                         prompts_path, profile, timing, gemini_options: dict, errors: list, aborts: list,
-                        state: dict, lock, provider: str) -> dict:
+                        state: dict, lock, provider: str, progress=None) -> dict:
     """Видео и фото одновременно через общий пул батчей. Потоки делятся по ключам: видео floor(K/2), фото ceil(K/2).
 
     Фото идёт в отдельном потоке, видео в вызывающем. Обе волны получают общие state и lock. Оба читают
@@ -276,7 +289,7 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
         try:
             _photo_step(photo, segments=segments, photo_cfg=photo_cfg, watch=watch, prompts_path=prompts_path,
                         gemini_options=gemini_options, errors=errors, aborts=aborts,
-                        managed=managed, state=state, lock=lock, pool=pool)
+                        managed=managed, state=state, lock=lock, pool=pool, progress=progress)
         except BaseException as exc:  # пробрасывается в основной поток после обеих волн
             box["photo"] = exc
 
@@ -286,7 +299,7 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
         state = _video_step(video, segments=segments, cfg=cfg, watch=watch,
                             prompts_path=prompts_path, profile=profile, timing=timing,
                             gemini_options=gemini_options, errors=errors, aborts=aborts,
-                            managed=managed, state=state, lock=lock, pool=pool)
+                            managed=managed, state=state, lock=lock, pool=pool, progress=progress)
     except BaseException as exc:
         box["video"] = exc
         pool.fail(exc)   # видео упало вне батчей: фото новые батчи не берёт, как раньше не запускался бы вовсе
@@ -311,6 +324,7 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
     Поле profile в файле одно: профиль видео, если видео есть в прогоне, иначе профиль фото.
     Значение зависит только от состава прогона, а не от порядка волн.
     """
+    started = time.monotonic()  # начало прогона: от него считается «за T с» в строке прогресса
     errors: list = []
     aborts: list = []  # жёсткие ошибки волн; решение об остановке принимает оркестратор после обеих волн
     # общие объекты прогона: один наблюдатель транспорта, один замок и одна цепочка моделей на оба вида
@@ -339,7 +353,8 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                                         watch=watch, managed=managed, prompts_path=prompts_path,
                                         profile=profile, timing=timing, gemini_options=gemini_options,
                                         errors=errors, aborts=aborts, state=state, lock=lock,
-                                        provider=getattr(watch, "provider", "gemini"))
+                                        provider=getattr(watch, "provider", "gemini"),
+                                        progress=_progress_for(video, photo, started))
         else:
             if video:
                 state = _load_shared(state, prompts_path, segments, file_profile)

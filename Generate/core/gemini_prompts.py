@@ -671,8 +671,11 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
     return res
 
 
-def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest) -> dict:
-    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult."""
+def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
+               tag: str = "") -> dict:
+    """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
+
+    tag: префикс строк журнала батча (имя волны в пуле, например «[видео] »); без пула пустой."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
     results, problems = parse_and_validate(raw, expected, builder.cfg)
@@ -680,11 +683,11 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     bad = [n for n in expected if n not in final]
     extras = [p for p in problems if p.num is not None and p.num not in set(expected)]
     if extras:
-        log.warning("Gemini вернул лишние номера: %d шт., они проигнорированы.", len(extras))
+        log.warning("%sGemini вернул лишние номера: %d шт., они проигнорированы.", tag, len(extras))
 
     if bad:
-        log.warning("Батч %s..%s: нарушения в %d из %d записей, повторный запрос.",
-                    expected[0], expected[-1], len(bad), len(expected))
+        log.warning("%sБатч %s..%s: нарушения в %d из %d записей, повторный запрос.",
+                    tag, expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
             note = _retry_note(rb.nums, problems)
@@ -722,10 +725,11 @@ class _LoggedTransport:
     и класс ошибки. Ответ и исключение пробрасываются без изменений; повторов обёртка не делает.
     В журнал не попадают тело запроса, текст промпта и ключ API."""
 
-    def __init__(self, inner: "GeminiTransport"):
+    def __init__(self, inner: "GeminiTransport", tag: str = ""):
         self._inner = inner
         self._batch_no = 0
         self._attempt = 0
+        self._tag = tag  # префикс строк журнала: имя волны в пуле; без пула пустой
 
     def start_batch(self, batch_no: int) -> None:
         # номер попытки считается заново для каждого батча
@@ -739,8 +743,8 @@ class _LoggedTransport:
         except Exception as exc:
             # безопасное сообщение GeminiRuntimeError не содержит тела ответа; прочим классам — только имя класса
             detail = f" ({exc})" if isinstance(exc, GeminiRuntimeError) else ""
-            log.warning("Батч %d: попытка %d не удалась, класс ошибки %s%s.",
-                        self._batch_no, self._attempt, type(exc).__name__, detail)
+            log.warning("%sБатч %d: попытка %d не удалась, класс ошибки %s%s.",
+                        self._tag, self._batch_no, self._attempt, type(exc).__name__, detail)
             raise
 
 
@@ -769,8 +773,9 @@ class _WaveJob:
     """
 
     def __init__(self, wave: str, builder, batches: list, transport, model: str, style_text: str,
-                 on_batch: Optional[Callable[[list], None]]) -> None:
+                 on_batch: Optional[Callable[[list], None]], tag: str = "") -> None:
         self.wave = wave                 # имя волны: по нему пул учитывает вызовы модели
+        self.tag = tag                   # префикс строк журнала батчей: «[имя волны] » в пуле, «» без пула
         self.builder = builder
         self.batches = batches
         self.transport = transport
@@ -789,11 +794,11 @@ class _WaveJob:
         batch_no = idx + 1
         batch = self.batches[idx]
         logged.start_batch(batch_no)
-        log.info("Батч %d из %d: начало, клипов в батче: %d.", batch_no, len(self.batches), len(batch.nums),
-                 extra=KEY_EVENT_EXTRA)
+        log.info("%sБатч %d из %d: начало, клипов в батче: %d.", self.tag, batch_no, len(self.batches),
+                 len(batch.nums), extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
         try:
-            batch_res = _run_batch(logged, self.model, self.builder, batch)
+            batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
         except GeminiRuntimeError as exc:
             partial = getattr(exc, "partial", None)
             if partial:
@@ -801,8 +806,8 @@ class _WaveJob:
                 for r in partial.values():
                     if r.prompt.strip():
                         r.prompt = attach_style(r.prompt, self.style_text)
-                log.warning("Батч %d: до остановки сохранено готовых клипов: %d из %d.",
-                            batch_no, len(partial), len(batch.nums))
+                log.warning("%sБатч %d: до остановки сохранено готовых клипов: %d из %d.",
+                            self.tag, batch_no, len(partial), len(batch.nums))
                 with self.out_lock:
                     self.out.update(partial)
                     if self.on_batch is not None:
@@ -824,11 +829,11 @@ class _WaveJob:
                 digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
                 log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
         if review_nums:
-            log.warning("Батч %d: промпты требуют проверки, клипы: %s.",
-                        batch_no, ", ".join(str(n) for n in review_nums))
+            log.warning("%sБатч %d: промпты требуют проверки, клипы: %s.",
+                        self.tag, batch_no, ", ".join(str(n) for n in review_nums))
         with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
-        log.info("Батч %d: получено промптов с текстом: %d из %d, за %.1f с.",
-                 batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
+        log.info("%sБатч %d: получено промптов с текстом: %d из %d, за %.1f с.",
+                 self.tag, batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
                  extra=KEY_EVENT_EXTRA)
         with self.out_lock:
             self.out.update(batch_res)
@@ -937,7 +942,7 @@ class SharedBatchPool:
             if got is None:
                 return
             job, idx = got
-            logged = _LoggedTransport(job.transport)   # журнал свой у каждого батча: номер попытки сбрасывается
+            logged = _LoggedTransport(job.transport, tag=job.tag)   # журнал свой у каждого батча: номер попытки сбрасывается
             exc: Optional[BaseException] = None
             if self._bind is not None:
                 self._bind(job.wave)
@@ -1043,9 +1048,12 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         out = job.out
     else:
         # общий пул: батчи этой волны выполняют потоки пула (свои и чужие), число потоков задаёт пул
-        job = _WaveJob(wave if wave is not None else kind, builder, batches, transport, model, style_text, on_batch)
+        wave_name = wave if wave is not None else kind
+        # имя волны в строках батчей пула: «[видео] » или «[фото] »
+        job = _WaveJob(wave_name, builder, batches, transport, model, style_text, on_batch,
+                       tag=f"[{wave_name}] ")
         n_workers = pool.arrive_and_wait(job.wave, job)
-        log.info("Батчи выполняются в %d потоках (общий пул волн).", n_workers)
+        log.info("%sБатчи выполняются в %d потоках (общий пул волн).", job.tag, n_workers)
         threads = [threading.Thread(target=pool.run_worker, args=(job.wave,), name=f"gemini-{job.wave}-{i + 1}")
                    for i in range(n_workers)]
         for th in threads:

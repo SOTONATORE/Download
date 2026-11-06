@@ -40,11 +40,39 @@ TRANSIENT_SWITCH_AFTER = 15  # временных сбоев подряд на �
 
 
 def is_transient(err: gp.GeminiRuntimeError) -> bool:
-    """Временный сбой: HTTP 500/503/504 или сетевой сбой (RealTransport отдаёт его без статуса).
-    Суточная квота, 429 и остальные коды (400, 401, 403, 404, 502 и т.д.) сюда не входят."""
+    """Временный сбой: любой HTTP 5xx (500–599, в том числе 500/502/503/504) или сетевой сбой
+    (RealTransport отдаёт его без статуса). Суточная квота, 429 и коды 4xx сюда не входят.
+    TRANSIENT_STATUSES оставлен для читаемости: он входит в диапазон 5xx."""
     if err.daily_quota or err.status == 429:
         return False
-    return err.status is None or err.status in TRANSIENT_STATUSES
+    # сеть: статуса нет; 5xx: сбой сервера, ключ не виноват, запрос повторяется
+    return err.status is None or err.status in TRANSIENT_STATUSES or 500 <= err.status <= 599
+
+
+def _pct(part: int, whole: int) -> str:
+    """Доля в процентах с одним знаком после запятой, половина округляется вверх (целая арифметика)."""
+    if whole <= 0:
+        return "0.0"
+    tenths = (2 * part * 1000 + whole) // (2 * whole)  # десятые доли процента, округление вверх от половины
+    return f"{tenths // 10}.{tenths % 10}"
+
+
+def progress_line(prompts: dict, video_nums: list, photo_nums: list, started: float) -> str:
+    """Строка прогресса обеих волн пула: сколько клипов каждой волны уже имеют промпт со статусом «ready».
+
+    prompts: общий словарь промптов прогона; читать его можно только под замком состояния.
+    started: время начала прогона (time.monotonic()), от него считается «за T с».
+    """
+    def ready_count(nums: list) -> int:
+        return sum(1 for n in set(nums) if (prompts.get(str(n)) or {}).get("status") == "ready")
+
+    video_total, photo_total = len(set(video_nums)), len(set(photo_nums))
+    video_ready, photo_ready = ready_count(video_nums), ready_count(photo_nums)
+    all_ready, all_total = video_ready + photo_ready, video_total + photo_total
+    elapsed = time.monotonic() - started
+    return (f"=== Прогресс: видео готово {video_ready} из {video_total} ({_pct(video_ready, video_total)}%), "
+            f"фото готово {photo_ready} из {photo_total} ({_pct(photo_ready, photo_total)}%), "
+            f"всего {all_ready} из {all_total} ({_pct(all_ready, all_total)}%), за {elapsed:.1f} с ===")
 
 
 def _describe(status: Optional[int], code: str) -> str:
@@ -353,12 +381,14 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
-                       managed=None, state=None, lock=None, pool=None, wave=None) -> dict:
+                       managed=None, state=None, lock=None, pool=None, wave=None,
+                       progress: Optional[Callable[[dict], str]] = None) -> dict:
     """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state.
 
     managed: общий ManagedTransport прогона (цепочка моделей одна на оба вида); None: создаётся здесь.
     state, lock: общий словарь состояния и замок; без них поведение прежнее (файл читается здесь).
     pool, wave: общий пул батчей обеих волн и имя этой волны; без пула батчи идут своей очередью, как раньше.
+    progress: строка прогресса обеих волн после каждого сохранённого батча (только в пуле); None — не пишется.
     """
     wanted = sorted(set(wanted_nums))
     if not wanted:
@@ -395,6 +425,9 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
             max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
             clock=clock, sleep=sleep)
 
+    # имя волны в строках батча и сохранения: только в пуле; без пула строки прежние, без префикса
+    wave_tag = f"[{wave}] " if pool is not None and wave is not None else ""
+
     def on_batch(results: list) -> None:
         # под замком: второй вид может писать в тот же файл параллельно (на данный момент волны идут по очереди)
         with guard:
@@ -413,16 +446,19 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
             state["model"] = managed.active_model
             state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
             # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
-            log.info("Сохранение промптов начато: файл %s, промптов к сохранению: %d.",
-                     prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
+            log.info("%sСохранение промптов начато: файл %s, промптов к сохранению: %d.",
+                     wave_tag, prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
             try:
                 atomic_write_json(prompts_path, state)
             except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
-                log.warning("Не удалось сохранить промпты в файл %s: %s: %s.",
-                            prompts_path, type(exc).__name__, exc)
+                log.warning("%sНе удалось сохранить промпты в файл %s: %s: %s.",
+                            wave_tag, prompts_path, type(exc).__name__, exc)
                 raise
-            log.info("Промпты сохранены: файл %s, всего в файле: %d.",
-                     prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
+            log.info("%sПромпты сохранены: файл %s, всего в файле: %d.",
+                     wave_tag, prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
+            if progress is not None:
+                # прогресс обеих волн: читается из того же словаря под тем же замком, уже после записи файла
+                log.info(progress(prompts), extra=gp.KEY_EVENT_EXTRA)
 
     # провайдер берётся у транспорта (openrouter считает свои ключи для числа потоков);
     # для gemini аргумент не передаётся, чтобы вызов остался прежним (совместимость с gemini_prompts без provider)
