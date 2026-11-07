@@ -1031,9 +1031,15 @@ class SiteTemporarilyClosed(Exception):
         self.site = site
 
 
+# Лимит Pixabay API на ключ: 99 запросов в минуту по умолчанию, 99 - максимум.
+# Превышение лимита провайдера блокирует ключ на час, поэтому значение выше 99 - ошибка конфигурации.
+PIXABAY_RPM_DEFAULT = 99
+PIXABAY_RPM_MAX = 99
+
+
 @dataclass(frozen=True)
 class RateConfig:
-    pixabay_requests_per_minute: int = 90
+    pixabay_requests_per_minute: int = PIXABAY_RPM_DEFAULT
     pexels_requests_per_hour: int = 190
     pexels_cooldown_seconds: float = 900.0
     retry_wait_max_seconds: float = 120.0
@@ -1041,10 +1047,11 @@ class RateConfig:
 
 def _env_number(
     environ: Mapping[str, str], name: str, default: Any, cast: Callable[[str], Any],
-    minimum: float, strict: bool = False,
+    minimum: float, strict: bool = False, maximum: Optional[float] = None,
 ) -> Any:
     """Пустая/незаданная переменная - default (в GitHub Actions незаданная vars.X даёт пустую
-    строку). Мусор или значение вне границы - ValueError с именем переменной."""
+    строку). Мусор или значение вне границы - ValueError с именем переменной. maximum (если задан) -
+    верхняя граница включительно."""
     raw = environ.get(name)
     if raw is None or not raw.strip():
         return default
@@ -1057,6 +1064,8 @@ def _env_number(
         raise ValueError(f"{name}={raw!r}: ожидается конечное {kind}")
     if value < minimum or (strict and value <= minimum):
         raise ValueError(f"{name}={raw!r}: значение должно быть {'больше' if strict else 'не меньше'} {minimum:g}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name}={raw!r}: значение должно быть не больше {maximum:g}")
     return value
 
 
@@ -1065,7 +1074,7 @@ def load_rate_config(environ: Optional[Mapping[str, str]] = None) -> RateConfig:
     d = RateConfig()
     return RateConfig(
         pixabay_requests_per_minute=_env_number(
-            env, "PIXABAY_REQUESTS_PER_MINUTE", d.pixabay_requests_per_minute, int, 1),
+            env, "PIXABAY_REQUESTS_PER_MINUTE", d.pixabay_requests_per_minute, int, 1, maximum=PIXABAY_RPM_MAX),
         pexels_requests_per_hour=_env_number(
             env, "PEXELS_REQUESTS_PER_HOUR", d.pexels_requests_per_hour, int, 1),
         pexels_cooldown_seconds=_env_number(
@@ -1718,9 +1727,11 @@ async def cached_search(
     ctx: Context, site: str, media_type: str, query: str,
     fetch_coro_factory: Callable[[], Awaitable[list]],
 ) -> list:
-    """Single-flight кэш по (site, media_type, query): если запрос уже в процессе -
-    ждём его же, а не дублируем."""
-    key = (site, media_type, query)
+    """Single-flight кэш по (нормализованный запрос, сайт, тип медиа): если запрос уже в процессе -
+    ждём его же, а не дублируем. Кэш живёт в Context одного запуска (в памяти, на диск не пишется).
+    Тип медиа входит в ключ: фото и видео не смешиваются. Нормализация - _norm_query (регистр и
+    пробелы не различаются)."""
+    key = (_norm_query(query), site, media_type)
     async with ctx.search_cache_lock:
         task = ctx.search_cache.get(key)
         if task is None:
@@ -4508,7 +4519,7 @@ def _selftest() -> int:
 
     _cfg = load_rate_config({})
     assert (_cfg.pixabay_requests_per_minute, _cfg.pexels_requests_per_hour,
-            _cfg.pexels_cooldown_seconds, _cfg.retry_wait_max_seconds) == (90, 190, 900.0, 120.0)
+            _cfg.pexels_cooldown_seconds, _cfg.retry_wait_max_seconds) == (99, 190, 900.0, 120.0)
     _cfg = load_rate_config({"PIXABAY_REQUESTS_PER_MINUTE": "50", "PEXELS_REQUESTS_PER_HOUR": "100",
                              "PEXELS_COOLDOWN_SECONDS": "30.5", "RETRY_WAIT_MAX_SECONDS": "0",
                              "X": ""})
@@ -4681,7 +4692,7 @@ def _selftest() -> int:
             pass
         else:
             raise AssertionError("cached_search должен пробросить SiteTemporarilyClosed")
-        assert ("pexels", "video", "q") not in c.search_cache
+        assert ("q", "pexels", "video") not in c.search_cache
         return await cached_search(c, "pexels", "video", "q", _fine)
 
     assert asyncio.run(_cache_check()) == ["x"] and _fcalls == ["boom", "fine"]

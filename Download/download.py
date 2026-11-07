@@ -323,7 +323,8 @@ def _pexels_pixabay_throttled(func):
 # ---------------------------------------------------------------------------
 
 PIXABAY_WINDOW_SECONDS = 60.0
-PIXABAY_RPM_DEFAULT = 90                    # запас от официальных 100/мин
+PIXABAY_RPM_DEFAULT = 99                    # на 1 ниже официальных 100/мин
+PIXABAY_RPM_MAX = 99                        # выше - ошибка конфигурации: превышение лимита блокирует ключ на час
 PIXABAY_429_MAX_RETRIES = 3                 # повторов того же запроса после 429
 PIXABAY_429_FALLBACK_PAUSE_SECONDS = 61.0   # нет заголовка / значение вне 0...600
 PIXABAY_429_RESET_MARGIN_SECONDS = 1.0      # запас к X-RateLimit-Reset
@@ -331,8 +332,8 @@ PIXABAY_429_RESET_MAX_SECONDS = 600.0       # Reset выше этого - мус
 
 
 def load_pixabay_rpm(environ=None) -> int:
-    """PIXABAY_REQUESTS_PER_MINUTE: пусто/не задано -> 90; не целое число или < 1 -> ValueError
-    с названием переменной (вызывающий останавливает запуск)."""
+    """PIXABAY_REQUESTS_PER_MINUTE: пусто/не задано -> 99; не целое число, < 1 или > 99 -> ValueError
+    с названием переменной и границей (вызывающий останавливает запуск)."""
     env = os.environ if environ is None else environ
     raw = env.get("PIXABAY_REQUESTS_PER_MINUTE")
     if raw is None or not raw.strip():
@@ -343,6 +344,8 @@ def load_pixabay_rpm(environ=None) -> int:
         raise ValueError(f"PIXABAY_REQUESTS_PER_MINUTE={raw!r}: ожидается целое число >= 1") from None
     if value < 1:
         raise ValueError(f"PIXABAY_REQUESTS_PER_MINUTE={raw!r}: значение должно быть не меньше 1")
+    if value > PIXABAY_RPM_MAX:
+        raise ValueError(f"PIXABAY_REQUESTS_PER_MINUTE={raw!r}: значение должно быть не больше {PIXABAY_RPM_MAX}")
     return value
 
 
@@ -2049,8 +2052,8 @@ def _selftest() -> None:
         FAILED_ITEMS[:] = saved_failed
 
     # ---- лимит Pixabay API: окно, общая пауза, 429 (время и сон подменены, HTTP заглушен) ----
-    assert load_pixabay_rpm({}) == 90 and load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": ""}) == 90
-    assert load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": "   "}) == 90
+    assert load_pixabay_rpm({}) == 99 and load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": ""}) == 99
+    assert load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": "   "}) == 99
     assert load_pixabay_rpm({"PIXABAY_REQUESTS_PER_MINUTE": " 50 "}) == 50
     for _bad in ("0", "-5", "abc", "1.5", "90 запросов"):
         try:
@@ -2231,7 +2234,7 @@ def _selftest() -> None:
             # PIXABAY_REQUESTS_PER_MINUTE: лениво читается из окружения; неверное значение - остановка
             set_pixabay_limiter(None)
             os.environ["PIXABAY_REQUESTS_PER_MINUTE"] = ""
-            assert get_pixabay_limiter().window.max_requests == 90
+            assert get_pixabay_limiter().window.max_requests == 99
             assert get_pixabay_limiter() is get_pixabay_limiter()   # один экземпляр на все потоки
             for _bad in ("0", "-5", "abc"):
                 set_pixabay_limiter(None)

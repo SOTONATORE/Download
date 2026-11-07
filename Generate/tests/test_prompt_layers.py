@@ -12,10 +12,10 @@ from Generate.core.srt_parser import Segment
 GEN = pathlib.Path(__file__).resolve().parents[1]
 LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 
-# база обновлена после добавления фразы про язык субтитров и вывод на английском в системную инструкцию (+85 байт, намеренно): прежнее значение 17077 байт, новое 17162.
-BASELINE_BYTES = 17162
-# хеш базы обновлён вместе с длиной: прежнее значение be7e5311211c68c5d8df9c53109ab9b601d431d983ff594bd238ad32412f3675, новое 1a254097885d431d15f22cc7c46ef56d0cb3c2b8afc5a0300b62f9f966affe36.
-BASELINE_SHA256 = "1a254097885d431d15f22cc7c46ef56d0cb3c2b8afc5a0300b62f9f966affe36"
+# база обновлена после расширения диапазона клипов в style.md с 2-6 до 2-8 секунд (+1 байт, намеренно): прежнее значение 17162 байт, новое 17163.
+BASELINE_BYTES = 17163
+# хеш базы обновлён вместе с длиной: прежнее значение 1a254097885d431d15f22cc7c46ef56d0cb3c2b8afc5a0300b62f9f966affe36, новое 3fbab6e5baa8f38887a377caca310322bd825e749dd3e8de2466b13389bf23ce.
+BASELINE_SHA256 = "3fbab6e5baa8f38887a377caca310322bd825e749dd3e8de2466b13389bf23ce"
 
 
 @pytest.fixture
