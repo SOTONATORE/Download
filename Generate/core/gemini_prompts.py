@@ -655,6 +655,17 @@ def _num_ranges(nums: list) -> str:
     return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in spans)
 
 
+def _wave_summary(job) -> None:
+    """Итог волны перед выходом с ошибкой: клипы с нарушениями, не исправленные, и клипы, оставшиеся в очереди.
+
+    Вызывается перед каждым raise в generate_prompts, после abandon_queue. Потоки волны уже завершены,
+    поэтому out и очередь читаются без замков; модель не вызывается.
+    """
+    unfixed = [c.num for c in job.out.values() if c.needs_review and c.rework_pending]
+    log.info("[%s] Итог волны до остановки: не исправлено клипов %d, номера: %s; в очереди исправлений клипов %d.",
+             job.wave, len(unfixed), _num_ranges(unfixed) or "нет", len(job.rework_queue))
+
+
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
                tag: str = "") -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
@@ -901,6 +912,11 @@ class _WaveJob:
             if not found:
                 c.rework_pending = []
                 c.prompt_raw = ""   # клип исправлен: сырого текста в записи нет
+                if c.review_reason.startswith(("исправление прервано", "очередь исправлений не выполнена")):
+                    # метка снимается только у клипов, чей флаг пришёл от прерванного исправления;
+                    # причина проверки последнего круга сюда не попадает: такие клипы не возвращаются в очередь
+                    c.needs_review = False
+                    c.review_reason = ""
                 fixed += 1
             elif c.rework_round >= REPAIR_ROUNDS:
                 # круги кончились: текст последней версии сохраняется, клип помечается на проверку
@@ -1210,6 +1226,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                 first_error.append(exc)
         job.abandon_queue()   # клипы очереди остановленной волны не исправлены: на проверку, с причиной
         if first_error:
+            _wave_summary(job)
             raise first_error[0]
         out = job.out
     else:
@@ -1230,9 +1247,11 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         pool.wait_job(job)
         job.abandon_queue()   # клипы очереди остановленной волны не исправлены: на проверку, с причиной
         if job.first_error:
+            _wave_summary(job)
             raise job.first_error[0]
         failure = pool.failure()
         if failure is not None:
+            _wave_summary(job)
             raise failure
         out = job.out
 
