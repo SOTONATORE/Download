@@ -125,9 +125,9 @@ def test_429_with_retry_after_blocks_only_that_key():
     assert info.value.retry_after == 7.0
     used = []   # (момент вызова, заголовок Authorization) для каждого последующего запроса
     for _ in range(6):
-        at = clock.now
         t.generate_json(MODEL, "s", "u", SCHEMA)
-        used.append((at, client.calls[-1]["headers"]["Authorization"]))
+        # планировщик ждёт внутри вызова, поэтому момент отправки — время ПОСЛЕ вызова (post его не сдвигает)
+        used.append((clock.now, client.calls[-1]["headers"]["Authorization"]))
     # пока блокировка первого ключа не истекла (до START+7), запросы уходят только на второй ключ
     before_block = [k for at, k in used if at < START + 7]
     assert before_block and all(k == f"Bearer {KEY_B}" for k in before_block)
