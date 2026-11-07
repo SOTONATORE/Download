@@ -1446,7 +1446,7 @@ class Orchestrator:
         video_model = os.environ.get("VIDEO_MODEL", "") or DEFAULT_MODEL_PROFILE
         try:
             video_percent = float(os.environ.get("VIDEO_PERCENT", "") or "100")
-            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
+            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "1200")
         except ValueError:
             raise gp.GeminiInputError("VIDEO_PERCENT и INTRO_SECONDS должны быть числами.") from None
         dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if self._artifact else None
