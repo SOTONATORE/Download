@@ -833,6 +833,30 @@ class _WaveJob:
         with self.sched_lock:
             self.rework_queue.extend(clips)
 
+    def abandon_queue(self) -> None:
+        """Клипы, оставшиеся в очереди исправлений после остановки волны, не исправлены: помечаются на проверку.
+
+        Вызывается только когда потоков волны уже нет (после join или pool.wait_job): остановленная волна
+        новых пакетов не берёт, поэтому замок очереди не нужен. Клипы не возвращаются в очередь; rework_pending
+        и prompt_raw сохраняются, повторный запуск продолжит исправление. Записываются один раз под out_lock.
+        """
+        if not self.rework_queue:
+            return
+        left = list(self.rework_queue)
+        self.rework_queue.clear()
+        for c in left:
+            c.needs_review = True
+            c.review_reason = "очередь исправлений не выполнена: прогон остановлен"
+            if c.prompt_raw.strip():
+                c.prompt = attach_style(c.prompt_raw, self.style_text)
+        ordered = sorted(left, key=lambda c: c.num)
+        with self.out_lock:
+            self.out.update({c.num: c for c in ordered})
+            if self.on_batch is not None:
+                self.on_batch(ordered)
+        log.warning("%sНе исправлено клипов из-за остановки: %d, номера: %s.",
+                    self.tag, len(ordered), _num_ranges([c.num for c in ordered]))
+
     def process_fix(self, logged, clips: list, fix_no: int) -> None:
         """Исправляет пакет клипов очереди: один запрос на волну, разбор, проверка, стиль, запись.
 
@@ -846,8 +870,25 @@ class _WaveJob:
         log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {rework_remark(c.rework_pending)}" for c in clips]
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
-        raw = logged.generate_json(self.model, builder.system, user, builder.schema)
-        results, _ = parse_and_validate(raw, nums, builder.cfg)
+        try:
+            raw = logged.generate_json(self.model, builder.system, user, builder.schema)
+            results, _ = parse_and_validate(raw, nums, builder.cfg)
+        except BaseException as exc:
+            # пакет не выполнен (запрос или разбор): каждый клип пакета помечается на проверку с причиной.
+            # rework_pending, rework_round и prompt_raw сохраняются; в очередь клипы не возвращаются.
+            # Запись та же, что у обычного пути: под out_lock, один раз. Ошибка пробрасывается, волна останавливается.
+            reason = f"исправление прервано: {type(exc).__name__}"
+            for c in clips:
+                c.needs_review = True
+                c.review_reason = reason
+                if c.prompt_raw.strip():
+                    c.prompt = attach_style(c.prompt_raw, self.style_text)
+            failed = sorted(clips, key=lambda c: c.num)
+            with self.out_lock:
+                self.out.update({c.num: c for c in failed})
+                if self.on_batch is not None:
+                    self.on_batch(failed)
+            raise
         fixed = 0
         requeue: list = []
         for c in clips:
@@ -1167,6 +1208,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                 job.process_fix(logged_fix, clips, job.fix_no)
             except BaseException as exc:
                 first_error.append(exc)
+        job.abandon_queue()   # клипы очереди остановленной волны не исправлены: на проверку, с причиной
         if first_error:
             raise first_error[0]
         out = job.out
@@ -1186,6 +1228,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
             th.join()
         # батчи этой волны могут выполнять потоки другой волны: ждём их конца, прежде чем отдать результат
         pool.wait_job(job)
+        job.abandon_queue()   # клипы очереди остановленной волны не исправлены: на проверку, с причиной
         if job.first_error:
             raise job.first_error[0]
         failure = pool.failure()

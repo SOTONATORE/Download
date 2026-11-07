@@ -209,7 +209,7 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         pending = go.missing_segments(prompts, needed)
         # очередь исправлений фото из сохранённого состояния (под замком: словарь пишут обе волны)
         with guard:
-            seeds = go._rework_seeds(prompts, photo=True)
+            seeds = go._rework_seeds(prompts, photo=True, only=set(needed))
         if not pending and not seeds:
             return
 
@@ -356,8 +356,8 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
         # очередь исправлений прошлого запуска: волна с очередью идёт, даже если клипов для генерации у неё нет
         # (только чтение файла, без замка и без вызовов модели: потоков волн ещё нет)
         prev_prompts = read_state(prompts_path).get("prompts", {})
-        video_seeds = bool(go._rework_seeds(prev_prompts))
-        photo_seeds = bool(go._rework_seeds(prev_prompts, photo=True))
+        video_seeds = bool(go._rework_seeds(prev_prompts, only=set(video)))
+        photo_seeds = bool(go._rework_seeds(prev_prompts, photo=True, only=set(photo)))
         run_video = bool(video) or video_seeds
         run_photo = bool(photo) or photo_seeds
         # цепочка строится на наблюдателе: её вызовы видны _TransportWatch и для видео, и для фото

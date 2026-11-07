@@ -373,12 +373,14 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
-def _rework_seeds(prompts: dict, photo: bool = False) -> list:
+def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None) -> list:
     """Клипы из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
 
     photo=False: клипы видео (узнаются по start_ms, его пишет только этот путь); photo=True: клипы фото
     (записи без start_ms). Текст для исправления — prompt_raw, у старых записей без него — prompt.
     Записи, которые не словари, пропускаются. Вызывать под замком состояния: словарь пишут обе волны.
+    only: набор номеров клипов или None. Задан — берутся только клипы из набора (нужные в этом прогоне);
+    None — все клипы, как раньше.
     """
     seeds = []
     for key, e in prompts.items():
@@ -394,6 +396,8 @@ def _rework_seeds(prompts: dict, photo: bool = False) -> list:
         raw = str(e.get("prompt_raw") or e.get("prompt") or "")
         if not raw.strip():
             continue
+        if only is not None and int(key) not in only:
+            continue   # клип не нужен в этом прогоне: очередь его не берёт, запись в файле не меняется
         seeds.append(gp.PromptResult(
             num=int(key), prompt=str(e.get("prompt", "")), needs_review=bool(e.get("needs_review", False)),
             review_reason=str(e.get("error", "")), extra=dict(e.get("extra") or {}),
@@ -442,7 +446,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
     # очередь исправлений из сохранённого состояния (под замком: словарь пишут обе волны)
     with guard:
-        seeds = _rework_seeds(prompts)
+        seeds = _rework_seeds(prompts, only=set(wanted_nums))
     if not pending and not seeds:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state
