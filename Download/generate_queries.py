@@ -301,8 +301,8 @@ INTRO_SEGMENT_RULE = (
     "a synonym query, query_broad the general setting, with the word limits given there) and the banned-word "
     "list of GENERAL RULES. The three queries must still differ from each other. An intro segment is searched "
     "only as stock, so its queries are written in stock style even where the sites rule above would name an "
-    "archive site. For an intro segment entity_keywords is [] and is_entity is false, because no name remains "
-    "in the queries; this overrides rules 5 and 6. The scene, the sites and the other rules stay as above.\n\n"
+    "archive site. Rules 5 and 6 still apply: entity_keywords lists any proper name left in query_narrow or "
+    "query_medium, so the script can remove it. The scene and the sites follow the rules above.\n\n"
 )
 
 
