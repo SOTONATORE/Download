@@ -86,7 +86,7 @@ on:
         type: number
         default: 100
       intro_seconds:
-        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
+        description: "Вступление, сек: сегменты, чьё начало раньше этого времени, всегда идут в видео, даже сверх бюджета video_percent. По умолчанию 1200 (то же окно, что у поиска в Download)"
         required: false
         type: number
         default: 1200

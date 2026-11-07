@@ -37,12 +37,12 @@ on:
         type: string
         default: "100"
       intro_seconds:
-        description: 'Вступление, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком).'
+        description: 'Вступление, сек: сегменты, чьё начало раньше этого времени, ищутся только в стоке (без архива; имена в запросах обобщаются моделью по флагу is_intro; при режиме 3 - только фото). По умолчанию 1200.'
         required: false
         type: string
         default: "1200"
       coverage_always_seconds:
-        description: 'Всегда искать первые N секунд ролика, сек: эти секунды ищутся при любом coverage_percent, отдельно от окна вступления (intro_seconds). По умолчанию 10.'
+        description: 'Покрытие, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком). По умолчанию 10. Не то же, что intro_seconds.'
         required: false
         type: string
         default: "10"
