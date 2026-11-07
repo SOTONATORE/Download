@@ -1,0 +1,74 @@
+# .github/workflows/bench_openrouter_parallel.yml
+name: Bench OpenRouter parallel (manual)
+
+# Только ручной запуск. Один прогон: окно из 3 параллельных запросов на одном ключе OPENROUTER10
+# над 6 батчами по 25 клипов (первые 150 сегментов корневого final.srt). Повторов нет, сравнения нет.
+# Значения ключей не выводятся. Результаты лежат в артефакте bench-openrouter-parallel.
+#
+# Расчёт таймаута задания (минуты):
+#   TIMEOUT_SEC = 600 с: таймаут одного запроса, тот же, что OPENROUTER_TIMEOUT_SEC в транспорте.
+#   6 запросов при окне 3 идут в 2 раундах (3 + 3), худший случай: 2 × 600 = 1200 с.
+#   Запас на настройку, итоги и загрузку артефакта (checkout, Python, pip, summary, upload): 300 с.
+#   Итого: 1200 + 300 = 1500 с = 25 мин. timeout-minutes: 30, запас 5 мин.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Модель OpenRouter для прогона"
+        type: choice
+        options:
+          - nvidia/nemotron-3-ultra-550b-a55b:free
+          - google/gemma-4-31b-it:free
+          - nvidia/nemotron-3.5-super-vl:free
+        default: nvidia/nemotron-3.5-super-vl:free
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Параллельный замер OpenRouter
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BENCH_OUT_DIR: ${{ runner.temp }}/bench-openrouter-parallel
+    steps:
+      - name: Получение репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: pip install -r Generate/requirements-dev.txt
+
+      - name: Папка результатов
+        run: mkdir -p "$BENCH_OUT_DIR"
+
+      - name: Прогон (окно 3 над 6 батчами)
+        env:
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
+          MODEL: ${{ inputs.model }}
+          TIMEOUT_SEC: "600"
+          PYTHONUNBUFFERED: "1"
+        run: python Generate/tools/bench_openrouter_parallel.py
+
+      - name: Итоги в GITHUB_STEP_SUMMARY
+        if: always()
+        run: |
+          f="$BENCH_OUT_DIR/bench_openrouter_parallel.txt"
+          if [ -f "$f" ]; then
+            { echo '```text'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Итоги не записаны: файл результатов не создан." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Артефакт с результатами
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-openrouter-parallel
+          path: ${{ runner.temp }}/bench-openrouter-parallel
+          if-no-files-found: warn
