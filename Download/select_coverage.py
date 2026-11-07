@@ -146,7 +146,7 @@ class Result:
     n_intro: int
     n_entity: int
     n_mandatory: int
-    per_window: list[tuple[int, int, int]]  # (число выбранных, мс выбранных, мс доступного бюджета)
+    per_window: list[tuple[int, int, float]]  # (число выбранных, мс выбранных, мс квоты окна)
     warnings: list[str] = field(default_factory=list)
     min_durations: dict[int, float] = field(default_factory=dict)  # заполняет run()
 
@@ -231,13 +231,14 @@ def select_segments(items: list[Item], percent: int, coverage_always_seconds: fl
        ролика не достиг coverage_always_seconds; последний берётся целиком) + все is_entity.
     3. Окон n = max(1, round(total / window_seconds)); окно k = [t0 + k*L, t0 + (k+1)*L),
        L = total/n. Сегмент относится к окну по своему началу (последнее окно включает
-       правую границу). Бюджет окна = budget/n + остаток (или долг) от предыдущих окон.
-    4. В окне: из доступного вычитаются обязательные сегменты окна, затем кандидаты
+       правую границу). Квота окна = percent/100 * сумма длительностей сегментов этого окна.
+       Остаток и долг между окнами не переносятся: каждое окно получает свою долю видео.
+    4. В окне: из квоты окна вычитаются обязательные сегменты этого окна, затем кандидаты
        идут по убыванию visual_value (при равенстве - раньше по времени); берётся тот,
-       что целиком помещается, иначе пропускается и проверяется следующий. Неизрасходованный
-       остаток уходит в следующее окно. Если обязательные окна превысили его бюджет,
-       "долг" тоже переносится вперёд (уменьшает бюджет следующих окон), поэтому
-       общий итог не превышает budget, пока обязательные сами в него помещаются.
+       что целиком помещается в оставшуюся квоту, иначе пропускается и проверяется следующий.
+       Если обязательные окна превысили его квоту, они не переносятся в соседние окна:
+       выводится предупреждение. Сумма квот всех окон равна budget, поэтому общий итог
+       не превышает budget, пока обязательные сами в него помещаются.
     5. Кандидатом не бывают: нулевая длительность, пустой текст, visual_value <= 0.
     """
     items = sorted(items, key=lambda x: x.index)
@@ -277,12 +278,16 @@ def select_segments(items: list[Item], percent: int, coverage_always_seconds: fl
     for it in items:
         by_win[it.window].append(it)
 
-    share = budget / n
-    carry = 0.0
     per_window = []
+    warnings: list[str] = []
     for w in range(n):
-        avail = share + carry
-        remaining = avail - sum(it.dur for it in by_win[w] if it.mandatory)
+        # Квота окна: доля процента от длительности сегментов этого окна; без переноса между окнами.
+        quota = percent / 100 * sum(it.dur for it in by_win[w])
+        mand_w = sum(it.dur for it in by_win[w] if it.mandatory)
+        remaining = quota - mand_w
+        if remaining < -EPS_MS:
+            warnings.append(f"окно {w + 1}: обязательные {mand_w / 1000:.1f} с больше квоты "
+                            f"{quota / 1000:.1f} с")
         cands = [it for it in by_win[w]
                  if not it.mandatory and it.dur > 0 and it.has_text and it.visual_value > 0]
         cands.sort(key=lambda it: (-it.visual_value, it.index))
@@ -290,11 +295,9 @@ def select_segments(items: list[Item], percent: int, coverage_always_seconds: fl
             if it.dur <= remaining + EPS_MS:
                 it.selected = True
                 remaining -= it.dur
-        carry = remaining  # >0 - остаток, <0 - долг от обязательных
         sel = [it for it in by_win[w] if it.selected]
-        per_window.append((len(sel), sum(it.dur for it in sel), avail))
+        per_window.append((len(sel), sum(it.dur for it in sel), quota))
 
-    warnings: list[str] = []
     mand_ms = sum(it.dur for it in items if it.mandatory)
     if mand_ms > budget + EPS_MS:
         over = (mand_ms - budget) / 1000
@@ -340,9 +343,9 @@ def format_summary(r: Result) -> str:
         f"Сегментов выбрано: {r.n_selected}, не выбрано: {r.n_unselected}",
         f"Обязательных: {r.n_mandatory} (вступление: {r.n_intro}, is_entity: {r.n_entity}; "
         f"{r.mandatory_ms / 1000:.1f} с)",
-        f"Окон: {r.n_windows}; выбрано по окнам (сегментов/секунд, доступный бюджет окна): "
-        + ", ".join(f"[{k + 1}] {c}/{ms / 1000:.1f}с ({av / 1000:.1f}с)"
-                    for k, (c, ms, av) in enumerate(r.per_window)),
+        f"Окон: {r.n_windows}; выбрано по окнам (сегментов/секунд, квота окна): "
+        + ", ".join(f"[{k + 1}] {c}/{ms / 1000:.1f}с (квота {q / 1000:.1f}с)"
+                    for k, (c, ms, q) in enumerate(r.per_window)),
     ]
     if r.min_durations:
         vals = list(r.min_durations.values())
@@ -509,6 +512,25 @@ def selftest() -> None:
         assert all(data[k]["skip"] is False and data[k]["type"] == "photo" for k in "123")
         assert all(isinstance(data[k]["min_duration"], float) for k in "123")
         assert "min_duration: записано 3" in format_summary(res)
+
+    # 13. равные сегменты и равная ценность, 70%: каждое окно получает свою квоту, без переноса.
+    #     120 с, 20 сегментов по 6 с -> 3 окна; в каждом выбрано не меньше квоты минус один сегмент
+    reqs, srt = _synth(vv=[50] * 20)
+    r = select_segments(build_items(reqs, srt), 70, 0)
+    assert r.n_windows == 3 and len(r.per_window) == 3, r.per_window
+    for k, (_c, ms, quota) in enumerate(r.per_window):
+        assert ms >= quota - 6000 - EPS_MS, f"окно {k + 1}: выбрано {ms} мс при квоте {quota} мс"
+        assert ms <= quota + EPS_MS, f"окно {k + 1}: выбрано {ms} мс сверх квоты {quota} мс"
+
+    # 14. первые 3 окна без текста, 70%: последнее окно не получает секунд сверх своей квоты.
+    #     240 с, 40 сегментов по 6 с -> 5 окон по 48 с; без текста сегменты 1..24 (окна 1-3)
+    reqs, srt = _synth(n=40, texts=["" if i <= 24 else "т" for i in range(1, 41)])
+    r = select_segments(build_items(reqs, srt), 70, 0)
+    assert r.n_windows == 5, r.n_windows
+    assert all(r.per_window[k][1] == 0 for k in range(3)), f"окна без текста не пустые: {r.per_window}"
+    c_last, ms_last, quota_last = r.per_window[-1]
+    assert ms_last <= quota_last + EPS_MS, f"последнее окно: {ms_last} мс сверх квоты {quota_last} мс"
+    assert c_last == 5 and ms_last == 30000, f"последнее окно должно взять 5 сегментов: {r.per_window}"
 
     print("selftest: все проверки пройдены")
 

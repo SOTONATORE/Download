@@ -269,3 +269,21 @@ def test_generate_yml_intro_default_1200():
             break
         block.append(ln)
     assert "        default: 1200" in block
+
+
+def test_coverage_window_quota_no_carry():
+    """select_coverage: квота окна = percent * сумма его сегментов, без переноса остатка между окнами.
+
+    Тот же случай, что вторая самопроверка в select_coverage.py: 240 с, 40 сегментов по 6 с,
+    первые 3 окна без текста, 70%. Последнее окно не получает секунд сверх своей квоты.
+    """
+    import select_coverage as sc
+
+    texts = ["" if i <= 24 else "т" for i in range(1, 41)]
+    reqs, srt = sc._synth(n=40, texts=texts)
+    r = sc.select_segments(sc.build_items(reqs, srt), 70, 0)
+    assert r.n_windows == 5, f"ожидалось 5 окон, получено {r.n_windows}"
+    assert all(r.per_window[k][1] == 0 for k in range(3)), f"окна без текста не пустые: {r.per_window}"
+    c_last, ms_last, quota_last = r.per_window[-1]
+    assert ms_last <= quota_last + 1e-6, f"последнее окно: {ms_last} мс сверх квоты {quota_last} мс"
+    assert c_last == 5 and ms_last == 30000, f"последнее окно должно взять 5 сегментов: {r.per_window}"
