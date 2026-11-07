@@ -775,9 +775,10 @@ def test_finalize_uses_final_gen_tag_from_srt(capsys, fin_env, prompts_file):
 
 
 def test_finalize_release_tag_option_removed(capsys, fin_env, prompts_file):
-    with pytest.raises(SystemExit):
-        cli.main(_fin_args("--repo", "o/r", "--release-tag", "мой-тег",
-                           "--prompts-path", str(prompts_file)))
+    # cli.main перехватывает SystemExit от argparse и возвращает код: 2 при ошибке аргументов
+    code = cli.main(_fin_args("--repo", "o/r", "--release-tag", "мой-тег",
+                              "--prompts-path", str(prompts_file)))
+    assert code == 2, "--release-tag должен отвергаться argparse с кодом 2"
 
 
 def test_finalize_failure_gives_3_and_hides_text(capsys, fin_env, prompts_file):

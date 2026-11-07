@@ -19,6 +19,9 @@ except ImportError:
     from core.gemini_prompts import GeminiInputError, GeminiRuntimeError
     from core.srt_parser import Segment, srt_hash
 
+# Тестовый маркер: проверяем, что он не попадает в журналы, результат и исключения (как в test_orchestrator.py).
+CANARY = "TESTKEY-12345"
+
 SECRET = "ghp_SECRETTOKEN1234567890abcdef"
 NOW = datetime(2026, 10, 5, 12, 30, tzinfo=timezone.utc)
 SEGS = [Segment(1, 0, 1000, "a"), Segment(2, 1000, 2000, "b")]
