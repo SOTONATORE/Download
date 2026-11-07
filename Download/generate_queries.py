@@ -100,10 +100,18 @@ from Generate.core.gemini_pool import (  # noqa: E402
 )
 from Generate.core.config_loader import load_config  # noqa: E402
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError  # noqa: E402
-from Generate.core.openrouter_transport import (  # noqa: E402
+# Транспорт OpenRouter лежит рядом с этим файлом (Download/openrouter_transport.py): папка Download в пути импорта.
+_DOWNLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
+if _DOWNLOAD_DIR not in sys.path:
+    sys.path.append(_DOWNLOAD_DIR)
+from openrouter_transport import (  # noqa: E402
     OpenRouterTransport,
+    bind_error_types as _bind_openrouter_errors,
     load_openrouter_keys,
 )
+
+# Классы ошибок для транспорта OpenRouter: те же объекты, которые ловит этот файл.
+_bind_openrouter_errors(GeminiInputError, GeminiRuntimeError, AllKeysExhaustedError)
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -146,6 +154,9 @@ POOL_TPM_LIMIT = 250000
 POOL_RPD_LIMIT = 500
 # Максимум параллельных батчей (не больше числа ключей, см. main).
 POOL_MAX_WORKERS = 10
+# Отправок на один ключ OpenRouter в скользящем окне (тот же смысл, что openrouter_sends_per_window в конфиге Generate).
+OPENROUTER_SENDS_PER_KEY_ENV = "OPENROUTER_SENDS_PER_KEY"
+OPENROUTER_SENDS_PER_KEY_DEFAULT = 10
 # Оценка токенов одного запроса для TPM (грубая, батч 100 сегментов).
 POOL_TOKENS_PER_REQUEST = 20000
 INITIAL_BACKOFF_SECONDS = 4
@@ -2063,7 +2074,8 @@ def _resolve_text_family(cfg, requested: Optional[str]) -> tuple[str, str, Optio
     return name, spec["provider"], spec["models"]
 
 
-def _make_openrouter_clients(cfg, models: list[str], key_pairs) -> dict[str, "OpenRouterTransport"]:
+def _make_openrouter_clients(cfg, models: list[str], key_pairs,
+                             sends_per_key: Optional[int] = None) -> dict[str, "OpenRouterTransport"]:
     """Один OpenRouterTransport на каждый ключ пула (кэш по имени переменной, как у genai.Client).
 
     Каждый транспорт видит только свой ключ: выбор ключа делает внешний KeyPool. Лимиты - как в
@@ -2077,6 +2089,7 @@ def _make_openrouter_clients(cfg, models: list[str], key_pairs) -> dict[str, "Op
             model_limits=model_limits,
             base_url=cfg.openrouter_base_url,
             max_output_tokens=cfg.openrouter_max_output_tokens,
+            sends_per_window=openrouter_sends_per_key() if sends_per_key is None else sends_per_key,
         )
         for name, value in key_pairs
     }
@@ -2276,6 +2289,65 @@ def _make_client_cache(keys_pairs, http_timeout_ms: int) -> dict[str, "genai.Cli
     return cache
 
 
+def openrouter_sends_per_key(environ=None) -> int:
+    """Отправок на ключ в окне для OpenRouter: из OPENROUTER_SENDS_PER_KEY, по умолчанию 10.
+
+    Некорректное значение (не целое или меньше 1) - ошибка входных данных. Значение в текст ошибки не выводится.
+    """
+    source = os.environ if environ is None else environ
+    raw = (source.get(OPENROUTER_SENDS_PER_KEY_ENV) or "").strip()
+    if not raw:
+        return OPENROUTER_SENDS_PER_KEY_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        raise GeminiInputError(
+            f"Ошибка входных данных: {OPENROUTER_SENDS_PER_KEY_ENV} должно быть целым числом.") from None
+    if value < 1:
+        raise GeminiInputError(f"Ошибка входных данных: {OPENROUTER_SENDS_PER_KEY_ENV} должно быть не меньше 1.")
+    return value
+
+
+def openrouter_thread_count(key_count: int, sends_per_key: Optional[int] = None) -> int:
+    """Потоки для OpenRouter: ключи × отправок на ключ в окне, не меньше 1 (как openrouter_thread_count в Generate).
+
+    Значение не передано: берётся OPENROUTER_SENDS_PER_KEY (по умолчанию 10).
+    """
+    per_key = openrouter_sends_per_key() if sends_per_key is None else max(1, int(sends_per_key))
+    return max(1, key_count) * per_key
+
+
+class OpenRouterLeasePool:
+    """Выдаёт имена ключей OpenRouter для первого прохода без эксклюзивного замка на время запроса.
+
+    KeyPool держит ключ занятым весь запрос, поэтому на ключ приходился бы один запрос в полёте.
+    Здесь ключ выбирается по кругу среди тех, у кого суточная квота на модель не исчерпана: признак берётся
+    из exhausted_pairs (ключ «имя|модель»), то есть из того же словаря, что ведёт _run_pool_tasks.
+    Паузу между отправками и окно отправок на ключ соблюдает транспорт (OpenRouterSendScheduler).
+    Значения ключей здесь не хранятся: lease несёт только имя переменной.
+    """
+
+    def __init__(self, key_names, exhausted_pairs: dict) -> None:
+        self._names = list(key_names)
+        self._exhausted = exhausted_pairs
+        self._lock = threading.Lock()
+        self._cursor = 0
+
+    def acquire(self, model: str, tokens: int = 0, timeout: Optional[float] = None) -> KeyLease:
+        """Возвращает lease с именем ключа, у которого суточная квота на модель ещё не исчерпана."""
+        live = [n for n in self._names if f"{n}|{model}" not in self._exhausted]
+        if not live:
+            raise AllKeysExhaustedError("Все ключи OpenRouter исчерпали суточную квоту для этой модели.")
+        with self._lock:
+            name = live[self._cursor % len(live)]
+            self._cursor += 1
+        return KeyLease(name=name, api_key="")
+
+    def release(self, lease: KeyLease, outcome, model: str, retry_after: Optional[float] = None) -> None:
+        """Ничего не делает: паузы и блокировки ведёт транспорт, суточную квоту - exhausted_pairs."""
+        return None
+
+
 def _run_pool_tasks(
     pool: "KeyPool",
     clients: dict[str, "genai.Client"],
@@ -2287,6 +2359,7 @@ def _run_pool_tasks(
     max_workers: int,
     exhausted_pairs: Optional[dict] = None,
     on_quota=None,
+    per_key_threads: int = 1,
 ) -> tuple[Optional[int], str]:
     """Выполняет tasks параллельно через пул ключей.
 
@@ -2355,7 +2428,8 @@ def _run_pool_tasks(
                 stop.set()
                 return
 
-    workers = max(1, min(len(clients), max_workers))
+    # потоков не больше ключей × per_key_threads: у OpenRouter это отправки на ключ в окне, у Gemini по одному
+    workers = max(1, min(len(clients) * max(1, per_key_threads), max_workers))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(worker) for _ in range(workers)]
         for f in futures:
@@ -3996,9 +4070,13 @@ def main() -> int:
     # включая call_gemini_batch.
     # Один genai.Client на каждый ключ пула, кэш по имени переменной (не по значению).
     if text_provider == "openrouter":
-        clients = _make_openrouter_clients(cfg, text_models or [], key_pairs)
+        or_sends = openrouter_sends_per_key()
+        or_threads = openrouter_thread_count(len(key_pairs), or_sends)
+        clients = _make_openrouter_clients(cfg, text_models or [], key_pairs, sends_per_key=or_sends)
         atexit.register(_close_transports, clients)
         logging.info("Ключей в пуле OpenRouter: %d", len(key_pairs))
+        logging.info("OpenRouter: ключей %d, потоков %d, отправок на ключ %d в окне",
+                     len(key_pairs), or_threads, or_sends)
     else:
         clients = _make_client_cache(key_pairs, int(http_timeout_s * 1000))
         logging.info("HTTP-таймаут запроса к Gemini: %.1fs; ключей в пуле: %d", http_timeout_s, len(key_pairs))
@@ -4112,10 +4190,17 @@ def main() -> int:
             batch_num, len(batches), progress_pct, len(results), len(segments),
         )
 
+    if text_provider == "openrouter":
+        # OpenRouter: без эксклюзивного замка ключа на время запроса; разрешение на отправку даёт транспорт
+        first_pool = OpenRouterLeasePool(list(clients), exhausted_models)
+        first_workers, first_per_key = or_threads, or_sends
+    else:
+        first_pool, first_workers, first_per_key = pool, POOL_MAX_WORKERS, 1
     code, current_model = _run_pool_tasks(
-        pool, clients, todo, run_batch, lock, on_batch_done, current_model, POOL_MAX_WORKERS,
+        first_pool, clients, todo, run_batch, lock, on_batch_done, current_model, first_workers,
         exhausted_pairs=exhausted_models,
         on_quota=lambda: save_checkpoint(checkpoint_path, src_hash, results, exhausted_models),
+        per_key_threads=first_per_key,
     )
     if code is not None:
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)
