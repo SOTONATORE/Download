@@ -305,12 +305,13 @@ def build_system_instruction(
             f"SOURCE MODE RULES (MODE {SOURCES_MIX}: MIXED ARCHIVE AND STOCK):\n"
             "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the words of the segment explicitly name a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
             "- When genuinely unsure, use stock sites [\"pexels\", \"pixabay\"], NOT both and NOT archive.\n"
+            "- For stock sites the three queries follow rule 3 (direct scene, synonym of the main object, general setting). The search tries video first with all three queries and uses a photo only when no video fits.\n"
             "- For abstract or general segments: follow the ABSTRACT / GENERAL SEGMENTS rule below (use stock sites).\n"
         ),
         SOURCES_STOCK: (
             f"SOURCE MODE RULES (MODE {SOURCES_STOCK}: STOCK ONLY):\n"
             "- All segments MUST use stock sites ONLY: [\"pexels\", \"pixabay\"]. NEVER include \"wikimedia\", \"loc\", or \"nasa\".\n"
-            "- All search queries must follow the stock search style: query_medium (2-4 words, object + context), query_narrow (4-6 words, slightly more specific), query_broad (1-2 words, general image).\n"
+            "- All search queries must follow the stock search style, as three different phrases for the same scene: query_medium is the DIRECT scene (2-4 words, the scene and its main object), query_narrow is a SYNONYM query (2-4 words, the main object replaced by a common synonym or a close visual alternative, e.g. door -> arch, doorway, gate), query_broad is the GENERAL setting (1-2 words, the setting or place with no proper names). The three must differ from each other. No video, stock or vintage words.\n"
             "- Replace any proper names with plain visual generalizations (a person by role or appearance, a place or building by its type).\n"
             f"- In Mode {SOURCES_STOCK}, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
         ),
@@ -374,9 +375,10 @@ segment as abstract and apply the ABSTRACT / GENERAL SEGMENTS rule below.
 "pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources. \
 Follow the SOURCE MODE RULES above.
 
-3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene, from \
-most specific to most general. They are tried in this order, so each must be a realistic search \
-phrase on its own. The style depends on the FIRST site in "sites":
+3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene. They \
+are tried in this order, so each must be a realistic search phrase on its own: for archive sites from \
+most specific to most general; for stock sites in the order medium, narrow, broad (see below). The \
+style depends on the FIRST site in "sites":
    - If the first site is an archive (wikimedia / loc / nasa):
      * query_narrow: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
 caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
@@ -390,10 +392,11 @@ pexels/pixabay, 2-4 words, no proper nouns, not a portrait of a person.
      MediaWiki (wikimedia) and LOC search match literal file titles/captions, which are short and \
 factual, so descriptive or stylistic padding only dilutes the match: use the bare name or place \
 exactly as the segment gives it, without added descriptors, years or archive words.
-   - If the first site is stock (pexels / pixabay):
-     * query_medium: 2-4 words, main object + context.
-     * query_narrow: slightly more specific than medium, 4-6 words.
-     * query_broad: 1-2 words, the general image; prefer the setting or place over a portrait of a person.
+   - If the first site is stock (pexels / pixabay), the three phrases are three different kinds of query for the same scene:
+     * query_medium - DIRECT scene: 2-4 words, the scene and its main object.
+     * query_narrow - SYNONYM: 2-4 words, the same scene with the main object replaced by a common synonym or a close visual alternative (for example: door -> arch, doorway, gate).
+     * query_broad - GENERAL setting: 1-2 words, the setting or place of the scene with no strong specifics and no proper names; prefer the setting over a portrait of a person.
+     The three phrases must differ from each other; no two may be the same phrase.
    - query_broad = null ONLY for segments with no visual scene at all - e.g. silence, a black \
 screen, a title/credits card with no depicted content, or on-screen text with nothing else \
 happening. When in doubt, fill it in rather than returning null. query_narrow and query_medium are \
@@ -516,11 +519,11 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
         "query_narrow": types.Schema(
             type=types.Type.STRING,
             description=(
-                "Most specific query, English. First site archive (wikimedia/loc/nasa): exact "
+                "Query, English. First site archive (wikimedia/loc/nasa): exact "
                 "name/place/event (+ short object refinement), 2-4 words, with NO year unless the "
                 "year is named in the segment text (a proper name that needs more than 4 words "
                 "is fine - the limit is about padding, not truncating a name). First site stock "
-                "(pexels/pixabay): 4-6 words, a bit more specific than query_medium. No filler "
+                "(pexels/pixabay): SYNONYM query, 2-4 words: the same scene with the main object replaced by a common synonym or a close visual alternative (door -> arch, doorway, gate). No filler "
                 "b-roll/cinematic/footage/HD/4K or 'stock footage/photo/image'; video/stock/"
                 "historic/vintage only when part of the subject itself; no "
                 "mood adjectives absent from the text."
@@ -530,7 +533,7 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             type=types.Type.STRING,
             description=(
                 "Medium query, English. First site archive: ONLY the name or ONLY the place, no "
-                "year. First site stock: 2-4 words, object + context. Same filler-word rules as "
+                "year. First site stock: DIRECT scene query, 2-4 words, the scene and its main object. Same filler-word rules as "
                 "query_narrow."
             ),
         ),
@@ -539,8 +542,8 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             nullable=True,
             description=(
                 "Broadest query, English. First site archive: ordinary stock phrasing of the same "
-                "scene for pexels/pixabay, 2-4 words. First site stock: 1-2 words, the general "
-                "image. null ONLY when the segment has no visible scene at all (silence, black "
+                "scene for pexels/pixabay, 2-4 words. First site stock: GENERAL setting, 1-2 words, no proper "
+                "names. null ONLY when the segment has no visible scene at all (silence, black "
                 "screen, title/credits card, bare on-screen text)."
             ),
         ),

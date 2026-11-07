@@ -349,6 +349,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 DEFAULT_SEARCH_INPUT = "requests.json"
+# SRT с начальными временами сегментов (final.srt - тот же файл, что нумерует requests.json).
+DEFAULT_SRT_PATH = "final.srt"
 DEFAULT_LINKS_OUTPUT = "links.txt"
 DEFAULT_MISSING_OUTPUT = "missing.txt"
 DEFAULT_BACKUP_LINKS_OUTPUT = "backup_links.txt"
@@ -442,6 +444,29 @@ def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
 
 
 SOURCES_MODE, _SOURCES_MODE_VALID = parse_sources_mode(_SOURCES_MODE_RAW)
+
+# Окно вступления, сек: сегмент, начало которого строго раньше, - только стоковое видео,
+# без архива и без фото-запасного; пустой результат - пропуск. Имя INTRO_SECONDS - то же, что в select_coverage.py.
+DEFAULT_INTRO_SECONDS = 1200.0
+
+
+def intro_seconds_from_env(raw: Optional[str]) -> float:
+    """Разбор INTRO_SECONDS: пусто - DEFAULT_INTRO_SECONDS; не число или отрицательное - предупреждение
+    и значение по умолчанию (молчаливых подстановок нет)."""
+    if raw is None or not raw.strip():
+        return DEFAULT_INTRO_SECONDS
+    try:
+        v = float(raw)
+    except ValueError:
+        logging.warning("INTRO_SECONDS=%r не число - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    if not math.isfinite(v) or v < 0:
+        logging.warning("INTRO_SECONDS=%r должно быть неотрицательным числом - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    return v
+
+
+INTRO_SECONDS = intro_seconds_from_env(os.environ.get("INTRO_SECONDS"))
 
 # Режим медиа (env MEDIA_MODE): 1 = смешанный, 2 = только видео, 3 = только фото.
 # Читается ОДИН раз в amain (parse_media_mode) и дальше лежит в Context.media_mode.
@@ -1215,6 +1240,8 @@ class SegmentSpec:
     entity_keywords: list[str]
     skip: bool = False  # select_coverage.py: True - сегмент не искать, сразу в missing
     min_duration: Optional[float] = None  # сек; нужен только видео-сегментам (type == "video")
+    # Начало сегмента, сек, из SRT по номеру реплики (amain). None - времени нет: вступление не назначается.
+    start_s: Optional[float] = None
 
 
 @dataclass
@@ -2513,12 +2540,74 @@ def _entity_name_query(seg: SegmentSpec) -> Optional[str]:
     return None
 
 
+def is_intro(seg: "SegmentSpec", intro_seconds: Optional[float] = None) -> bool:
+    """Чистая функция: сегмент во вступлении, если его начало строго раньше intro_seconds.
+    Начало ровно на границе - уже не вступление. Нет времени начала - не вступление."""
+    if seg.start_s is None:
+        return False
+    limit = INTRO_SECONDS if intro_seconds is None else intro_seconds
+    return seg.start_s < limit
+
+
+def archive_allowed(seg: "SegmentSpec", mode: Optional[int] = None, intro_seconds: Optional[float] = None) -> bool:
+    """Правило (d): архивный сайт - только для is_entity вне вступления.
+    Режим источников SOURCES_ARCHIVE (только архивные) - явный выбор пользователя, правило там не действует."""
+    if mode is None:
+        mode = SOURCES_MODE
+    if mode == SOURCES_ARCHIVE:
+        return True
+    return bool(seg.is_entity) and not is_intro(seg, intro_seconds)
+
+
+def allowed_sites(seg: "SegmentSpec", mode: Optional[int] = None, intro_seconds: Optional[float] = None) -> list:
+    """Сайты сегмента с учётом правила (d). Порядок, который дала модель, сохраняется.
+    Если архив запрещён и после отсева не осталось ничего, кроме архива, - берётся сток по умолчанию."""
+    sites = [x for x in _pixabay_first(list(seg.sites)) if x in SITE_SEARCH_FUNCS]
+    if archive_allowed(seg, mode, intro_seconds):
+        return sites
+    kept = [x for x in sites if x not in ARCHIVE_SITES]
+    if kept or not any(x in ARCHIVE_SITES for x in sites):
+        return kept
+    return _pixabay_first(list(STOCK_SITES))
+
+
+def _strip_names(q: str, names: list) -> str:
+    """Убирает имена (целые слова, без учёта регистра) из запроса; лишние пробелы схлопываются."""
+    out = q
+    for n in names:
+        out = re.sub(r"\b" + re.escape(n) + r"\b", " ", out, flags=re.IGNORECASE)
+    return " ".join(out.split())
+
+
+def intro_search_view(seg: "SegmentSpec", media_mode: int, intro_seconds: Optional[float] = None) -> "SegmentSpec":
+    """Правило (c): вид сегмента для поиска во вступлении. Вне вступления - сам сегмент.
+    Только стоковые сайты; is_entity считается false; имена из трёх запросов убираются (обобщение
+    без модели: если запрос после этого пуст - берётся другой запрос); тип - видео в режимах 1 и 2,
+    фото в режиме 3 (там фото - единственный тип)."""
+    if not is_intro(seg, intro_seconds):
+        return seg
+    names = [kw.strip() for kw in (seg.entity_keywords or []) if kw and kw.strip() and _is_latin_text(kw.strip())]
+    narrow = _strip_names(seg.query_narrow, names)
+    medium = _strip_names(seg.query_medium, names)
+    broad = _strip_names(seg.query_broad, names) if seg.query_broad else ""
+    return dc_replace(
+        seg,
+        sites=_pixabay_first(list(STOCK_SITES)),
+        is_entity=False,
+        entity_keywords=[],
+        query_narrow=narrow or broad or seg.query_narrow,
+        query_medium=medium or broad or seg.query_medium,
+        query_broad=broad or None,
+        type="image" if media_mode == 3 else "video",
+    )
+
+
 def build_cascade(seg: SegmentSpec, mode: Optional[int] = None) -> list[Variant]:
     """Чистая функция (без сети и ctx): упорядоченный список вариантов запроса.
     Режим источников SOURCES_ARCHIVE (только архивные): broad (он идёт только на pixabay/pexels) не строится."""
     if mode is None:
         mode = SOURCES_MODE
-    seg_sites = [x for x in _pixabay_first(list(seg.sites)) if x in SITE_SEARCH_FUNCS]
+    seg_sites = allowed_sites(seg, mode)  # правило (d): архив - только is_entity вне вступления
     archive_first = bool(seg_sites) and seg_sites[0] in ARCHIVE_SITES
 
     if archive_first:
@@ -2874,49 +2963,102 @@ async def _cascade_normal(
     return None, None, rejected_pool
 
 
-async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
-    # 1) родной тип, нормальные условия
-    url, backup_url, rejected_native = await _cascade_normal(ctx, seg, build_cascade(seg))
-    if url:
-        return url, backup_url
+def _how(ctx: Context, seg: SegmentSpec) -> str:
+    """Причина принятия итогового кандидата (для сводки переключений)."""
+    chosen = ctx.primary_cands.get(seg.index)
+    return chosen.reject_reason if chosen is not None else "abs/rank"
 
-    # 2) только режим 1: другой тип по тем же запросам, тоже нормальные условия
-    alt: Optional[SegmentSpec] = None
-    rejected_alt: list[Candidate] = []
-    if should_switch_type(ctx.media_mode, False):
-        alt = dc_replace(seg, type=other_media_type(seg.type))
+
+def _mark_pass(ctx: Context, seg: SegmentSpec, pass_type: str) -> None:
+    """Проход по типу pass_type: если он не родной тип сегмента, это попытка переключения (для сводки)."""
+    if pass_type != seg.type:
         ctx.switch_attempted.add(seg.index)
-        url, backup_url, rejected_alt = await _cascade_normal(ctx, alt, alt_cascade(alt))
-        if url:
-            chosen = ctx.primary_cands.get(seg.index)
-            how = chosen.reject_reason if chosen is not None else "abs/rank"
-            ctx.switch_final[seg.index] = alt.type
-            ctx.switch_how[how] += 1
-            logging.info("Сегмент %s: тип %s -> %s, найден по %s", seg.index, seg.type, alt.type, how)
-            return url, backup_url
 
-    # 3) Никто не принят ни по одному типу: best-effort. Берём лучшего среди оценённых по РОДНОМУ
-    # типу; кандидатов другого типа - только если по родному не оценён ни один (иначе тип сегмента
-    # не меняется из-за слабого кандидата).
-    pool, pool_seg = rejected_native, seg
-    if not pool and rejected_alt and alt is not None:
-        pool, pool_seg = rejected_alt, alt
-    if pool:
-        url, backup_url = await try_claim_pool(ctx, best_effort_order(pool), seg.index)
-        if url:
-            chosen = ctx.primary_cands.get(seg.index)
-            if chosen is not None:
-                ctx.site_stats.setdefault(chosen.stats_key or chosen.site, SiteStats()).best_effort_total += 1
-                _record_choice(ctx, chosen, seg.index)
-            if pool_seg is not seg:
-                ctx.switch_final[seg.index] = pool_seg.type
-                ctx.switch_how["best_effort"] += 1
-                logging.info(
-                    "Сегмент %s: тип %s -> %s, найден по best-effort (по родному типу кандидатов нет)",
-                    seg.index, seg.type, pool_seg.type,
-                )
-            return url, backup_url
-    return None, None
+
+def _mark_final(ctx: Context, seg: SegmentSpec, final_type: str, how: str) -> None:
+    """Итоговый тип: если он не родной, запоминаем (effective_segment для backup) и считаем причину."""
+    if final_type != seg.type:
+        ctx.switch_final[seg.index] = final_type
+        ctx.switch_how[how] += 1
+        logging.info("Сегмент %s: тип %s -> %s, найден по %s", seg.index, seg.type, final_type, how)
+
+
+async def _best_effort(
+    ctx: Context, seg: SegmentSpec, pools: list,
+) -> tuple[Optional[str], Optional[str]]:
+    """Запасной вариант, когда ни один тип не принят по нормальным условиям.
+    pools - [(вид сегмента, отклонённые кандидаты)] в порядке проходов; берётся первый непустой.
+    Пул видео (первый проход в режиме 1) хранится отдельно и не смешивается с пулом фото."""
+    pool_seg, pool = next(((sg, p) for sg, p in pools if p), (None, None))
+    if not pool:
+        return None, None
+    url, backup_url = await try_claim_pool(ctx, best_effort_order(pool), seg.index)
+    if not url:
+        return None, None
+    chosen = ctx.primary_cands.get(seg.index)
+    if chosen is not None:
+        ctx.site_stats.setdefault(chosen.stats_key or chosen.site, SiteStats()).best_effort_total += 1
+        _record_choice(ctx, chosen, seg.index)
+    if pool_seg.type != seg.type:
+        ctx.switch_final[seg.index] = pool_seg.type
+        ctx.switch_how["best_effort"] += 1
+        logging.info(
+            "Сегмент %s: тип %s -> %s, найден по best-effort (по прочим типам кандидатов нет)",
+            seg.index, seg.type, pool_seg.type,
+        )
+    return url, backup_url
+
+
+async def _process_single(
+    ctx: Context, seg: SegmentSpec, orig: SegmentSpec,
+) -> tuple[Optional[str], Optional[str]]:
+    """Один тип (режимы 2 и 3, вступление): каскад этого типа, затем best-effort по нему же.
+    seg - вид для поиска, orig - исходный сегмент (для учёта переключения)."""
+    _mark_pass(ctx, orig, seg.type)
+    url, backup_url, rejected = await _cascade_normal(ctx, seg, build_cascade(seg))
+    if url:
+        _mark_final(ctx, orig, seg.type, _how(ctx, orig))
+        return url, backup_url
+    return await _best_effort(ctx, orig, [(seg, rejected)])
+
+
+async def _process_mixed(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+    """Режим 1 (микс), обычный сегмент: видео по всем трём запросам; фото по тем же трём запросам
+    - только если ни одно видео не принято. Отклонённые видео-кандидаты сохраняются в rejected_v
+    до фото-прохода и используются первыми в best-effort."""
+    seg_v = dc_replace(seg, type="video")
+    seg_p = dc_replace(seg, type="image")
+    _mark_pass(ctx, seg, "video")
+    url, backup_url, rejected_v = await _cascade_normal(ctx, seg_v, alt_cascade(seg_v))
+    if url:
+        _mark_final(ctx, seg, "video", _how(ctx, seg))
+        return url, backup_url
+    _mark_pass(ctx, seg, "image")
+    url, backup_url, rejected_p = await _cascade_normal(ctx, seg_p, build_cascade(seg_p))
+    if url:
+        _mark_final(ctx, seg, "image", _how(ctx, seg))
+        return url, backup_url
+    return await _best_effort(ctx, seg, [(seg_v, rejected_v), (seg_p, rejected_p)])
+
+
+async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
+    """Поиск одного сегмента по порядку проходов.
+    Вступление (start_s < intro_seconds): только стоковое видео (режим 3 - фото), без архива и без
+    фото-запасного; ничего не найдено - сегмент пропущен (уходит в missing), фото не ищется.
+    Режим 1: видео по трём запросам, затем фото по трём запросам.
+    Режимы 2 и 3: один тип, как раньше."""
+    if is_intro(seg):
+        view = intro_search_view(seg, ctx.media_mode)
+        url, backup_url = await _process_single(ctx, view, seg)
+        if not url:
+            logging.info(
+                "Сегмент %s: вступление, подходящий %s не найден - сегмент пропущен, фото не ищется.",
+                seg.index, "видео" if view.type == "video" else "фото",
+            )
+        return url, backup_url
+    if ctx.media_mode == 1:
+        return await _process_mixed(ctx, seg)
+    return await _process_single(ctx, seg, seg)
 
 
 async def process_segment(ctx: Context, seg: SegmentSpec) -> tuple[int, Optional[str], Optional[str]]:
@@ -2963,15 +3105,19 @@ async def _claim_first(
     return None, None
 
 
-def backup_candidate_sites(seg_sites, primary_site: str, mode: Optional[int] = None) -> list:
+def backup_candidate_sites(seg_sites, primary_site: str, mode: Optional[int] = None,
+                           allow_archive: bool = True) -> list:
     """Сайты для backup: seg.sites + SEARCH_BACKUP_EXTRA_SITES (+ pexels/pixabay, если primary - loc).
-    Режим источников фильтрует результат целиком (SOURCES_MIX - без изменений)."""
+    Режим источников фильтрует результат целиком (SOURCES_MIX - без изменений).
+    allow_archive=False (правило (d): не is_entity или вступление) - архивные сайты убираются."""
     candidate_sites = list(seg_sites) + BACKUP_EXTRA_SITES
     # Если primary был loc, обязательно добавляем pexels и pixabay в список резерва
     if primary_site == "loc":
         for stock_site in ("pexels", "pixabay"):
             if stock_site not in candidate_sites:
                 candidate_sites.append(stock_site)
+    if not allow_archive:
+        candidate_sites = [x for x in candidate_sites if x not in ARCHIVE_SITES]
     return filter_sites_by_mode(candidate_sites, mode)
 
 
@@ -2982,9 +3128,12 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
         return None, None
     pkey = cand_key(primary)
 
+    seg = intro_search_view(seg, ctx.media_mode)  # правило (c): во вступлении только сток
     cascade = build_cascade(seg)
 
-    candidate_sites = backup_candidate_sites(seg.sites, primary.site)
+    candidate_sites = backup_candidate_sites(
+        seg.sites, primary.site, allow_archive=archive_allowed(seg),
+    )
 
     ordered: list[str] = []
     for site in candidate_sites:
@@ -3196,6 +3345,36 @@ def split_skipped(specs: list[SegmentSpec]) -> tuple[list[SegmentSpec], list[int
     return [sg for sg in specs if not sg.skip], sorted(sg.index for sg in specs if sg.skip)
 
 
+_SRT_TIME_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,.](\d{3})")
+
+
+def load_srt_starts(path: str) -> dict:
+    """Начала сегментов из SRT: номер реплики -> начало в секундах. Номер - тот же, что ключ в requests.json.
+    Нет файла - предупреждение и пустой словарь: тогда вступление не назначается ни одному сегменту."""
+    starts: dict = {}
+    if not os.path.isfile(path):
+        logging.warning(
+            "SRT-файл %s не найден: времена начала сегментов не известны, вступление не назначается.", path,
+        )
+        return starts
+    with open(path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if len(lines) < 2 or "-->" not in lines[1]:
+            continue
+        try:
+            idx = int(lines[0])
+        except ValueError:
+            continue
+        m = _SRT_TIME_RE.search(lines[1])
+        if not m:
+            continue
+        h, mi, se, ms = m.groups()
+        starts[idx] = int(h) * 3600 + int(mi) * 60 + int(se) + int(ms) / 1000.0
+    return starts
+
+
 def load_requests(path: str) -> list[SegmentSpec]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -3351,6 +3530,19 @@ async def amain(args: argparse.Namespace) -> int:
     # skip == True: не ищем (ни сайты, ни CLIP, ни каскад, ни backup), в конце идут в missing.
     # Дальше `segments` - только сегменты для поиска, поэтому encode_scenes, rel_top_n,
     # прогресс run_search и backup-проход считаются от них, а не от полного списка.
+    # Правило (c): начало сегмента - из SRT по номеру реплики (тот же номер, что ключ в requests.json).
+    starts = load_srt_starts(getattr(args, "srt", DEFAULT_SRT_PATH))
+    all_segments = [dc_replace(sg, start_s=starts.get(sg.index)) for sg in all_segments]
+    no_start = sorted(sg.index for sg in all_segments if sg.index not in starts)
+    if no_start:
+        shown = ", ".join(map(str, no_start[:20])) + (" ..." if len(no_start) > 20 else "")
+        logging.warning(
+            "Сегменты без времени начала в SRT (номера: %s): вступление к ним не применяется.", shown,
+        )
+    logging.info(
+        "Вступление: сегментов с началом раньше %s с (INTRO_SECONDS): %s.",
+        INTRO_SECONDS, sum(1 for sg in all_segments if is_intro(sg)),
+    )
     segments, skipped = split_skipped(all_segments)
     logging.info("Загружено сегментов: %s", len(all_segments))
     if skipped:
@@ -4262,11 +4454,11 @@ def _selftest() -> int:
     _orig = _bs(1, "image", 4.0)
     assert effective_segment(_orig, {}) is _orig and _orig.type == "image"
 
-    # каскад запасного типа: для video wikimedia убирается, для image - нет
+    # каскад запасного типа: для video wikimedia убирается; для image без is_entity архив тоже убирается (правило (d))
     _av = alt_cascade(_bs(1, "video", 4.0))
     assert _av and all("wikimedia" not in v.sites and "pexels" in v.sites for v in _av), _av
     _ai = alt_cascade(_bs(1, "image", 4.0))
-    assert _ai and all("wikimedia" in v.sites for v in _ai), _ai
+    assert _ai and all("wikimedia" not in v.sites and "pexels" in v.sites for v in _ai), _ai
     assert "переключено 3" in summarize_type_switch(3, 2, Counter({"abs": 1, "best_effort": 1}))
 
     # process_segment_inner с подменой run_variant/finalize_candidate (без сети)
@@ -4302,12 +4494,12 @@ def _selftest() -> int:
         _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
         assert _r[0] == "https://cdn.example/pexels/v1", _r
         assert _c.switch_final == {5: "video"} and _c.switch_attempted == {5} and _c.switch_how["abs"] == 1
-        # режим 1: родной принят -> другой тип не трогаем
+        # режим 1: видео ищется первым; принятое видео - итог, фото не ищется (порядок этапа 4)
         _types_seen.clear()
         _g["run_variant"] = _mk_rv({"image": [_pc("i1", True, "abs")], "video": [_pc("v1", True, "abs")]})
         _c = _mkctx(1)
         _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
-        assert _r[0].endswith("/i1") and not _c.switch_attempted and set(_types_seen) == {"image"}, _types_seen
+        assert _r[0].endswith("/v1") and _c.switch_final == {5: "video"} and set(_types_seen) == {"video"}, _types_seen
         # режимы 2 и 3: переключения нет, best-effort на родном типе
         for _m in (2, 3):
             _types_seen.clear()
@@ -4316,11 +4508,11 @@ def _selftest() -> int:
             _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
             assert _r[0].endswith("/i1") and not _c.switch_final and not _c.switch_attempted, (_m, _r)
             assert set(_types_seen) == {"image"}, _types_seen
-        # режим 1: никто не принят ни по одному типу -> best-effort родного типа, тип не меняется
+        # режим 1: никто не принят ни по одному типу -> best-effort из пула видео (он первый), тип сменился на видео
         _g["run_variant"] = _mk_rv({"image": [_pc("i1", False, "floor", 0.1)], "video": [_pc("v1", False, "rank_miss", 0.2)]})
         _c = _mkctx(1)
         _r = asyncio.run(process_segment_inner(_c, _bs(5, "image", 4.0, sites=("pexels",))))
-        assert _r[0].endswith("/i1") and not _c.switch_final and _c.switch_attempted == {5}, _r
+        assert _r[0].endswith("/v1") and _c.switch_final == {5: "video"} and _c.switch_attempted == {5} and _c.switch_how["best_effort"] == 1, _r
         # режим 1: по родному ничего не оценено, у другого типа только слабые -> best-effort другого типа
         _g["run_variant"] = _mk_rv({"video": [_pc("v1", False, "rank_miss", 0.2)]})
         _c = _mkctx(1)
@@ -4933,6 +5125,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Подбор медиа для сегментов requests.json")
     parser.add_argument("--input", default=os.environ.get("SEARCH_INPUT", DEFAULT_SEARCH_INPUT))
+    parser.add_argument(
+        "--srt", default=os.environ.get("SEARCH_SRT", DEFAULT_SRT_PATH),
+        help="SRT с временами начала сегментов (номера как в requests.json) - для вступления (INTRO_SECONDS)",
+    )
     parser.add_argument("--links-output", default=os.environ.get("SEARCH_LINKS_OUTPUT", DEFAULT_LINKS_OUTPUT))
     parser.add_argument(
         "--backup-links-output",
