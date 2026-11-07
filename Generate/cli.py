@@ -416,9 +416,13 @@ def _text_family_line(cfg: Config, family: tuple) -> str:
 
 
 def _gemini_options(cfg: Config, family: tuple) -> dict:
-    return {"models": tuple(_text_chain(cfg, family)), "rpm_limit": cfg.gemini_rpm_limit,
+    opts = {"models": tuple(_text_chain(cfg, family)), "rpm_limit": cfg.gemini_rpm_limit,
             "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit,
             "transient_switch_after": cfg.gemini_transient_switch_after}
+    if family[1] == "openrouter":
+        # число отправок в окне из конфига: по нему считаются потоки OpenRouter; для gemini ключа нет
+        opts["openrouter_sends_per_window"] = cfg.openrouter_sends_per_window
+    return opts
 
 
 def _make_transport(cfg: Config, family: tuple):

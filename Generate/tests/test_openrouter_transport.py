@@ -5,7 +5,6 @@ import logging
 import httpx
 import pytest
 
-from Generate.core.gemini_pool import KeyPool, Outcome
 from Generate.core.gemini_prompts import GeminiInputError
 from Generate.core.openrouter_transport import OpenRouterTransport, load_openrouter_keys
 
@@ -23,6 +22,10 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+    def sleep(self, seconds: float) -> None:
+        # пауза в фейковых часах: только сдвиг времени, реального ожидания нет
+        self.now += seconds
 
 
 class FakeResponse:
@@ -67,27 +70,24 @@ def ok_body(content):
 
 
 def make_transport(responses=(), error=None, **kwargs):
+    # планировщик создаёт сам транспорт по списку ключей; часы фейковые, пауза — сдвиг часов
     clock = FakeClock()
     keys = [("OPENROUTER1", KEY_A), ("OPENROUTER2", KEY_B)]
-    pool = KeyPool(keys, rpm_limit=20, tpm_limit=1_000_000, rpd_limit=1000,
-                   clock=clock, poll_interval=0.001)
-    released = []
-    real_release = pool.release
-
-    def spy_release(lease, outcome, model, retry_after=None):
-        released.append((outcome, retry_after))
-        return real_release(lease, outcome, model, retry_after=retry_after)
-
-    pool.release = spy_release  # запись исходов для проверок
     client = FakeClient(responses, error)
-    transport = OpenRouterTransport(pool=pool, client=client, **kwargs)
-    return transport, client, released
+    transport = OpenRouterTransport(keys=keys, client=client, clock=clock, sleep=clock.sleep, **kwargs)
+    return transport, client, transport._scheduler  # планировщик для проверок состояния ключей
+
+
+def assert_no_penalty(sched):
+    # ошибка не по вине ключа: ни блокировки, ни суточной квоты
+    assert sched._blocked_until["OPENROUTER1"] == 0.0
+    assert not sched._day_exhausted
 
 
 def test_200_returns_content_and_releases_success():
-    t, client, released = make_transport([FakeResponse(200, ok_body('{"segments": []}'))])
+    t, client, sched = make_transport([FakeResponse(200, ok_body('{"segments": []}'))])
     assert t.generate_json(MODEL, "sys", "usr", SCHEMA) == '{"segments": []}'
-    assert released == [(Outcome.SUCCESS, None)]
+    assert_no_penalty(sched)
     call = client.calls[0]
     assert call["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert call["headers"]["Authorization"] == f"Bearer {KEY_A}"
@@ -106,7 +106,7 @@ def test_json_object_mode_when_schema_disabled():
 
 
 def test_429_plain_body_is_rate_limited_with_retry_after():
-    t, _, released = make_transport(
+    t, _, sched = make_transport(
         [FakeResponse(429, text="Too many requests", headers={"Retry-After": "7"})])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
@@ -115,11 +115,13 @@ def test_429_plain_body_is_rate_limited_with_retry_after():
     assert err.daily_quota is False
     assert err.retry_after == 7.0
     assert not getattr(err, "key_exhausted_only", False)
-    assert released == [(Outcome.RATE_LIMITED, 7.0)]
+    # блокируется только этот ключ до конца Retry-After; суточной квоты нет
+    assert sched._blocked_until["OPENROUTER1"] == START + 7
+    assert not sched._day_exhausted
 
 
 def test_429_with_daily_in_body_is_daily_quota_key_exhausted_only():
-    t, _, released = make_transport(
+    t, _, sched = make_transport(
         [FakeResponse(429, text="Free-models-per-day limit exceeded")])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
@@ -127,7 +129,10 @@ def test_429_with_daily_in_body_is_daily_quota_key_exhausted_only():
     assert err.status == 429
     assert err.daily_quota is True
     assert err.key_exhausted_only is True
-    assert released == [(Outcome.DAILY_QUOTA, None)]
+    # суточная квота: исчерпана только пара (ключ, модель), блокировки ключа нет
+    assert ("OPENROUTER1", MODEL) in sched._day_exhausted
+    assert ("OPENROUTER2", MODEL) not in sched._day_exhausted
+    assert sched._blocked_until["OPENROUTER1"] == 0.0
 
 
 def test_429_log_redacts_key_like_text(caplog):
@@ -143,7 +148,7 @@ def test_429_log_redacts_key_like_text(caplog):
 
 
 def test_402_raises_payment_required_not_transient():
-    t, _, released = make_transport([FakeResponse(402, text="insufficient credits")])
+    t, _, sched = make_transport([FakeResponse(402, text="insufficient credits")])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     err = info.value
@@ -151,47 +156,47 @@ def test_402_raises_payment_required_not_transient():
     assert err.code == "PAYMENT_REQUIRED"
     assert err.daily_quota is False
     assert err.status not in (500, 503, 504)
-    assert released == [(Outcome.SERVER_ERROR, None)]
+    assert_no_penalty(sched)
 
 
 def test_401_raises_unauthorized_and_does_not_leak_key(caplog):
     caplog.set_level(logging.ERROR, logger="Generate.openrouter_transport")
-    t, _, released = make_transport([FakeResponse(401, text="invalid key")])
+    t, _, sched = make_transport([FakeResponse(401, text="invalid key")])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     err = info.value
     assert err.status == 401
     assert err.code == "UNAUTHORIZED"
-    assert released == [(Outcome.SERVER_ERROR, None)]
+    assert_no_penalty(sched)
     assert KEY_A not in str(err)
     assert KEY_A not in caplog.text
 
 
 def test_503_raises_unavailable():
-    t, _, released = make_transport([FakeResponse(503, text="busy")])
+    t, _, sched = make_transport([FakeResponse(503, text="busy")])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     assert info.value.status == 503
     assert info.value.code == "UNAVAILABLE"
-    assert released == [(Outcome.SERVER_ERROR, None)]
+    assert_no_penalty(sched)
 
 
 def test_network_error_raises_code_network():
-    t, _, released = make_transport(error=httpx.ConnectError("boom"))
+    t, _, sched = make_transport(error=httpx.ConnectError("boom"))
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     assert info.value.status is None
     assert info.value.code == "NETWORK"
-    assert released == [(Outcome.NETWORK_ERROR, None)]
+    assert_no_penalty(sched)
 
 
 def test_empty_choices_raises_empty_response():
-    t, _, released = make_transport([FakeResponse(200, {"choices": []})])
+    t, _, sched = make_transport([FakeResponse(200, {"choices": []})])
     with pytest.raises(Exception) as info:
         t.generate_json(MODEL, "s", "u", SCHEMA)
     assert info.value.code == "EMPTY_RESPONSE"
     assert info.value.status == 500
-    assert released == [(Outcome.SERVER_ERROR, None)]
+    assert_no_penalty(sched)
 
 
 def test_load_keys_none_set_raises_and_names_variables():

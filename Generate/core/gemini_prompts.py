@@ -760,13 +760,15 @@ def _provider_key_count(provider: str) -> int:
     return len(_pool_module().load_gemini_keys(os.environ))
 
 
-def openrouter_thread_count(key_count: int) -> int:
-    """Потоки для OpenRouter: ключи × SENDS_PER_WINDOW. Лимит MAX_PARALLEL_BATCHES для OpenRouter не действует."""
-    try:
-        from . import openrouter_transport as ort
-    except ImportError:  # плоский импорт, как в остальных модулях core
-        import openrouter_transport as ort  # type: ignore
-    return ort.parallel_sends_limit(key_count)
+def openrouter_thread_count(key_count: int, sends_per_window: Optional[int] = None) -> int:
+    """Потоки для OpenRouter: ключи × настроенное openrouter_sends_per_window.
+
+    Константа SENDS_PER_WINDOW здесь не используется. Лимит MAX_PARALLEL_BATCHES для OpenRouter не действует.
+    Значение не передано: один поток на ключ.
+    """
+    # значение приходит из конфига через gemini_options; без него — по одному потоку на ключ
+    per_key = 1 if sends_per_window is None else max(1, int(sends_per_window))
+    return max(1, key_count) * per_key
 
 
 class _WaveJob:
