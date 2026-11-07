@@ -40,6 +40,11 @@ on:
         description: 'Вступление, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком).'
         required: false
         type: string
+        default: "1200"
+      coverage_always_seconds:
+        description: 'Всегда искать первые N секунд ролика, сек: эти секунды ищутся при любом coverage_percent, отдельно от окна вступления (intro_seconds). По умолчанию 10.'
+        required: false
+        type: string
         default: "10"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
@@ -116,6 +121,7 @@ jobs:
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
         TEXT_MODEL: ${{ inputs.text_model }}
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/generate_queries.py --input final.srt --output requests.json --text-model "$TEXT_MODEL"
 
@@ -241,7 +247,8 @@ jobs:
     - name: Select segments by coverage percent
       env:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
-        INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
+        COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '10' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/select_coverage.py requests.json final.srt
 

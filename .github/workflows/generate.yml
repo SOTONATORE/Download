@@ -89,7 +89,7 @@ on:
         description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
         required: false
         type: number
-        default: 10
+        default: 1200
       preset:
         description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
