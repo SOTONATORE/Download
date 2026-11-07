@@ -35,9 +35,9 @@ on:
         type: number
         default: 100
       intro_seconds:
-        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
+        description: "Вступление, сек: сегменты, чьё начало раньше этого времени, всегда идут в видео, даже сверх бюджета video_percent. По умолчанию 1200 (то же окно, что у поиска в Download)"
         type: number
-        default: 10
+        default: 1200
       limit_clips:
         # GitHub Actions не поддерживает type: integer, поэтому number
         description: "0 = все клипы из missing; N > 0 = первые N клипов по возрастанию номера"
@@ -260,7 +260,7 @@ jobs:
               video_profile=os.environ["VIDEO_PROFILE"],
               photo_profile=os.environ.get("PHOTO_PROFILE") or None,
               video_percent=os.environ.get("VIDEO_PERCENT") or "100",
-              intro_seconds=os.environ.get("INTRO_SECONDS") or "10",
+              intro_seconds=os.environ.get("INTRO_SECONDS") or "1200",
               limit_clips=limit,
               preset=os.environ.get("PRESET") or "none",
               text_model=os.environ.get("TEXT_MODEL") or None,

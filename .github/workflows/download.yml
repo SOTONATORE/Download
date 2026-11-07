@@ -36,11 +36,16 @@ on:
         required: false
         type: string
         default: "100"
-      intro_seconds:
-        description: 'Вступление, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком).'
+      coverage_always_seconds:
+        description: 'Покрытие, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком). По умолчанию 10. Не то же, что intro_seconds.'
         required: false
         type: string
         default: "10"
+      intro_seconds:
+        description: 'Вступление, сек: сегменты, чьё начало раньше этого времени, ищутся только в стоке (без архива; имена в запросах обобщаются моделью по флагу is_intro; при режиме 3 - только фото). По умолчанию 1200.'
+        required: false
+        type: string
+        default: "1200"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
         required: false
@@ -107,6 +112,8 @@ jobs:
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
+        # Тот же порог, что у поиска: флаг is_intro в блоках сегментов для генератора запросов
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
         TEXT_MODEL: ${{ inputs.text_model }}
         PYTHONUNBUFFERED: "1"
       run: python Download/generate_queries.py --input final.srt --output requests.json --text-model "$TEXT_MODEL"
@@ -233,7 +240,7 @@ jobs:
     - name: Select segments by coverage percent
       env:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
-        INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
+        COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '10' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/select_coverage.py requests.json final.srt
 
@@ -262,6 +269,8 @@ jobs:
         SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
         SEARCH_SOURCES_MODE: ${{ inputs.sources }}
         MEDIA_MODE: ${{ inputs.media_mode }}
+        # Окно вступления поиска (search.py): начало сегмента раньше этого времени - вступление
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
         # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
         # Значения ниже включены по итогам прогона на 126 сегментах
         SEARCH_SIM_MIN_THRESHOLD: "0.22"
