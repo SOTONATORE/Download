@@ -414,7 +414,8 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
                        managed=None, state=None, lock=None, pool=None, wave=None,
-                       progress: Optional[Callable[[dict], str]] = None) -> dict:
+                       progress: Optional[Callable[[dict], str]] = None,
+                       sends_per_window: Optional[int] = None) -> dict:
     """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state.
 
     managed: общий ManagedTransport прогона (цепочка моделей одна на оба вида); None: создаётся здесь.
@@ -514,6 +515,8 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     pool_kw = {} if pool is None else {"pool": pool, "wave": wave}
     # очередь прошлого запуска передаётся только когда она не пуста: вызов без неё остаётся прежним
     rework_kw = {} if not seeds else {"rework": seeds}
+    # число отправок OpenRouter передаётся только когда задано: вызов без него остаётся прежним
+    sends_kw = {} if sends_per_window is None else {"sends_per_window": sends_per_window}
     gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
-                        **extra, **pool_kw, **rework_kw)
+                        **extra, **pool_kw, **rework_kw, **sends_kw)
     return state

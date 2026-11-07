@@ -171,12 +171,15 @@ def _video_step(needed: list, *, segments, cfg, watch, prompts_path, profile, ti
     seen = watch.view(VIDEO_WAVE) if pool is not None else watch
     mark = 0 if pool is not None else watch.calls  # вызовы этой волны начинаются отсюда
     pool_kw = {} if pool is None else {"pool": pool, "wave": VIDEO_WAVE, "progress": progress}
-    # ключ openrouter_sends_per_window нужен только для числа потоков, а не для generate_and_store
+    # ключ openrouter_sends_per_window не принимает generate_and_store через **go_options: он передаётся отдельно
     go_options = {k: v for k, v in gemini_options.items() if k != "openrouter_sends_per_window"}
+    sends = gemini_options.get("openrouter_sends_per_window")
+    sends_kw = {} if sends is None else {"sends_per_window": sends}
     try:
         return go.generate_and_store(
             segments, needed, cfg, watch, prompts_path,
-            profile=profile, timing=timing, managed=managed, state=state, lock=lock, **pool_kw, **go_options)
+            profile=profile, timing=timing, managed=managed, state=state, lock=lock, **pool_kw, **go_options,
+            **sends_kw)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
         if _is_hard(exc, seen, mark):
@@ -248,8 +251,11 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         pool_kw = {} if pool is None else {"pool": pool, "wave": PHOTO_WAVE}
         # очередь прошлого запуска передаётся только когда она не пуста: вызов без неё остаётся прежним
         rework_kw = {} if not seeds else {"rework": seeds}
+        # число отправок OpenRouter из gemini_options; для gemini ключа нет, аргумент не передаётся
+        sends = gemini_options.get("openrouter_sends_per_window")
+        sends_kw = {} if sends is None else {"sends_per_window": sends}
         gp.generate_prompts(segments, pending, photo_cfg, managed, managed.active_model, on_batch=on_batch,
-                            **extra, **pool_kw, **rework_kw)
+                            **extra, **pool_kw, **rework_kw, **sends_kw)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
         if _is_hard(exc, seen, mark):

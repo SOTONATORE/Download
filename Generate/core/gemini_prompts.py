@@ -1140,7 +1140,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      on_batch: Optional[Callable[[list], None]] = None,
                      max_workers: Optional[int] = None, provider: str = "gemini",
                      pool: Optional["SharedBatchPool"] = None, wave: Optional[str] = None,
-                     rework: Optional[list] = None) -> list:
+                     rework: Optional[list] = None, sends_per_window: Optional[int] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -1190,7 +1190,8 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         # одиночная волна: число потоков по числу ключей провайдера; без ключей — один поток (как раньше)
         if max_workers is None:
             if provider == "openrouter":
-                max_workers = openrouter_thread_count(key_count)
+                # значение openrouter_sends_per_window из конфига; без него — один поток на ключ
+                max_workers = openrouter_thread_count(key_count, sends_per_window)
             else:
                 max_workers = key_count
             if max_workers < 1:
