@@ -100,4 +100,4 @@ def test_default_config_lists_vietnam():
     import yaml
     from pathlib import Path
     raw = yaml.safe_load((Path(vc.__file__).resolve().parent.parent / "config.default.yaml").read_text(encoding="utf-8"))
-    assert raw["exclude_countries"] == ["Vietnam"]
+    assert raw["exclude_countries"] == ["Vietnam", "China"]

@@ -99,6 +99,7 @@ COUNTRY_FIELD = "geolocation"
 COUNTRY_NAME_CODES = {
     "vietnam": "VN",
     "viet nam": "VN",
+    "china": "CN",
 }
 # Текст статуса экземпляра (ошибка рантайма при неудачном старте, SPEC 8.2).
 # UNVERIFIED: имя поля не найдено ни в репозитории, ни в производственном логе; официальный
