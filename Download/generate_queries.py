@@ -18,7 +18,9 @@ response_schema).
                            "gemini-3.1-flash-lite" - RPD 500, подтверждено на реальном
                            аккаунте; gemini-3.8-flash из цепочки исключена намеренно -
                            у неё RPD всего 20, что слишком мало для батчевой генерации)
-    GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
+    GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 25)
+    INTRO_SECONDS         - опционально, вступление, сек: сегмент, чьё начало строго раньше, получает
+                           строку is_intro: true в блоке (по умолчанию 1200; то же имя, что в search.py)
     GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
                            (по умолчанию 60; в SDK передаётся в миллисекундах)
     GENQ_SOURCES_MODE    - опционально, режим источников: 1 (микс, по умолчанию),
@@ -115,7 +117,12 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 # RPD 500 у обеих Flash-Lite моделей против RPD 20 у gemini-3.8-flash - проверено
 # напрямую в панели лимитов аккаунта (не только по статьям в вебе).
 DEFAULT_FALLBACK_MODELS = ["gemini-3.1-flash-lite"]
-DEFAULT_BATCH_SIZE = 100
+DEFAULT_BATCH_SIZE = 25
+# Вступление для флага is_intro: начало сегмента строго раньше этого времени (сек). Совпадает с окном поиска.
+DEFAULT_INTRO_SECONDS = 1200.0
+# Порог вступления, заданный в main() из env INTRO_SECONDS. None - строка is_intro в блоках не печатается
+# (так работают self-test и вызовы без main).
+INTRO_SECONDS_LIMIT: Optional[float] = None
 CONTEXT_WINDOW = 3
 # Окна контекста в блоке сегмента (build_segment_block): набираются целыми предложениями,
 # пока сумма слов не достигнет порога; верхней границы нет.
@@ -286,6 +293,53 @@ REQUIRED_ENTRY_KEYS = [
 MAX_NORMALIZE_WARNINGS = 20
 
 
+INTRO_SEGMENT_RULE = (
+    "INTRO SEGMENTS: a segment block with the line \"is_intro: true\" lies in the opening part of the video. "
+    "Its three queries (query_narrow, query_medium, query_broad) must contain NO proper names and NO named "
+    "objects: replace each name by its generic type - a person by role, a building by its type, a place by "
+    "its setting. Keep the stock search style of the STOCK rules (query_medium is the direct scene, query_narrow "
+    "a synonym query, query_broad the general setting, with the word limits given there) and the banned-word "
+    "list of GENERAL RULES. The three queries must still differ from each other. An intro segment is searched "
+    "only as stock, so its queries are written in stock style even where the sites rule above would name an "
+    "archive site. For an intro segment entity_keywords is [] and is_entity is false, because no name remains "
+    "in the queries; this overrides rules 5 and 6. The scene, the sites and the other rules stay as above.\n\n"
+)
+
+
+def intro_seconds_from_env(raw: Optional[str]) -> float:
+    """Разбор INTRO_SECONDS: пусто - DEFAULT_INTRO_SECONDS; не число или отрицательное - предупреждение
+    и DEFAULT_INTRO_SECONDS."""
+    if raw is None or not raw.strip():
+        return DEFAULT_INTRO_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logging.warning("INTRO_SECONDS=%r не число - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    if val < 0:
+        logging.warning("INTRO_SECONDS=%r должно быть неотрицательным числом - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    return val
+
+
+_SRT_START_RE = re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
+
+
+def segment_start_seconds(start: str) -> Optional[float]:
+    """Начало сегмента из строки SRT 'ЧЧ:ММ:СС,ммм' в секундах; не разобрано - None."""
+    m = _SRT_START_RE.search(start or "")
+    if not m:
+        return None
+    h, mi, se, ms = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(se) + int(ms) / 1000.0
+
+
+def is_intro_segment(seg: "Segment", intro_seconds: float) -> bool:
+    """Вступление: начало строго раньше intro_seconds (как is_intro в search.py). Нет времени - не вступление."""
+    t = segment_start_seconds(seg.start)
+    return t is not None and t < intro_seconds
+
+
 def build_system_instruction(
     mode: int = DEFAULT_SOURCES_MODE, junk_words: tuple[str, ...] = JUNK_KIND_WORDS,
     media_mode: int = DEFAULT_MEDIA_MODE,
@@ -330,6 +384,7 @@ def build_system_instruction(
         ),
     }.get(media_mode, "")
 
+    intro_rule = "" if mode == SOURCES_ARCHIVE else INTRO_SEGMENT_RULE
     instruction = f"""\
 You generate search-query instructions for stock/archival video and photo sourcing for a video's \
 scenes. You receive numbered scene segments (number = the segment's sequential position in the \
@@ -445,7 +500,7 @@ line and the segments after the current one are not used for the scene.
 (without proper nouns, even if the context names them).
 - Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode {SOURCES_ARCHIVE}).
 
-GENERAL RULES:
+{intro_rule}GENERAL RULES:
 - Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
 words.
 - NEVER use these filler words in any query: b-roll, cinematic, footage, HD, 4K, historical, and the \
@@ -919,6 +974,9 @@ def build_segment_block(
     непустого предложения, оно выводится в строке Sentence без маркера."""
     sen = by_segment[seg.index]
     lines = [f"### Segment {seg.index}", f"Timing: {seg.start} --> {seg.end}"]
+    # Флаг вступления для модели: печатается только когда порог задан (main); self-test его не видит.
+    if INTRO_SECONDS_LIMIT is not None:
+        lines.append(f"is_intro: {'true' if is_intro_segment(seg, INTRO_SECONDS_LIMIT) else 'false'}")
     text = " ".join((seg.text or "").split())
 
     if text:
@@ -3559,9 +3617,9 @@ def run_self_tests() -> int:
             rsegs = parse_srt(real_srt)
             r_idx = merge_segments_into_sentences(rsegs)
             rb = make_batches(rsegs, DEFAULT_BATCH_SIZE, CONTEXT_WINDOW)
-            pr1 = build_prompt(rb[0][0], rb[0][1], rb[0][2], sentence_index=r_idx)
-            pr2 = build_prompt(rb[1][0], rb[1][1], rb[1][2], sentence_index=r_idx)
-            check("real batch: сегмент 100 в батче 1, 101 в батче 2",
+            pr1 = build_prompt(rb[3][0], rb[3][1], rb[3][2], sentence_index=r_idx)
+            pr2 = build_prompt(rb[4][0], rb[4][1], rb[4][2], sentence_index=r_idx)
+            check("real batch (размер 25): сегмент 100 в батче 4, 101 в батче 5",
                   ("### Segment 100\n" in pr1, "### Segment 101\n" in pr1, "### Segment 101\n" in pr2), (True, False, True))
             check("real batch: предложение 100-101 целиком в обоих батчах",
                   ("<<" in pr1 and r_idx[1][100].text in pr1.replace(">>", "").replace("<<", ""),
@@ -3855,6 +3913,10 @@ def main() -> int:
         help="семейство текстовой модели: gemini, gemma, nemotron, nemotron-super-vl (по умолчанию из конфига)",
     )
     args = parser.parse_args()
+    # Порог вступления для флага is_intro (env INTRO_SECONDS, по умолчанию 1200).
+    global INTRO_SECONDS_LIMIT
+    INTRO_SECONDS_LIMIT = intro_seconds_from_env(os.environ.get("INTRO_SECONDS"))
+    logging.info("Вступление: сегменты с началом раньше %s с получают is_intro: true.", INTRO_SECONDS_LIMIT)
 
     # Семейство текстовой модели: --text-model или default_text_model из конфига (как в cli).
     try:

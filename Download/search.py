@@ -446,7 +446,8 @@ def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
 SOURCES_MODE, _SOURCES_MODE_VALID = parse_sources_mode(_SOURCES_MODE_RAW)
 
 # Окно вступления, сек: сегмент, начало которого строго раньше, - только стоковое видео,
-# без архива и без фото-запасного; пустой результат - пропуск. Имя INTRO_SECONDS - то же, что в select_coverage.py.
+# без архива и без фото-запасного; пустой результат - пропуск. Имя INTRO_SECONDS здесь и в generate_queries.py (флаг is_intro);
+# select_coverage.py читает COVERAGE_ALWAYS_SECONDS (другое окно).
 DEFAULT_INTRO_SECONDS = 1200.0
 
 

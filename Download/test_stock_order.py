@@ -162,3 +162,110 @@ def test_is_entity_inside_intro_gets_no_archive_site(monkeypatch):
     assert archive_allowed(seg) is False
     assert "wikimedia" not in _sites_used(log), log
     assert all(not (set(v.sites) & ARCHIVE) for v in build_cascade(seg))
+
+
+# ---------------------------------------------------------------------------
+# Этап 5: флаг вступления для генератора, размер батча, имена переменных окружения.
+# Тесты офлайн и НЕ запускались (запуск - на GitHub).
+# ---------------------------------------------------------------------------
+
+def test_generator_intro_flag_in_payload(monkeypatch):
+    """Блок сегмента несёт is_intro: true для начала 100 с и is_intro: false для начала 1500 с (порог 1200)."""
+    gq = pytest.importorskip("generate_queries")
+    monkeypatch.setattr(gq, "INTRO_SECONDS_LIMIT", 1200.0)
+    early = gq.Segment(index=1, start="00:01:40,000", end="00:01:45,000", text="A street in Rome.")
+    late = gq.Segment(index=2, start="00:25:00,000", end="00:25:05,000", text="A street in Rome.")
+    sentences, by_segment = gq.merge_segments_into_sentences([early, late])
+    block_early = gq.build_segment_block(early, sentences, by_segment)
+    block_late = gq.build_segment_block(late, sentences, by_segment)
+    assert "is_intro: true" in block_early.splitlines()
+    assert "is_intro: false" in block_late.splitlines()
+
+
+def test_generator_intro_flag_absent_without_limit(monkeypatch):
+    """Без порога (None, как в self-test) строки is_intro нет: старые блоки не меняются."""
+    gq = pytest.importorskip("generate_queries")
+    monkeypatch.setattr(gq, "INTRO_SECONDS_LIMIT", None)
+    seg = gq.Segment(index=1, start="00:01:40,000", end="00:01:45,000", text="A street in Rome.")
+    sentences, by_segment = gq.merge_segments_into_sentences([seg])
+    assert "is_intro" not in gq.build_segment_block(seg, sentences, by_segment)
+
+
+def test_generator_intro_rule_in_system_instruction():
+    """Правило вступления есть в режимах 1 и 3 и отсутствует в режиме 2 (только архив)."""
+    gq = pytest.importorskip("generate_queries")
+    for mode in (gq.SOURCES_MIX, gq.SOURCES_STOCK):
+        assert "is_intro: true" in gq.build_system_instruction(mode)
+    assert "is_intro: true" not in gq.build_system_instruction(gq.SOURCES_ARCHIVE)
+
+
+def test_generator_batch_size_default_25():
+    """Размер батча генератора по умолчанию 25."""
+    gq = pytest.importorskip("generate_queries")
+    assert gq.DEFAULT_BATCH_SIZE == 25
+
+
+def test_select_coverage_reads_coverage_always_env_only(monkeypatch):
+    """select_coverage берёт COVERAGE_ALWAYS_SECONDS, а INTRO_SECONDS (окно поиска) не читает."""
+    import select_coverage as sc
+
+    captured = {}
+
+    def fake_run(requests_path, srt_path, percent, coverage_always_seconds, window_seconds):
+        captured["coverage_always"] = coverage_always_seconds
+        return None
+
+    monkeypatch.setattr(sc, "run", fake_run)
+    monkeypatch.setattr(sc, "format_summary", lambda result: "")
+    monkeypatch.setenv("INTRO_SECONDS", "777")
+    monkeypatch.delenv("COVERAGE_ALWAYS_SECONDS", raising=False)
+    sc.main(["r.json", "s.srt"])
+    assert captured["coverage_always"] == 10.0  # INTRO_SECONDS=777 не влияет
+    monkeypatch.setenv("COVERAGE_ALWAYS_SECONDS", "42")
+    sc.main(["r.json", "s.srt"])
+    assert captured["coverage_always"] == 42.0
+
+
+def test_search_intro_seconds_env_parsing():
+    """Окно поиска: INTRO_SECONDS пусто - 1200; число - число; мусор - 1200."""
+    assert search.intro_seconds_from_env(None) == 1200.0
+    assert search.intro_seconds_from_env("") == 1200.0
+    assert search.intro_seconds_from_env("600") == 600.0
+    assert search.intro_seconds_from_env("abc") == 1200.0
+
+
+def test_download_workflow_inputs_and_env_names():
+    """download.yml: вход intro_seconds по умолчанию 1200; coverage_always_seconds по умолчанию 10;
+    поиск получает INTRO_SECONDS, выбор покрытия получает COVERAGE_ALWAYS_SECONDS (имена разные)."""
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "download.yml"
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    def input_block(name):
+        start = lines.index(f"      {name}:")
+        block = []
+        for ln in lines[start + 1:]:
+            if ln.startswith("      ") and not ln.startswith("        "):
+                break
+            block.append(ln)
+        return block
+
+    assert 'default: "1200"' in input_block("intro_seconds")
+    assert 'default: "10"' in input_block("coverage_always_seconds")
+    text = "\n".join(lines)
+    assert "COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '10' }}" in text
+    assert "INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}" in text
+
+
+def test_generate_yml_intro_default_1200():
+    """Строковая проверка generate.yml: у входа intro_seconds default 1200."""
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "generate.yml"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = lines.index("      intro_seconds:")
+    block = []
+    for ln in lines[start + 1:]:
+        if ln.startswith("      ") and not ln.startswith("        "):
+            break
+        block.append(ln)
+    assert "        default: 1200" in block
