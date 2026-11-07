@@ -3056,7 +3056,7 @@ async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optiona
     фото-запасного; ничего не найдено - сегмент пропущен (уходит в missing), фото не ищется.
     Режим 1: видео по трём запросам, затем фото по трём запросам.
     Режимы 2 и 3: один тип, как раньше; режим 3 - тип фото для любого сегмента (mode3_view)."""
-    seg = mode3_view(ctx, seg)
+    seg = await mode3_view(ctx, seg)
     if is_intro(seg):
         view = intro_search_view(seg, ctx.media_mode)
         url, backup_url = await _process_single(ctx, view, seg)
@@ -3138,7 +3138,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
         return None, None
     pkey = cand_key(primary)
 
-    seg = mode3_view(ctx, seg)  # стадия 6: в режиме 3 backup тоже только фото
+    seg = await mode3_view(ctx, seg)  # стадия 6: в режиме 3 backup тоже только фото
     seg = intro_search_view(seg, ctx.media_mode)  # правило (c): во вступлении только сток
     cascade = build_cascade(seg)
 
