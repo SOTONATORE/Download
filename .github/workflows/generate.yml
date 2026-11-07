@@ -86,10 +86,10 @@ on:
         type: number
         default: 100
       intro_seconds:
-        description: "Вступление, сек: сегменты, чьё начало раньше этого времени, всегда идут в видео, даже сверх бюджета video_percent. По умолчанию 1200 (то же окно, что у поиска в Download)"
+        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
         required: false
         type: number
-        default: 1200
+        default: 10
       preset:
         description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
@@ -499,20 +499,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          # стадия 6: финал ГЕНЕРАЦИЯ один на хэш final.srt; --release-tag больше не передаётся
           args=(
             --repo "$REPO"
             --srt "$SRT_PATH"
             --model-profile "$MODEL_PROFILE"
             --run-id "$RUN_ID"
           )
-          if [ -n "$RELEASE_TAG" ]; then
-            args+=(--release-tag "$RELEASE_TAG")
-          fi
           mask_code='
           import os, sys
           vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)

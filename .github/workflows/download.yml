@@ -36,16 +36,11 @@ on:
         required: false
         type: string
         default: "100"
-      coverage_always_seconds:
-        description: 'Покрытие, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком). По умолчанию 10. Не то же, что intro_seconds.'
+      intro_seconds:
+        description: 'Вступление, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком).'
         required: false
         type: string
         default: "10"
-      intro_seconds:
-        description: 'Вступление, сек: сегменты, чьё начало раньше этого времени, ищутся только в стоке (без архива; имена в запросах обобщаются моделью по флагу is_intro; при режиме 3 - только фото). По умолчанию 1200.'
-        required: false
-        type: string
-        default: "1200"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
         required: false
@@ -80,6 +75,14 @@ jobs:
         PYTHONUNBUFFERED: "1"
       run: python Download/normalize_srt.py "${{ inputs.srt_path }}" final.srt
 
+    # Стадия 6: ФИНАЛ · СТОКИ открывается сразу после склейки final.srt (хэш берётся из него).
+    # Ошибка здесь (два релиза с тегом, другое содержимое) останавливает запуск до поиска и трат.
+    - name: Open ФИНАЛ · СТОКИ release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: python Download/publish_stock.py open --srt final.srt
+
     - name: Install query-generation deps
       run: pip install -U google-genai pyyaml httpx
 
@@ -112,8 +115,6 @@ jobs:
         GENQ_SOURCES_MODE: ${{ inputs.sources }}
         GENQ_STRICT: ${{ inputs.strict }}
         MEDIA_MODE: ${{ inputs.media_mode }}
-        # Тот же порог, что у поиска: флаг is_intro в блоках сегментов для генератора запросов
-        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
         TEXT_MODEL: ${{ inputs.text_model }}
         PYTHONUNBUFFERED: "1"
       run: python Download/generate_queries.py --input final.srt --output requests.json --text-model "$TEXT_MODEL"
@@ -240,7 +241,7 @@ jobs:
     - name: Select segments by coverage percent
       env:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
-        COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '10' }}
+        INTRO_SECONDS: ${{ inputs.intro_seconds || '10' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/select_coverage.py requests.json final.srt
 
@@ -269,8 +270,6 @@ jobs:
         SEARCH_CLIP_PRETRAINED: ${{ env.SEARCH_CLIP_PRETRAINED || 'openai' }}
         SEARCH_SOURCES_MODE: ${{ inputs.sources }}
         MEDIA_MODE: ${{ inputs.media_mode }}
-        # Окно вступления поиска (search.py): начало сегмента раньше этого времени - вступление
-        INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
         # Опциональная тонкая настройка параметров поиска и лимитеров (Этап 1):
         # Значения ниже включены по итогам прогона на 126 сегментах
         SEARCH_SIM_MIN_THRESHOLD: "0.22"
@@ -454,66 +453,33 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    - name: Publish files as a GitHub Release
-      id: release
+    - name: Download requests.json artifact (для ФИНАЛ · СТОКИ)
+      if: needs.search_media.result == 'success'
+      uses: actions/download-artifact@v7
+      with:
+        name: requests-json
+
+    # Стадия 6: вместо одного релиза media-<run_id> - ФИНАЛ · СТОКИ (тексты и stock_links.txt)
+    # и части СТОКИ · ЧАСТЬ N (только медиа, до 900 файлов в части). Тег и хэш - из final.srt.
+    # Без final.srt (сценарий с ручными ссылками) выкладка пропускается: финала без хэша не бывает.
+    # missing.txt всегда непуст (см. шаг "Merge failed downloads into missing.txt").
+    - name: Publish stock files to GitHub Releases
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
       run: |
-        TAG="media-${{ github.run_id }}"
-        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-        gh release create "$TAG" \
-          --repo "${{ github.repository }}" \
-          --title "Медиафайлы от $(date -u +'%Y-%m-%d %H:%M UTC')" \
-          --notes "Автоматическая публикация из workflow. Файлов: $(ls downloaded_media | wc -l)"
-
-        if ls downloaded_media/* 1> /dev/null 2>&1; then
-          gh release upload "$TAG" downloaded_media/* \
-            --repo "${{ github.repository }}" \
-            --clobber
+        if [ ! -f final.srt ]; then
+          echo "final.srt нет (сценарий с ручными ссылками): выкладка в ФИНАЛ · СТОКИ пропущена."
+          exit 0
         fi
-
-        # missing.txt прикладываем всегда - после Раунда 8 он гарантированно не 0
-        # байт (см. шаг "Merge failed downloads into missing.txt": либо реальный
-        # список пропущенных номеров, либо явная строка-заглушка "пропущенных нет"),
-        # так что 400 "Bad Content-Length" от uploads.github.com на пустое тело
-        # здесь больше не воспроизводится. download_failed.txt - только если он
-        # реально не пуст, чтобы не тащить в релиз шум, когда скачивание прошло без
-        # единого сбоя (этот файл по-прежнему может быть 0 байт/не существовать -
-        # для него сохранена проверка [ -s ... ], т.к. его в релиз тогда не грузим
-        # вообще, в отличие от missing.txt).
-        UPLOAD_EXTRA="missing.txt"
-        if [ -s download_failed.txt ]; then
-          UPLOAD_EXTRA="$UPLOAD_EXTRA download_failed.txt"
-        fi
-        # final.srt (склеенный SRT, по нему нумеруются все сегменты) прикладываем только
-        # в сценарии srt_path: в ручном сценарии с inputs.links его нет, а проверка по
-        # needs.search_media.result не даст случайному final.srt из репозитория попасть в релиз.
-        if [ "${{ needs.search_media.result }}" = "success" ] && [ -f final.srt ]; then
-          UPLOAD_EXTRA="$UPLOAD_EXTRA final.srt"
-        fi
-        gh release upload "$TAG" $UPLOAD_EXTRA \
-          --repo "${{ github.repository }}" \
-          --clobber
-
-    - name: Build direct-links list for download manager
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        TAG="${{ steps.release.outputs.tag }}"
-        > release_links.txt
-        for f in downloaded_media/*; do
-          [ -e "$f" ] || continue
-          filename=$(basename "$f")
-          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/$filename" >> release_links.txt
+        TEXT_FILES="missing.txt"
+        for f in download_failed.txt requests.json links.txt backup_links.txt backup_missing.txt min_durations.json final.srt; do
+          if [ -s "$f" ]; then
+            TEXT_FILES="$TEXT_FILES $f"
+          fi
         done
-        cat release_links.txt
+        python Download/publish_stock.py upload --srt final.srt --media-dir downloaded_media --text $TEXT_FILES
 
-        gh release upload "$TAG" release_links.txt \
-          --repo "${{ github.repository }}" \
-          --clobber
-
-    - name: Print release URL
+    - name: Print release link
       run: |
-        echo "Релиз со всеми файлами:"
-        echo "https://github.com/${{ github.repository }}/releases/tag/${{ steps.release.outputs.tag }}"
+        echo "Релизы стоков: https://github.com/${{ github.repository }}/releases"
