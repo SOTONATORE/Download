@@ -422,4 +422,4 @@ exit 0
 def test_config_docker_image_is_stock_vast_tag():
     yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    assert data["docker_image"] == "vastai/comfy:v0.41.0-cuda-12.9-py312"
+    assert data["docker_image"] == "vastai/comfy:v0.41.0-cuda-13.2-py312"
