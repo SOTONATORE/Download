@@ -766,11 +766,18 @@ def test_finalize_no_clips_skips_links(capsys, fin_env, prompts_file):
     assert "generated_links.txt" not in FakeUploader.instances[0].uploaded
 
 
-def test_finalize_custom_release_tag(capsys, fin_env, prompts_file):
-    cli.main(_fin_args("--repo", "o/r", "--release-tag", "мой-тег",
-                       "--prompts-path", str(prompts_file)))
-    assert fin_env.tags == ["мой-тег"]
-    assert FakeUploader.instances[0].release_tag == "мой-тег"
+def test_finalize_uses_final_gen_tag_from_srt(capsys, fin_env, prompts_file):
+    # стадия 6: тег финала - final-gen-<hash16> от final.srt; --release-tag больше нет
+    segments, _code = cli._load_srt(str(DATA))
+    cli.main(_fin_args("--repo", "o/r", "--prompts-path", str(prompts_file)))
+    assert fin_env.tags == [cli.final_tag("gen", cli.srt_hash(segments))]
+    assert FakeUploader.instances[0].release_tag is None
+
+
+def test_finalize_release_tag_option_removed(capsys, fin_env, prompts_file):
+    with pytest.raises(SystemExit):
+        cli.main(_fin_args("--repo", "o/r", "--release-tag", "мой-тег",
+                           "--prompts-path", str(prompts_file)))
 
 
 def test_finalize_failure_gives_3_and_hides_text(capsys, fin_env, prompts_file):

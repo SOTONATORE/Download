@@ -446,8 +446,7 @@ def parse_sources_mode(raw: Optional[str]) -> tuple[int, bool]:
 SOURCES_MODE, _SOURCES_MODE_VALID = parse_sources_mode(_SOURCES_MODE_RAW)
 
 # Окно вступления, сек: сегмент, начало которого строго раньше, - только стоковое видео,
-# без архива и без фото-запасного; пустой результат - пропуск. Имя INTRO_SECONDS здесь и в generate_queries.py (флаг is_intro);
-# select_coverage.py читает COVERAGE_ALWAYS_SECONDS (другое окно).
+# без архива и без фото-запасного; пустой результат - пропуск. Имя INTRO_SECONDS - то же, что в select_coverage.py.
 DEFAULT_INTRO_SECONDS = 1200.0
 
 
@@ -3042,12 +3041,22 @@ async def _process_mixed(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str],
     return await _best_effort(ctx, seg, [(seg_v, rejected_v), (seg_p, rejected_p)])
 
 
+async def mode3_view(ctx: Context, seg: SegmentSpec) -> SegmentSpec:
+    """Стадия 6, правило режима 3 (только фото): любой сегмент, в том числе с type=video из
+    requests.json, ищется как фото. В режимах 1 и 2 сегмент не меняется.
+    Вступление это правило уже выполняет (intro_search_view ставит image в режиме 3)."""
+    if ctx.media_mode == 3 and seg.type != "image":
+        return dc_replace(seg, type="image")
+    return seg
+
+
 async def process_segment_inner(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Optional[str]]:
     """Поиск одного сегмента по порядку проходов.
     Вступление (start_s < intro_seconds): только стоковое видео (режим 3 - фото), без архива и без
     фото-запасного; ничего не найдено - сегмент пропущен (уходит в missing), фото не ищется.
     Режим 1: видео по трём запросам, затем фото по трём запросам.
-    Режимы 2 и 3: один тип, как раньше."""
+    Режимы 2 и 3: один тип, как раньше; режим 3 - тип фото для любого сегмента (mode3_view)."""
+    seg = mode3_view(ctx, seg)
     if is_intro(seg):
         view = intro_search_view(seg, ctx.media_mode)
         url, backup_url = await _process_single(ctx, view, seg)
@@ -3129,6 +3138,7 @@ async def find_backup(ctx: Context, seg: SegmentSpec) -> tuple[Optional[str], Op
         return None, None
     pkey = cand_key(primary)
 
+    seg = mode3_view(ctx, seg)  # стадия 6: в режиме 3 backup тоже только фото
     seg = intro_search_view(seg, ctx.media_mode)  # правило (c): во вступлении только сток
     cascade = build_cascade(seg)
 

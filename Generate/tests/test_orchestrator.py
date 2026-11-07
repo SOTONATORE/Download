@@ -36,7 +36,9 @@ except ImportError:  # pragma: no cover
     from core import vast_client as vc  # type: ignore
 
 FULL_HASH = "ab12cd34ef56" + "0" * 52
-TAG = "clips-ab12cd34ef56"
+FINAL = ra.final_tag("gen", FULL_HASH)     # ФИНАЛ · ГЕНЕРАЦИЯ (стадия 6): служебные файлы, превью, ссылки
+PART1 = ra.part_tag("gen", 1, FULL_HASH)   # ГЕНЕРАЦИЯ · ЧАСТЬ 1: клипы
+PART2 = ra.part_tag("gen", 2, FULL_HASH)
 TOKEN = "WTOK-secret-0123456789"
 VAST_KEY = "vast-key-SECRET-777"
 GEMINI_KEY = "gemini-key-SECRET-888"
@@ -76,8 +78,8 @@ class FakeStore(orch.ReleaseStore):
         self.blobs: dict = {}
 
     def preload(self, assets) -> None:
-        self.releases[TAG] = orch.ReleaseInfo(
-            tag=TAG, title="t", body=f"hash: {FULL_HASH}\nmodel: ltx25", assets=list(assets))
+        self.releases[PART1] = orch.ReleaseInfo(
+            tag=PART1, title="t", body=f"hash: {FULL_HASH}\nmodel: ltx25", assets=list(assets))
 
     def find_releases(self, tag: str) -> list:
         rel = self.releases.get(tag)
@@ -374,11 +376,11 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
     assert summary.spent_usd > 0
 
     # релизы запуска: клип-релиз, служебный (в начале), итоговый (в конце, SPEC 9.1)
-    assert rig.store.created == [TAG, ra.service_tag("test"), ra.final_tag("test")]
+    assert rig.store.created == [FINAL, PART1]   # финал открыт в начале, часть - при первой загрузке клипа
     assert rig.store.clip_uploads() == ["1.mp4", "2.mp4"]
     # клип существовал на диске в момент загрузки
     assert all(existed for _, name, existed in rig.store.uploads if name.endswith(".mp4"))
-    assert rig.store.blobs[(TAG, "1.mp4")] == b"MP4-1"
+    assert rig.store.blobs[(PART1, "1.mp4")] == b"MP4-1"
     # временные файлы удалены сразу: к моменту ack на диске клипа уже нет
     assert rig.worker.files_left_at_ack == []
     rig.assert_clean_workdir()
@@ -386,11 +388,11 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
 
     # служебные файлы и ссылки
     # generated_links.txt -> итоговый релиз; prompts.json -> служебный (SPEC 9.1, 9.4, 9.7)
-    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode()
-    assert f"https://github.com/owner/repo/releases/download/{TAG}/1.mp4" in links
-    assert (ra.service_tag("test"), "prompts.json") in rig.store.blobs
-    assert (TAG, "generated_links.txt") not in rig.store.blobs  # E3: клип-релиз без служебных файлов
-    assert (TAG, "prompts.json") not in rig.store.blobs
+    links = rig.store.blobs[(FINAL, "generated_links.txt")].decode()
+    assert f"https://github.com/owner/repo/releases/download/{PART1}/1.mp4" in links
+    assert (FINAL, "prompts.json") in rig.store.blobs
+    assert (PART1, "generated_links.txt") not in rig.store.blobs  # E3: клип-релиз без служебных файлов
+    assert (PART1, "prompts.json") not in rig.store.blobs
 
     # карты уничтожены по метке
     assert rig.vast.label_destroyed == [LABEL]
@@ -436,7 +438,7 @@ def test_all_clips_already_in_release(tmp_path, monkeypatch):
     assert rig.gemini.calls == 0
     assert rig.vast.search_calls == 0 and rig.vast.created == []
     # служебный релиз открывается в начале, итоговый создаётся для ссылок (SPEC 9.1, 9.4)
-    assert rig.store.created == [ra.service_tag("test"), ra.final_tag("test")]
+    assert rig.store.created == [FINAL]
     assert rig.store.clip_uploads() == []
 
 
@@ -452,9 +454,9 @@ def test_no_clips_means_no_links_upload(tmp_path, monkeypatch, caplog):
     assert summary.completed == 0 and rig.vast.created == []
     assert rig.store.clip_uploads() == []
     # клип-релиз не получает служебных файлов (E3); links пустые и не выкладываются
-    assert [u for u in rig.store.uploads if u[0] == TAG] == []
+    assert [u for u in rig.store.uploads if u[0] == PART1] == []
     assert not any(name == "generated_links.txt" for _, name, _ in rig.store.uploads)
-    assert (ra.final_tag("test"), "generated_links.txt") not in rig.store.blobs
+    assert (FINAL, "generated_links.txt") not in rig.store.blobs
     assert caplog.text.count("Нет готовых клипов: generated_links.txt не выкладывается.") == 1
     _no_secrets(caplog.text)
 
@@ -2394,11 +2396,11 @@ def test_service_release_opened_and_start_files_uploaded_before_spending(tmp_pat
     (tmp_path / "missing.txt").write_text("1\n2\n", encoding="utf-8")
     rig = Rig(tmp_path, monkeypatch, missing=(1, 2))
     rig.run()
-    svc = ra.service_tag("test")
+    svc = FINAL
     assert (svc, "missing.txt") in rig.store.blobs
     assert (svc, "prompts.json") in rig.store.blobs
     assert rig.events.index("upload:missing.txt") < rig.events.index("vast_create")
-    assert rig.store.created[0] == TAG                       # клип-релиз проверяется первым
+    assert rig.store.created[0] == FINAL                       # ФИНАЛ · ГЕНЕРАЦИЯ открывается первым (prepare)
     assert svc in rig.store.created
 
 
@@ -2423,16 +2425,16 @@ def test_service_start_upload_failure_stops_before_any_spending(tmp_path, monkey
 def test_final_release_links_cover_clip_release_and_parts(tmp_path, monkeypatch):
     """E2: generated_links.txt в итоговом релизе строится по основному релизу и всем частям."""
     rig = Rig(tmp_path, monkeypatch, missing=(2,), preload=["1.mp4"])
-    part2 = ra.part_tag(TAG, 2)
+    part2 = PART2
     rig.store.releases[part2] = orch.ReleaseInfo(
         tag=part2, title="p2", body=f"hash: {FULL_HASH}\nmodel: ltx25", assets=["5.mp4"])
     rig.run()
-    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode()
-    assert f"/releases/download/{TAG}/1.mp4" in links
+    links = rig.store.blobs[(FINAL, "generated_links.txt")].decode()
+    assert f"/releases/download/{PART1}/1.mp4" in links
     assert f"/releases/download/{part2}/5.mp4" in links
     assert f"/releases/download/{part2}/2.mp4" in links
     assert (part2, "generated_links.txt") not in rig.store.blobs
-    assert not any(t in (TAG, part2) and n in ("prompts.json", "generated_links.txt", "summary.md")
+    assert not any(t in (PART1, part2) and n in ("prompts.json", "generated_links.txt", "summary.md")
                    for t, n, _ in rig.store.uploads)
 
 
@@ -2485,7 +2487,7 @@ def test_artifact_layout_masking_and_no_secrets(tmp_path, monkeypatch, caplog):
     for (_, _), blob in rig.store.blobs.items():
         _no_secrets(blob.decode("utf-8", errors="replace"))
     # журнал запуска и загрузки без клипов в служебном релизе
-    assert (ra.service_tag("test"), "run-logs.zip") in rig.store.blobs
+    assert (FINAL, "run-logs.zip") in rig.store.blobs
     _no_secrets(caplog.text)
 
 
@@ -2600,7 +2602,7 @@ def test_artifact_bundle_and_releases_have_no_card_fields_or_canary(tmp_path, mo
         if p.is_file() and p.suffix != ".zip":
             _assert_no_markers(p.read_text(encoding="utf-8"), markers, where=p.name)
     # 2. архив run-logs.zip, который уходит в служебный релиз
-    bundle = rig.store.blobs[(ra.service_tag("test"), "run-logs.zip")]
+    bundle = rig.store.blobs[(FINAL, "run-logs.zip")]
     with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
         names = zf.namelist()
         assert names and "run/summary.md" in names
@@ -2658,7 +2660,7 @@ def test_canary_absent_from_status_meta_prompts_and_links(tmp_path, monkeypatch,
     status = (card / "status.txt").read_text(encoding="utf-8")
     meta = (card / "meta.json").read_text(encoding="utf-8")
     prompts = (art / "service" / "prompts.json").read_text(encoding="utf-8")
-    links = rig.store.blobs[(ra.final_tag("test"), "generated_links.txt")].decode("utf-8")
+    links = rig.store.blobs[(FINAL, "generated_links.txt")].decode("utf-8")
     assert status.strip() and meta.strip() and prompts.strip()        # файлы не пустые: проверка значима
     assert "https://github.com/" in links
     for name, text in (("status.txt", status), ("meta.json", meta),

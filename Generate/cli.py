@@ -6,7 +6,7 @@
     kill-cards  уничтожение арендованных карт по метке (шаг ``if: always()``);
     watch-heartbeat  наблюдатель heartbeat: фоновый процесс шага run (SPEC 8.3 а);
     cleanup-vast  уборка забытых карт по метке и статусу запуска (SPEC 8.3 г; cleanup_vast.yml);
-    finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt
+    finalize-release  выдача уже готовых клипов: prompts.json и generated_links.txt (ФИНАЛ · ГЕНЕРАЦИЯ)
                 (шаг ``if: always()``, в том числе после отмены запуска).
 
 Коды завершения:
@@ -59,7 +59,9 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.orchestrator import (
         ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
-        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
+        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader)
+    from Generate.core.release_names import final_tag
+    from Generate.core.srt_parser import srt_hash
     from Generate.core.vast_client import (
         OfferFilter, VastClient, VastError, VastInstanceNotFound, VastRuntimeError)
 except ImportError:  # pragma: no cover
@@ -74,7 +76,9 @@ except ImportError:  # pragma: no cover
     from orchestrator import (  # type: ignore
         ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
-        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader, make_tag)
+        LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader)
+    from release_names import final_tag  # type: ignore
+    from srt_parser import srt_hash  # type: ignore
     from vast_client import (  # type: ignore
         OfferFilter, VastClient, VastError, VastInstanceNotFound, VastRuntimeError)
 
@@ -1310,10 +1314,11 @@ def cmd_cleanup_vast(args: argparse.Namespace) -> int:
 
 
 def cmd_finalize_release(args: argparse.Namespace) -> int:
-    """Доводит выдачу до конца: prompts.json и generated_links.txt по уже загруженным клипам.
+    """Доводит выдачу до конца: prompts.json, отчёты и generated_links.txt в ФИНАЛ · ГЕНЕРАЦИЯ.
 
-    Та же логика выдачи, что у оркестратора (RunPublisher, SPEC 9.1, 9.4, 9.7; F2).
-    Безопасна при повторном запуске: если клип-релиз ещё не создан, завершается с кодом 0.
+    Тот же финал, что у запуска (final-gen-<hash16>, стадия 6): хэш берётся из --srt.
+    Финал не создаётся заново, если он уже есть (ReleaseUploader.prepare() его продолжает).
+    Безопасна при повторном запуске: если финала ещё нет, завершается с кодом 0.
     """
     cfg, code = _load_cfg(args.config, {"model_profile": args.model_profile})
     if code is not None:
@@ -1324,17 +1329,16 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
         return code
 
     try:
-        tag = make_tag(segments, args.release_tag)
+        tag = final_tag("gen", srt_hash(segments))
         store = _make_release_store(args.repo)
         if not store.find_releases(tag):
-            print(f"Release {tag} ещё не создан: финализировать нечего.")
+            print(f"Релиз {tag} ещё не создан: финализировать нечего.")
             return EXIT_OK
 
         uploader = ReleaseUploader(store, segments, cfg.model_profile,
-                                   release_tag=args.release_tag,
                                    release_asset_limit=cfg.release_asset_limit,
                                    filename_template=cfg.filename_template,
-                                   run_id=args.run_id or None)
+                                   repo=args.repo)
         uploader.prepare()
         clips = len(uploader.done)
 
@@ -1355,7 +1359,7 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
         print(f"Файл промптов не найден ({args.prompts_path}): он не загружен.")
     print("Выдача клипов завершена.")
     print(f"  релиз: {tag}")
-    print(f"  клипов в релизах: {clips}")
+    print(f"  клипов в частях: {clips}")
     print(f"  prompts.json загружен: {'да' if prompts_uploaded else 'нет'}")
     print(f"  generated_links.txt загружен: {'да' if links_uploaded else 'нет'}")
     for name in pub.failures:
@@ -1731,7 +1735,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="файл итогов (в Actions: $GITHUB_STEP_SUMMARY); пусто = не писать")
     clean_p.set_defaults(func=lambda a: cmd_cleanup_vast(a))
     fin_p = sub.add_parser("finalize-release",
-                           help="загрузить prompts.json и generated_links.txt в Release")
+                           help="загрузить prompts.json, отчёты и generated_links.txt в ФИНАЛ · ГЕНЕРАЦИЯ")
     fin_p.add_argument("--srt", default=DEFAULT_SRT,
                        help=f"путь к файлу SRT (по умолчанию {DEFAULT_SRT})")
     fin_p.add_argument("--config", default=None,
@@ -1739,11 +1743,10 @@ def build_parser() -> argparse.ArgumentParser:
     fin_p.add_argument("--repo", default="", help="репозиторий owner/name (передаётся явно)")
     fin_p.add_argument("--model-profile", default=None,
                        help="профиль модели; по умолчанию из конфига")
-    fin_p.add_argument("--release-tag", default=None, help="тег Release (необязательно)")
     fin_p.add_argument("--prompts-path", default=DEFAULT_PROMPTS,
                        help=f"путь к файлу промптов (по умолчанию {DEFAULT_PROMPTS})")
     fin_p.add_argument("--run-id", default="",
-                       help="номер запуска: нужен для служебного и итогового релизов (необязательно)")
+                       help="номер запуска (необязательно; с этапа 6 на раскладку релизов не влияет)")
     fin_p.set_defaults(func=lambda a: cmd_finalize_release(a))
     return parser
 

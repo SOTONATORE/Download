@@ -1,4 +1,7 @@
-"""Офлайн-тесты release_adapter: без сети и без настоящего gh."""
+"""Офлайн-тесты release_adapter: без сети и без настоящего gh.
+
+Стадия 6: выдача генерации - ФИНАЛ · ГЕНЕРАЦИЯ (final-gen-<hash16>) и части ГЕНЕРАЦИЯ · ЧАСТЬ N
+(gen-part<N>-<hash16>). Служебного релиза run-<id>-service больше нет."""
 import subprocess
 import traceback
 from datetime import datetime, timezone
@@ -7,10 +10,12 @@ import pytest
 
 try:
     from Generate.core import release_adapter as ra
+    from Generate.core import release_names as rn
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError
     from Generate.core.srt_parser import Segment, srt_hash
 except ImportError:
     from core import release_adapter as ra
+    from core import release_names as rn
     from core.gemini_prompts import GeminiInputError, GeminiRuntimeError
     from core.srt_parser import Segment, srt_hash
 
@@ -18,10 +23,12 @@ SECRET = "ghp_SECRETTOKEN1234567890abcdef"
 NOW = datetime(2026, 10, 5, 12, 30, tzinfo=timezone.utc)
 SEGS = [Segment(1, 0, 1000, "a"), Segment(2, 1000, 2000, "b")]
 FULL = srt_hash(SEGS)
-TAG = f"clips-{FULL[:12]}"
-RUN = "42"
-SERVICE = f"run-{RUN}-service"
-FINAL = f"run-{RUN}-final"
+H16 = FULL[:16]
+FINAL = f"final-gen-{H16}"
+PART1 = f"gen-part1-{H16}"
+PART2 = f"gen-part2-{H16}"
+PART3 = f"gen-part3-{H16}"
+TAG = PART1   # тег для блока gh-хранилища ниже: там важен только сам тег строкой
 
 
 class FakeStore(ra.ReleaseStore):
@@ -45,72 +52,71 @@ class FakeStore(ra.ReleaseStore):
         self.uploads.append((tag, path))
 
 
-def make(store, limit=900):
+def make(store, limit=900, repo=""):
     return ra.ReleaseUploader(store, SEGS, "ltx25", release_asset_limit=limit,
-                              now=lambda: NOW, log=lambda m: None)
-
-
-def make_run(store, limit=900):
-    return ra.ReleaseUploader(store, SEGS, "ltx25", release_asset_limit=limit,
-                              now=lambda: NOW, log=lambda m: None, run_id=RUN)
+                              now=lambda: NOW, log=lambda m: None, repo=repo)
 
 
 def body():
-    return ra.format_body(FULL, "ltx25")
+    return rn.release_body("gen", "final", FULL)
 
 
-def test_tag_title_body():
-    assert ra.make_tag(SEGS) == TAG
-    assert TAG.startswith("clips-") and not TAG.startswith("gen-")
-    assert ra.make_tag(SEGS, "my-tag") == "my-tag"
-    assert ra.format_title(FULL, NOW) == f"{TAG} · часть 1 · 2026-10-05 12:30 UTC"
-    assert ra.format_title(FULL, NOW, 3) == f"{TAG} · часть 3 · 2026-10-05 12:30 UTC"
-    assert ra.format_body(FULL, "ltx25") == f"hash: {FULL}\nmodel: ltx25"
-    assert len(FULL) == 64
+def test_names_six_kinds_tags_and_titles():
+    # финалы и части: теги, заголовки; номер части - только у частей
+    assert rn.final_tag("stock", FULL) == f"final-stock-{H16}"
+    assert rn.final_tag("gen", FULL) == FINAL
+    assert rn.part_tag("stock", 2, FULL) == f"stock-part2-{H16}"
+    assert rn.part_tag("gen", 1, FULL) == PART1
+    assert rn.final_title("gen", FULL, NOW) == f"ФИНАЛ · ГЕНЕРАЦИЯ · 2026-10-05 12:30 UTC · {H16}"
+    assert rn.part_title("gen", 3, FULL, NOW) == f"ГЕНЕРАЦИЯ · ЧАСТЬ 3 · 2026-10-05 12:30 UTC · {H16}"
+    assert "ЧАСТЬ" not in rn.final_title("gen", FULL, NOW)
+    assert rn.release_body("gen", "final", FULL) == f"hash: {FULL}\nstage: gen\nrole: final"
 
 
 def test_check1_multiple_releases():
     s = FakeStore()
-    s.add(TAG, body())
-    s.add(TAG, body(), draft=True)
+    s.add(FINAL, body())
+    s.add(FINAL, body(), draft=True)
     with pytest.raises(GeminiInputError) as e:
         make(s).prepare()
     assert e.value.exit_code == 2
-    assert str(e.value) == f"Найдено несколько релизов с тегом {TAG}, удалите лишние вручную."
+    assert str(e.value) == f"Найдено несколько релизов с тегом {FINAL}, удалите лишние вручную."
 
 
 @pytest.mark.parametrize("b", ["", "hash: " + "0" * 64, "hash: " + FULL[:12]])
 def test_check2_hash_mismatch(b):
     s = FakeStore()
-    s.add(TAG, b)
+    s.add(FINAL, b)
     with pytest.raises(GeminiInputError) as e:
         make(s).prepare()
     assert "Тег совпал, содержимое нет" in str(e.value)
 
 
-def test_check3_new_release_created():
+def test_check3_new_final_created_no_parts():
     s = FakeStore()
     assert make(s).prepare() == set()
     tag, title, b = s.created[0]
-    assert tag == TAG and title.startswith(TAG) and b == body()
+    assert tag == FINAL and title == rn.final_title("gen", FULL, NOW) and b == body()
+    assert [c[0] for c in s.created] == [FINAL]
 
 
 def test_check3_resume_collects_done_from_all_parts():
     s = FakeStore()
-    s.add(TAG, body(), ["1.mp4", "2.mp4", "prompts.json", "generated_links.txt"])
-    s.add(TAG + "-part2", body(), ["3.mp4", "x.txt"])
+    s.add(FINAL, body(), ["prompts.json", "generated_links.txt", "missing.txt"])
+    s.add(PART1, body(), ["1.mp4", "2.mp4"])
+    s.add(PART2, body(), ["3.mp4", "x.txt"])
     u = make(s)
     assert u.prepare() == {1, 2, 3}
     assert s.created == []
     assert u.upload_clip("/tmp/2.mp4") is False
     assert u.upload_clip("/tmp/4.mp4") is True
-    assert s.uploads == [(TAG + "-part2", "/tmp/4.mp4")]
+    assert s.uploads == [(PART2, "/tmp/4.mp4")]
 
 
 def test_part_validation_hash():
     s = FakeStore()
-    s.add(TAG, body())
-    s.add(TAG + "-part2", "hash: other")
+    s.add(FINAL, body())
+    s.add(PART1, "hash: other")
     with pytest.raises(GeminiInputError):
         make(s).prepare()
 
@@ -121,26 +127,23 @@ def test_multipart_rollover():
     u.prepare()
     for n in range(1, 6):
         u.upload_clip(f"/tmp/{n}.mp4")
-    assert [t for t, _ in s.uploads] == [TAG, TAG, TAG + "-part2", TAG + "-part2", TAG + "-part3"]
-    assert [c[0] for c in s.created] == [TAG, TAG + "-part2", TAG + "-part3"]
-    assert "часть 2" in s.created[1][1]
-    assert FULL in s.created[2][2]
+    assert [t for t, _ in s.uploads] == [PART1, PART1, PART2, PART2, PART3]
+    assert [c[0] for c in s.created] == [FINAL, PART1, PART2, PART3]
+    assert "ЧАСТЬ 2" in s.created[2][1]
+    assert FULL in s.created[3][2]
 
 
-def test_service_files_only_main_without_run_id_refused():
-    # без run_id служебным файлам негде быть: ошибка, а не тихая загрузка в клип-релиз
+def test_final_takes_text_and_previews_without_limit():
+    # ФИНАЛ · ГЕНЕРАЦИЯ: служебные файлы и превью; превью не расходуют лимит частей
     s = FakeStore()
     u = make(s, limit=1)
     u.prepare()
-    u.upload_clip("/tmp/1.mp4")
-    u.upload_clip("/tmp/2.mp4")
-    with pytest.raises(GeminiInputError):
-        u.upload_service_file("/tmp/prompts.json")
-    with pytest.raises(GeminiInputError):
-        u.upload_service_file("/tmp/generated_links.txt")
-    assert [t for t, _ in s.uploads] == [TAG, TAG + "-part2"]
-    with pytest.raises(GeminiInputError):
-        u.upload_service_file("/tmp/3.mp4")
+    u.upload_service_file("/tmp/prompts.json")
+    u.upload_run_file("/tmp/missing.txt")
+    for n in (1, 2, 3):
+        u.upload_preview(f"/tmp/preview_{n}_1.png")
+    assert [t for t, _ in s.uploads] == [FINAL] * 5
+    assert [c[0] for c in s.created] == [FINAL]
 
 
 def test_upload_before_prepare_and_bad_name():
@@ -168,7 +171,18 @@ def test_links_text_sorted_with_parts():
     u.upload_clip("/tmp/10.mp4")
     u.upload_clip("/tmp/2.mp4")
     lines = u.links_text("o/r").splitlines()
-    assert lines[0].endswith(f"{TAG}-part2/2.mp4") and lines[1].endswith(f"{TAG}/10.mp4")
+    assert lines[0].endswith(f"{PART2}/2.mp4") and lines[1].endswith(f"{PART1}/10.mp4")
+
+
+def test_links_refreshed_in_final_after_each_clip():
+    # стадия 6: generated_links.txt в финале обновляется после каждой загрузки клипа
+    s = FakeStore()
+    u = make(s, repo="o/r")
+    u.prepare()
+    u.upload_clip("/tmp/1.mp4")
+    u.upload_clip("/tmp/2.mp4")
+    assert [t for t, _ in s.uploads] == [PART1, FINAL, PART1, FINAL]
+    assert s.uploads[1][1].endswith("generated_links.txt")
 
 
 def test_no_clips_empty_links_file_not_uploaded(tmp_path):
@@ -188,31 +202,29 @@ def test_no_clips_empty_links_file_not_uploaded(tmp_path):
 
 def test_links_file_with_clips_is_uploaded_to_final(tmp_path):
     s = FakeStore()
-    s.add(TAG, body(), ["1.mp4"])
-    u = make_run(s)
+    s.add(PART1, body(), ["1.mp4"])
+    u = make(s, repo="o/r")
     u.prepare()
     links = tmp_path / "generated_links.txt"
     links.write_text(u.links_text("o/r"), encoding="utf-8")
     assert links.stat().st_size > 0
     u.upload_service_file(str(links))
     assert s.uploads == [(FINAL, str(links))]
-    assert not any(t == TAG for t, p in s.uploads if p.endswith("generated_links.txt"))
+    assert not any(t == PART1 for t, p in s.uploads if p.endswith("generated_links.txt"))
 
 
-def test_empty_prompts_file_goes_to_service_release(tmp_path):
+def test_empty_prompts_file_goes_to_final(tmp_path):
     s = FakeStore()
     logs = []
     u = ra.ReleaseUploader(s, SEGS, "ltx25", release_asset_limit=900, now=lambda: NOW,
-                           log=logs.append, run_id=RUN)
+                           log=logs.append)
     u.prepare()
     logs.clear()
     prompts = tmp_path / "prompts.json"
     prompts.write_text("", encoding="utf-8")
     u.upload_service_file(str(prompts))
-    assert s.uploads == [(SERVICE, str(prompts))] and logs == []
+    assert s.uploads == [(FINAL, str(prompts))] and logs == []
 
-
-# --- gh и безопасность токена -------------------------------------------------
 
 class FakeProc:
     def __init__(self, rc=0, out="", err=""):
@@ -295,186 +307,63 @@ def test_gh_store_bad_json():
 
 # --- три типа релизов (SPEC 9.1) -------------------------------------------
 
-def test_three_release_types_and_tags():
-    assert ra.make_tag(SEGS) == f"clips-{FULL[:12]}"
-    assert ra.part_tag(TAG, 2) == TAG + "-part2"
-    assert ra.service_tag(RUN) == SERVICE == "run-42-service"
-    assert ra.final_tag(RUN) == FINAL == "run-42-final"
-    assert len({TAG, SERVICE, FINAL}) == 3
-
-
-@pytest.mark.parametrize("bad", ["", "a/b", "x y", "a\\b", "../x", "с-кириллицей", "a" * 65])
-def test_run_id_validation(bad):
-    with pytest.raises(GeminiInputError):
-        ra.service_tag(bad)
-    with pytest.raises(GeminiInputError):
-        ra.ReleaseUploader(FakeStore(), SEGS, "ltx25", run_id=bad)
-
-
-def test_run_titles_and_bodies_have_no_hash():
-    t = ra.format_run_title("служебный", RUN, NOW)
-    assert t == "run-42 · служебный · 2026-10-05 12:30 UTC"
-    b = ra.format_run_body("service", RUN)
-    assert b == "run: 42\nkind: service" and FULL not in b
-
-
-def test_no_run_id_creates_only_clip_release():
-    s = FakeStore()
-    make(s).prepare()
-    assert [c[0] for c in s.created] == [TAG]
-
-
-def test_run_id_creates_service_at_start_not_final():
-    s = FakeStore()
-    make_run(s).prepare()
-    assert [c[0] for c in s.created] == [TAG, SERVICE]
-    assert FINAL not in s.releases
-
-
-# --- проверки 9.2 только для клип-релизов ----------------------------------
-
-def test_service_and_final_not_hash_checked():
-    s = FakeStore()
-    s.add(SERVICE, "совсем другой текст")
-    s.add(FINAL, "")
-    u = make_run(s)
-    assert u.prepare() == set()          # служебный с чужим описанием не останавливает запуск
-    assert [c[0] for c in s.created] == [TAG]   # существующий служебный переиспользован
-    assert u.open_final_release() == FINAL       # итоговый с пустым описанием тоже
-
-
-def test_clip_hash_check_still_applies_with_run_id():
-    s = FakeStore()
-    s.add(TAG, "hash: other")
-    with pytest.raises(GeminiInputError) as e:
-        make_run(s).prepare()
-    assert "Тег совпал, содержимое нет" in str(e.value)
-
-
-def test_service_release_duplicates_refused():
-    s = FakeStore()
-    s.add(SERVICE, "x")
-    s.add(SERVICE, "y")
-    with pytest.raises(GeminiInputError) as e:
-        make_run(s).prepare()
-    assert str(e.value) == f"Найдено несколько релизов с тегом {SERVICE}, удалите лишние вручную."
-
-
-# --- маршрутизация файлов и финальный релиз ---------------------------------
-
-def test_prompts_and_missing_to_service_links_to_final(tmp_path):
-    s = FakeStore()
-    u = make_run(s)
-    u.prepare()
-    u.upload_clip("/tmp/1.mp4")
-    prompts = tmp_path / "prompts.json"
-    prompts.write_text("{}", encoding="utf-8")
-    missing = tmp_path / "missing.txt"
-    missing.write_text("1\n", encoding="utf-8")
-    u.upload_service_file(str(prompts))
-    u.upload_run_file(str(missing))
-    links = tmp_path / "generated_links.txt"
-    links.write_text(u.links_text("o/r"), encoding="utf-8")
-    u.upload_service_file(str(links))
-    assert s.uploads == [(TAG, "/tmp/1.mp4"), (SERVICE, str(prompts)),
-                         (SERVICE, str(missing)), (FINAL, str(links))]
-    assert [c[0] for c in s.created] == [TAG, SERVICE, FINAL]
-
 
 def test_final_created_once_even_if_links_uploaded_twice(tmp_path):
     s = FakeStore()
-    u = make_run(s)
+    s.add(PART1, body(), ["1.mp4"])
+    u = make(s, repo="o/r")
     u.prepare()
-    u.upload_clip("/tmp/1.mp4")
     links = tmp_path / "generated_links.txt"
     links.write_text(u.links_text("o/r"), encoding="utf-8")
     u.upload_service_file(str(links))
     u.upload_service_file(str(links))
-    assert [c[0] for c in s.created].count(FINAL) == 1
-    assert [t for t, _ in s.uploads].count(FINAL) == 2
+    assert [c[0] for c in s.created] == [FINAL]                 # финал создан один раз, при prepare
+    assert [t for t, _ in s.uploads] == [FINAL, FINAL]
 
 
 def test_run_files_refused_when_wrong_kind(tmp_path):
-    u = make_run(FakeStore())
+    s = FakeStore()
+    u = make(s)
     u.prepare()
     with pytest.raises(GeminiInputError):
-        u.upload_run_file("/tmp/3.mp4")                   # клип не в служебный релиз
+        u.upload_run_file("/tmp/3.mp4")                   # клип не в финал через текстовый путь
     with pytest.raises(GeminiInputError):
-        u.upload_run_file("/tmp/generated_links.txt")     # ссылки не в служебный релиз
+        u.upload_run_file("/tmp/generated_links.txt")     # ссылки ведутся отдельно
     with pytest.raises(GeminiInputError):
         u.upload_service_file("/tmp/notes.txt")           # не служебный файл
 
 
-def test_run_files_need_run_id(tmp_path):
-    u = make(FakeStore())
-    u.prepare()
-    with pytest.raises(GeminiInputError):
-        u.upload_run_file(str(tmp_path / "missing.txt"))
-    with pytest.raises(GeminiInputError):
-        u.open_final_release()
-
-
 def test_service_files_do_not_count_against_clip_limit(tmp_path):
     s = FakeStore()
-    u = make_run(s, limit=2)
+    u = make(s, limit=1)
     u.prepare()
-    for name in ("prompts.json", "missing.txt", "generated_links.txt"):
+    for name in ("prompts.json", "missing.txt"):
         f = tmp_path / name
-        f.write_text("1\n" if name != "prompts.json" else "{}", encoding="utf-8")
-        if name == "missing.txt":
-            u.upload_run_file(str(f))
-        else:
+        f.write_text("x", encoding="utf-8")
+        if name == "prompts.json":
             u.upload_service_file(str(f))
+        else:
+            u.upload_run_file(str(f))
     u.upload_clip("/tmp/1.mp4")
     u.upload_clip("/tmp/2.mp4")
-    u.upload_clip("/tmp/3.mp4")
-    assert [t for t, _ in s.uploads if t.startswith("clips-")] == [TAG, TAG, TAG + "-part2"]
-
-
-def test_part_switch_at_limit_with_run_id():
-    s = FakeStore()
-    s.add(TAG, body(), ["1.mp4", "2.mp4"])
-    u = make_run(s, limit=2)
-    assert u.prepare() == {1, 2}
-    u.upload_clip("/tmp/3.mp4")
-    assert [c[0] for c in s.created] == [SERVICE, TAG + "-part2"]
-    assert s.uploads == [(TAG + "-part2", "/tmp/3.mp4")]
+    assert [t for t, _ in s.uploads if t.startswith("gen-part")] == [PART1, PART2]
 
 
 def test_links_built_from_all_clip_parts_and_uploaded_to_final(tmp_path):
     s = FakeStore()
-    s.add(TAG, body(), ["1.mp4", "2.mp4", "prompts.json"])
-    s.add(TAG + "-part2", body(), ["3.mp4"])
-    u = make_run(s, limit=2)
+    s.add(PART1, body(), ["1.mp4", "2.mp4"])
+    s.add(PART2, body(), ["3.mp4"])
+    u = make(s, repo="o/r")
     u.prepare()
-    u.upload_clip("/tmp/4.mp4")
     links = tmp_path / "generated_links.txt"
     links.write_text(u.links_text("o/r"), encoding="utf-8")
     u.upload_service_file(str(links))
-    lines = links.read_text(encoding="utf-8").splitlines()
-    assert lines == [
-        f"https://github.com/o/r/releases/download/{TAG}/1.mp4",
-        f"https://github.com/o/r/releases/download/{TAG}/2.mp4",
-        f"https://github.com/o/r/releases/download/{TAG}-part2/3.mp4",
-        f"https://github.com/o/r/releases/download/{TAG}-part2/4.mp4",
+    assert links.read_text(encoding="utf-8").splitlines() == [
+        f"https://github.com/o/r/releases/download/{PART1}/1.mp4",
+        f"https://github.com/o/r/releases/download/{PART1}/2.mp4",
+        f"https://github.com/o/r/releases/download/{PART2}/3.mp4",
     ]
-    assert s.uploads[-1] == (FINAL, str(links))
-
-
-def test_empty_clips_with_run_id_no_links_no_final(tmp_path):
-    s = FakeStore()
-    u = make_run(s)
-    u.prepare()
-    links = tmp_path / "generated_links.txt"
-    links.write_text(u.links_text("o/r"), encoding="utf-8")
-    assert links.stat().st_size == 0
-    u.upload_service_file(str(links))
-    assert s.uploads == [] and FINAL not in s.releases
-
-
-# --- канарейка: токен не попадает в вывод, логи и исключения -----------------
-
-CANARY = "TESTKEY-12345"
+    assert s.uploads == [(FINAL, str(links))]
 
 
 def test_canary_normal_path_not_in_logs_or_result(capsys):
@@ -490,8 +379,7 @@ def test_canary_normal_path_not_in_logs_or_result(capsys):
 
     r = ra.GhCommandRunner(environ={"GH_TOKEN": CANARY}, run=run)
     store = ra.GhReleaseStore("o/r", r)
-    u = ra.ReleaseUploader(store, SEGS, "ltx25", now=lambda: NOW, log=logs.append,
-                           run_id=RUN)
+    u = ra.ReleaseUploader(store, SEGS, "ltx25", now=lambda: NOW, log=logs.append)
     assert CANARY not in r(["release", "list"]) and "***" in r(["release", "list"])
     u.prepare()
     out = capsys.readouterr()
@@ -505,7 +393,7 @@ def test_canary_error_path_not_in_exception_or_traceback(capsys):
 
     logs = []
     store = ra.GhReleaseStore("o/r", ra.GhCommandRunner(environ={"GH_TOKEN": CANARY}, run=run))
-    u = ra.ReleaseUploader(store, SEGS, "ltx25", now=lambda: NOW, log=logs.append, run_id=RUN)
+    u = ra.ReleaseUploader(store, SEGS, "ltx25", now=lambda: NOW, log=logs.append)
     with pytest.raises(GeminiRuntimeError) as e:
         u.prepare()
     text = "".join(traceback.format_exception(e.value))
