@@ -763,7 +763,7 @@ def _provider_key_count(provider: str) -> int:
 class _WaveJob:
     """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
 
-    Поля очереди (next_idx, stopped, first_error, inflight) меняются под замком очереди: своим у одиночной волны
+    Поля очереди (next_idx, stopped, first_error, inflight, main_inflight) меняются под замком очереди: своим у одиночной волны
     или общим у SharedBatchPool. Модель вызывается вне всех замков.
     """
 
@@ -784,6 +784,7 @@ class _WaveJob:
         self.stopped = False              # первая ошибка волны (или остановка пула): новые батчи не берём
         self.first_error: list = []       # первая ошибка волны; последующие не сохраняются
         self.inflight = 0                 # батчи, которые выполняются сейчас (в любом потоке)
+        self.main_inflight = 0            # главные батчи, которые выполняются сейчас; остаток исправлений ждёт их конца
         # замок очереди: у пула свой (его _cond), у одиночной волны — замок её очереди батчей
         self.sched_lock = sched_lock if sched_lock is not None else threading.Lock()
         self.rework_queue: list = list(rework or [])  # клипы, ждущие исправления (PromptResult); меняются под замком очереди
@@ -1005,7 +1006,7 @@ class SharedBatchPool:
         """Следующая работа потока: ('main', волна, idx) или ('fix', волна, (номер пакета, клипы)); None, когда работы больше не будет.
 
         Порядок: главный батч (своя волна, затем чужая). Если главных не осталось: пакет исправлений, полный
-        (FIX_BATCH_SIZE клипов одной волны) сразу; остаток — только когда ничего не выполняется нигде.
+        (FIX_BATCH_SIZE клипов одной волны) сразу; остаток — только когда нигде не выполняется главный батч (исправления других волн не мешают).
         Иначе поток ждёт в wait(); замок при ожидании отпускается. Ошибка пула останавливает выдачу.
         """
         with self._cond:
@@ -1034,6 +1035,7 @@ class SharedBatchPool:
             idx = job.next_idx
             job.next_idx += 1
             job.inflight += 1
+            job.main_inflight += 1   # парный декремент — в _finish при kind == "main"
             return job, idx
         return None
 
@@ -1044,7 +1046,7 @@ class SharedBatchPool:
             job = self._jobs.get(w)
             if job is not None and not job.stopped and len(job.rework_queue) >= FIX_BATCH_SIZE:
                 return self._cut_fix(job)
-        if all(j.inflight == 0 for j in self._jobs.values() if j is not None):
+        if all(j.main_inflight == 0 for j in self._jobs.values() if j is not None):
             for w in order:
                 job = self._jobs.get(w)
                 if job is not None and not job.stopped and job.rework_queue:
@@ -1075,9 +1077,12 @@ class SharedBatchPool:
             job.rework_queue.extend(clips)
             self._cond.notify_all()
 
-    def _finish(self, job: "_WaveJob", exc: Optional[BaseException]) -> None:
+    def _finish(self, job: "_WaveJob", exc: Optional[BaseException], *, kind: str) -> None:
+        """Под замком очереди: снимает отметку выполнения; главный батч (kind == "main") снимает и main_inflight."""
         with self._cond:
             job.inflight -= 1
+            if kind == "main":
+                job.main_inflight -= 1
             if exc is not None:
                 # ошибка не глотается: первая ошибка волны; новые батчи волны не берём, запущенные доходят до конца
                 if not job.first_error:
@@ -1116,7 +1121,7 @@ class SharedBatchPool:
             finally:
                 if self._bind is not None:
                     self._bind(None)
-            self._finish(job, exc)
+            self._finish(job, exc, kind=kind)
 
 
 def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
