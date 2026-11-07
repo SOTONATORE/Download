@@ -25,13 +25,13 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .srt_parser import Segment
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
-    from .prompt_check import (MAX_REWORK_ATTEMPTS, PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
+    from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
-    from prompt_check import (MAX_REWORK_ATTEMPTS, PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
+    from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
@@ -119,6 +119,8 @@ class PromptResult:
     rework_pending: list = field(default_factory=list)
     # число кругов исправления; None: клип очередь не проходил (в prompts.json поля не пишутся)
     rework_round: Optional[int] = None
+    # сырой текст клипа в очереди исправлений (без стиля): по нему проверка и исправление; пусто вне очереди
+    prompt_raw: str = ""
 
 
 # Очередь исправлений: кругов на клип и размер пакета исправления (одна волна, один запрос)
@@ -653,33 +655,6 @@ def _num_ranges(nums: list) -> str:
     return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in spans)
 
 
-def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
-                     res: PromptResult) -> PromptResult:
-    """Проверка запрещённых типов кадра и маркеров в готовом промпте, один клип (шаг 6).
-
-    Пакетный путь эту функцию не вызывает: нарушения помечаются в _run_batch и исправляются очередью
-    (_WaveJob.process_fix). Здесь прежний цикл до MAX_REWORK_ATTEMPTS переписываний одного промпта.
-    Если нарушение осталось, исключение не поднимается: возвращается последний текст.
-    """
-    text = res.prompt
-    problems = _find_all_problems(text, builder.cfg)
-    attempt = 0
-    while problems and attempt < MAX_REWORK_ATTEMPTS:
-        attempt += 1
-        user = (f"Prompt for segment_index {res.num}: {text}\n\n"
-                + rework_remark(problems)
-                + f"\n\nReturn only the JSON array with one item: segment_index {res.num}.")
-        raw = transport.generate_json(model, builder.system, user, builder.schema)
-        results, _ = parse_and_validate(raw, [res.num], builder.cfg)
-        new_text = results[res.num].prompt if res.num in results else ""
-        if new_text.strip():
-            text = new_text
-        problems = _find_all_problems(text, builder.cfg)
-    # нарушение после последней попытки не останавливает прогон: решение о тексте принимает вызывающий код
-    res.prompt = text
-    return res
-
-
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
                tag: str = "") -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
@@ -812,25 +787,13 @@ class _WaveJob:
         log.info("%sБатч %d из %d: начало, клипов в батче: %d.", self.tag, batch_no, len(self.batches),
                  len(batch.nums), extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
-        try:
-            batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
-        except GeminiRuntimeError as exc:
-            partial = getattr(exc, "partial", None)
-            if partial:
-                # прогон останавливается: готовые клипы батча пишем под out_lock тем же путём, что обычный батч
-                for r in partial.values():
-                    if r.prompt.strip():
-                        r.prompt = attach_style(r.prompt, self.style_text)
-                log.warning("%sБатч %d: до остановки сохранено готовых клипов: %d из %d.",
-                            self.tag, batch_no, len(partial), len(batch.nums))
-                with self.out_lock:
-                    self.out.update(partial)
-                    if self.on_batch is not None:
-                        self.on_batch([partial[n] for n in batch.nums if n in partial])
-            raise
+        batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
         for r in batch_res.values():
-            # стиль пресета прикрепляется последним; пустой промпт и клип в очереди исправлений не трогаем
-            if r.prompt.strip() and not r.rework_pending:
+            if r.prompt.strip() and r.rework_pending:
+                # клип в очереди исправлений: сырой текст в prompt_raw (по нему проверка и исправление), в prompt — со стилем
+                r.prompt_raw = r.prompt
+            if r.prompt.strip():
+                # стиль пресета прикрепляется последним; пустой промпт не трогаем
                 r.prompt = attach_style(r.prompt, self.style_text)
         # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
         review_nums = []
@@ -846,7 +809,7 @@ class _WaveJob:
         if review_nums:
             log.warning("%sБатч %d: промпты требуют проверки, клипы: %s.",
                         self.tag, batch_no, ", ".join(str(n) for n in review_nums))
-        # клипы с нарушениями: в запись уходят без стиля, в очередь исправлений — после записи
+        # клипы с нарушениями: в запись уходят со стилем, сырой текст в prompt_raw; в очередь исправлений — после записи
         queued = [batch_res[n] for n in batch.nums if n in batch_res and batch_res[n].rework_pending]
         if queued:
             log.info("%sБатч %d: клипов с нарушениями, в очереди исправлений: %d.", self.tag, batch_no, len(queued))
@@ -881,7 +844,7 @@ class _WaveJob:
         nums = [c.num for c in clips]
         logged.start_batch(fix_no, "Фикс")   # номер попытки и номер пакета в строках повторов
         log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
-        lines = [f"Prompt for segment_index {c.num}: {c.prompt} {rework_remark(c.rework_pending)}" for c in clips]
+        lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {rework_remark(c.rework_pending)}" for c in clips]
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
         raw = logged.generate_json(self.model, builder.system, user, builder.schema)
         results, _ = parse_and_validate(raw, nums, builder.cfg)
@@ -890,17 +853,17 @@ class _WaveJob:
         for c in clips:
             new_text = results[c.num].prompt if c.num in results else ""
             if new_text.strip():
-                c.prompt = new_text   # пустой ответ: прежний текст остаётся
+                c.prompt_raw = new_text   # пустой ответ: прежний сырой текст остаётся
             c.rework_round = (c.rework_round or 0) + 1
-            found = _find_all_problems(c.prompt, builder.cfg)  # проверка до стиля: текст в записи пока без него
+            found = _find_all_problems(c.prompt_raw, builder.cfg)  # проверка по сырому тексту, до стиля
+            c.prompt = attach_style(c.prompt_raw, self.style_text)  # в записи — текст со стилем, как у клипов вне очереди
             if not found:
                 c.rework_pending = []
-                c.prompt = attach_style(c.prompt, self.style_text)
+                c.prompt_raw = ""   # клип исправлен: сырого текста в записи нет
                 fixed += 1
             elif c.rework_round >= REPAIR_ROUNDS:
                 # круги кончились: текст последней версии сохраняется, клип помечается на проверку
                 c.rework_pending = found
-                c.prompt = attach_style(c.prompt, self.style_text)
                 c.needs_review = True
                 c.review_reason = "; ".join(problem_ru(p) for p in found)
                 log.warning("%sКлип %d: не исправлено за %d кругов: %s.",

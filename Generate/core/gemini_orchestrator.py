@@ -373,24 +373,31 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
-def _rework_seeds(prompts: dict) -> list:
-    """Клипы видео из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
+def _rework_seeds(prompts: dict, photo: bool = False) -> list:
+    """Клипы из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
 
-    Видео узнаётся по start_ms (его пишет только этот путь); фото сюда не попадает. Вызывать под замком
-    состояния: словарь пишут обе волны.
+    photo=False: клипы видео (узнаются по start_ms, его пишет только этот путь); photo=True: клипы фото
+    (записи без start_ms). Текст для исправления — prompt_raw, у старых записей без него — prompt.
+    Записи, которые не словари, пропускаются. Вызывать под замком состояния: словарь пишут обе волны.
     """
     seeds = []
     for key, e in prompts.items():
+        if not isinstance(e, dict):
+            continue
+        is_video = "start_ms" in e
+        if is_video == photo:
+            continue   # клип другой волны
         pending_fix = e.get("rework_pending") or []
         rnd = int(e.get("rework_round", 0) or 0)
-        if not pending_fix or rnd >= gp.REPAIR_ROUNDS or "start_ms" not in e:
+        if not pending_fix or rnd >= gp.REPAIR_ROUNDS:
             continue
-        if not str(e.get("prompt", "")).strip():
+        raw = str(e.get("prompt_raw") or e.get("prompt") or "")
+        if not raw.strip():
             continue
         seeds.append(gp.PromptResult(
-            num=int(key), prompt=e["prompt"], needs_review=bool(e.get("needs_review", False)),
+            num=int(key), prompt=str(e.get("prompt", "")), needs_review=bool(e.get("needs_review", False)),
             review_reason=str(e.get("error", "")), extra=dict(e.get("extra") or {}),
-            rework_pending=list(pending_fix), rework_round=rnd))
+            rework_pending=list(pending_fix), rework_round=rnd, prompt_raw=raw))
     return seeds
 
 
@@ -474,6 +481,9 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                     # поля очереди исправлений есть только у клипов, которые её проходили; остальные записи не меняются
                     entry["rework_pending"] = list(getattr(r, "rework_pending", None) or [])
                     entry["rework_round"] = int(rework_round)
+                if getattr(r, "rework_pending", None):
+                    # клип в очереди исправлений: сырой текст отдельно; в поле prompt — со стилем
+                    entry["prompt_raw"] = r.prompt_raw
                 prompts[str(r.num)] = entry
             state["model"] = managed.active_model
             state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}

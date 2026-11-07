@@ -7,7 +7,7 @@ import json
 import pytest
 
 from Generate.core import gemini_prompts as gp
-from Generate.core.gemini_prompts import GeminiRuntimeError, PromptConfig
+from Generate.core.gemini_prompts import PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
     find_camera_motion,

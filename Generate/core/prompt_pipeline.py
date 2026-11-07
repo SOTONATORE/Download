@@ -207,7 +207,10 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         guard = lock
         prompts = state["prompts"]
         pending = go.missing_segments(prompts, needed)
-        if not pending:
+        # очередь исправлений фото из сохранённого состояния (под замком: словарь пишут обе волны)
+        with guard:
+            seeds = go._rework_seeds(prompts, photo=True)
+        if not pending and not seeds:
             return
 
         def on_batch(results: list) -> None:
@@ -226,6 +229,9 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
                         # поля очереди исправлений — только у клипов, которые её проходили
                         entry["rework_pending"] = list(getattr(r, "rework_pending", None) or [])
                         entry["rework_round"] = int(rework_round)
+                    if getattr(r, "rework_pending", None):
+                        # клип в очереди исправлений: сырой текст отдельно; в поле prompt — со стилем
+                        entry["prompt_raw"] = r.prompt_raw
                     prompts[str(r.num)] = entry
                 state["model"] = managed.active_model
                 state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
@@ -238,8 +244,10 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         provider = getattr(watch, "provider", "gemini")
         extra = {} if provider == "gemini" else {"provider": provider}
         pool_kw = {} if pool is None else {"pool": pool, "wave": PHOTO_WAVE}
+        # очередь прошлого запуска передаётся только когда она не пуста: вызов без неё остаётся прежним
+        rework_kw = {} if not seeds else {"rework": seeds}
         gp.generate_prompts(segments, pending, photo_cfg, managed, managed.active_model, on_batch=on_batch,
-                            **extra, **pool_kw)
+                            **extra, **pool_kw, **rework_kw)
     except gp.GeminiRuntimeError as exc:
         errors.append(str(exc))
         if _is_hard(exc, seen, mark):
@@ -345,6 +353,13 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
     else:
         video = [n for n in needed if n not in photo_nums]
         photo = [n for n in needed if n in photo_nums]
+        # очередь исправлений прошлого запуска: волна с очередью идёт, даже если клипов для генерации у неё нет
+        # (только чтение файла, без замка и без вызовов модели: потоков волн ещё нет)
+        prev_prompts = read_state(prompts_path).get("prompts", {})
+        video_seeds = bool(go._rework_seeds(prev_prompts))
+        photo_seeds = bool(go._rework_seeds(prev_prompts, photo=True))
+        run_video = bool(video) or video_seeds
+        run_photo = bool(photo) or photo_seeds
         # цепочка строится на наблюдателе: её вызовы видны _TransportWatch и для видео, и для фото
         managed = go.ManagedTransport(
             watch, gemini_options.get("models", go.DEFAULT_MODELS),
@@ -362,13 +377,13 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                                         provider=getattr(watch, "provider", "gemini"),
                                         progress=_progress_for(video, photo, started))
         else:
-            if video:
+            if run_video:
                 state = _load_shared(state, prompts_path, segments, file_profile)
                 state = _video_step(video, segments=segments, cfg=cfg, watch=watch,
                                     prompts_path=prompts_path, profile=profile, timing=timing,
                                     gemini_options=gemini_options, errors=errors, aborts=aborts,
                                     managed=managed, state=state, lock=lock)
-            if photo:
+            if run_photo:
                 state = _load_shared(state, prompts_path, segments, file_profile)
                 _photo_step(photo, segments=segments, photo_cfg=photo_cfg, watch=watch,
                             prompts_path=prompts_path, gemini_options=gemini_options,
