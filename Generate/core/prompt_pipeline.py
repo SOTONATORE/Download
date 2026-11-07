@@ -215,12 +215,18 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
             with guard:
                 for r in results:
                     old = prompts.get(str(r.num)) or {}
-                    prompts[str(r.num)] = {
+                    entry = {
                         "num": r.num, "num_frames": PHOTO_NUM_FRAMES, "prompt": r.prompt,
                         "status": "ready" if r.prompt.strip() else "failed",
                         "attempts": int(old.get("attempts", 0)) + 1,
                         "error": r.review_reason, "needs_review": r.needs_review, "extra": r.extra,
                     }
+                    rework_round = getattr(r, "rework_round", None)
+                    if rework_round is not None:
+                        # поля очереди исправлений — только у клипов, которые её проходили
+                        entry["rework_pending"] = list(getattr(r, "rework_pending", None) or [])
+                        entry["rework_round"] = int(rework_round)
+                    prompts[str(r.num)] = entry
                 state["model"] = managed.active_model
                 state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
                 go.atomic_write_json(prompts_path, state)

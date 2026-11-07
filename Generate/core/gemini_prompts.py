@@ -115,6 +115,15 @@ class PromptResult:
     needs_review: bool = False
     review_reason: str = ""
     extra: dict = field(default_factory=dict)   # дополнительные поля из response_format профиля
+    # очередь исправлений (шаг 6): нарушения, которые ещё не исправлены (строки, как у find_problems)
+    rework_pending: list = field(default_factory=list)
+    # число кругов исправления; None: клип очередь не проходил (в prompts.json поля не пишутся)
+    rework_round: Optional[int] = None
+
+
+# Очередь исправлений: кругов на клип и размер пакета исправления (одна волна, один запрос)
+REPAIR_ROUNDS = 5
+FIX_BATCH_SIZE = 25
 
 
 @dataclass(frozen=True)
@@ -633,14 +642,24 @@ def _find_all_problems(text: str, cfg: PromptConfig) -> list:
     return list(dict.fromkeys(problems))
 
 
+def _num_ranges(nums: list) -> str:
+    """Номера списком диапазонов: «3-5, 9». Пусто, если номеров нет."""
+    spans: list = []
+    for n in sorted(set(nums)):
+        if spans and n == spans[-1][1] + 1:
+            spans[-1][1] = n
+        else:
+            spans.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in spans)
+
+
 def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
                      res: PromptResult) -> PromptResult:
-    """Проверка запрещённых типов кадра и маркеров в готовом промпте (шаг 6).
+    """Проверка запрещённых типов кадра и маркеров в готовом промпте, один клип (шаг 6).
 
-    Нарушение: до MAX_REWORK_ATTEMPTS переписываний этого одного промпта тем же вызовом Gemini.
-    Если нарушение осталось после последней попытки, прогон останавливается с ошибкой.
-    Этот цикл отдельный: повтор при сбоях сети живёт в gemini_orchestrator, повтор за стиль — в _run_batch.
-    Текст промпта в сообщение об ошибке не попадает.
+    Пакетный путь эту функцию не вызывает: нарушения помечаются в _run_batch и исправляются очередью
+    (_WaveJob.process_fix). Здесь прежний цикл до MAX_REWORK_ATTEMPTS переписываний одного промпта.
+    Если нарушение осталось, исключение не поднимается: возвращается последний текст.
     """
     text = res.prompt
     problems = _find_all_problems(text, builder.cfg)
@@ -656,17 +675,7 @@ def _check_forbidden(transport: GeminiTransport, model: str, builder: _Builder,
         if new_text.strip():
             text = new_text
         problems = _find_all_problems(text, builder.cfg)
-    if problems:
-        # GeminiRuntimeError со status=None: сбой-класс, который cli уже обрабатывает; повтор на транспорте
-        # сюда не заходит (ошибка поднимается вне generate_json), поэтому оркестратор её не повторяет.
-        # причина остановки: лимит переписываний исчерпан и нарушение осталось; число уже сохранённых клипов
-        # здесь неизвестно (батч ещё не записан), его пишет prompt_pipeline.build_prompts после обеих волн
-        raise GeminiRuntimeError(
-            f"Сегмент {res.num}: лимит переписываний исчерпан ({attempt} из {MAX_REWORK_ATTEMPTS}), "
-            f"в промпте остались запрещённые типы кадра или маркеры: "
-            f"{'; '.join(problem_ru(p) for p in problems)}. "
-            "Прогон остановлен; готовые промпты сохранены, при повторном запуске догенерируются только недостающие."
-        )
+    # нарушение после последней попытки не останавливает прогон: решение о тексте принимает вызывающий код
     res.prompt = text
     return res
 
@@ -706,17 +715,15 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 if best is None:
                     best = PromptResult(n, "")
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
-    # шаг 6: проверка до прикрепления стиля в generate_prompts (текст стиля сам содержит слова вроде «documents»)
-    checked: dict = {}  # клипы батча, прошедшие проверку шага 6: их отдаём наверх, если прогон остановится
+    # шаг 6 без запроса: запрещённые типы и маркеры помечаются очередью исправлений (rework_pending);
+    # текст пока без стиля, исправление идёт пакетами после главных батчей (_WaveJob.process_fix)
     for n in list(final):
-        if final[n].prompt.strip():
-            try:
-                final[n] = _check_forbidden(transport, model, builder, final[n])
-            except GeminiRuntimeError as exc:
-                # остановка: уже проверенные клипы батча не теряем, process запишет их перед выходом
-                exc.partial = dict(checked)
-                raise
-            checked[n] = final[n]
+        r = final[n]
+        if r.prompt.strip():
+            found = _find_all_problems(r.prompt, builder.cfg)
+            if found:
+                r.rework_pending = found
+                r.rework_round = 0
     return final
 
 
@@ -773,7 +780,8 @@ class _WaveJob:
     """
 
     def __init__(self, wave: str, builder, batches: list, transport, model: str, style_text: str,
-                 on_batch: Optional[Callable[[list], None]], tag: str = "") -> None:
+                 on_batch: Optional[Callable[[list], None]], tag: str = "", sched_lock=None,
+                 rework: Optional[list] = None) -> None:
         self.wave = wave                 # имя волны: по нему пул учитывает вызовы модели
         self.tag = tag                   # префикс строк журнала батчей: «[имя волны] » в пуле, «» без пула
         self.builder = builder
@@ -788,6 +796,10 @@ class _WaveJob:
         self.stopped = False              # первая ошибка волны (или остановка пула): новые батчи не берём
         self.first_error: list = []       # первая ошибка волны; последующие не сохраняются
         self.inflight = 0                 # батчи, которые выполняются сейчас (в любом потоке)
+        # замок очереди: у пула свой (его _cond), у одиночной волны — замок её очереди батчей
+        self.sched_lock = sched_lock if sched_lock is not None else threading.Lock()
+        self.rework_queue: list = list(rework or [])  # клипы, ждущие исправления (PromptResult); меняются под замком очереди
+        self.pool = None                  # общий пул, если волна в нём; ставится в arrive_and_wait
 
     def process(self, logged, idx: int) -> None:
         """Выполняет батч idx: запрос, стиль, журнал, затем out и on_batch под out_lock. Исключения не глотает."""
@@ -814,8 +826,8 @@ class _WaveJob:
                         self.on_batch([partial[n] for n in batch.nums if n in partial])
             raise
         for r in batch_res.values():
-            # стиль пресета прикрепляется последним; пустой промпт (нет пригодного текста) не трогаем
-            if r.prompt.strip():
+            # стиль пресета прикрепляется последним; пустой промпт и клип в очереди исправлений не трогаем
+            if r.prompt.strip() and not r.rework_pending:
                 r.prompt = attach_style(r.prompt, self.style_text)
         # журнал по клипам: принятые — с длиной и коротким хешем (текст промпта в журнал не пишется)
         review_nums = []
@@ -825,12 +837,16 @@ class _WaveJob:
                 continue
             if r.needs_review:
                 review_nums.append(n)
-            elif r.prompt.strip():
+            elif r.prompt.strip() and not r.rework_pending:
                 digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
                 log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
         if review_nums:
             log.warning("%sБатч %d: промпты требуют проверки, клипы: %s.",
                         self.tag, batch_no, ", ".join(str(n) for n in review_nums))
+        # клипы с нарушениями: в запись уходят без стиля, в очередь исправлений — после записи
+        queued = [batch_res[n] for n in batch.nums if n in batch_res and batch_res[n].rework_pending]
+        if queued:
+            log.info("%sБатч %d: клипов с нарушениями, в очереди исправлений: %d.", self.tag, batch_no, len(queued))
         with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
         log.info("%sБатч %d: получено промптов с текстом: %d из %d, за %.1f с.",
                  self.tag, batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
@@ -839,6 +855,62 @@ class _WaveJob:
             self.out.update(batch_res)
             if self.on_batch is not None:
                 self.on_batch([batch_res[n] for n in batch.nums])
+        self.enqueue(queued)
+
+    def enqueue(self, clips: list) -> None:
+        """Ставит клипы в очередь исправлений. Замок очереди не держится при вызове модели."""
+        if not clips:
+            return
+        if self.pool is not None:
+            self.pool.enqueue(self, clips)
+            return
+        with self.sched_lock:
+            self.rework_queue.extend(clips)
+
+    def process_fix(self, logged, clips: list) -> None:
+        """Исправляет пакет клипов очереди: один запрос на волну, разбор, проверка, стиль, запись.
+
+        В запрос входят только текущий промпт и что убрать: без SRT, пресета и стиля. Системная инструкция и схема
+        берутся у волны. Замков при вызове модели нет. Исключения транспорта не глотаются (как у батча).
+        """
+        builder = self.builder
+        nums = [c.num for c in clips]
+        lines = [f"Prompt for segment_index {c.num}: {c.prompt} {rework_remark(c.rework_pending)}" for c in clips]
+        user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
+        raw = logged.generate_json(self.model, builder.system, user, builder.schema)
+        results, _ = parse_and_validate(raw, nums, builder.cfg)
+        fixed = 0
+        requeue: list = []
+        for c in clips:
+            new_text = results[c.num].prompt if c.num in results else ""
+            if new_text.strip():
+                c.prompt = new_text   # пустой ответ: прежний текст остаётся
+            c.rework_round = (c.rework_round or 0) + 1
+            found = _find_all_problems(c.prompt, builder.cfg)  # проверка до стиля: текст в записи пока без него
+            if not found:
+                c.rework_pending = []
+                c.prompt = attach_style(c.prompt, self.style_text)
+                fixed += 1
+            elif c.rework_round >= REPAIR_ROUNDS:
+                # круги кончились: текст последней версии сохраняется, клип помечается на проверку
+                c.rework_pending = found
+                c.prompt = attach_style(c.prompt, self.style_text)
+                c.needs_review = True
+                c.review_reason = "; ".join(problem_ru(p) for p in found)
+                log.warning("%sКлип %d: не исправлено за %d кругов: %s.",
+                            self.tag, c.num, REPAIR_ROUNDS, c.review_reason)
+            else:
+                c.rework_pending = found
+                requeue.append(c)
+        ordered = sorted(clips, key=lambda c: c.num)
+        with self.out_lock:
+            self.out.update({c.num: c for c in ordered})
+            if self.on_batch is not None:
+                self.on_batch(ordered)
+        if self.pool is not None:
+            log.info("%sФикс: круг %d, клипов %d, исправлено %d, осталось %d.",
+                     self.tag, max(c.rework_round for c in clips), len(clips), fixed, len(clips) - fixed)
+        self.enqueue(requeue)
 
 
 class SharedBatchPool:
@@ -874,10 +946,12 @@ class SharedBatchPool:
             raise ValueError(f"волна {wave!r} не объявлена в общем пуле")
         with self._cond:
             self._jobs[wave] = job
+            job.pool = self   # очередь исправлений этой волны ведёт пул под своим замком
             self._arrived.add(wave)
             self._cond.notify_all()
             self._cond.wait_for(lambda: set(self._shares) <= self._arrived)
-            other_has_work = any(j is not None and j.batches for w, j in self._jobs.items() if w != wave)
+            other_has_work = any(j is not None and (j.batches or j.rework_queue)
+                                 for w, j in self._jobs.items() if w != wave)
             if other_has_work:
                 return int(self._shares[wave])
             return sum(int(v) for v in self._shares.values())
@@ -902,20 +976,77 @@ class SharedBatchPool:
             return self._fatal
 
     def _take(self, own: str):
-        """Следующий батч: сначала из очереди своей волны, затем из чужой. None, если работы нет нигде."""
+        """Следующая работа потока: ('main', волна, idx) или ('fix', волна, клипы); None, когда работы больше не будет.
+
+        Порядок: главный батч (своя волна, затем чужая). Если главных не осталось: пакет исправлений, полный
+        (FIX_BATCH_SIZE клипов одной волны) сразу; остаток — только когда ничего не выполняется нигде.
+        Иначе поток ждёт в wait(); замок при ожидании отпускается. Ошибка пула останавливает выдачу.
+        """
         with self._cond:
-            if self._fatal is not None:
-                return None
-            order = [own] + [w for w in self._shares if w != own]
+            while True:
+                if self._fatal is not None:
+                    return None
+                main = self._pick_main(own)
+                if main is not None:
+                    job, idx = main
+                    return "main", job, idx
+                fix = self._pick_fix(own)
+                if fix is not None:
+                    job, clips = fix
+                    return "fix", job, clips
+                if self._idle():
+                    return None
+                self._cond.wait()
+
+    def _pick_main(self, own: str):
+        """Под замком очереди: следующий главный батч (своя волна, затем чужая) или None."""
+        order = [own] + [w for w in self._shares if w != own]
+        for w in order:
+            job = self._jobs.get(w)
+            if job is None or job.stopped or job.next_idx >= len(job.batches):
+                continue
+            idx = job.next_idx
+            job.next_idx += 1
+            job.inflight += 1
+            return job, idx
+        return None
+
+    def _pick_fix(self, own: str):
+        """Под замком очереди: пакет исправлений одной волны (своя, затем чужая) или None."""
+        order = [own] + [w for w in self._shares if w != own]
+        for w in order:
+            job = self._jobs.get(w)
+            if job is not None and not job.stopped and len(job.rework_queue) >= FIX_BATCH_SIZE:
+                return self._cut_fix(job)
+        if all(j.inflight == 0 for j in self._jobs.values() if j is not None):
             for w in order:
                 job = self._jobs.get(w)
-                if job is None or job.stopped or job.next_idx >= len(job.batches):
-                    continue
-                idx = job.next_idx
-                job.next_idx += 1
-                job.inflight += 1
-                return job, idx
-            return None
+                if job is not None and not job.stopped and job.rework_queue:
+                    return self._cut_fix(job)
+        return None
+
+    @staticmethod
+    def _cut_fix(job: "_WaveJob"):
+        """Под замком очереди: снимает с очереди до FIX_BATCH_SIZE клипов и отмечает выполнение."""
+        clips = job.rework_queue[:FIX_BATCH_SIZE]
+        del job.rework_queue[:FIX_BATCH_SIZE]
+        job.inflight += 1
+        return job, clips
+
+    def _idle(self) -> bool:
+        """Под замком очереди: в не остановленных волнах не осталось ни батчей, ни исправлений, ни выполнений."""
+        for job in self._jobs.values():
+            if job is None or job.stopped:
+                continue
+            if job.next_idx < len(job.batches) or job.rework_queue or job.inflight:
+                return False
+        return True
+
+    def enqueue(self, job: "_WaveJob", clips: list) -> None:
+        """Ставит клипы волны в очередь исправлений и будит потоки пула."""
+        with self._cond:
+            job.rework_queue.extend(clips)
+            self._cond.notify_all()
 
     def _finish(self, job: "_WaveJob", exc: Optional[BaseException]) -> None:
         with self._cond:
@@ -933,21 +1064,25 @@ class SharedBatchPool:
         """Ждёт, пока все батчи волны выполнены (или волна остановлена) и никто не выполняет её батч."""
         with self._cond:
             self._cond.wait_for(lambda: job.inflight == 0 and (
-                job.next_idx >= len(job.batches) or job.stopped or self._fatal is not None))
+                job.stopped or self._fatal is not None
+                or (job.next_idx >= len(job.batches) and not job.rework_queue)))
 
     def run_worker(self, own: str) -> None:
-        """Тело потока пула: берёт батчи, пока есть работа. Ошибка батча не останавливает поток."""
+        """Тело потока пула: берёт главные батчи и пакеты исправлений, пока есть работа. Ошибка батча не останавливает поток."""
         while True:
             got = self._take(own)
             if got is None:
                 return
-            job, idx = got
+            kind, job, payload = got
             logged = _LoggedTransport(job.transport, tag=job.tag)   # журнал свой у каждого батча: номер попытки сбрасывается
             exc: Optional[BaseException] = None
             if self._bind is not None:
                 self._bind(job.wave)
             try:
-                job.process(logged, idx)
+                if kind == "main":
+                    job.process(logged, payload)
+                else:
+                    job.process_fix(logged, payload)
             except BaseException as err:
                 exc = err
             finally:
@@ -960,7 +1095,8 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                      transport: GeminiTransport, model: str,
                      on_batch: Optional[Callable[[list], None]] = None,
                      max_workers: Optional[int] = None, provider: str = "gemini",
-                     pool: Optional["SharedBatchPool"] = None, wave: Optional[str] = None) -> list:
+                     pool: Optional["SharedBatchPool"] = None, wave: Optional[str] = None,
+                     rework: Optional[list] = None) -> list:
     """Промпты для нужных номеров: список PromptResult по возрастанию номера.
 
     Все проверки входа выполняются до первого обращения к transport. Ошибки транспорта
@@ -985,12 +1121,18 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     работа идёт как раньше: своя очередь и потоки по числу ключей. С пулом число потоков и очередь задаёт пул,
     max_workers не используется; вызов возвращается, когда выполнены все батчи его волны, даже если их
     выполняли потоки другой волны. Ошибка волны пробрасывается ей, ошибка не-Gemini останавливает весь пул.
+
+    rework: клипы из сохранённого состояния, у которых нарушения ещё не исправлены (очередь прошлого запуска).
+    Им текст уже есть, батчей для них нет: они только попадают в очередь исправлений этого вызова.
+    Без них поведение прежнее. Исправления после главных батчей идут в обоих путях (с пулом и без него).
     """
-    builder = _Builder(segments, wanted_nums, cfg)
+    seeds = list(rework or [])
+    # построитель знает нужные номера и номера очереди; батчи строятся только для нужных номеров
+    builder = _Builder(segments, list(wanted_nums) + [r.num for r in seeds], cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
     style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
     t_all = time.monotonic()
-    batches = builder.batches(builder.wanted)
+    batches = builder.batches(list(wanted_nums))
     # ключи для баннера: те же ключи провайдера, что и для числа потоков; ошибка чтения — ноль
     try:
         key_count = _provider_key_count(provider)
@@ -998,7 +1140,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         key_count = 0
     kind = "видео" if cfg.media == "video" else "фото"
     log.info("=== Генерация %s-промптов: клипов %d, батчей %d, ключей %d ===",
-             kind, len(builder.wanted), len(batches), key_count, extra=KEY_EVENT_EXTRA)
+             kind, len(set(wanted_nums)), len(batches), key_count, extra=KEY_EVENT_EXTRA)
 
     if pool is None:
         # одиночная волна: число потоков по числу ключей провайдера; без ключей — один поток (как раньше)
@@ -1010,8 +1152,9 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
         log.info("Батчи выполняются в %d потоках.", n_workers)
 
-        job = _WaveJob(kind, builder, batches, transport, model, style_text, on_batch)
-        queue_lock = threading.Lock()    # очередь батчей, флаг остановки и первая ошибка
+        queue_lock = threading.Lock()    # очередь батчей, флаг остановки, первая ошибка и очередь исправлений
+        job = _WaveJob(kind, builder, batches, transport, model, style_text, on_batch,
+                       sched_lock=queue_lock, rework=seeds)
         stop = threading.Event()
         first_error: list = []           # первая ошибка; последующие не сохраняются (их видно в журнале попыток)
 
@@ -1043,6 +1186,15 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                 th.start()
             for th in threads:
                 th.join()
+        # исправления очереди этой волны: потоков уже нет, пакеты идут по одному (без пула)
+        logged_fix = _LoggedTransport(transport)
+        while job.rework_queue and not first_error:
+            clips = job.rework_queue[:FIX_BATCH_SIZE]
+            del job.rework_queue[:FIX_BATCH_SIZE]
+            try:
+                job.process_fix(logged_fix, clips)
+            except BaseException as exc:
+                first_error.append(exc)
         if first_error:
             raise first_error[0]
         out = job.out
@@ -1051,7 +1203,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         wave_name = wave if wave is not None else kind
         # имя волны в строках батчей пула: «[видео] » или «[фото] »
         job = _WaveJob(wave_name, builder, batches, transport, model, style_text, on_batch,
-                       tag=f"[{wave_name}] ")
+                       tag=f"[{wave_name}] ", rework=seeds)
         n_workers = pool.arrive_and_wait(job.wave, job)
         log.info("%sБатчи выполняются в %d потоках (общий пул волн).", job.tag, n_workers)
         threads = [threading.Thread(target=pool.run_worker, args=(job.wave,), name=f"gemini-{job.wave}-{i + 1}")
@@ -1072,6 +1224,10 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     results = [out[n] for n in builder.wanted]
     flagged = sum(1 for r in results if r.needs_review)
     log.info("Промпты готовы: %d, из них требуют проверки: %d.", len(results), flagged)
+    # итог по волне: клипы с нарушениями, не исправленными за REPAIR_ROUNDS кругов (текст последней версии сохранён)
+    unfixed = [r.num for r in results if r.needs_review and r.rework_pending]
+    log.info("[%s] Нарушения запрещённых типов и маркеров: не исправлено клипов %d, номера: %s.",
+             wave if wave is not None else kind, len(unfixed), _num_ranges(unfixed) or "нет")
     # итог прогона: готово / без текста; клипы с отметкой проверки в эти числа не входят (их число в строке «Промпты готовы»)
     ready = sum(1 for r in results if r.prompt.strip() and not r.needs_review)
     no_text = sum(1 for r in results if not r.prompt.strip())

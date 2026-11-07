@@ -373,6 +373,27 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
+def _rework_seeds(prompts: dict) -> list:
+    """Клипы видео из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
+
+    Видео узнаётся по start_ms (его пишет только этот путь); фото сюда не попадает. Вызывать под замком
+    состояния: словарь пишут обе волны.
+    """
+    seeds = []
+    for key, e in prompts.items():
+        pending_fix = e.get("rework_pending") or []
+        rnd = int(e.get("rework_round", 0) or 0)
+        if not pending_fix or rnd >= gp.REPAIR_ROUNDS or "start_ms" not in e:
+            continue
+        if not str(e.get("prompt", "")).strip():
+            continue
+        seeds.append(gp.PromptResult(
+            num=int(key), prompt=e["prompt"], needs_review=bool(e.get("needs_review", False)),
+            review_reason=str(e.get("error", "")), extra=dict(e.get("extra") or {}),
+            rework_pending=list(pending_fix), rework_round=rnd))
+    return seeds
+
+
 def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, inner_transport,
                        prompts_path, *, profile: str, timing: TimingParams,
                        models=DEFAULT_MODELS, rpm_limit: int = 15, tpm_limit: int = 250_000,
@@ -412,10 +433,15 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
 
     prompts = state["prompts"]
     pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
-    if not pending:
+    # очередь исправлений из сохранённого состояния (под замком: словарь пишут обе волны)
+    with guard:
+        seeds = _rework_seeds(prompts)
+    if not pending and not seeds:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state
     log.info("К генерации: %d из %d запрошенных номеров.", len(pending), len(wanted))
+    if seeds:
+        log.info("Очередь исправлений из прошлого запуска: %d клипов.", len(seeds))
 
     # цепочка моделей: общая (передана managed) или своя на этот вызов, как раньше
     if managed is None:
@@ -434,7 +460,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
             for r in results:
                 t = timings[r.num]
                 old = prompts.get(str(r.num)) or {}
-                prompts[str(r.num)] = {
+                entry = {
                     "num": r.num, "start_ms": t.start_ms, "end_ms": t.end_ms,
                     "clip_ms": t.clip_ms, "num_frames": t.num_frames,
                     "prompt": r.prompt,
@@ -443,6 +469,12 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                     "error": r.review_reason, "needs_review": r.needs_review,
                     "extra": r.extra,
                 }
+                rework_round = getattr(r, "rework_round", None)
+                if rework_round is not None:
+                    # поля очереди исправлений есть только у клипов, которые её проходили; остальные записи не меняются
+                    entry["rework_pending"] = list(getattr(r, "rework_pending", None) or [])
+                    entry["rework_round"] = int(rework_round)
+                prompts[str(r.num)] = entry
             state["model"] = managed.active_model
             state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
             # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
@@ -466,5 +498,8 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     extra = {} if provider == "gemini" else {"provider": provider}
     # пул передаётся только при общем пуле: вызов для одной волны остаётся прежним
     pool_kw = {} if pool is None else {"pool": pool, "wave": wave}
-    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch, **extra, **pool_kw)
+    # очередь прошлого запуска передаётся только когда она не пуста: вызов без неё остаётся прежним
+    rework_kw = {} if not seeds else {"rework": seeds}
+    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
+                        **extra, **pool_kw, **rework_kw)
     return state
