@@ -622,14 +622,15 @@ def test_unknown_mask_mode_is_rejected():
 
 
 def test_allowlist_is_frozen():
-    """Белый список зафиксирован (28 имён, решение владельца 18.10.2026): любое изменение требует правки этого теста."""
+    """Белый список зафиксирован (32 имени, решение владельца 18.10.2026; четыре имени usage-полей OpenRouter добавлены по решению владельца): любое изменение требует правки этого теста."""
     assert isinstance(ls.ALLOWED_NAMES, frozenset)
     assert tuple(sorted(ls.ALLOWED_NAMES)) == (
-        "address", "component", "connIndex", "device", "dph", "event", "gpu", "hash", "id", "identity",
-        "ip", "is_bid", "limit", "location", "max_tokens", "msg", "name", "num_tokens", "port", "protocol",
-        "rc", "run_id", "size", "status", "target", "threshold", "token_count", "tokenizer",
+        "address", "completion_tokens", "component", "connIndex", "device", "dph", "event", "gpu", "hash", "id",
+        "identity", "ip", "is_bid", "limit", "location", "max_tokens", "msg", "name", "num_tokens", "port",
+        "prompt_tokens", "protocol", "rc", "reasoning_tokens", "run_id", "size", "status", "target", "threshold",
+        "token_count", "tokenizer", "total_tokens",
     )
-    assert len(ls.ALLOWED_NAMES) == 28
+    assert len(ls.ALLOWED_NAMES) == 32
 
 
 def test_mode_a_masks_key_suffix_and_keeps_name():

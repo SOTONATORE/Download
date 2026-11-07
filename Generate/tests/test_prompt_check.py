@@ -7,11 +7,15 @@ import json
 import pytest
 
 from Generate.core import gemini_prompts as gp
-from Generate.core.gemini_prompts import GeminiRuntimeError, PromptConfig
+from Generate.core.gemini_prompts import PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
     find_camera_motion,
+    PROBLEM_FORBIDDEN_FORMAT,
+    PROBLEM_FORBIDDEN_SHOT_TYPE,
+    PROBLEM_LEFTOVER_MARKER,
     find_problems,
+    make_problem,
     rework_remark,
 )
 from Generate.core.srt_parser import Segment
@@ -105,10 +109,11 @@ def test_format_is_not_form():
 # ---------------------------------------------------------------- rework_remark
 
 def test_rework_remark_contains_each_problem():
-    problems = ["запрещённый тип кадра: «map»", "незаполненный маркер: «[CHAR_1]»"]
+    problems = [make_problem(PROBLEM_FORBIDDEN_SHOT_TYPE, "map"), make_problem(PROBLEM_LEFTOVER_MARKER, "[CHAR_1]")]
     remark = rework_remark(problems)
-    for p in problems:
-        assert p in remark
+    assert "forbidden shot type: «map»" in remark
+    assert "unfilled marker: «[CHAR_1]»" in remark
+    assert "запрещённый" not in remark  # модель получает только английский текст
 
 
 def test_max_rework_attempts_is_two():
@@ -117,17 +122,24 @@ def test_max_rework_attempts_is_two():
 
 # ---------------------------------------------------------------- hook in gemini_prompts
 
-def test_hook_stops_after_two_rework_calls(tmp_path):
-    # первый ответ и оба переписывания содержат «map»: после второго переписывания прогон останавливается
+def test_hook_keeps_clip_after_repair_rounds(tmp_path):
+    # первый ответ и все REPAIR_ROUNDS исправлений содержат «map»: прогон не останавливается,
+    # клип сохраняется с текстом последней версии и помечается на проверку
     t = ScriptedTransport([
         answer(1, "A detailed map of the Balkans on a wooden table."),
         answer(1, "A detailed map of the coast."),
         answer(1, "A map on a table."),
+        answer(1, "A map of the old town."),
+        answer(1, "A map of a harbour."),
+        answer(1, "A map of the bazaar."),
     ])
-    with pytest.raises(GeminiRuntimeError):
-        gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
-    # один первичный вызов и ровно два вызова на переписывание
-    assert len(t.calls) == 1 + MAX_REWORK_ATTEMPTS
+    results = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
+    res = next(r for r in results if r.num == 1)
+    assert res.needs_review is True
+    assert res.prompt.strip()
+    # один первичный вызов и по одному вызову на каждый круг исправления
+    assert len(t.calls) == 1 + gp.REPAIR_ROUNDS
+    assert res.review_reason
 
 
 def test_hook_succeeds_after_one_clean_rework(tmp_path):
@@ -177,7 +189,7 @@ def test_camera_motion_not_found(text):
 def test_format_terms_are_forbidden(text):
     problems = find_problems(text)
     assert len(problems) == 1
-    assert "формат кадра" in problems[0]
+    assert problems[0].startswith(PROBLEM_FORBIDDEN_FORMAT)
 
 
 def test_blank_sheet_is_forbidden():

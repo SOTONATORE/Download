@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -39,11 +40,39 @@ TRANSIENT_SWITCH_AFTER = 15  # временных сбоев подряд на �
 
 
 def is_transient(err: gp.GeminiRuntimeError) -> bool:
-    """Временный сбой: HTTP 500/503/504 или сетевой сбой (RealTransport отдаёт его без статуса).
-    Суточная квота, 429 и остальные коды (400, 401, 403, 404, 502 и т.д.) сюда не входят."""
+    """Временный сбой: любой HTTP 5xx (500–599, в том числе 500/502/503/504) или сетевой сбой
+    (RealTransport отдаёт его без статуса). Суточная квота, 429 и коды 4xx сюда не входят.
+    TRANSIENT_STATUSES оставлен для читаемости: он входит в диапазон 5xx."""
     if err.daily_quota or err.status == 429:
         return False
-    return err.status is None or err.status in TRANSIENT_STATUSES
+    # сеть: статуса нет; 5xx: сбой сервера, ключ не виноват, запрос повторяется
+    return err.status is None or err.status in TRANSIENT_STATUSES or 500 <= err.status <= 599
+
+
+def _pct(part: int, whole: int) -> str:
+    """Доля в процентах с одним знаком после запятой, половина округляется вверх (целая арифметика)."""
+    if whole <= 0:
+        return "0.0"
+    tenths = (2 * part * 1000 + whole) // (2 * whole)  # десятые доли процента, округление вверх от половины
+    return f"{tenths // 10}.{tenths % 10}"
+
+
+def progress_line(prompts: dict, video_nums: list, photo_nums: list, started: float) -> str:
+    """Строка прогресса обеих волн пула: сколько клипов каждой волны уже имеют промпт со статусом «ready».
+
+    prompts: общий словарь промптов прогона; читать его можно только под замком состояния.
+    started: время начала прогона (time.monotonic()), от него считается «за T с».
+    """
+    def ready_count(nums: list) -> int:
+        return sum(1 for n in set(nums) if (prompts.get(str(n)) or {}).get("status") == "ready")
+
+    video_total, photo_total = len(set(video_nums)), len(set(photo_nums))
+    video_ready, photo_ready = ready_count(video_nums), ready_count(photo_nums)
+    all_ready, all_total = video_ready + photo_ready, video_total + photo_total
+    elapsed = time.monotonic() - started
+    return (f"=== Прогресс: видео готово {video_ready} из {video_total} ({_pct(video_ready, video_total)}%), "
+            f"фото готово {photo_ready} из {photo_total} ({_pct(photo_ready, photo_total)}%), "
+            f"всего {all_ready} из {all_total} ({_pct(all_ready, all_total)}%), за {elapsed:.1f} с ===")
 
 
 def _describe(status: Optional[int], code: str) -> str:
@@ -105,6 +134,14 @@ class RateLimiter:
 # Транспорт с лимитером и цепочкой моделей
 # ---------------------------------------------------------------------------
 
+def _accepts_reasoning(fn) -> bool:
+    """Есть ли у метода generate_json транспорта именованный параметр reasoning_effort."""
+    try:
+        return "reasoning_effort" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class ManagedTransport:
     """Обёртка над transport.generate_json: смена модели только при суточной квоте,
     повтор при RPM, повтор временных ошибок (500/503/504, сеть) на той же модели без смены.
@@ -139,6 +176,9 @@ class ManagedTransport:
         if rpd_used:
             log.warning("Счётчики RPD из прошлых запусков не учитываются: их ведёт пул ключей.")
         self._inner = inner
+        # reasoning_effort передаём внутреннему транспорту только если он его принимает
+        self._reasoning_ok = _accepts_reasoning(getattr(inner, "generate_json", None))
+        self._reasoning_warned = False
         self._reserve = max(0, output_reserve_tokens)
         self._max_retries = max_rate_retries
         self._switch_after = transient_switch_after
@@ -193,14 +233,23 @@ class ManagedTransport:
                     return self._models[i]
         return None
 
-    def generate_json(self, model: str, system: str, user: str, schema: dict) -> str:
+    def generate_json(self, model: str, system: str, user: str, schema: dict,
+                      reasoning_effort: Optional[str] = None) -> str:
         rate_retries = 0
         tries = 0                  # неудачные попытки подряд в этом запросе: потолок TRANSIENT_ATTEMPTS на весь запрос
+        # None: поведение как раньше; иначе параметр уходит только к транспорту, который его понимает
+        extra = {}
+        if reasoning_effort is not None:
+            if self._reasoning_ok:
+                extra = {"reasoning_effort": reasoning_effort}
+            elif not self._reasoning_warned:
+                self._reasoning_warned = True
+                log.warning("Транспорт не принимает reasoning_effort: запрос идёт с настройками по умолчанию.")
         while True:
             m = self._pick_model()
             t0 = self._clock()
             try:
-                text = self._inner.generate_json(m, system, user, schema)
+                text = self._inner.generate_json(m, system, user, schema, **extra)
                 with self._lock:
                     self._streak[m] = 0            # успех сбрасывает серию временных сбоев модели
                 log.info("Модель %s: ответ получен за %.1f с (сбоев подряд до этого: %d).",
@@ -324,6 +373,38 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
+def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None) -> list:
+    """Клипы из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
+
+    photo=False: клипы видео (узнаются по start_ms, его пишет только этот путь); photo=True: клипы фото
+    (записи без start_ms). Текст для исправления — prompt_raw, у старых записей без него — prompt.
+    Записи, которые не словари, пропускаются. Вызывать под замком состояния: словарь пишут обе волны.
+    only: набор номеров клипов или None. Задан — берутся только клипы из набора (нужные в этом прогоне);
+    None — все клипы, как раньше.
+    """
+    seeds = []
+    for key, e in prompts.items():
+        if not isinstance(e, dict):
+            continue
+        is_video = "start_ms" in e
+        if is_video == photo:
+            continue   # клип другой волны
+        pending_fix = e.get("rework_pending") or []
+        rnd = int(e.get("rework_round", 0) or 0)
+        if not pending_fix or rnd >= gp.REPAIR_ROUNDS:
+            continue
+        raw = str(e.get("prompt_raw") or e.get("prompt") or "")
+        if not raw.strip():
+            continue
+        if only is not None and int(key) not in only:
+            continue   # клип не нужен в этом прогоне: очередь его не берёт, запись в файле не меняется
+        seeds.append(gp.PromptResult(
+            num=int(key), prompt=str(e.get("prompt", "")), needs_review=bool(e.get("needs_review", False)),
+            review_reason=str(e.get("error", "")), extra=dict(e.get("extra") or {}),
+            rework_pending=list(pending_fix), rework_round=rnd, prompt_raw=raw))
+    return seeds
+
+
 def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, inner_transport,
                        prompts_path, *, profile: str, timing: TimingParams,
                        models=DEFAULT_MODELS, rpm_limit: int = 15, tpm_limit: int = 250_000,
@@ -331,8 +412,17 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
                        output_reserve_tokens: int = 2000, max_rate_retries: int = 6,
                        transient_switch_after: int = TRANSIENT_SWITCH_AFTER,
                        clock: Callable[[], float] = time.monotonic,
-                       sleep: Callable[[float], None] = time.sleep) -> dict:
-    """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state."""
+                       sleep: Callable[[float], None] = time.sleep,
+                       managed=None, state=None, lock=None, pool=None, wave=None,
+                       progress: Optional[Callable[[dict], str]] = None,
+                       sends_per_window: Optional[int] = None) -> dict:
+    """Генерирует недостающие промпты, дописывая prompts.json после каждого батча. Возвращает state.
+
+    managed: общий ManagedTransport прогона (цепочка моделей одна на оба вида); None: создаётся здесь.
+    state, lock: общий словарь состояния и замок; без них поведение прежнее (файл читается здесь).
+    pool, wave: общий пул батчей обеих волн и имя этой волны; без пула батчи идут своей очередью, как раньше.
+    progress: строка прогресса обеих волн после каждого сохранённого батча (только в пуле); None — не пишется.
+    """
     wanted = sorted(set(wanted_nums))
     if not wanted:
         raise gp.GeminiInputError("Список нужных номеров пуст: нечего генерировать.")
@@ -341,7 +431,11 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     if absent:
         raise gp.GeminiInputError("Номера отсутствуют в SRT: " + ", ".join(map(str, absent)) + ".")
 
-    state = load_state(prompts_path, segments, profile)
+    # общее состояние прогона передано извне: читаем файл только когда его не передали
+    shared_state = state
+    state = shared_state if shared_state is not None else load_state(prompts_path, segments, profile)
+    # замок общего состояния: слияние и запись в файл идут под ним; без общего состояния замка не нужно
+    guard = lock if lock is not None else threading.Lock()
     try:
         timings = {t.num: t for t in compute_timings(
             segments, timing.fps, timing.frame_rule, timing.clip_min_sec,
@@ -351,43 +445,78 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
 
     prompts = state["prompts"]
     pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
-    if not pending:
+    # очередь исправлений из сохранённого состояния (под замком: словарь пишут обе волны)
+    with guard:
+        seeds = _rework_seeds(prompts, only=set(wanted_nums))
+    if not pending and not seeds:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state
     log.info("К генерации: %d из %d запрошенных номеров.", len(pending), len(wanted))
+    if seeds:
+        log.info("Очередь исправлений из прошлого запуска: %d клипов.", len(seeds))
 
-    managed = ManagedTransport(
-        inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
-        rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
-        max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
-        clock=clock, sleep=sleep)
+    # цепочка моделей: общая (передана managed) или своя на этот вызов, как раньше
+    if managed is None:
+        managed = ManagedTransport(
+            inner_transport, models, rpm_limit=rpm_limit, tpm_limit=tpm_limit, rpd_limit=rpd_limit,
+            rpd_used=rpd_used, output_reserve_tokens=output_reserve_tokens,
+            max_rate_retries=max_rate_retries, transient_switch_after=transient_switch_after,
+            clock=clock, sleep=sleep)
+
+    # имя волны в строках батча и сохранения: только в пуле; без пула строки прежние, без префикса
+    wave_tag = f"[{wave}] " if pool is not None and wave is not None else ""
 
     def on_batch(results: list) -> None:
-        for r in results:
-            t = timings[r.num]
-            old = prompts.get(str(r.num)) or {}
-            prompts[str(r.num)] = {
-                "num": r.num, "start_ms": t.start_ms, "end_ms": t.end_ms,
-                "clip_ms": t.clip_ms, "num_frames": t.num_frames,
-                "prompt": r.prompt,
-                "status": "ready" if r.prompt.strip() else "failed",
-                "attempts": int(old.get("attempts", 0)) + 1,
-                "error": r.review_reason, "needs_review": r.needs_review,
-                "extra": r.extra,
-            }
-        state["model"] = managed.active_model
-        state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-        # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
-        log.info("Сохранение промптов начато: файл %s, промптов к сохранению: %d.",
-                 prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
-        try:
-            atomic_write_json(prompts_path, state)
-        except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
-            log.warning("Не удалось сохранить промпты в файл %s: %s: %s.",
-                        prompts_path, type(exc).__name__, exc)
-            raise
-        log.info("Промпты сохранены: файл %s, всего в файле: %d.",
-                 prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
+        # под замком: второй вид может писать в тот же файл параллельно (на данный момент волны идут по очереди)
+        with guard:
+            for r in results:
+                t = timings[r.num]
+                old = prompts.get(str(r.num)) or {}
+                entry = {
+                    "num": r.num, "start_ms": t.start_ms, "end_ms": t.end_ms,
+                    "clip_ms": t.clip_ms, "num_frames": t.num_frames,
+                    "prompt": r.prompt,
+                    "status": "ready" if r.prompt.strip() else "failed",
+                    "attempts": int(old.get("attempts", 0)) + 1,
+                    "error": r.review_reason, "needs_review": r.needs_review,
+                    "extra": r.extra,
+                }
+                rework_round = getattr(r, "rework_round", None)
+                if rework_round is not None:
+                    # поля очереди исправлений есть только у клипов, которые её проходили; остальные записи не меняются
+                    entry["rework_pending"] = list(getattr(r, "rework_pending", None) or [])
+                    entry["rework_round"] = int(rework_round)
+                if getattr(r, "rework_pending", None):
+                    # клип в очереди исправлений: сырой текст отдельно; в поле prompt — со стилем
+                    entry["prompt_raw"] = r.prompt_raw
+                prompts[str(r.num)] = entry
+            state["model"] = managed.active_model
+            state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+            # журнал сохранения: начало и итог — ключевые строки для консоли; сбой — предупреждение с причиной
+            log.info("%sСохранение промптов начато: файл %s, промптов к сохранению: %d.",
+                     wave_tag, prompts_path, len(results), extra=gp.KEY_EVENT_EXTRA)
+            try:
+                atomic_write_json(prompts_path, state)
+            except Exception as exc:  # причину пишем и пробрасываем дальше: поведение прогона не меняется
+                log.warning("%sНе удалось сохранить промпты в файл %s: %s: %s.",
+                            wave_tag, prompts_path, type(exc).__name__, exc)
+                raise
+            log.info("%sПромпты сохранены: файл %s, всего в файле: %d.",
+                     wave_tag, prompts_path, len(prompts), extra=gp.KEY_EVENT_EXTRA)
+            if progress is not None:
+                # прогресс обеих волн: читается из того же словаря под тем же замком, уже после записи файла
+                log.info(progress(prompts), extra=gp.KEY_EVENT_EXTRA)
 
-    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch)
+    # провайдер берётся у транспорта (openrouter считает свои ключи для числа потоков);
+    # для gemini аргумент не передаётся, чтобы вызов остался прежним (совместимость с gemini_prompts без provider)
+    provider = getattr(inner_transport, "provider", "gemini")
+    extra = {} if provider == "gemini" else {"provider": provider}
+    # пул передаётся только при общем пуле: вызов для одной волны остаётся прежним
+    pool_kw = {} if pool is None else {"pool": pool, "wave": wave}
+    # очередь прошлого запуска передаётся только когда она не пуста: вызов без неё остаётся прежним
+    rework_kw = {} if not seeds else {"rework": seeds}
+    # число отправок OpenRouter передаётся только когда задано: вызов без него остаётся прежним
+    sends_kw = {} if sends_per_window is None else {"sends_per_window": sends_per_window}
+    gp.generate_prompts(segments, pending, cfg, managed, managed.active_model, on_batch=on_batch,
+                        **extra, **pool_kw, **rework_kw, **sends_kw)
     return state

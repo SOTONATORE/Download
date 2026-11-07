@@ -22,8 +22,8 @@ gemini_models:
   - "gemini-3.6-flash"
   - "gemini-3.8-flash"
   - "gemini-3.1-flash-lite"
-# Сегментов в одном пакете запроса.
-gemini_batch_size: 50
+# Сегментов в одном пакете запроса: 25, потому что на пакетах по 50 рассуждения модели занимали весь лимит ответа.
+gemini_batch_size: 25
 # Лимиты по умолчанию: для моделей, которых нет в gemini_model_limits; значения даны пользователем, сверить с документацией Google на этапе 4.
 gemini_rpm_limit: 15       # запросов в минуту
 gemini_tpm_limit: 250000   # токенов в минуту
@@ -48,6 +48,40 @@ gemini_model_limits:
     rpm: 15
     tpm: 250000
     rpd: 500
+
+# --- Семейства текстовых моделей (выбор: --text-model или default_text_model) ---
+# gemini: модели из gemini_models выше (models: null). Провайдер openrouter: ключи OPENROUTER1…OPENROUTER10 из окружения.
+default_text_model: "nemotron-super-vl"
+text_model_families:
+  gemini:
+    provider: "gemini"
+    models: null
+  gemma:
+    provider: "openrouter"
+    models: ["google/gemma-4-31b-it:free"]
+  nemotron:
+    provider: "openrouter"
+    models: ["nvidia/nemotron-3-ultra-550b-a55b:free"]
+  # запасная модель: NVIDIA Nemotron Super VL (резерв, если основная недоступна)
+  nemotron-super-vl:
+    provider: "openrouter"
+    models: ["nvidia/nemotron-3.5-super-vl:free"]
+openrouter_base_url: "https://openrouter.ai/api/v1"
+# на ключ; лимит аккаунта может быть общим, проверить в панели OpenRouter
+openrouter_limits:
+  rpm: 20
+  tpm: 1000000
+  rpd: 1000
+# 96000: лимит ответа для OpenRouter; при 32000 рассуждения моделей не оставляли места для ответа, поэтому лимит держим с запасом
+openrouter_max_output_tokens: 96000
+# уровень рассуждений для OpenRouter: low, medium, high или none (параметр reasoning в запросе; none не отправляет параметр)
+openrouter_reasoning_effort: "low"
+# планировщик отправок OpenRouter (openrouter_transport): пауза между отправками на один ключ, сек
+openrouter_send_gap_sec: 3.0
+# отправок на один ключ в скользящем окне
+openrouter_sends_per_window: 10
+# длина скользящего окна, сек
+openrouter_window_sec: 60.0
 
 # --- Профиль модели и тайминги ---
 # Файл из Generate/model_profiles/ (без расширения).

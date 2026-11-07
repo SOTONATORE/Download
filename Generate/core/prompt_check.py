@@ -77,25 +77,71 @@ LEFTOVER_MARKERS_RE = re.compile(r"\[[A-Z_]+\d*\]")
 MAX_REWORK_ATTEMPTS = 2
 
 
+# Машинные коды нарушений. cli и тесты сравнивают код, а не текст сообщения.
+PROBLEM_FORBIDDEN_SHOT_TYPE = "forbidden_shot_type"
+PROBLEM_FORBIDDEN_COMBINATION = "forbidden_combination"
+PROBLEM_FORBIDDEN_FORMAT = "forbidden_format"
+PROBLEM_LEFTOVER_MARKER = "leftover_marker"
+PROBLEM_CAMERA_MOTION = "camera_motion"
+
+# Подписи на английском для промпта Gemini и на русском для журнала, отчёта и текста ошибки.
+_PROBLEM_EN = {
+    PROBLEM_FORBIDDEN_SHOT_TYPE: "forbidden shot type",
+    PROBLEM_FORBIDDEN_COMBINATION: "forbidden combination",
+    PROBLEM_FORBIDDEN_FORMAT: "forbidden frame format",
+    PROBLEM_LEFTOVER_MARKER: "unfilled marker",
+    PROBLEM_CAMERA_MOTION: "camera motion",
+}
+_PROBLEM_RU = {
+    PROBLEM_FORBIDDEN_SHOT_TYPE: "запрещённый тип кадра",
+    PROBLEM_FORBIDDEN_COMBINATION: "запрещённое сочетание",
+    PROBLEM_FORBIDDEN_FORMAT: "запрещённый формат кадра",
+    PROBLEM_LEFTOVER_MARKER: "незаполненный маркер",
+    PROBLEM_CAMERA_MOTION: "движение камеры",
+}
+
+
+def make_problem(code: str, fragment: str) -> str:
+    """Сообщение о нарушении вида «код: «фрагмент»». Код идёт до первого двоеточия."""
+    return f"{code}: «{fragment}»"
+
+
+def problem_code(problem: str) -> str:
+    """Машинный код нарушения."""
+    return problem.partition(": ")[0]
+
+
+def problem_en(problem: str) -> str:
+    """Английская запись нарушения для промпта Gemini."""
+    code, _, rest = problem.partition(": ")
+    return f"{_PROBLEM_EN[code]}: {rest}"
+
+
+def problem_ru(problem: str) -> str:
+    """Русская запись нарушения для журнала, отчёта и текста ошибки."""
+    code, _, rest = problem.partition(": ")
+    return f"{_PROBLEM_RU[code]}: {rest}"
+
+
 def find_problems(prompt: str) -> list:
-    """Список коротких сообщений на русском, по одному на найденное нарушение. Пусто, если нарушений нет."""
+    """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     problems = []
     for m in FORBIDDEN_IMAGE_RE.finditer(text):
-        problems.append(f"запрещённый тип кадра: «{m.group(0)}»")
+        problems.append(make_problem(PROBLEM_FORBIDDEN_SHOT_TYPE, m.group(0)))
     for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text):
-        problems.append(f"запрещённое сочетание: «{m.group(0)}»")
+        problems.append(make_problem(PROBLEM_FORBIDDEN_COMBINATION, m.group(0)))
     for m in FORBIDDEN_FORMAT_PATTERNS_EN.finditer(text):
-        problems.append(f"запрещённый формат кадра: «{m.group(0)}»")
+        problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
-        problems.append(f"незаполненный маркер: «{m.group(0)}»")
+        problems.append(make_problem(PROBLEM_LEFTOVER_MARKER, m.group(0)))
     # одинаковые сообщения (например, «map» дважды) не повторяем
     return list(dict.fromkeys(problems))
 
 
 def rework_remark(problems: list) -> str:
     """Английская помощь для Gemini: что исправить в промпте при повторном запросе."""
-    joined = "; ".join(problems)
+    joined = "; ".join(problem_en(p) for p in problems)
     return (
         "Rewrite this prompt. Remove these problems: "
         f"{joined}. "

@@ -369,13 +369,79 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
 
 
-def _gemini_options(cfg: Config) -> dict:
-    return {"models": tuple(cfg.gemini_models), "rpm_limit": cfg.gemini_rpm_limit,
+def _key_names_range(provider: str) -> str:
+    """Диапазон имён переменных ключей семейства для вывода (значения ключей не выводятся).
+
+    Имена собираются из констант модулей ключей, поэтому литеральных имён переменных в коде cli нет.
+    Импорт ленивый: без модуля OpenRouter путь gemini работает как раньше.
+    """
+    if provider == "openrouter":
+        try:
+            from Generate.core.openrouter_transport import KEY_ENV_COUNT, KEY_ENV_PREFIX
+        except ImportError:  # плоский импорт, как в остальных модулях core
+            from core.openrouter_transport import KEY_ENV_COUNT, KEY_ENV_PREFIX  # type: ignore
+    else:
+        try:
+            from Generate.core.gemini_pool import KEY_ENV_COUNT, KEY_ENV_PREFIX
+        except ImportError:  # плоский импорт
+            from core.gemini_pool import KEY_ENV_COUNT, KEY_ENV_PREFIX  # type: ignore
+    return f"{KEY_ENV_PREFIX}1…{KEY_ENV_PREFIX}{KEY_ENV_COUNT}"
+
+
+def resolve_text_family(cfg: Config, requested: Optional[str]) -> tuple[str, str, Optional[list[str]]]:
+    """Семейство текстовой модели: requested (--text-model) или default_text_model из конфига.
+
+    Возвращает (имя, провайдер, модели); у gemini модели могут быть None (берутся из gemini_models).
+    Неизвестное имя = ошибка входа (GeminiInputError, код 2).
+    """
+    name = requested or cfg.default_text_model
+    if name not in cfg.text_model_families:
+        raise GeminiInputError(
+            f"Ошибка входных данных: неизвестное семейство текстовой модели «{name}». "
+            f"Доступны: {', '.join(sorted(cfg.text_model_families))}.")
+    spec = cfg.text_model_families[name]
+    return name, spec["provider"], spec["models"]
+
+
+def _text_chain(cfg: Config, family: tuple) -> list[str]:
+    """Цепочка моделей семейства; у gemini без явного списка это gemini_models (как раньше)."""
+    return list(family[2] or cfg.gemini_models)
+
+
+def _text_family_line(cfg: Config, family: tuple) -> str:
+    """Строка для check: семейство, провайдер, модели по порядку и имена ключей (значения ключей не выводятся)."""
+    name, provider, _models = family
+    return (f"Текстовая модель: семейство {name}, провайдер {provider}, "
+            f"модели: {', '.join(_text_chain(cfg, family))}, ключи: {_key_names_range(provider)}")
+
+
+def _gemini_options(cfg: Config, family: tuple) -> dict:
+    opts = {"models": tuple(_text_chain(cfg, family)), "rpm_limit": cfg.gemini_rpm_limit,
             "tpm_limit": cfg.gemini_tpm_limit, "rpd_limit": cfg.gemini_rpd_limit,
             "transient_switch_after": cfg.gemini_transient_switch_after}
+    if family[1] == "openrouter":
+        # число отправок в окне из конфига: по нему считаются потоки OpenRouter; для gemini ключа нет
+        opts["openrouter_sends_per_window"] = cfg.openrouter_sends_per_window
+    return opts
 
 
-def _make_transport(cfg: Config):
+def _make_transport(cfg: Config, family: tuple):
+    if family[1] == "openrouter":
+        # импорт внутри функции: без модуля OpenRouter путь gemini работает как раньше
+        try:
+            from Generate.core.openrouter_transport import OpenRouterTransport
+        except ImportError:  # плоский импорт, как в остальных модулях core
+            from core.openrouter_transport import OpenRouterTransport  # type: ignore
+        # один набор лимитов из openrouter_limits на каждую модель семейства (на ключ)
+        limits = (cfg.openrouter_limits["rpm"], cfg.openrouter_limits["tpm"], cfg.openrouter_limits["rpd"])
+        model_limits = {m: limits for m in _text_chain(cfg, family)}
+        # model_limits передаётся для совместимости и не используется: лимиты заменены планировщиком отправок
+        return OpenRouterTransport(base_url=cfg.openrouter_base_url, model_limits=model_limits,
+                                   max_output_tokens=cfg.openrouter_max_output_tokens,
+                                   reasoning_effort=cfg.openrouter_reasoning_effort,
+                                   send_gap_sec=cfg.openrouter_send_gap_sec,
+                                   sends_per_window=cfg.openrouter_sends_per_window,
+                                   window_sec=cfg.openrouter_window_sec)
     cls = _find_symbol("RealTransport", ("gemini_client", "gemini_transport",
                                           "gemini_orchestrator", "gemini_prompts"))
     # лимиты по моделям из раздела gemini_model_limits; раздела нет: один набор лимитов для всех моделей (как раньше)
@@ -442,6 +508,22 @@ def cmd_check(args: argparse.Namespace) -> int:
     _cfg, code = _load_cfg(args.config, {"scan_sec": getattr(args, "scan_sec", None)})
     if code is not None:
         return code
+    # семейство текстовой модели; для openrouter нужен хотя бы один ключ OPENROUTER (до любого вызова Vast)
+    try:
+        family = resolve_text_family(_cfg, getattr(args, "text_model", None))
+    except GeminiInputError as e:
+        _err(str(e))
+        return EXIT_INPUT
+    if family[1] == "openrouter":
+        try:
+            from Generate.core.openrouter_transport import load_openrouter_keys
+        except ImportError:  # плоский импорт
+            from core.openrouter_transport import load_openrouter_keys  # type: ignore
+        try:
+            load_openrouter_keys()
+        except GeminiInputError as e:
+            _err(str(e))
+            return EXIT_INPUT
 
     segments, code = _load_srt(args.srt)
     if code is not None:
@@ -459,6 +541,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return code
 
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
+    print(_text_family_line(_cfg, family))
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
     if previews.count_value(getattr(args, "prompts_count", None)):
         print(f"Превью: файл промптов {args.prompts_file}, вариантов на промпт {args.prompts_count}")
@@ -562,6 +645,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
         return code
+    # семейство текстовой модели: --text-model или default_text_model из конфига (ошибка входа = код 2)
+    try:
+        family = resolve_text_family(cfg, getattr(args, "text_model", None))
+    except GeminiInputError as e:
+        _err(str(e))
+        return EXIT_INPUT
 
     segments, code = _load_srt(args.srt)
     if code is not None:
@@ -595,25 +684,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         if input_code is not None:
             return input_code
 
+    # текущий шаг подготовки: нужен, чтобы при ошибке назвать место, не раскрывая текст чужого исключения
+    stage = "таймингов и промптов"
     try:
         timing = _build_timing(cfg, cfg.model_profile)
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
-        transport = None if _pilot_mode(args) else _make_transport(cfg)
+        stage = "текстового транспорта"
+        transport = None if _pilot_mode(args) else _make_transport(cfg, family)
+        stage = "хранилища Release"
         store = None if _pilot_mode(args) else _make_release_store(args.repo)
+        stage = "клиента Vast"
         vast = VastClient(debug_logs=bool(getattr(args, "debug_logs", False)))
     except VastError as e:
         _err(f"Ошибка запуска: {e}")
         return EXIT_INPUT if e.exit_code == EXIT_INPUT else EXIT_RUNTIME
     except Exception as e:  # noqa: BLE001
         exit_code = EXIT_INPUT if getattr(e, "exit_code", None) == EXIT_INPUT else EXIT_RUNTIME
-        # текст берём только у своих ошибок проекта (у них есть exit_code); иначе только тип
         if hasattr(e, "exit_code"):
+            # свои ошибки проекта: текст уже безопасен (у них есть exit_code)
             _err(f"Ошибка подготовки запуска: {e}")
         else:
-            _err(f"Ошибка подготовки запуска ({type(e).__name__}).")
+            # чужое исключение: тип и место; текст не печатаем, он может содержать значения ключей (SPEC 0.1)
+            _err(f"Ошибка подготовки запуска ({type(e).__name__}) на этапе «{stage}».")
         return exit_code
 
     offer_filter = OfferFilter(
@@ -704,7 +799,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             filename_template=cfg.filename_template,
             clip_name_width=cfg.clip_name_width,
             release_asset_limit=cfg.release_asset_limit,
-            gemini_options=_gemini_options(cfg),
+            gemini_options=_gemini_options(cfg, family),
             log_level=getattr(args, "log_level", "INFO"),
             stop_event=stop,
             pilot=_pilot_mode(args),
@@ -1268,13 +1363,11 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     return EXIT_RUNTIME if pub.failures else EXIT_OK
 
 
-# --- проверка промптов (workflow verify_gemini) -----------------------------
+# --- проверка промптов (workflow verify_prompts) -----------------------------
 # Подготовка промптов как в cmd_run, но без Vast, релиза и воркера: тот же build_prompts,
 # то же распределение (plan_split), те же профили и тайминг (_build_timing, _build_prompt_config).
 
 VERIFY_REWORK_RE = re.compile(r"Prompt for segment_index (\d+):")
-_FORBIDDEN_TAG = "запрещённый тип кадра"
-_LEFTOVER_TAG = "незаполненный маркер"
 
 
 class _ReworkCounter:
@@ -1288,10 +1381,24 @@ class _ReworkCounter:
         self._inner = inner
         self.rework_nums: set = set()
 
-    def generate_json(self, model, system, user, schema) -> str:
+    def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
         m = VERIFY_REWORK_RE.match(user or "")
         if m:
             self.rework_nums.add(int(m.group(1)))
+        if reasoning_effort is None:
+            # без параметра вызов такой же, как раньше
+            return self._inner.generate_json(model, system, user, schema)
+        # reasoning_effort уходит внутреннему транспорту только если он его объявляет (Gemini не объявляет)
+        import inspect  # локально: модуль нужен только здесь
+        try:
+            accepts = "reasoning_effort" in inspect.signature(self._inner.generate_json).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return self._inner.generate_json(model, system, user, schema, reasoning_effort=reasoning_effort)
+        if not getattr(self, "_reasoning_warned", False):
+            self._reasoning_warned = True  # предупреждение один раз на обёртку
+            log.warning("Транспорт не принимает reasoning_effort: запрос идёт с настройками по умолчанию.")
         return self._inner.generate_json(model, system, user, schema)
 
 
@@ -1325,7 +1432,8 @@ def _failure_reason(num: int, entry, errors: list) -> str:
 
 def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
     """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
-    from Generate.core.prompt_check import find_problems
+    from Generate.core.prompt_check import (PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
+                                            find_problems, problem_code, problem_ru)
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
 
     ready = forbidden = leftover = frames_bad = 0
@@ -1338,12 +1446,13 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             continue
         ready += 1
         for p in find_problems(entry["prompt"]):
-            if p.startswith(_FORBIDDEN_TAG):
+            code = problem_code(p)
+            if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
-                problems.append(f"{label} клип {n}: {p}")
-            elif p.startswith(_LEFTOVER_TAG):
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code == PROBLEM_LEFTOVER_MARKER:
                 leftover += 1
-                problems.append(f"{label} клип {n}: {p}")
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
         want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
         if entry.get("num_frames") != want:
             frames_bad += 1
@@ -1434,8 +1543,9 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
     photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                  if photo_profile is not None else None)
-    counting = _ReworkCounter(_make_transport(cfg))
-    gemini_options = _gemini_options(cfg)
+    family = resolve_text_family(cfg, getattr(args, "text_model", None))
+    counting = _ReworkCounter(_make_transport(cfg, family))
+    gemini_options = _gemini_options(cfg, family)
 
     # распределение до промптов, как в _run_body: по всем номерам, потом лимит
     dist_path = Path(args.artifact_dir) / orch_mod.DISTRIBUTION_FILENAME if args.artifact_dir else None
@@ -1516,6 +1626,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="проверить конфигурацию и входные файлы")
     check_p.add_argument("--scan-sec", type=_parse_scan_sec, default=None,
                          help="окно сбора цен, с (целое > 0); пусто = из конфига")
+    check_p.add_argument("--text-model", default=None,
+                         help="семейство текстовой модели: gemini, gemma, nemotron (по умолчанию из конфига)")
     check_p.add_argument("--prompts-file", default="",
                          help="файл промптов для превью (prompts.txt); проверяется только при переключателе 1..4")
     check_p.add_argument("--prompts-count", default=previews.PREVIEW_COUNT_OFF,
@@ -1540,6 +1652,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="профиль модели; по умолчанию из конфига")
     run_p.add_argument("--preset", default="none",
                        help="пресет профиля; none = без пресета (файл пресета проверяется до аренды)")
+    run_p.add_argument("--text-model", default=None,
+                       help="семейство текстовой модели: gemini, gemma, nemotron (по умолчанию из конфига)")
     run_p.add_argument("--photo-profile", default=None,
                        help="профиль фото (type: image); по умолчанию фото не делаются")
     run_p.add_argument("--repo", default="",

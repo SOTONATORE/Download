@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -15,26 +17,34 @@ try:
 except ImportError:  # запуск без пакета (плоская раскладка)
     from segment_split import Segment  # type: ignore
 
+log = logging.getLogger("Generate.video_value")
+
 MAX_ATTEMPTS = 2
+# сегментов в одном запросе оценки; большой запрос упирается в лимит вывода рассуждениями
+SCORE_BATCH_SIZE = 25
 
 _FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
 
 def build_value_prompt(segments: Sequence[Segment]) -> str:
-    """Строит русскоязычную инструкцию для Gemini: оценить video_value каждого сегмента."""
+    """Builds the English instruction for Gemini: rate the video_value (0-100) of each segment.
+
+    The segment text is passed unchanged, whatever language the subtitles are in.
+    """
+    # инструкция на английском; текст сегментов добавляется как есть, на любом языке
     lines = [
-        "Ты оцениваешь, насколько каждый сегмент видеоролика подходит для показа в виде видео,",
-        "а не статичного фото.",
+        "You rate how well each segment of a video suits being shown as a moving video",
+        "rather than as a static photo.",
         "",
-        "Для каждого сегмента поставь целое число video_value от 0 до 100:",
-        "- движение или действие: 70–100;",
-        "- статичный кадр: 0–30;",
-        "- смешанный случай: 31–69.",
+        "For every segment give an integer video_value from 0 to 100:",
+        "- movement or action: 70–100;",
+        "- static frame: 0–30;",
+        "- mixed case: 31–69.",
         "",
-        "Верни ТОЛЬКО JSON-список объектов вида {\"id\": <номер>, \"video_value\": <целое число>},",
-        "по одному объекту на каждый номер сегмента. Никакого текста до или после JSON.",
+        "Return ONLY a JSON list of objects of the form {\"id\": <number>, \"video_value\": <integer>},",
+        "one object for each segment number. No text before or after the JSON.",
         "",
-        "Сегменты:",
+        "Segments:",
     ]
     for seg in sorted(segments, key=lambda s: (s.start, s.id)):
         lines.append(f"id {seg.id} ({seg.start:.2f}–{seg.end:.2f} с): {seg.text}")
@@ -89,24 +99,66 @@ def parse_value_response(text: str, expected_ids: Sequence[int]) -> dict:
     return result
 
 
-def score_segments(segments: Sequence[Segment], send: Callable[[str], str]) -> dict:
-    """Получает video_value для всех сегментов. Не больше MAX_ATTEMPTS попыток.
+def _score_chunk(no: int, total: int, chunk: Sequence[Segment], send: Callable[[str], str]) -> dict:
+    """Оценка одного батча с повторами (MAX_ATTEMPTS). Бросает ValueError со списком номеров батча.
 
+    no — номер батча по порядку (с 1), total — всего батчей; send может вызываться из нескольких потоков.
+    """
+    prompt = build_value_prompt(chunk)
+    expected = [s.id for s in chunk]
+    parsed = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        log.info("Оценка video_value: батч %d из %d, сегменты %s–%s, попытка %d",
+                 no, total, expected[0], expected[-1], attempt)
+        try:
+            text = send(prompt)
+            parsed = parse_value_response(text, expected)
+            break
+        except Exception:  # любая неудача отправки или разбора: повтор, если попытки остались
+            continue
+    if parsed is None:
+        ids = ", ".join(str(i) for i in expected)
+        raise ValueError(f"Не удалось получить video_value для сегментов: {ids}")
+    log.info("Оценка video_value: батч %d готов, результатов %d", no, len(parsed))
+    return parsed
+
+
+def score_segments(segments: Sequence[Segment], send: Callable[[str], str], workers: int = 1) -> dict:
+    """Получает video_value для всех сегментов, батчами по SCORE_BATCH_SIZE.
+
+    Не больше MAX_ATTEMPTS попыток на каждый батч.
     send — отправитель запроса: принимает строку промпта, возвращает текст ответа.
-    Если обе попытки неудачны, бросает ValueError с сообщением о сегментах.
+    workers — число параллельных батчей (по умолчанию 1: батчи идут в вызывающем потоке, как раньше).
+    Значение больше 1 включает пул потоков; send тогда вызывается из нескольких потоков одновременно,
+    поэтому отправитель должен быть потокобезопасным (ManagedTransport и KeyPool такие).
+    Если обе попытки какого-либо батча неудачны, бросает ValueError с номерами сегментов этого батча;
+    частичный результат не возвращается. При параллельном режиме батчи, которые ещё не начались, отменяются.
     """
     if not segments:
         return {}
-    prompt = build_value_prompt(segments)
-    expected = [s.id for s in segments]
-    for _ in range(MAX_ATTEMPTS):
+    # батчи идут по времени начала, затем по номеру: порядок стабилен между запусками
+    ordered = sorted(segments, key=lambda s: (s.start, s.id))
+    chunks = [ordered[i:i + SCORE_BATCH_SIZE] for i in range(0, len(ordered), SCORE_BATCH_SIZE)]
+    total = len(chunks)
+    n_workers = max(1, min(workers, total))
+    result: dict = {}
+    if n_workers == 1:
+        for no, chunk in enumerate(chunks, start=1):
+            result.update(_score_chunk(no, total, chunk, send))
+        return result
+    # результаты собираются в порядке номеров батчей, а не в порядке завершения
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_score_chunk, no, total, chunk, send)
+                   for no, chunk in enumerate(chunks, start=1)]
         try:
-            text = send(prompt)
-            return parse_value_response(text, expected)
-        except Exception:  # любая неудача отправки или разбора: повтор, если попытки остались
-            continue
-    ids = ", ".join(str(i) for i in expected)
-    raise ValueError(f"Не удалось получить video_value для сегментов: {ids}")
+            for fut in futures:
+                result.update(fut.result())
+        except ValueError:
+            # батч неудачен: остальные, которые ещё не начались, отменяем; частичный результат не отдаём
+            for fut in futures:
+                fut.cancel()
+            raise
+    return result
 
 
 def write_distribution(

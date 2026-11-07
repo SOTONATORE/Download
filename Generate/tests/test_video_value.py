@@ -29,14 +29,17 @@ SEGS = [
 ]
 
 
-def test_prompt_contains_russian_instruction_and_anchors():
+def test_prompt_is_english_with_anchors():
     prompt = build_value_prompt(SEGS)
     assert "video_value" in prompt
     assert "JSON" in prompt
-    assert "движение или действие: 70–100" in prompt
-    assert "статичный кадр: 0–30" in prompt
-    assert "смешанный случай: 31–69" in prompt
-    assert "Человек бежит" in prompt
+    assert "movement or action: 70–100" in prompt
+    assert "static frame: 0–30" in prompt
+    assert "mixed case: 31–69" in prompt
+    assert "No text before or after the JSON." in prompt
+    assert "Человек бежит" in prompt  # текст сегмента передаётся как есть
+    instruction = prompt.split("Segments:")[0]
+    assert all(not ("\u0400" <= ch <= "\u04ff") for ch in instruction)  # инструкция без кириллицы
 
 
 def test_parse_accepts_fenced_json():

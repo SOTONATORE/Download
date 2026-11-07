@@ -259,7 +259,7 @@ def net_fail():
     (unavail(503), True),
     (unavail(504), True),
     (net_fail(), True),
-    (unavail(502), False),
+    (unavail(502), True),
     (unavail(503, ""), True),
     (GeminiRuntimeError("x", status=503, daily_quota=True), False),
     (GeminiRuntimeError("x", status=429, code="RESOURCE_EXHAUSTED"), False),

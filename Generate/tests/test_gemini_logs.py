@@ -70,8 +70,8 @@ def test_successful_batch_logs_start_success_and_each_prompt(tmp_path, caplog):
     assert [r.num for r in results] == [1, 2]
     assert transport.calls == 1
     msgs = _messages(caplog)
-    # начало прогона: модель и число клипов
-    assert any("Генерация промптов начата: модель model-x, клипов к описанию: 2, батчей: 1." in m for m in msgs)
+    # начало прогона: вид, число клипов, батчей и ключей
+    assert any(m.startswith("=== Генерация ") and ": клипов 2, батчей 1, ключей " in m for m in msgs)
     # начало батча: номер и число элементов
     assert any("Батч 1 из 1: начало, клипов в батче: 2." in m for m in msgs)
     # каждый принятый промпт: номер клипа, длина в символах, короткий хеш из 12 символов
@@ -87,7 +87,7 @@ def test_successful_batch_logs_start_success_and_each_prompt(tmp_path, caplog):
     assert any(m.startswith("Батч 1: получено промптов с текстом: 2 из 2, за ") and m.endswith(" с.")
                for m in msgs)
     # итог прогона: готово, без текста, требуют проверки, общее время
-    assert any(m.startswith("Генерация промптов завершена: готово 2, без текста 0, требуют проверки 0, всего ")
+    assert any(m.startswith("=== Генерация ") and "-промптов готова: готово 2, без текста 0, за " in m
                for m in msgs)
 
 
@@ -158,10 +158,10 @@ def test_console_shows_batch_and_run_lines_but_not_per_clip(tmp_path, caplog):
     shown = [r.getMessage() for r in records if console.filter(r)]
     # 2 клипа в одном батче: начало прогона, начало батча, получено по батчу, итог прогона
     assert len(shown) == 4
-    assert shown[0].startswith("Генерация промптов начата:")
+    assert shown[0].startswith("=== Генерация ") and ": клипов 2, батчей 1, ключей " in shown[0]
     assert shown[1].startswith("Батч 1 из 1: начало")
     assert shown[2].startswith("Батч 1: получено промптов с текстом")
-    assert shown[3].startswith("Генерация промптов завершена:")
+    assert shown[3].startswith("=== Генерация ") and "-промптов готова:" in shown[3]
     # построчные записи «Промпт принят» остаются только в файле журнала
     accepted = [r for r in records if r.getMessage().startswith("Промпт принят:")]
     assert len(accepted) == 2

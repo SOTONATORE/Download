@@ -780,7 +780,7 @@ def cli_run(monkeypatch):
     orchestrator_calls = []
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "T")
     monkeypatch.setattr(cli, "_build_prompt_config", lambda *a: "P")
-    monkeypatch.setattr(cli, "_make_transport", lambda cfg: "X")
+    monkeypatch.setattr(cli, "_make_transport", lambda cfg, family: "X")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: "S")
 
     def fake_run(*a, **k):

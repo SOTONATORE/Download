@@ -71,6 +71,15 @@ on:
           - "zimage_turbo"
           - "none"
         default: "zimage_turbo"
+      text_model:
+        description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"
+        type: choice
+        options:
+          - "nemotron-super-vl"
+          - "gemini"
+          - "gemma"
+          - "nemotron"
+        default: "nemotron-super-vl"
       video_percent:
         description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
         required: false
@@ -112,13 +121,6 @@ on:
         description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
         type: string
         default: "4.1"
-      verified:
-        description: "Только проверенные хосты Vast: 1 = да, 0 = нет. По умолчанию 1"
-        type: choice
-        options:
-          - "1"
-          - "0"
-        default: "1"
       rental_type:
         description: "Режим аренды Vast: on-demand (обычная, по умолчанию, цена фиксирована) или interruptible (прерываемая: перед арендой собирается окно цен, ставка bid, карту может остановить перебитая ставка)"
         type: choice
@@ -134,11 +136,6 @@ on:
         description: "Таймаут первого ответа хоста, минут"
         type: number
         default: 10
-      scan_sec:
-        description: "Окно сбора цен перед первой арендой, секунд. Действует только при rental_type interruptible; при on-demand не используется"
-        type: number
-        required: false
-        default: 300
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -198,17 +195,27 @@ jobs:
         env:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
-          SCAN_SEC: ${{ inputs.scan_sec }}
           PROMPTS_FILE: ${{ inputs.prompts_path }}
           PROMPTS_COUNT: ${{ inputs.prompts_count }}
           # фото-профиль для превью: пусто, если фото-модель выключена (превью без неё не запускаются)
           PREVIEW_PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
+          TEXT_MODEL: ${{ inputs.text_model }}
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
         run: |
-          # пустой SCAN_SEC (не задан) не переопределяет config.default.yaml; число проверяется здесь, до аренды
           # превью: при «выкл» файл промптов не читается; при 1..4 проверяются файл и фото-модель, до аренды
-          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" --scan-sec "$SCAN_SEC" \
+          python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" \
             --prompts-file "$PROMPTS_FILE" --prompts-count "$PROMPTS_COUNT" \
-            --photo-profile "$PREVIEW_PHOTO_PROFILE"
+            --photo-profile "$PREVIEW_PHOTO_PROFILE" \
+            --text-model "$TEXT_MODEL"
 
       # Наблюдатель heartbeat (SPEC 8.3 а): фоновый процесс, который запускается до шага run и
       # читает файл heartbeat, пишущийся оркестратором. При тишине уничтожает карты запуска.
@@ -246,6 +253,16 @@ jobs:
           GEMINI8: ${{ secrets.GEMINI8 }}
           GEMINI9: ${{ secrets.GEMINI9 }}
           GEMINI10: ${{ secrets.GEMINI10 }}
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
           GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
           VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -260,6 +277,7 @@ jobs:
           BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
           MIN_BALANCE: ${{ inputs.min_balance_usd }}
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
+          TEXT_MODEL: ${{ inputs.text_model }}
           # STEP 3b: распределение видео/фото (distribution.json); читает оркестратор до промптов
           VIDEO_PERCENT: ${{ inputs.video_percent }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
@@ -270,12 +288,10 @@ jobs:
           MIN_RELIABILITY: ${{ inputs.min_reliability }}
           MIN_INET: ${{ inputs.min_inet_mbps }}
           MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
-          VERIFIED: ${{ inputs.verified }}
           RENTAL_TYPE: ${{ inputs.rental_type }}
           WORKER_BUILD: ${{ github.sha }}
           DISK_GB: ${{ inputs.disk_gb }}
           SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
-          SCAN_SEC: ${{ inputs.scan_sec }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           # Два обработчика журнала (SPEC 10, Generate/core/log_setup.py). Консоль (окно шага) пишет только INFO:
@@ -299,6 +315,7 @@ jobs:
             --budget-limit "$BUDGET_LIMIT"
             --min-balance-usd "$MIN_BALANCE"
             --model-profile "$MODEL_PROFILE"
+            --text-model "$TEXT_MODEL"
             --preset "$PRESET"
             --gpu-name "$GPU_NAME"
             --min-price-per-hour "$MIN_PRICE"
@@ -306,11 +323,9 @@ jobs:
             --min-reliability "$MIN_RELIABILITY"
             --min-inet-mbps "$MIN_INET"
             --max-inet-price-per-tb "$MAX_INET_PRICE"
-            --verified "$VERIFIED"
             --rental-type "$RENTAL_TYPE"
             --disk-gb "$DISK_GB"
             --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
-            --scan-sec "$SCAN_SEC"
             --repo "$REPO"
             --run-id "$RUN_ID"
             --worker-build "$WORKER_BUILD"
@@ -336,6 +351,8 @@ jobs:
           values = {os.environ.get(k, "").strip() for k in (
               "GEMINI1", "GEMINI2", "GEMINI3", "GEMINI4", "GEMINI5",
               "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10",
+              "OPENROUTER1", "OPENROUTER2", "OPENROUTER3", "OPENROUTER4", "OPENROUTER5",
+              "OPENROUTER6", "OPENROUTER7", "OPENROUTER8", "OPENROUTER9", "OPENROUTER10",
               "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN", "VAST_SSH_KEY")}
           # VAST_SSH_KEY многострочный: кроме всего значения маскируются его строки длиной не меньше 20 символов
           values |= {line.strip() for line in os.environ.get("VAST_SSH_KEY", "").splitlines()

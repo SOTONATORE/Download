@@ -61,6 +61,10 @@ def _rule(**meta: Any):
     return field(metadata=meta)
 
 
+# уровни рассуждений OpenRouter; none означает, что параметр reasoning в запросе не отправляется
+REASONING_EFFORTS = ("none", "low", "medium", "high")
+
+
 @dataclass(frozen=True)
 class Config:
     """Схема и значения конфигурации. Порядок полей совпадает с config.default.yaml."""
@@ -79,6 +83,21 @@ class Config:
     gemini_model_limits: Optional[dict[str, dict[str, int]]] = field(
         default=None, kw_only=True, metadata={"optional": True})
     gemini_transient_switch_after: int = field(default=15, kw_only=True, metadata={"ge": 1})
+
+    # --- текстовые модели (этап 2): семейства gemini и openrouter, выбор через --text-model ---
+    # у семейства gemini ключ «models» может быть null: тогда берётся gemini_models
+    text_model_families: dict[str, dict[str, Any]] = _rule(families=True)
+    default_text_model: str = _rule(nonempty=True)
+    openrouter_base_url: str = _rule(nonempty=True)
+    # лимиты на один ключ OpenRouter (rpm, tpm, rpd); общие для всех моделей семейств openrouter
+    openrouter_limits: dict[str, int] = _rule(flat_limits=True)
+    openrouter_max_output_tokens: int = _rule(ge=1)
+    # планировщик отправок OpenRouter: пауза между отправками на ключ, отправок в окне, длина окна
+    openrouter_send_gap_sec: float = _rule(ge=0)
+    openrouter_sends_per_window: int = _rule(ge=1)
+    openrouter_window_sec: float = _rule(gt=0)
+    # уровень рассуждений OpenRouter (параметр reasoning); none не отправляет параметр; kw_only: умолчание не ломает порядок
+    openrouter_reasoning_effort: str = field(default="low", kw_only=True, metadata={"choices": REASONING_EFFORTS})
 
     # --- профиль модели и тайминги ---
     model_profile: str = _rule(pattern=_PROFILE_NAME_PATTERN,
@@ -181,6 +200,11 @@ def _check_value(name: str, value: Any, hint: Any, meta: Mapping[str, Any]) -> A
             raise _Bad(f"«{name}»: пустые элементы в списке недопустимы")
         return list(value)
 
+    if meta.get("families"):
+        return _check_families(name, value)
+    if meta.get("flat_limits"):
+        return _check_flat_limits(name, value)
+
     if get_origin(base) is dict:
         return _check_model_limits(name, value)
 
@@ -230,6 +254,48 @@ def _check_model_limits(name: str, value: Any) -> dict[str, dict[str, int]]:
     return out
 
 
+_TEXT_PROVIDERS = ("gemini", "openrouter")
+
+
+def _check_families(name: str, value: Any) -> dict[str, dict[str, Any]]:
+    """Семейства текстовых моделей: {имя: {provider, models}}. У gemini models может быть null."""
+    if not isinstance(value, dict) or not value or not all(isinstance(k, str) and k.strip() for k in value):
+        raise _Bad(f"«{name}»: нужен набор «семейство: настройки» с непустыми именами")
+    problems: list[str] = []
+    out: dict[str, dict[str, Any]] = {}
+    for family, spec in value.items():
+        if not isinstance(spec, dict) or set(spec) != {"provider", "models"}:
+            problems.append(f"«{name}» / {family}: нужны ровно два поля: provider, models")
+            continue
+        provider, models = spec["provider"], spec["models"]
+        if provider not in _TEXT_PROVIDERS:
+            # значение provider в текст ошибки не выводим (SPEC 0.1): только допустимые значения
+            problems.append(f"«{name}» / {family}: «provider» должен быть gemini или openrouter")
+            continue
+        if models is None and provider == "gemini":
+            out[family] = {"provider": provider, "models": None}
+            continue
+        if not isinstance(models, list) or not models or not all(isinstance(m, str) and m.strip() for m in models):
+            hint = "" if provider == "openrouter" else " или null"
+            problems.append(f"«{name}» / {family}: «models» должен быть непустым списком строк{hint}")
+            continue
+        out[family] = {"provider": provider, "models": list(models)}
+    if problems:
+        raise _Bad("; ".join(problems))
+    return out
+
+
+def _check_flat_limits(name: str, value: Any) -> dict[str, int]:
+    """Один набор лимитов {rpm, tpm, rpd}, целые не меньше 1. Значения в текст ошибки не выводим."""
+    if not isinstance(value, dict) or set(value) != set(_MODEL_LIMIT_KEYS):
+        raise _Bad(f"«{name}»: нужны ровно три поля: rpm, tpm, rpd")
+    for key in _MODEL_LIMIT_KEYS:
+        number = value[key]
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise _Bad(f"«{name}»: «{key}» должно быть целым числом не меньше 1")
+    return {key: value[key] for key in _MODEL_LIMIT_KEYS}
+
+
 def _check_bounds(name: str, number: float, meta: Mapping[str, Any]) -> float:
     # Значение из файла в текст ошибки не выводим (SPEC 0.1, задание этапа 1): только имя ключа и правило.
     if "gt" in meta and not number > meta["gt"]:
@@ -250,6 +316,12 @@ def _cross_checks(v: Mapping[str, Any]) -> list[str]:
         if unknown:
             problems.append("«gemini_model_limits»: лимиты заданы для моделей, которых нет в «gemini_models»: "
                             + ", ".join(unknown))
+    # семейства текстовых моделей: gemini обязателен (это запасной вариант), default_text_model должен быть из списка
+    families = v["text_model_families"]
+    if "gemini" not in families:
+        problems.append("«text_model_families» должен содержать семейство «gemini»")
+    if v["default_text_model"] not in families:
+        problems.append("«default_text_model» должен быть именем семейства из «text_model_families»")
     if v["clip_max_sec"] < v["clip_min_sec"]:
         problems.append("«clip_max_sec» не может быть меньше «clip_min_sec»")
     if v["max_price_per_hour"] <= v["min_price_per_hour"]:
