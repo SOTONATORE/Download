@@ -431,9 +431,13 @@ def _make_transport(cfg: Config, family: tuple):
         # один набор лимитов из openrouter_limits на каждую модель семейства (на ключ)
         limits = (cfg.openrouter_limits["rpm"], cfg.openrouter_limits["tpm"], cfg.openrouter_limits["rpd"])
         model_limits = {m: limits for m in _text_chain(cfg, family)}
+        # model_limits передаётся для совместимости и не используется: лимиты заменены планировщиком отправок
         return OpenRouterTransport(base_url=cfg.openrouter_base_url, model_limits=model_limits,
                                    max_output_tokens=cfg.openrouter_max_output_tokens,
-                                   reasoning_effort=cfg.openrouter_reasoning_effort)
+                                   reasoning_effort=cfg.openrouter_reasoning_effort,
+                                   send_gap_sec=cfg.openrouter_send_gap_sec,
+                                   sends_per_window=cfg.openrouter_sends_per_window,
+                                   window_sec=cfg.openrouter_window_sec)
     cls = _find_symbol("RealTransport", ("gemini_client", "gemini_transport",
                                           "gemini_orchestrator", "gemini_prompts"))
     # лимиты по моделям из раздела gemini_model_limits; раздела нет: один набор лимитов для всех моделей (как раньше)

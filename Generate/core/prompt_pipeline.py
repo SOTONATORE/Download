@@ -275,6 +275,9 @@ def _pool_threads(provider: str) -> int:
         keys = gp._provider_key_count(provider)
     except Exception:  # ключей нет или не прочитались: как в generate_prompts, один поток
         keys = 0
+    if provider == "openrouter":
+        # OpenRouter: ключи × SENDS_PER_WINDOW, без общего ограничения MAX_PARALLEL_BATCHES
+        return gp.openrouter_thread_count(keys)
     return min(max(keys, 1), gp.MAX_PARALLEL_BATCHES)
 
 

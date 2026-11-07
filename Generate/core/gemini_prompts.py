@@ -760,6 +760,15 @@ def _provider_key_count(provider: str) -> int:
     return len(_pool_module().load_gemini_keys(os.environ))
 
 
+def openrouter_thread_count(key_count: int) -> int:
+    """Потоки для OpenRouter: ключи × SENDS_PER_WINDOW. Лимит MAX_PARALLEL_BATCHES для OpenRouter не действует."""
+    try:
+        from . import openrouter_transport as ort
+    except ImportError:  # плоский импорт, как в остальных модулях core
+        import openrouter_transport as ort  # type: ignore
+    return ort.parallel_sends_limit(key_count)
+
+
 class _WaveJob:
     """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
 
@@ -1178,11 +1187,17 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     if pool is None:
         # одиночная волна: число потоков по числу ключей провайдера; без ключей — один поток (как раньше)
         if max_workers is None:
-            max_workers = key_count
+            if provider == "openrouter":
+                max_workers = openrouter_thread_count(key_count)
+            else:
+                max_workers = key_count
             if max_workers < 1:
                 log.info("Ключей провайдера %s не найдено, батчи идут в один поток.", provider)
                 max_workers = 1
-        n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
+        if provider == "openrouter":
+            n_workers = max(1, min(max_workers, len(batches)))
+        else:
+            n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
         log.info("Батчи выполняются в %d потоках.", n_workers)
 
         queue_lock = threading.Lock()    # очередь батчей, флаг остановки, первая ошибка и очередь исправлений

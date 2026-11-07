@@ -76,6 +76,12 @@ openrouter_limits:
 openrouter_max_output_tokens: 96000
 # уровень рассуждений для OpenRouter: low, medium, high или none (параметр reasoning в запросе; none не отправляет параметр)
 openrouter_reasoning_effort: "low"
+# планировщик отправок OpenRouter (openrouter_transport): пауза между отправками на один ключ, сек
+openrouter_send_gap_sec: 3.0
+# отправок на один ключ в скользящем окне
+openrouter_sends_per_window: 10
+# длина скользящего окна, сек
+openrouter_window_sec: 60.0
 
 # --- Профиль модели и тайминги ---
 # Файл из Generate/model_profiles/ (без расширения).

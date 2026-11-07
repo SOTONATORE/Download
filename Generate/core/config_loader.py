@@ -92,6 +92,10 @@ class Config:
     # лимиты на один ключ OpenRouter (rpm, tpm, rpd); общие для всех моделей семейств openrouter
     openrouter_limits: dict[str, int] = _rule(flat_limits=True)
     openrouter_max_output_tokens: int = _rule(ge=1)
+    # планировщик отправок OpenRouter: пауза между отправками на ключ, отправок в окне, длина окна
+    openrouter_send_gap_sec: float = _rule(ge=0)
+    openrouter_sends_per_window: int = _rule(ge=1)
+    openrouter_window_sec: float = _rule(gt=0)
     # уровень рассуждений OpenRouter (параметр reasoning); none не отправляет параметр; kw_only: умолчание не ломает порядок
     openrouter_reasoning_effort: str = field(default="low", kw_only=True, metadata={"choices": REASONING_EFFORTS})
 
