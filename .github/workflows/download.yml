@@ -41,21 +41,6 @@ on:
         required: false
         type: string
         default: "10"
-      min_seconds:
-        description: 'Склейка SRT: минимальная длина одного склеенного куска, сек. Соседние короткие реплики склеиваются, пока кусок не достигнет этой длины.'
-        required: false
-        type: string
-        default: "3.5"
-      sentence_min_seconds:
-        description: 'Склейка SRT: минимальная длина куска, сек, при которой его можно закончить на конце предложения (. ! ? …), не дожидаясь min_seconds. Должна быть <= min_seconds.'
-        required: false
-        type: string
-        default: "2.0"
-      max_seconds:
-        description: 'Склейка SRT: потолок длины одного склеенного куска, сек. Должен быть >= min_seconds. Одиночная реплика длиннее потолка остаётся как есть (с предупреждением в логе).'
-        required: false
-        type: string
-        default: "5.0"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
         required: false
@@ -87,9 +72,6 @@ jobs:
     # только final.srt - иначе номера сегментов разойдутся. Только stdlib.
     - name: Normalize SRT
       env:
-        MIN_SECONDS: ${{ inputs.min_seconds || '3.5' }}
-        SENTENCE_MIN_SECONDS: ${{ inputs.sentence_min_seconds || '2.0' }}
-        MAX_SECONDS: ${{ inputs.max_seconds || '5.0' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/normalize_srt.py "${{ inputs.srt_path }}" final.srt
 
