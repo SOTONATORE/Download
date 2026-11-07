@@ -42,10 +42,10 @@ on:
         type: string
         default: "1200"
       coverage_always_seconds:
-        description: 'Покрытие, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком). По умолчанию 10. Не то же, что intro_seconds.'
+        description: 'Покрытие, сек: сегменты с начала ролика, которые всегда ищутся при coverage_percent < 100 (последний сегмент берётся целиком). По умолчанию 0. Не то же, что intro_seconds.'
         required: false
         type: string
-        default: "10"
+        default: "0"
       links:
         description: 'Вставь СЮДА готовый список ссылок вручную (обходит generate_queries/search.py). Оставь пустым, если сейчас не нужно. Видео в ручном режиме не поддерживаются, только фото.'
         required: false
@@ -248,7 +248,7 @@ jobs:
       env:
         COVERAGE_PERCENT: ${{ inputs.coverage_percent || '100' }}
         INTRO_SECONDS: ${{ inputs.intro_seconds || '1200' }}
-        COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '10' }}
+        COVERAGE_ALWAYS_SECONDS: ${{ inputs.coverage_always_seconds || '0' }}
         PYTHONUNBUFFERED: "1"
       run: python Download/select_coverage.py requests.json final.srt
 
