@@ -30,8 +30,6 @@ jobs:
     name: Параллельный замер OpenRouter
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      BENCH_OUT_DIR: ${{ runner.temp }}/bench-openrouter-parallel
     steps:
       - name: Получение репозитория
         uses: actions/checkout@v4
@@ -45,6 +43,8 @@ jobs:
         run: pip install -r Generate/requirements-dev.txt
 
       - name: Папка результатов
+        env:
+          BENCH_OUT_DIR: ${{ runner.temp }}/bench-openrouter-parallel
         run: mkdir -p "$BENCH_OUT_DIR"
 
       - name: Прогон (окно 3 над 6 батчами)
@@ -53,10 +53,13 @@ jobs:
           MODEL: ${{ inputs.model }}
           TIMEOUT_SEC: "600"
           PYTHONUNBUFFERED: "1"
+          BENCH_OUT_DIR: ${{ runner.temp }}/bench-openrouter-parallel
         run: python Generate/tools/bench_openrouter_parallel.py
 
       - name: Итоги в GITHUB_STEP_SUMMARY
         if: always()
+        env:
+          BENCH_OUT_DIR: ${{ runner.temp }}/bench-openrouter-parallel
         run: |
           f="$BENCH_OUT_DIR/bench_openrouter_parallel.txt"
           if [ -f "$f" ]; then
