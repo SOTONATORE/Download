@@ -7,6 +7,8 @@
 import json
 import pathlib
 import sys
+import threading
+import time
 
 try:
     from Generate.core import orchestrator as orch
@@ -62,6 +64,10 @@ def _orc(tmp_path, vast, rec, *, attempts=5, pause=30.0):
     orc._slots = {}
     orc.heartbeat_path = tmp_path / "hb" / "heartbeat.json"
     orc.label = "gen-1"
+    orc._heartbeat_sec = 0.05          # короткий интервал потока heartbeat для теста
+    orc._hb_stop = threading.Event()
+    orc._hb_thread = None
+    orc._hb_error_logged = False
     real_write = orc._write_heartbeat
 
     def counting_write():
@@ -78,18 +84,29 @@ def test_thirty_second_pause_writes_heartbeat_at_least_three_times(tmp_path):
     assert orc._fetch_vast_logs(_slot()) is True
     sleeps = [v for k, v in rec.events if k == "sleep"]
     assert sleeps == [10.0, 10.0, 10.0]                       # одна пауза 30 с, кусками по 10 с
-    # записи внутри паузы: в её начале и после каждого куска, т.е. не реже трёх раз на 30 с
-    first_sleep = rec.events.index(("sleep", 10.0))
-    last_sleep = len(rec.events) - 1 - rec.events[::-1].index(("sleep", 10.0))
-    writes_in_pause = [k for k, _ in rec.events[first_sleep - 1:last_sleep + 1] if k == "write"]
-    assert len(writes_in_pause) >= 3, rec.events
+    # поток heartbeat пишет файл сам: ждём не меньше трёх записей, не дольше 2 с
+    orc._start_heartbeat_thread()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if sum(1 for k, _ in rec.events if k == "write") >= 3:
+                break
+            time.sleep(0.01)
+    finally:
+        orc._stop_heartbeat_thread()
+    writes = [k for k, _ in rec.events if k == "write"]
+    assert len(writes) >= 3, rec.events
 
 
 def test_heartbeat_file_is_written_with_utc_field(tmp_path):
     rec = Recorder()
     orc = _orc(tmp_path, FakeVast([403, 200]), rec)
     orc._fetch_vast_logs(_slot())
-    data = json.loads(pathlib.Path(orc.heartbeat_path).read_text(encoding="utf-8"))
+    orc._start_heartbeat_thread()      # файл пишет поток heartbeat, а не путь паузы
+    try:
+        data = json.loads(pathlib.Path(orc.heartbeat_path).read_text(encoding="utf-8"))
+    finally:
+        orc._stop_heartbeat_thread()
     assert "utc" in data and data["label"] == "gen-1"
 
 

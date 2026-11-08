@@ -2132,7 +2132,7 @@ def test_heartbeat_file_is_written_without_secrets(tmp_path, monkeypatch):
     hb = tmp_path / "heartbeat.json"
     rig = Rig(tmp_path, monkeypatch, missing=(1,), token="TESTKEY-12345", heartbeat_path=hb)
     _ready_slot(rig, 1, instance_id=500)
-    rig.orc._heartbeat(rig.clock.now)
+    rig.orc._write_heartbeat()          # файл пишет _write_heartbeat (поток heartbeat вызывает его же)
     text = hb.read_text(encoding="utf-8")
     record = json.loads(text)
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", record["utc"])
