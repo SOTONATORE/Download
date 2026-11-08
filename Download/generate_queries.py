@@ -100,11 +100,12 @@ from Generate.core.gemini_pool import (  # noqa: E402
 )
 from Generate.core.config_loader import load_config  # noqa: E402
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError  # noqa: E402
-# Транспорт OpenRouter лежит рядом с этим файлом (Download/openrouter_transport.py): папка Download в пути импорта.
+# Транспорт OpenRouter лежит рядом с этим файлом (Download/download_openrouter_transport.py): папка Download в пути импорта.
+# Имя модуля уникально (download_openrouter_transport), чтобы не совпасть с Generate/core/openrouter_transport.py.
 _DOWNLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
 if _DOWNLOAD_DIR not in sys.path:
     sys.path.append(_DOWNLOAD_DIR)
-from openrouter_transport import (  # noqa: E402
+from download_openrouter_transport import (  # noqa: E402
     OpenRouterTransport,
     bind_error_types as _bind_openrouter_errors,
     load_openrouter_keys,
