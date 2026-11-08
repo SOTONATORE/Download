@@ -285,8 +285,8 @@ def test_run_default_offer_filter(capsys, run_env, missing_file):
     assert f.min_price == 0.35
     assert f.max_price == 1.0
     assert f.min_reliability == 0.90
-    assert f.min_inet_mbps == 800.0
-    assert f.max_inet_price_per_tb == 4.1
+    assert f.min_inet_mbps == 500.0
+    assert f.max_inet_price_per_tb == 6.1
     assert f.interruptible is False                 # rental_type по умолчанию on-demand
 
 
@@ -408,7 +408,7 @@ def test_run_default_card_params(capsys, run_env, missing_file):
     _, kwargs = run_env.calls[0]
     assert kwargs["docker_image"] == "vastai/comfy:v0.41.0-cuda-13.2-py312"
     assert kwargs["disk_gb"] == 100
-    assert kwargs["silent_host_timeout_min"] == 10
+    assert kwargs["silent_host_timeout_min"] == 15
 
 
 def test_run_custom_card_params(capsys, run_env, missing_file):
