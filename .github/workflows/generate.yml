@@ -84,12 +84,12 @@ on:
         description: "Доля видео, %: какая часть хронометража (по секундам) идёт в видео, остальное в фото. Целое число от 0 до 100"
         required: false
         type: number
-        default: 100
+        default: 50
       intro_seconds:
-        description: "Вступление, сек: сегменты с начала ролика всегда идут в видео, даже сверх бюджета video_percent"
+        description: "Вступление, сек: сегменты, чьё начало раньше этого времени, всегда идут в видео, даже сверх бюджета video_percent. По умолчанию 1200 (то же окно, что у поиска в Download)"
         required: false
         type: number
-        default: 10
+        default: 1200
       preset:
         description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md, проверяется до аренды карт (новые пресеты добавляются в список choices)"
         type: choice
@@ -116,11 +116,11 @@ on:
       min_inet_mbps:
         description: "Минимальная скорость интернета карты для отбора предложений, Мбит/с. Порог скорости загрузки весов равен половине этого значения, округлённой вниз"
         type: string
-        default: "800"
+        default: "500"
       max_inet_price_per_tb:
         description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка); дороже = предложение отбрасывается"
         type: string
-        default: "4.1"
+        default: "6.1"
       rental_type:
         description: "Режим аренды Vast: on-demand (обычная, по умолчанию, цена фиксирована) или interruptible (прерываемая: перед арендой собирается окно цен, ставка bid, карту может остановить перебитая ставка)"
         type: choice
@@ -135,7 +135,7 @@ on:
       silent_host_timeout_min:
         description: "Таймаут первого ответа хоста, минут"
         type: number
-        default: 10
+        default: 15
 
 # SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
 concurrency:
@@ -499,20 +499,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
+          # стадия 6: финал ГЕНЕРАЦИЯ один на хэш final.srt; --release-tag больше не передаётся
           args=(
             --repo "$REPO"
             --srt "$SRT_PATH"
             --model-profile "$MODEL_PROFILE"
             --run-id "$RUN_ID"
           )
-          if [ -n "$RELEASE_TAG" ]; then
-            args+=(--release-tag "$RELEASE_TAG")
-          fi
           mask_code='
           import os, sys
           vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)

@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""normalize_srt.py - склейка коротких соседних реплик .srt в более длинные куски.
+"""normalize_srt.py - склейка коротких соседних реплик .srt в куски заданной длины.
 
-Запуск:  python normalize_srt.py INPUT.srt OUTPUT.srt [--min-seconds 3.5]
-             [--sentence-min-seconds 2.0] [--max-seconds 5.0]
+Алгоритм:
+  1. Текстовые реплики делятся на блоки: пустая реплика разделяет блоки и не склеивается.
+  2. Для каждого блока динамическое программирование (C5) ищет разбиение с минимальной
+     суммарной стоимостью среди допустимых кусков длиной [SEG_MIN, SEG_MAX] секунд.
+  3. Локальное уточнение (C4): каждая внутренняя граница сдвигается на одну реплику,
+     если суммарная стоимость двух соседних кусков уменьшается.
+  Если блок нельзя разбить допустимо, выводится предупреждение и блок склеивается жадно.
+
+Запуск:  python normalize_srt.py INPUT.srt OUTPUT.srt
          python normalize_srt.py --selftest
 """
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import statistics
@@ -26,9 +34,16 @@ SRT_BLOCK_RE = re.compile(
 SENTENCE_CLOSERS = "\"'\u00bb\u201d\u2019)]"
 SENTENCE_END_CHARS = ".!?\u2026"
 
-DEFAULT_MIN = 3.5
-DEFAULT_SENTENCE_MIN = 2.0
-DEFAULT_MAX = 5.0
+# --- параметры склейки (секунды) ---
+SEG_MIN = 5.0            # нижняя граница длины склеенного куска
+SEG_MAX = 8.0            # верхняя граница длины склеенного куска
+SEG_TARGET = 8.0         # желаемая длина: стоимость растёт как квадрат отклонения от неё
+SENTENCE_PENALTY = 2.0   # штраф (сек^2) за конец куска не в конце предложения
+REFINE_PASSES = 20       # предел проходов локального уточнения (C4)
+COST_EPS = 1e-9          # улучшение меньше этого не принимается (защита от шума float)
+
+SEG_MIN_MS = round(SEG_MIN * 1000)
+SEG_MAX_MS = round(SEG_MAX * 1000)
 
 
 def _strip_closers(text: str) -> str:
@@ -77,46 +92,154 @@ def ends_sentence(text: str) -> bool:
     return bool(core) and core[-1] in SENTENCE_END_CHARS
 
 
-def merge_cues(cues: list[Cue], min_ms: int, sent_min_ms: int, max_ms: int,
-               warn=None) -> list[Cue]:
+# ---------------------------------------------------------------------------
+# Оптимизатор склейки: C5 (глобальное ДП) + C4 (локальное уточнение границ)
+
+def _seg_cost(block: list[Cue], s: int, k: int) -> float:
+    """Стоимость куска block[s:k] (полуинтервал по индексам); inf - кусок недопустим.
+
+    dur - секунды от начала первой реплики куска до конца последней (паузы внутри входят).
+    cost = (SEG_TARGET - dur)^2 + SENTENCE_PENALTY, если последняя реплика куска
+    не заканчивает предложение; иначе cost = (SEG_TARGET - dur)^2.
+    Допустимо только при SEG_MIN <= dur <= SEG_MAX.
+    """
+    dur_ms = block[k - 1].end - block[s].start
+    if dur_ms < SEG_MIN_MS or dur_ms > SEG_MAX_MS:
+        return math.inf
+    dur = dur_ms / 1000.0
+    cost = (SEG_TARGET - dur) ** 2
+    if not ends_sentence(block[k - 1].text):
+        cost += SENTENCE_PENALTY
+    return cost
+
+
+def _dp_partition(block: list[Cue]) -> tuple[Optional[list[tuple[int, int]]], int]:
+    """C5: глобальное ДП по префиксам блока.
+
+    Возвращает (границы кусков или None, последняя достижимая точка префикса).
+    None - разбиения, где все куски допустимы, не существует; тогда вторая часть
+    результата - индекс первой реплики, от которой дальше нельзя собрать кусок.
+    Перебор концов ограничен: из начала s рассматриваются только концы k, пока
+    span <= SEG_MAX (концы по времени не убывают, поэтому можно остановиться).
+    При равной стоимости выигрывает меньший индекс начала (внешний цикл по s возрастает).
+    """
+    n = len(block)
+    best = [math.inf] * (n + 1)
+    back = [-1] * (n + 1)
+    best[0] = 0.0
+    for s in range(n):
+        if best[s] == math.inf:
+            continue
+        k = s + 1
+        while k <= n:
+            if block[k - 1].end - block[s].start > SEG_MAX_MS:
+                break
+            c = best[s] + _seg_cost(block, s, k)
+            if c < best[k]:
+                best[k] = c
+                back[k] = s
+            k += 1
+    reach = max(k for k in range(n + 1) if best[k] < math.inf)
+    if best[n] == math.inf:
+        return None, reach
+    bounds: list[tuple[int, int]] = []
+    k = n
+    while k > 0:
+        s = back[k]
+        bounds.append((s, k))
+        k = s
+    bounds.reverse()
+    return bounds, n
+
+
+def _refine(block: list[Cue], bounds: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """C4: сдвиг каждой внутренней границы на одну реплику влево или вправо.
+
+    Для границы b между кусками [a0, b) и [b, c) новая граница b' = b-1 или b+1.
+    Изменение суммарной стоимости: delta = cost(a0,b') + cost(b',c) - cost(a0,b) - cost(b,c).
+    Ход принимается, если delta < -COST_EPS; при равенстве сначала проверяется b-1.
+    Проходы повторяются до отсутствия изменений или до REFINE_PASSES.
+    """
+    segs = list(bounds)
+    for _ in range(REFINE_PASSES):
+        changed = False
+        for t in range(len(segs) - 1):
+            a0, b = segs[t]
+            _, c = segs[t + 1]
+            base = _seg_cost(block, a0, b) + _seg_cost(block, b, c)
+            best_val, best_b = base - COST_EPS, None
+            for nb in (b - 1, b + 1):
+                if nb <= a0 or nb >= c:
+                    continue
+                val = _seg_cost(block, a0, nb) + _seg_cost(block, nb, c)
+                if val < best_val:
+                    best_val, best_b = val, nb
+            if best_b is not None:
+                segs[t] = (a0, best_b)
+                segs[t + 1] = (best_b, c)
+                changed = True
+        if not changed:
+            break
+    return segs
+
+
+def _greedy_bounds(block: list[Cue]) -> list[tuple[int, int]]:
+    """Запасной жадный вариант: закрыть кусок, как только он >= SEG_MIN и не переходить SEG_MAX.
+
+    Одиночная реплика длиннее SEG_MAX остаётся отдельным куском (ошибка уже выведена).
+    Хвост короче SEG_MIN приклеивается к предыдущему куску, если это не превышает SEG_MAX.
+    """
+    bounds: list[tuple[int, int]] = []
+    s = 0
+    n = len(block)
+    for k in range(n):
+        if k > s and block[k].end - block[s].start > SEG_MAX_MS:
+            bounds.append((s, k))
+            s = k
+        if block[k].end - block[s].start >= SEG_MIN_MS:
+            bounds.append((s, k + 1))
+            s = k + 1
+    if s < n:
+        if bounds and block[n - 1].end - block[bounds[-1][0]].start <= SEG_MAX_MS:
+            bounds[-1] = (bounds[-1][0], n)
+        else:
+            bounds.append((s, n))
+    return bounds
+
+
+def _build_segment(block: list[Cue], s: int, k: int) -> Cue:
+    """Склеивает block[s:k]: начало первой, конец последней, тексты через один пробел."""
+    return Cue(block[s].index, block[s].start, block[k - 1].end,
+               " ".join(c.text for c in block[s:k]))
+
+
+def _partition_block(block: list[Cue], warn) -> list[Cue]:
+    """Разбивает блок текстовых реплик: сначала ДП + уточнение, при неудаче - жадно с предупреждением."""
+    bounds, reach = _dp_partition(block)
+    if bounds is None:
+        bad = block[reach]
+        if warn:
+            warn(f"первая проблемная реплика №{bad.index}: от неё нельзя собрать кусок "
+                 f"{SEG_MIN:g}-{SEG_MAX:g} с; блок склеен жадно, куски этого блока могут выйти за диапазон")
+        return [_build_segment(block, s, k) for s, k in _greedy_bounds(block)]
+    bounds = _refine(block, bounds)
+    return [_build_segment(block, s, k) for s, k in bounds]
+
+
+def merge_cues(cues: list[Cue], warn=None) -> list[Cue]:
+    """Склейка реплик. Пустые реплики остаются отдельно на своих местах и не склеиваются с текстовыми."""
     out: list[Cue] = []
-    cur: Optional[Cue] = None
-    # Признак "последний элемент out - непустой сегмент, не отделённый пустым":
-    # пустые сегменты лежат в out как Cue с text == "", проверяем out[-1].text.
-
-    def close():
-        nonlocal cur
-        if cur is not None:
-            out.append(cur)
-            cur = None
-
+    block: list[Cue] = []
     for c in cues:
         if not c.text:
-            close()
+            if block:
+                out.extend(_partition_block(block, warn))
+                block = []
             out.append(Cue(c.index, c.start, c.end, ""))
-            continue
-        if c.dur > max_ms and warn:
-            warn(f"реплика №{c.index} длиннее потолка: {c.dur / 1000:.3f} с > {max_ms / 1000:.3f} с "
-                 f"(остаётся как есть)")
-        if cur is None:
-            cur = Cue(c.index, c.start, c.end, c.text)
-        elif c.end - cur.start > max_ms:
-            close()
-            cur = Cue(c.index, c.start, c.end, c.text)
         else:
-            cur = Cue(cur.index, cur.start, c.end, cur.text + " " + c.text)
-        d = cur.dur
-        if d >= min_ms or (d >= sent_min_ms and ends_sentence(cur.text)):
-            close()
-
-    if cur is not None:
-        prev = out[-1] if out else None
-        # Берём полный охват (с паузой между ними), т.к. пауза поглощается - так потолок точно не превысится.
-        if prev is not None and prev.text and cur.end - prev.start <= max_ms:
-            out[-1] = Cue(prev.index, prev.start, cur.end, prev.text + " " + cur.text)
-        else:
-            out.append(cur)
-        cur = None
+            block.append(c)
+    if block:
+        out.extend(_partition_block(block, warn))
     return out
 
 
@@ -125,42 +248,29 @@ def render(segs: list[Cue]) -> str:
                    for i, s in enumerate(segs, 1))
 
 
-def validate_params(min_s: float, sent_s: float, max_s: float) -> None:
-    if not (min_s > 0 and sent_s > 0 and max_s > 0):
+def validate_params(min_s: float, target_s: float, max_s: float) -> None:
+    if not (min_s > 0 and target_s > 0 and max_s > 0):
         raise ValueError("все параметры должны быть > 0")
-    if not (sent_s <= min_s <= max_s):
-        raise ValueError(f"нужно sentence_min <= min <= max, получено {sent_s} / {min_s} / {max_s}")
+    if not (min_s <= target_s <= max_s):
+        raise ValueError(f"нужно min <= target <= max, получено {min_s} / {target_s} / {max_s}")
 
 
-def to_ms(sec: float) -> int:
-    return int(round(sec * 1000))
-
-
-def summary(n_in, segs, min_s, sent_s, max_s, n_warn) -> str:
+def summary(n_in, segs, n_warn) -> str:
     durs = [s.dur for s in segs if s.text]
-    lines = [f"Параметры: MIN={min_s} SENTENCE_MIN={sent_s} MAX={max_s} (сек)",
+    lines = [f"Параметры: MIN={SEG_MIN} TARGET={SEG_TARGET} MAX={SEG_MAX} (сек)",
              f"Реплик на входе: {n_in}; сегментов на выходе: {len(segs)}"]
     if durs:
         lines.append(f"Длительность, с: мин {min(durs)/1000:.3f} / медиана "
                      f"{statistics.median(durs)/1000:.3f} / макс {max(durs)/1000:.3f}")
         lines.append(f"Короче 2 с: {sum(d < 2000 for d in durs)}; ровно на потолке: "
-                     f"{sum(d == to_ms(max_s) for d in durs)}")
-    lines.append(f"Предупреждений о слишком длинных одиночных репликах: {n_warn}")
+                     f"{sum(d == SEG_MAX_MS for d in durs)}; вне [MIN, MAX]: "
+                     f"{sum(d < SEG_MIN_MS or d > SEG_MAX_MS for d in durs)}")
+    lines.append(f"Предупреждений о нарушении диапазона: {n_warn}")
     return "\n".join(lines)
 
 
-def env_float(name: str, default: float) -> float:
-    v = os.environ.get(name, "").strip()
-    if not v:
-        return default
-    try:
-        return float(v)
-    except ValueError:
-        raise ValueError(f"{name}={v!r} - не число")
-
-
-def run(inp: str, outp: str, min_s: float, sent_s: float, max_s: float) -> int:
-    validate_params(min_s, sent_s, max_s)
+def run(inp: str, outp: str) -> int:
+    validate_params(SEG_MIN, SEG_TARGET, SEG_MAX)
     with open(inp, "r", encoding="utf-8-sig") as f:
         cues = parse_cues(f.read())
     if not cues:
@@ -171,7 +281,7 @@ def run(inp: str, outp: str, min_s: float, sent_s: float, max_s: float) -> int:
         warns.append(msg)
         print("ВНИМАНИЕ:", msg, file=sys.stderr)
 
-    segs = merge_cues(cues, to_ms(min_s), to_ms(sent_s), to_ms(max_s), warn)
+    segs = merge_cues(cues, warn)
     d = os.path.dirname(os.path.abspath(outp))
     fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
     try:
@@ -182,49 +292,46 @@ def run(inp: str, outp: str, min_s: float, sent_s: float, max_s: float) -> int:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-    print(summary(len(cues), segs, min_s, sent_s, max_s, len(warns)))
+    print(summary(len(cues), segs, len(warns)))
     return 0
 
 
 # ---------------------------------------------------------------------------
 def selftest() -> int:
-    def C(i, s, e, t):
-        return Cue(i, to_ms(s) if False else int(s * 1000), int(e * 1000), t)
+    import random
+    import time
 
-    MIN, SM, MAX = 3500, 2000, 5000
+    def C(i, s, e, t):
+        return Cue(i, round(s * 1000), round(e * 1000), t)
 
     def m(cs, warn=None):
-        return merge_cues(cs, MIN, SM, MAX, warn)
+        return merge_cues(cs, warn)
 
-    # 1. склейка до MIN
-    r = m([C(1, 0, 1, "a"), C(2, 1, 2, "b"), C(3, 2, 3.6, "c"), C(4, 3.6, 8, "d")])
-    assert r[0].text == "a b c" and r[0].dur == 3600 and r[1].text == "d", r
-    # 2. конец предложения при >= SENTENCE_MIN
-    r = m([C(1, 0, 1, "a"), C(2, 1, 2.2, "end."), C(3, 2.2, 3, "x"), C(4, 3, 5.5, "y")])
-    assert r[0].text == "a end." and r[1].text.startswith("x"), r
-    r = m([C(1, 0, 1, 'say "hi."'), C(2, 1, 1.5, "ok")])  # d=1.0<2: не закрывать
-    assert r[0].text == 'say "hi." ok', r
-    r = m([C(1, 0, 2.5, 'He said "stop."'), C(2, 2.5, 9, "Next")])
-    assert r[0].text == 'He said "stop."', r
-    # 3. потолок
-    r = m([C(1, 0, 3, "a"), C(2, 3, 6, "b"), C(3, 6, 7, "c")])
-    assert all(s.dur <= MAX for s in r) and len(r) >= 2, r
-    # 4. пустая реплика
-    r = m([C(1, 0, 1, "a"), C(2, 1, 2, ""), C(3, 2, 3, "b")])
-    assert [s.text for s in r] == ["a", "", "b"], r
-    # 5. хвост: приклеивается, если помещается; не приклеивается к пустой; не помещается
-    r = m([C(1, 0, 3.6, "a"), C(2, 3.6, 4.2, "tail")])
-    assert len(r) == 1 and r[0].text == "a tail", r
-    r = m([C(1, 0, 3.6, "a"), C(2, 3.6, 4.0, ""), C(3, 4.0, 4.5, "tail")])
-    assert [s.text for s in r] == ["a", "", "tail"], r
-    r = m([C(1, 0, 3.6, "a"), C(2, 3.6, 5.5, "tail")])
-    assert len(r) == 2, r
-    # 6. одиночная реплика > MAX
+    # 1. оптимум: 10 реплик по 1 с -> ровно два куска по 5 с (других допустимых разбиений нет)
+    cs = [C(i, i - 1, i, f"w{i}") for i in range(1, 11)]
+    r = m(cs)
+    assert [s.dur for s in r] == [5000, 5000], r
+    assert r[0].text == " ".join(f"w{i}" for i in range(1, 6)), r
+    assert r[1].text == " ".join(f"w{i}" for i in range(6, 11)), r
+    # 2. выбор границы по стоимости: 13 реплик по 1 с; (6 с, 7 с) с концом "w6." дают минимум 5
+    cs = [C(i, i - 1, i, f"w{i}" + ("." if i in (6, 13) else "")) for i in range(1, 14)]
+    r = m(cs)
+    assert [s.dur for s in r] == [6000, 7000], r
+    assert r[0].text.endswith("w6.") and r[1].text.startswith("w7"), r
+    # 3. пустая реплика разделяет блоки и сохраняется на своём месте
+    cs2 = cs + [C(14, 13, 13.5, "")] + [C(15 + k, 13.5 + k, 14.5 + k, f"x{k}") for k in range(10)]
+    r = m(cs2)
+    assert len(r) == 5 and r[2].text == "" and r[2].start == 13000 and r[2].end == 13500, r
+    assert [s.dur for s in r if s.text] == [6000, 7000, 5000, 5000], r
+    # 4. одиночная реплика длиннее потолка: предупреждение с №1, реплика остаётся как есть
     w = []
-    r = m([C(1, 0, 7, "long"), C(2, 7, 8, "b")], w.append)
-    assert r[0].text == "long" and r[0].dur == 7000 and len(w) == 1 and "№1" in w[0], (r, w)
-    # 7-10. свойства на синтетике
-    import random
+    r = m([C(1, 0, 9, "long"), C(2, 9, 10, "b")], w.append)
+    assert r[0].text == "long" and r[0].dur == 9000 and len(w) == 1 and "№1" in w[0], (r, w)
+    # 5. невозможное разбиение: блок 3 с (меньше SEG_MIN) -> жадно и предупреждение с №1
+    w = []
+    r = m([C(1, 0, 1, "a"), C(2, 1, 2, "b"), C(3, 2, 3, "c")], w.append)
+    assert len(r) == 1 and r[0].text == "a b c" and r[0].dur == 3000 and len(w) == 1 and "№1" in w[0], (r, w)
+    # 6. свойства на синтетике: детерминизм, текст и порядок, диапазон (или предупреждение)
     rnd = random.Random(1)
     cs, t = [], 0.0
     for i in range(1, 200):
@@ -232,39 +339,49 @@ def selftest() -> int:
         txt = "" if i % 37 == 0 else f"w{i}" + ("." if i % 5 == 0 else "")
         cs.append(C(i, t, t + d, txt))
         t += d + rnd.choice([0, 0.06, 0.5])
-    cs = [Cue(c.index, round(c.start), round(c.end), c.text) for c in cs]
     cs = [Cue(c.index, int(c.start), int(c.end), c.text) for c in cs]
-    r1, r2 = m(cs), m(cs)
-    assert r1 == r2
-    out = render(r1)
-    assert out == render(r2)
-    assert all(s.dur <= MAX for s in r1 if s.text)
+    w1, w2 = [], []
+    r1, r2 = m(cs, w1.append), m(cs, w2.append)
+    assert r1 == r2 and w1 == w2
+    assert render(r1) == render(r2)
+    assert all(s.dur <= SEG_MAX_MS for s in r1 if s.text)
+    assert all(SEG_MIN_MS <= s.dur <= SEG_MAX_MS for s in r1 if s.text) or w1, r1
     assert r1[0].start == cs[0].start and r1[-1].end == cs[-1].end
     assert " ".join(c.text for c in cs if c.text) == " ".join(s.text for s in r1 if s.text)
+    out = render(r1)
     blocks = list(SRT_BLOCK_RE.finditer(out.replace("\r\n", "\n").strip() + "\n\n"))
     assert [int(b.group("index")) for b in blocks] == list(range(1, len(r1) + 1))
     assert len(blocks) == len(r1)
     back = parse_cues(out)
     assert [(c.start, c.end, c.text) for c in back] == [(s.start, s.end, s.text) for s in r1]
-    # неверные параметры
-    for bad in [(0, 1, 2), (3, 2, 1), (3.5, 4.0, 5.0), (-1, -1, 1)]:
+    # 7. 1500 реплик: время работы в пределах 5 с (ограничение на бесплатном GitHub runner)
+    rnd = random.Random(2)
+    big, t_ms = [], 0
+    for i in range(1, 1501):
+        d_ms = rnd.randint(300, 3000)
+        big.append(Cue(i, t_ms, t_ms + d_ms, "" if i % 50 == 0 else f"s{i}"))
+        t_ms += d_ms + rnd.choice([0, 60, 500])
+    t0 = time.perf_counter()
+    r3 = m(big, [].append)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 5.0, f"слишком медленно: {elapsed:.2f} с"
+    assert " ".join(c.text for c in big if c.text) == " ".join(s.text for s in r3 if s.text)
+    # 8. неверные параметры
+    for bad in [(0, 1, 2), (6, 5, 8), (5, 8, 7), (-1, -1, 1)]:
         try:
             validate_params(*bad)
         except ValueError:
             continue
         raise AssertionError(f"параметры {bad} должны давать ошибку")
-    validate_params(3.5, 2.0, 5.0)
+    validate_params(SEG_MIN, SEG_TARGET, SEG_MAX)
     print("selftest OK")
     return 0
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Склейка коротких реплик .srt в более длинные куски")
+    ap = argparse.ArgumentParser(description="Склейка коротких реплик .srt в куски заданной длины")
     ap.add_argument("input", nargs="?")
     ap.add_argument("output", nargs="?")
-    ap.add_argument("--min-seconds", type=float, default=None)
-    ap.add_argument("--sentence-min-seconds", type=float, default=None)
-    ap.add_argument("--max-seconds", type=float, default=None)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
@@ -272,11 +389,7 @@ def main(argv=None) -> int:
     if not a.input or not a.output:
         ap.error("нужны INPUT.srt и OUTPUT.srt")
     try:
-        min_s = a.min_seconds if a.min_seconds is not None else env_float("MIN_SECONDS", DEFAULT_MIN)
-        sent_s = (a.sentence_min_seconds if a.sentence_min_seconds is not None
-                  else env_float("SENTENCE_MIN_SECONDS", DEFAULT_SENTENCE_MIN))
-        max_s = a.max_seconds if a.max_seconds is not None else env_float("MAX_SECONDS", DEFAULT_MAX)
-        return run(a.input, a.output, min_s, sent_s, max_s)
+        return run(a.input, a.output)
     except (ValueError, OSError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 1

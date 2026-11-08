@@ -18,7 +18,9 @@ response_schema).
                            "gemini-3.1-flash-lite" - RPD 500, подтверждено на реальном
                            аккаунте; gemini-3.8-flash из цепочки исключена намеренно -
                            у неё RPD всего 20, что слишком мало для батчевой генерации)
-    GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 100)
+    GENQ_BATCH_SIZE       - опционально, число сегментов в одном вызове (по умолчанию 25)
+    INTRO_SECONDS         - опционально, вступление, сек: сегмент, чьё начало строго раньше, получает
+                           строку is_intro: true в блоке (по умолчанию 1200; то же имя, что в search.py)
     GENQ_HTTP_TIMEOUT_SECONDS - опционально, таймаут одного HTTP-запроса к Gemini в секундах
                            (по умолчанию 60; в SDK передаётся в миллисекундах)
     GENQ_SOURCES_MODE    - опционально, режим источников: 1 (микс, по умолчанию),
@@ -98,10 +100,18 @@ from Generate.core.gemini_pool import (  # noqa: E402
 )
 from Generate.core.config_loader import load_config  # noqa: E402
 from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError  # noqa: E402
-from Generate.core.openrouter_transport import (  # noqa: E402
+# Транспорт OpenRouter лежит рядом с этим файлом (Download/openrouter_transport.py): папка Download в пути импорта.
+_DOWNLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
+if _DOWNLOAD_DIR not in sys.path:
+    sys.path.append(_DOWNLOAD_DIR)
+from openrouter_transport import (  # noqa: E402
     OpenRouterTransport,
+    bind_error_types as _bind_openrouter_errors,
     load_openrouter_keys,
 )
+
+# Классы ошибок для транспорта OpenRouter: те же объекты, которые ловит этот файл.
+_bind_openrouter_errors(GeminiInputError, GeminiRuntimeError, AllKeysExhaustedError)
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -115,7 +125,12 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 # RPD 500 у обеих Flash-Lite моделей против RPD 20 у gemini-3.8-flash - проверено
 # напрямую в панели лимитов аккаунта (не только по статьям в вебе).
 DEFAULT_FALLBACK_MODELS = ["gemini-3.1-flash-lite"]
-DEFAULT_BATCH_SIZE = 100
+DEFAULT_BATCH_SIZE = 25
+# Вступление для флага is_intro: начало сегмента строго раньше этого времени (сек). Совпадает с окном поиска.
+DEFAULT_INTRO_SECONDS = 1200.0
+# Порог вступления, заданный в main() из env INTRO_SECONDS. None - строка is_intro в блоках не печатается
+# (так работают self-test и вызовы без main).
+INTRO_SECONDS_LIMIT: Optional[float] = None
 CONTEXT_WINDOW = 3
 # Окна контекста в блоке сегмента (build_segment_block): набираются целыми предложениями,
 # пока сумма слов не достигнет порога; верхней границы нет.
@@ -139,6 +154,9 @@ POOL_TPM_LIMIT = 250000
 POOL_RPD_LIMIT = 500
 # Максимум параллельных батчей (не больше числа ключей, см. main).
 POOL_MAX_WORKERS = 10
+# Отправок на один ключ OpenRouter в скользящем окне (тот же смысл, что openrouter_sends_per_window в конфиге Generate).
+OPENROUTER_SENDS_PER_KEY_ENV = "OPENROUTER_SENDS_PER_KEY"
+OPENROUTER_SENDS_PER_KEY_DEFAULT = 10
 # Оценка токенов одного запроса для TPM (грубая, батч 100 сегментов).
 POOL_TOKENS_PER_REQUEST = 20000
 INITIAL_BACKOFF_SECONDS = 4
@@ -286,6 +304,53 @@ REQUIRED_ENTRY_KEYS = [
 MAX_NORMALIZE_WARNINGS = 20
 
 
+INTRO_SEGMENT_RULE = (
+    "INTRO SEGMENTS: a segment block with the line \"is_intro: true\" lies in the opening part of the video. "
+    "Its three queries (query_narrow, query_medium, query_broad) must contain NO proper names and NO named "
+    "objects: replace each name by its generic type - a person by role, a building by its type, a place by "
+    "its setting. Keep the stock search style of the STOCK rules (query_medium is the direct scene, query_narrow "
+    "a synonym query, query_broad the general setting, with the word limits given there) and the banned-word "
+    "list of GENERAL RULES. The three queries must still differ from each other. An intro segment is searched "
+    "only as stock, so its queries are written in stock style even where the sites rule above would name an "
+    "archive site. Rules 5 and 6 still apply: entity_keywords lists any proper name left in query_narrow or "
+    "query_medium, so the script can remove it. The scene and the sites follow the rules above.\n\n"
+)
+
+
+def intro_seconds_from_env(raw: Optional[str]) -> float:
+    """Разбор INTRO_SECONDS: пусто - DEFAULT_INTRO_SECONDS; не число или отрицательное - предупреждение
+    и DEFAULT_INTRO_SECONDS."""
+    if raw is None or not raw.strip():
+        return DEFAULT_INTRO_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logging.warning("INTRO_SECONDS=%r не число - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    if val < 0:
+        logging.warning("INTRO_SECONDS=%r должно быть неотрицательным числом - берётся %s.", raw, DEFAULT_INTRO_SECONDS)
+        return DEFAULT_INTRO_SECONDS
+    return val
+
+
+_SRT_START_RE = re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
+
+
+def segment_start_seconds(start: str) -> Optional[float]:
+    """Начало сегмента из строки SRT 'ЧЧ:ММ:СС,ммм' в секундах; не разобрано - None."""
+    m = _SRT_START_RE.search(start or "")
+    if not m:
+        return None
+    h, mi, se, ms = m.groups()
+    return int(h) * 3600 + int(mi) * 60 + int(se) + int(ms) / 1000.0
+
+
+def is_intro_segment(seg: "Segment", intro_seconds: float) -> bool:
+    """Вступление: начало строго раньше intro_seconds (как is_intro в search.py). Нет времени - не вступление."""
+    t = segment_start_seconds(seg.start)
+    return t is not None and t < intro_seconds
+
+
 def build_system_instruction(
     mode: int = DEFAULT_SOURCES_MODE, junk_words: tuple[str, ...] = JUNK_KIND_WORDS,
     media_mode: int = DEFAULT_MEDIA_MODE,
@@ -305,12 +370,13 @@ def build_system_instruction(
             f"SOURCE MODE RULES (MODE {SOURCES_MIX}: MIXED ARCHIVE AND STOCK):\n"
             "- SITES DEFAULT: Default to stock sites [\"pexels\", \"pixabay\"]. Use archival sites [\"wikimedia\", \"loc\"] ONLY when the words of the segment explicitly name a specific real person, a specific building, or a specific physical object that can actually be photographed (not just a date, country, or era). Add \"nasa\" first only for space/astronomy/NASA missions.\n"
             "- When genuinely unsure, use stock sites [\"pexels\", \"pixabay\"], NOT both and NOT archive.\n"
+            "- For stock sites the three queries follow rule 3 (direct scene, synonym of the main object, general setting). The search tries video first with all three queries and uses a photo only when no video fits.\n"
             "- For abstract or general segments: follow the ABSTRACT / GENERAL SEGMENTS rule below (use stock sites).\n"
         ),
         SOURCES_STOCK: (
             f"SOURCE MODE RULES (MODE {SOURCES_STOCK}: STOCK ONLY):\n"
             "- All segments MUST use stock sites ONLY: [\"pexels\", \"pixabay\"]. NEVER include \"wikimedia\", \"loc\", or \"nasa\".\n"
-            "- All search queries must follow the stock search style: query_medium (2-4 words, object + context), query_narrow (4-6 words, slightly more specific), query_broad (1-2 words, general image).\n"
+            "- All search queries must follow the stock search style, as three different phrases for the same scene: query_medium is the DIRECT scene (2-4 words, the scene and its main object), query_narrow is a SYNONYM query (2-4 words, the main object replaced by a common synonym or a close visual alternative, e.g. door -> arch, doorway, gate), query_broad is the GENERAL setting (1-2 words, the setting or place with no proper names). The three must differ from each other. No video, stock or vintage words.\n"
             "- Replace any proper names with plain visual generalizations (a person by role or appearance, a place or building by its type).\n"
             f"- In Mode {SOURCES_STOCK}, entity_keywords MUST ALWAYS be an empty list [], and is_entity MUST ALWAYS be false for ALL segments.\n"
         ),
@@ -329,6 +395,7 @@ def build_system_instruction(
         ),
     }.get(media_mode, "")
 
+    intro_rule = "" if mode == SOURCES_ARCHIVE else INTRO_SEGMENT_RULE
     instruction = f"""\
 You generate search-query instructions for stock/archival video and photo sourcing for a video's \
 scenes. You receive numbered scene segments (number = the segment's sequential position in the \
@@ -374,9 +441,10 @@ segment as abstract and apply the ABSTRACT / GENERAL SEGMENTS rule below.
 "pexels", "pixabay", "wikimedia", "nasa", "loc". This list is fixed - never invent other sources. \
 Follow the SOURCE MODE RULES above.
 
-3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene, from \
-most specific to most general. They are tried in this order, so each must be a realistic search \
-phrase on its own. The style depends on the FIRST site in "sites":
+3. query_narrow, query_medium, query_broad - three English search queries for the SAME scene. They \
+are tried in this order, so each must be a realistic search phrase on its own: for archive sites from \
+most specific to most general; for stock sites in the order medium, narrow, broad (see below). The \
+style depends on the FIRST site in "sites":
    - If the first site is an archive (wikimedia / loc / nasa):
      * query_narrow: SHORT, 2-4 words ONLY - the exact proper noun(s) that a real file title or \
 caption on these sites would actually contain: a person's full name, OR a specific place name, OR a \
@@ -390,10 +458,11 @@ pexels/pixabay, 2-4 words, no proper nouns, not a portrait of a person.
      MediaWiki (wikimedia) and LOC search match literal file titles/captions, which are short and \
 factual, so descriptive or stylistic padding only dilutes the match: use the bare name or place \
 exactly as the segment gives it, without added descriptors, years or archive words.
-   - If the first site is stock (pexels / pixabay):
-     * query_medium: 2-4 words, main object + context.
-     * query_narrow: slightly more specific than medium, 4-6 words.
-     * query_broad: 1-2 words, the general image; prefer the setting or place over a portrait of a person.
+   - If the first site is stock (pexels / pixabay), the three phrases are three different kinds of query for the same scene:
+     * query_medium - DIRECT scene: 2-4 words, the scene and its main object.
+     * query_narrow - SYNONYM: 2-4 words, the same scene with the main object replaced by a common synonym or a close visual alternative (for example: door -> arch, doorway, gate).
+     * query_broad - GENERAL setting: 1-2 words, the setting or place of the scene with no strong specifics and no proper names; prefer the setting over a portrait of a person.
+     The three phrases must differ from each other; no two may be the same phrase.
    - query_broad = null ONLY for segments with no visual scene at all - e.g. silence, a black \
 screen, a title/credits card with no depicted content, or on-screen text with nothing else \
 happening. When in doubt, fill it in rather than returning null. query_narrow and query_medium are \
@@ -442,7 +511,7 @@ line and the segments after the current one are not used for the scene.
 (without proper nouns, even if the context names them).
 - Set sites = ["pexels", "pixabay"], entity_keywords = [], is_entity = false (unless running in Mode {SOURCES_ARCHIVE}).
 
-GENERAL RULES:
+{intro_rule}GENERAL RULES:
 - Queries describe what is VISIBLE in the frame. They do not retell or paraphrase the narrator's \
 words.
 - NEVER use these filler words in any query: b-roll, cinematic, footage, HD, 4K, historical, and the \
@@ -516,11 +585,11 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
         "query_narrow": types.Schema(
             type=types.Type.STRING,
             description=(
-                "Most specific query, English. First site archive (wikimedia/loc/nasa): exact "
+                "Query, English. First site archive (wikimedia/loc/nasa): exact "
                 "name/place/event (+ short object refinement), 2-4 words, with NO year unless the "
                 "year is named in the segment text (a proper name that needs more than 4 words "
                 "is fine - the limit is about padding, not truncating a name). First site stock "
-                "(pexels/pixabay): 4-6 words, a bit more specific than query_medium. No filler "
+                "(pexels/pixabay): SYNONYM query, 2-4 words: the same scene with the main object replaced by a common synonym or a close visual alternative (door -> arch, doorway, gate). No filler "
                 "b-roll/cinematic/footage/HD/4K or 'stock footage/photo/image'; video/stock/"
                 "historic/vintage only when part of the subject itself; no "
                 "mood adjectives absent from the text."
@@ -530,7 +599,7 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             type=types.Type.STRING,
             description=(
                 "Medium query, English. First site archive: ONLY the name or ONLY the place, no "
-                "year. First site stock: 2-4 words, object + context. Same filler-word rules as "
+                "year. First site stock: DIRECT scene query, 2-4 words, the scene and its main object. Same filler-word rules as "
                 "query_narrow."
             ),
         ),
@@ -539,8 +608,8 @@ SEGMENT_ENTRY_SCHEMA = types.Schema(
             nullable=True,
             description=(
                 "Broadest query, English. First site archive: ordinary stock phrasing of the same "
-                "scene for pexels/pixabay, 2-4 words. First site stock: 1-2 words, the general "
-                "image. null ONLY when the segment has no visible scene at all (silence, black "
+                "scene for pexels/pixabay, 2-4 words. First site stock: GENERAL setting, 1-2 words, no proper "
+                "names. null ONLY when the segment has no visible scene at all (silence, black "
                 "screen, title/credits card, bare on-screen text)."
             ),
         ),
@@ -916,6 +985,9 @@ def build_segment_block(
     непустого предложения, оно выводится в строке Sentence без маркера."""
     sen = by_segment[seg.index]
     lines = [f"### Segment {seg.index}", f"Timing: {seg.start} --> {seg.end}"]
+    # Флаг вступления для модели: печатается только когда порог задан (main); self-test его не видит.
+    if INTRO_SECONDS_LIMIT is not None:
+        lines.append(f"is_intro: {'true' if is_intro_segment(seg, INTRO_SECONDS_LIMIT) else 'false'}")
     text = " ".join((seg.text or "").split())
 
     if text:
@@ -2002,7 +2074,8 @@ def _resolve_text_family(cfg, requested: Optional[str]) -> tuple[str, str, Optio
     return name, spec["provider"], spec["models"]
 
 
-def _make_openrouter_clients(cfg, models: list[str], key_pairs) -> dict[str, "OpenRouterTransport"]:
+def _make_openrouter_clients(cfg, models: list[str], key_pairs,
+                             sends_per_key: Optional[int] = None) -> dict[str, "OpenRouterTransport"]:
     """Один OpenRouterTransport на каждый ключ пула (кэш по имени переменной, как у genai.Client).
 
     Каждый транспорт видит только свой ключ: выбор ключа делает внешний KeyPool. Лимиты - как в
@@ -2016,6 +2089,7 @@ def _make_openrouter_clients(cfg, models: list[str], key_pairs) -> dict[str, "Op
             model_limits=model_limits,
             base_url=cfg.openrouter_base_url,
             max_output_tokens=cfg.openrouter_max_output_tokens,
+            sends_per_window=openrouter_sends_per_key() if sends_per_key is None else sends_per_key,
         )
         for name, value in key_pairs
     }
@@ -2215,6 +2289,65 @@ def _make_client_cache(keys_pairs, http_timeout_ms: int) -> dict[str, "genai.Cli
     return cache
 
 
+def openrouter_sends_per_key(environ=None) -> int:
+    """Отправок на ключ в окне для OpenRouter: из OPENROUTER_SENDS_PER_KEY, по умолчанию 10.
+
+    Некорректное значение (не целое или меньше 1) - ошибка входных данных. Значение в текст ошибки не выводится.
+    """
+    source = os.environ if environ is None else environ
+    raw = (source.get(OPENROUTER_SENDS_PER_KEY_ENV) or "").strip()
+    if not raw:
+        return OPENROUTER_SENDS_PER_KEY_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        raise GeminiInputError(
+            f"Ошибка входных данных: {OPENROUTER_SENDS_PER_KEY_ENV} должно быть целым числом.") from None
+    if value < 1:
+        raise GeminiInputError(f"Ошибка входных данных: {OPENROUTER_SENDS_PER_KEY_ENV} должно быть не меньше 1.")
+    return value
+
+
+def openrouter_thread_count(key_count: int, sends_per_key: Optional[int] = None) -> int:
+    """Потоки для OpenRouter: ключи × отправок на ключ в окне, не меньше 1 (как openrouter_thread_count в Generate).
+
+    Значение не передано: берётся OPENROUTER_SENDS_PER_KEY (по умолчанию 10).
+    """
+    per_key = openrouter_sends_per_key() if sends_per_key is None else max(1, int(sends_per_key))
+    return max(1, key_count) * per_key
+
+
+class OpenRouterLeasePool:
+    """Выдаёт имена ключей OpenRouter для первого прохода без эксклюзивного замка на время запроса.
+
+    KeyPool держит ключ занятым весь запрос, поэтому на ключ приходился бы один запрос в полёте.
+    Здесь ключ выбирается по кругу среди тех, у кого суточная квота на модель не исчерпана: признак берётся
+    из exhausted_pairs (ключ «имя|модель»), то есть из того же словаря, что ведёт _run_pool_tasks.
+    Паузу между отправками и окно отправок на ключ соблюдает транспорт (OpenRouterSendScheduler).
+    Значения ключей здесь не хранятся: lease несёт только имя переменной.
+    """
+
+    def __init__(self, key_names, exhausted_pairs: dict) -> None:
+        self._names = list(key_names)
+        self._exhausted = exhausted_pairs
+        self._lock = threading.Lock()
+        self._cursor = 0
+
+    def acquire(self, model: str, tokens: int = 0, timeout: Optional[float] = None) -> KeyLease:
+        """Возвращает lease с именем ключа, у которого суточная квота на модель ещё не исчерпана."""
+        live = [n for n in self._names if f"{n}|{model}" not in self._exhausted]
+        if not live:
+            raise AllKeysExhaustedError("Все ключи OpenRouter исчерпали суточную квоту для этой модели.")
+        with self._lock:
+            name = live[self._cursor % len(live)]
+            self._cursor += 1
+        return KeyLease(name=name, api_key="")
+
+    def release(self, lease: KeyLease, outcome, model: str, retry_after: Optional[float] = None) -> None:
+        """Ничего не делает: паузы и блокировки ведёт транспорт, суточную квоту - exhausted_pairs."""
+        return None
+
+
 def _run_pool_tasks(
     pool: "KeyPool",
     clients: dict[str, "genai.Client"],
@@ -2226,6 +2359,7 @@ def _run_pool_tasks(
     max_workers: int,
     exhausted_pairs: Optional[dict] = None,
     on_quota=None,
+    per_key_threads: int = 1,
 ) -> tuple[Optional[int], str]:
     """Выполняет tasks параллельно через пул ключей.
 
@@ -2294,7 +2428,8 @@ def _run_pool_tasks(
                 stop.set()
                 return
 
-    workers = max(1, min(len(clients), max_workers))
+    # потоков не больше ключей × per_key_threads: у OpenRouter это отправки на ключ в окне, у Gemini по одному
+    workers = max(1, min(len(clients) * max(1, per_key_threads), max_workers))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(worker) for _ in range(workers)]
         for f in futures:
@@ -3556,9 +3691,9 @@ def run_self_tests() -> int:
             rsegs = parse_srt(real_srt)
             r_idx = merge_segments_into_sentences(rsegs)
             rb = make_batches(rsegs, DEFAULT_BATCH_SIZE, CONTEXT_WINDOW)
-            pr1 = build_prompt(rb[0][0], rb[0][1], rb[0][2], sentence_index=r_idx)
-            pr2 = build_prompt(rb[1][0], rb[1][1], rb[1][2], sentence_index=r_idx)
-            check("real batch: сегмент 100 в батче 1, 101 в батче 2",
+            pr1 = build_prompt(rb[3][0], rb[3][1], rb[3][2], sentence_index=r_idx)
+            pr2 = build_prompt(rb[4][0], rb[4][1], rb[4][2], sentence_index=r_idx)
+            check("real batch (размер 25): сегмент 100 в батче 4, 101 в батче 5",
                   ("### Segment 100\n" in pr1, "### Segment 101\n" in pr1, "### Segment 101\n" in pr2), (True, False, True))
             check("real batch: предложение 100-101 целиком в обоих батчах",
                   ("<<" in pr1 and r_idx[1][100].text in pr1.replace(">>", "").replace("<<", ""),
@@ -3852,6 +3987,10 @@ def main() -> int:
         help="семейство текстовой модели: gemini, gemma, nemotron, nemotron-super-vl (по умолчанию из конфига)",
     )
     args = parser.parse_args()
+    # Порог вступления для флага is_intro (env INTRO_SECONDS, по умолчанию 1200).
+    global INTRO_SECONDS_LIMIT
+    INTRO_SECONDS_LIMIT = intro_seconds_from_env(os.environ.get("INTRO_SECONDS"))
+    logging.info("Вступление: сегменты с началом раньше %s с получают is_intro: true.", INTRO_SECONDS_LIMIT)
 
     # Семейство текстовой модели: --text-model или default_text_model из конфига (как в cli).
     try:
@@ -3931,9 +4070,13 @@ def main() -> int:
     # включая call_gemini_batch.
     # Один genai.Client на каждый ключ пула, кэш по имени переменной (не по значению).
     if text_provider == "openrouter":
-        clients = _make_openrouter_clients(cfg, text_models or [], key_pairs)
+        or_sends = openrouter_sends_per_key()
+        or_threads = openrouter_thread_count(len(key_pairs), or_sends)
+        clients = _make_openrouter_clients(cfg, text_models or [], key_pairs, sends_per_key=or_sends)
         atexit.register(_close_transports, clients)
         logging.info("Ключей в пуле OpenRouter: %d", len(key_pairs))
+        logging.info("OpenRouter: ключей %d, потоков %d, отправок на ключ %d в окне",
+                     len(key_pairs), or_threads, or_sends)
     else:
         clients = _make_client_cache(key_pairs, int(http_timeout_s * 1000))
         logging.info("HTTP-таймаут запроса к Gemini: %.1fs; ключей в пуле: %d", http_timeout_s, len(key_pairs))
@@ -4047,10 +4190,17 @@ def main() -> int:
             batch_num, len(batches), progress_pct, len(results), len(segments),
         )
 
+    if text_provider == "openrouter":
+        # OpenRouter: без эксклюзивного замка ключа на время запроса; разрешение на отправку даёт транспорт
+        first_pool = OpenRouterLeasePool(list(clients), exhausted_models)
+        first_workers, first_per_key = or_threads, or_sends
+    else:
+        first_pool, first_workers, first_per_key = pool, POOL_MAX_WORKERS, 1
     code, current_model = _run_pool_tasks(
-        pool, clients, todo, run_batch, lock, on_batch_done, current_model, POOL_MAX_WORKERS,
+        first_pool, clients, todo, run_batch, lock, on_batch_done, current_model, first_workers,
         exhausted_pairs=exhausted_models,
         on_quota=lambda: save_checkpoint(checkpoint_path, src_hash, results, exhausted_models),
+        per_key_threads=first_per_key,
     )
     if code is not None:
         save_checkpoint(checkpoint_path, src_hash, results, exhausted_models)

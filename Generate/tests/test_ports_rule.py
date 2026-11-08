@@ -208,7 +208,7 @@ def test_release_upload_refuses_card_diagnostics():
     store = _Store()
     up = ra.ReleaseUploader(store, segs, "ltx25", release_asset_limit=900,
                             now=lambda: datetime(2026, 10, 5, 12, 30, tzinfo=timezone.utc),
-                            log=lambda m: None, run_id="42")
+                            log=lambda m: None)
     up.prepare()
     for name in sorted(ra.CARD_DIAGNOSTIC_FILES):
         with pytest.raises(GeminiInputError):

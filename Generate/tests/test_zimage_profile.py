@@ -72,10 +72,22 @@ def test_d_prompt_is_empty_placeholder():
             assert text == "", f"в узле {node_id} остался текст промпта"
 
 
-def test_e_resolution_is_1920x1080():
+def test_e_latent_is_1280x720():
     inputs = _json(WORKFLOW)["57:13"]["inputs"]
-    assert inputs["width"] == 1920
-    assert inputs["height"] == 1080
+    assert inputs["width"] == 1280
+    assert inputs["height"] == 720
+
+
+def test_e_upscale_is_1920x1080_bicubic_before_save():
+    # Итоговый кадр 1920x1080: ImageScale 57:14 (bicubic) между VAEDecode 57:8 и SaveImage 9
+    graph = _json(WORKFLOW)
+    node = graph["57:14"]
+    assert node["class_type"] == "ImageScale"
+    assert node["inputs"]["width"] == 1920
+    assert node["inputs"]["height"] == 1080
+    assert node["inputs"]["upscale_method"] == "bicubic"
+    assert node["inputs"]["image"] == ["57:8", 0]
+    assert graph["9"]["inputs"]["images"] == ["57:14", 0]
 
 
 def test_f_no_ltx_only_keys_in_profile():

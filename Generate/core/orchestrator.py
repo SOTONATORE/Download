@@ -820,7 +820,7 @@ class RunPublisher:
         return dst
 
     def start(self, missing_path, prompts_path) -> None:
-        """E1: файлы запуска в служебный релиз до любых трат. Первая ошибка останавливает запуск."""
+        """E1: файлы запуска в ФИНАЛ · ГЕНЕРАЦИЯ до любых трат. Первая ошибка останавливает запуск."""
         if os.path.isfile(str(missing_path)):
             dst = self._copy(str(missing_path), MISSING_FILENAME)
             self._required(lambda: self.up.upload_run_file(dst), MISSING_FILENAME)
@@ -833,7 +833,7 @@ class RunPublisher:
             fn()
         except Exception as exc:
             raise ReleaseStartError(
-                f"Не удалось загрузить {name} в служебный релиз: {self._reason(exc)}. "
+                f"Не удалось загрузить {name} в ФИНАЛ · ГЕНЕРАЦИЯ: {self._reason(exc)}. "
                 "Запуск остановлен до трат.") from None
         self.uploaded.append(name)
 
@@ -847,7 +847,7 @@ class RunPublisher:
         self.uploaded.append(name)
 
     def finish(self, *, prompts_path=None, report_path=None, bundle_path=None) -> None:
-        """E2, E4: служебные файлы в служебный релиз, generated_links.txt в итоговый."""
+        """E2, E4: служебные файлы и отчёты в ФИНАЛ · ГЕНЕРАЦИЯ; generated_links.txt там же (стадия 6)."""
         if report_path:
             self._soft(lambda: self.up.upload_run_file(report_path), os.path.basename(report_path))
         if bundle_path:
@@ -1446,7 +1446,7 @@ class Orchestrator:
         video_model = os.environ.get("VIDEO_MODEL", "") or DEFAULT_MODEL_PROFILE
         try:
             video_percent = float(os.environ.get("VIDEO_PERCENT", "") or "100")
-            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "10")
+            intro_seconds = float(os.environ.get("INTRO_SECONDS", "") or "1200")
         except ValueError:
             raise gp.GeminiInputError("VIDEO_PERCENT и INTRO_SECONDS должны быть числами.") from None
         dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if self._artifact else None
@@ -1497,9 +1497,9 @@ class Orchestrator:
         uploader = ReleaseUploader(
             self.release_store, self.segments, self.profile, release_tag=self.release_tag,
             release_asset_limit=self.release_asset_limit, filename_template=self.template,
-            log=self._info, run_id=self.run_id)
+            log=self._info, repo=self.repo)
         try:
-            done = uploader.prepare()  # открывает служебный релиз run-<run_id>-service (SPEC 9.1, E1)
+            done = uploader.prepare()  # открывает ФИНАЛ · ГЕНЕРАЦИЯ (final-gen-<hash16>) в начале запуска (стадия 6)
         except gp.GeminiRuntimeError as exc:
             raise ReleaseStartError(
                 f"Не удалось открыть релиз запуска: {self._mask_remote(str(exc))}. "
@@ -3017,7 +3017,7 @@ class Orchestrator:
         try:
             self._uploader.upload_run_file(path)
         except (gp.GeminiRuntimeError, gp.GeminiInputError) as exc:
-            log.error("previews_index.txt не выгружен в служебный релиз: %s", self._mask_remote(str(exc)))
+            log.error("previews_index.txt не выгружен в ФИНАЛ · ГЕНЕРАЦИЯ: %s", self._mask_remote(str(exc)))
 
     def _clip_label(self, num: int) -> str:
         """Метка клипа в строках начала, готовности и ошибки (P2): номер из missing.txt и место в этом запуске."""
@@ -3156,7 +3156,7 @@ class Orchestrator:
         try:
             self._download(slot, task.id, path)
             if preview is not None:
-                self._uploader.upload_preview(path)  # превью в итоговый релиз, не в generated_links.txt
+                self._uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
             else:
                 self._uploader.upload_clip(path)
         except (_WorkerNetError, _WorkerHttpError) as exc:

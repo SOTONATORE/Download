@@ -6,9 +6,11 @@ name: zimage_turbo
 # Тип результата: одиночное изображение, а не видео-клип
 type: image
 
-# Итоговый размер кадра (16:9, YouTube). Подставляется в узел 57:13 через привязки width и height
-width: 1920
-height: 1080
+# Размер латента (16:9): узел 57:13 EmptySD3LatentImage создаёт 1280x720.
+# Итоговый кадр 1920x1080 даёт ImageScale 57:14 (bicubic) перед SaveImage 9.
+# Эти значения справочные: в граф не подставляются, размеры заданы в workflow.json.
+width: 1280
+height: 720
 
 # Граф ComfyUI (API-формат) и подстановки значений
 workflow:
@@ -27,7 +29,8 @@ params:
   sampler: "res_multistep"       # KSampler (57:3): sampler_name
   scheduler: "simple"            # KSampler (57:3): scheduler
   shift: 3                       # ModelSamplingAuraFlow (57:11): shift
-  resolution: "1920x1080"        # EmptySD3LatentImage (57:13)
+  resolution: "1280x720"         # EmptySD3LatentImage (57:13), затем ImageScale 57:14 до 1920x1080
+  upscale: "bicubic 1920x1080 (ImageScale 57:14)"  # ImageScale (57:14), после VAEDecode 57:8
 
 # Имена файлов весов. Граф workflow.json содержит те же имена.
 model_files:

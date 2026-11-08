@@ -13,7 +13,7 @@ requests.json. Остальные поля не меняются.
 
 Примеры:
     python select_coverage.py requests.json result.srt --percent 40
-    COVERAGE_PERCENT=40 INTRO_SECONDS=12 python select_coverage.py requests.json result.srt
+    COVERAGE_PERCENT=40 COVERAGE_ALWAYS_SECONDS=12 python select_coverage.py requests.json result.srt
     python select_coverage.py --selftest
 """
 
@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 log = logging.getLogger("select_coverage")
 
 DEFAULT_PERCENT = 100
-DEFAULT_INTRO_SECONDS = 10.0
+# Всегда искать первые N секунд ролика (env COVERAGE_ALWAYS_SECONDS). Это не окно вступления поиска
+# (INTRO_SECONDS в search.py и generate_queries.py).
+DEFAULT_COVERAGE_ALWAYS_SECONDS = 10.0
 DEFAULT_WINDOW_SECONDS = 45.0  # целевая длина окна; число окон = round(total / это)
 EPS_MS = 1e-6
 
@@ -144,7 +146,7 @@ class Result:
     n_intro: int
     n_entity: int
     n_mandatory: int
-    per_window: list[tuple[int, int, int]]  # (число выбранных, мс выбранных, мс доступного бюджета)
+    per_window: list[tuple[int, int, float]]  # (число выбранных, мс выбранных, мс квоты окна)
     warnings: list[str] = field(default_factory=list)
     min_durations: dict[int, float] = field(default_factory=dict)  # заполняет run()
 
@@ -220,22 +222,23 @@ def compute_min_durations(items: list[Item]) -> dict[int, float]:
     return out
 
 
-def select_segments(items: list[Item], percent: int, intro_seconds: float,
+def select_segments(items: list[Item], percent: int, coverage_always_seconds: float,
                     window_seconds: float = DEFAULT_WINDOW_SECONDS) -> Result:
     """Выбор сегментов.
 
     1. total = конец последнего - начало первого; budget = percent/100 * total.
     2. Обязательные: вступление (подряд с начала, пока конец сегмента относительно начала
-       ролика не достиг intro_seconds; последний берётся целиком) + все is_entity.
+       ролика не достиг coverage_always_seconds; последний берётся целиком) + все is_entity.
     3. Окон n = max(1, round(total / window_seconds)); окно k = [t0 + k*L, t0 + (k+1)*L),
        L = total/n. Сегмент относится к окну по своему началу (последнее окно включает
-       правую границу). Бюджет окна = budget/n + остаток (или долг) от предыдущих окон.
-    4. В окне: из доступного вычитаются обязательные сегменты окна, затем кандидаты
+       правую границу). Квота окна = percent/100 * сумма длительностей сегментов этого окна.
+       Остаток и долг между окнами не переносятся: каждое окно получает свою долю видео.
+    4. В окне: из квоты окна вычитаются обязательные сегменты этого окна, затем кандидаты
        идут по убыванию visual_value (при равенстве - раньше по времени); берётся тот,
-       что целиком помещается, иначе пропускается и проверяется следующий. Неизрасходованный
-       остаток уходит в следующее окно. Если обязательные окна превысили его бюджет,
-       "долг" тоже переносится вперёд (уменьшает бюджет следующих окон), поэтому
-       общий итог не превышает budget, пока обязательные сами в него помещаются.
+       что целиком помещается в оставшуюся квоту, иначе пропускается и проверяется следующий.
+       Если обязательные окна превысили его квоту, они не переносятся в соседние окна:
+       выводится предупреждение. Сумма квот всех окон равна budget, поэтому общий итог
+       не превышает budget, пока обязательные сами в него помещаются.
     5. Кандидатом не бывают: нулевая длительность, пустой текст, visual_value <= 0.
     """
     items = sorted(items, key=lambda x: x.index)
@@ -253,11 +256,11 @@ def select_segments(items: list[Item], percent: int, intro_seconds: float,
     budget = percent / 100 * total
 
     # --- обязательные ---
-    intro_ms = intro_seconds * 1000
-    if intro_ms > 0:
+    coverage_always_ms = coverage_always_seconds * 1000
+    if coverage_always_ms > 0:
         for it in items:
             it.intro = it.mandatory = True
-            if it.end - t0 >= intro_ms - EPS_MS:
+            if it.end - t0 >= coverage_always_ms - EPS_MS:
                 break
     for it in items:
         if it.is_entity:
@@ -275,12 +278,16 @@ def select_segments(items: list[Item], percent: int, intro_seconds: float,
     for it in items:
         by_win[it.window].append(it)
 
-    share = budget / n
-    carry = 0.0
     per_window = []
+    warnings: list[str] = []
     for w in range(n):
-        avail = share + carry
-        remaining = avail - sum(it.dur for it in by_win[w] if it.mandatory)
+        # Квота окна: доля процента от длительности сегментов этого окна; без переноса между окнами.
+        quota = percent / 100 * sum(it.dur for it in by_win[w])
+        mand_w = sum(it.dur for it in by_win[w] if it.mandatory)
+        remaining = quota - mand_w
+        if remaining < -EPS_MS:
+            warnings.append(f"окно {w + 1}: обязательные {mand_w / 1000:.1f} с больше квоты "
+                            f"{quota / 1000:.1f} с")
         cands = [it for it in by_win[w]
                  if not it.mandatory and it.dur > 0 and it.has_text and it.visual_value > 0]
         cands.sort(key=lambda it: (-it.visual_value, it.index))
@@ -288,11 +295,9 @@ def select_segments(items: list[Item], percent: int, intro_seconds: float,
             if it.dur <= remaining + EPS_MS:
                 it.selected = True
                 remaining -= it.dur
-        carry = remaining  # >0 - остаток, <0 - долг от обязательных
         sel = [it for it in by_win[w] if it.selected]
-        per_window.append((len(sel), sum(it.dur for it in sel), avail))
+        per_window.append((len(sel), sum(it.dur for it in sel), quota))
 
-    warnings: list[str] = []
     mand_ms = sum(it.dur for it in items if it.mandatory)
     if mand_ms > budget + EPS_MS:
         over = (mand_ms - budget) / 1000
@@ -338,9 +343,9 @@ def format_summary(r: Result) -> str:
         f"Сегментов выбрано: {r.n_selected}, не выбрано: {r.n_unselected}",
         f"Обязательных: {r.n_mandatory} (вступление: {r.n_intro}, is_entity: {r.n_entity}; "
         f"{r.mandatory_ms / 1000:.1f} с)",
-        f"Окон: {r.n_windows}; выбрано по окнам (сегментов/секунд, доступный бюджет окна): "
-        + ", ".join(f"[{k + 1}] {c}/{ms / 1000:.1f}с ({av / 1000:.1f}с)"
-                    for k, (c, ms, av) in enumerate(r.per_window)),
+        f"Окон: {r.n_windows}; выбрано по окнам (сегментов/секунд, квота окна): "
+        + ", ".join(f"[{k + 1}] {c}/{ms / 1000:.1f}с (квота {q / 1000:.1f}с)"
+                    for k, (c, ms, q) in enumerate(r.per_window)),
     ]
     if r.min_durations:
         vals = list(r.min_durations.values())
@@ -370,7 +375,7 @@ def atomic_write_json(path: str, data) -> None:
         raise
 
 
-def run(requests_path: str, srt_path: str, percent: int, intro_seconds: float,
+def run(requests_path: str, srt_path: str, percent: int, coverage_always_seconds: float,
         window_seconds: float = DEFAULT_WINDOW_SECONDS) -> Result:
     with open(requests_path, "r", encoding="utf-8") as f:
         requests = json.load(f)
@@ -379,7 +384,7 @@ def run(requests_path: str, srt_path: str, percent: int, intro_seconds: float,
     srt = parse_srt(srt_path)
     items = build_items(requests, srt)
     min_durations = compute_min_durations(items)  # всегда, в т.ч. при percent == 100
-    result = select_segments(items, percent, intro_seconds, window_seconds)
+    result = select_segments(items, percent, coverage_always_seconds, window_seconds)
     result.min_durations = min_durations
     for key, seg in requests.items():
         seg["skip"] = result.skip[int(key)]
@@ -508,6 +513,25 @@ def selftest() -> None:
         assert all(isinstance(data[k]["min_duration"], float) for k in "123")
         assert "min_duration: записано 3" in format_summary(res)
 
+    # 13. равные сегменты и равная ценность, 70%: каждое окно получает свою квоту, без переноса.
+    #     120 с, 20 сегментов по 6 с -> 3 окна; в каждом выбрано не меньше квоты минус один сегмент
+    reqs, srt = _synth(vv=[50] * 20)
+    r = select_segments(build_items(reqs, srt), 70, 0)
+    assert r.n_windows == 3 and len(r.per_window) == 3, r.per_window
+    for k, (_c, ms, quota) in enumerate(r.per_window):
+        assert ms >= quota - 6000 - EPS_MS, f"окно {k + 1}: выбрано {ms} мс при квоте {quota} мс"
+        assert ms <= quota + EPS_MS, f"окно {k + 1}: выбрано {ms} мс сверх квоты {quota} мс"
+
+    # 14. первые 3 окна без текста, 70%: последнее окно не получает секунд сверх своей квоты.
+    #     240 с, 40 сегментов по 6 с -> 5 окон по 48 с; без текста сегменты 1..24 (окна 1-3)
+    reqs, srt = _synth(n=40, texts=["" if i <= 24 else "т" for i in range(1, 41)])
+    r = select_segments(build_items(reqs, srt), 70, 0)
+    assert r.n_windows == 5, r.n_windows
+    assert all(r.per_window[k][1] == 0 for k in range(3)), f"окна без текста не пустые: {r.per_window}"
+    c_last, ms_last, quota_last = r.per_window[-1]
+    assert ms_last <= quota_last + EPS_MS, f"последнее окно: {ms_last} мс сверх квоты {quota_last} мс"
+    assert c_last == 5 and ms_last == 30000, f"последнее окно должно взять 5 сегментов: {r.per_window}"
+
     print("selftest: все проверки пройдены")
 
 
@@ -533,8 +557,9 @@ def main(argv=None) -> int:
                    help="путь к .srt (env COVERAGE_SRT)")
     p.add_argument("--percent", type=_percent_type,
                    default=_percent_type(os.environ.get("COVERAGE_PERCENT", str(DEFAULT_PERCENT))))
-    p.add_argument("--intro-seconds", type=float,
-                   default=float(os.environ.get("INTRO_SECONDS", DEFAULT_INTRO_SECONDS)))
+    p.add_argument("--coverage-always-seconds", type=float,
+                   default=float(os.environ.get("COVERAGE_ALWAYS_SECONDS", DEFAULT_COVERAGE_ALWAYS_SECONDS)),
+                   help="первые N секунд ролика, которые всегда ищутся (env COVERAGE_ALWAYS_SECONDS, по умолчанию 10)")
     p.add_argument("--window-seconds", type=float,
                    default=float(os.environ.get("WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS)),
                    help="целевая длина окна, с (число окон = round(длительность / это), минимум 1)")
@@ -547,11 +572,11 @@ def main(argv=None) -> int:
         return 0
     if not args.requests or not args.srt:
         p.error("нужны пути к requests.json и .srt (аргументами или COVERAGE_REQUESTS/COVERAGE_SRT)")
-    if args.intro_seconds < 0 or args.window_seconds <= 0:
-        p.error("--intro-seconds >= 0, --window-seconds > 0")
+    if args.coverage_always_seconds < 0 or args.window_seconds <= 0:
+        p.error("--coverage-always-seconds >= 0, --window-seconds > 0")
 
     try:
-        result = run(args.requests, args.srt, args.percent, args.intro_seconds, args.window_seconds)
+        result = run(args.requests, args.srt, args.percent, args.coverage_always_seconds, args.window_seconds)
     except (CoverageError, ValueError, OSError, json.JSONDecodeError) as e:
         log.error("Ошибка: %s", e)
         return 1
