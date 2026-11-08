@@ -113,6 +113,8 @@ WATCH_FIRST_HEARTBEAT_LIMIT_SEC = 600
 # «switching» или «booting», порог тишины не меньше 900 с (= SWITCH_TIMEOUT_SEC в core/orchestrator.py)
 WATCH_LONG_STATE_SILENCE_SEC = 900
 WATCH_LONG_STATES = ("switching", "booting")
+# исправление H2: у карты в обычном состоянии порог тишины не короче 300 с (запись heartbeat идёт в потоке, см. orchestrator)
+WATCH_NORMAL_SILENCE_SEC = 300
 # уборка по расписанию (SPEC 8.3 г): аварийный предел возраста карты и метки карт
 MAX_AGE_SEC = 6 * 3600
 GEN_LABEL_RE = re.compile(r"gen-([0-9]+)")
@@ -1053,8 +1055,9 @@ def _silence_limit_sec(path: Path, max_silence_sec: int) -> int:
     """Порог тишины для текущего обхода (исправление P4).
 
     Состояния карт берутся из того же файла heartbeat (поле cards[].state, его пишет оркестратор).
-    Если у карты «switching» или «booting», порог не меньше WATCH_LONG_STATE_SILENCE_SEC; иначе прежний порог.
-    Файл не читается или карт нет: прежний порог. Содержимое файла не печатается.
+    Если у карты «switching» или «booting», порог не меньше WATCH_LONG_STATE_SILENCE_SEC.
+    Если есть карта в обычном состоянии, порог не меньше WATCH_NORMAL_SILENCE_SEC (исправление H2).
+    Файл не читается или карт с состоянием нет: прежний порог. Содержимое файла не печатается.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1065,6 +1068,8 @@ def _silence_limit_sec(path: Path, max_silence_sec: int) -> int:
         return max_silence_sec
     if any(isinstance(c, dict) and c.get("state") in WATCH_LONG_STATES for c in cards):
         return max(max_silence_sec, WATCH_LONG_STATE_SILENCE_SEC)
+    if any(isinstance(c, dict) and c.get("state") is not None for c in cards):  # исправление H2: обычное состояние
+        return max(max_silence_sec, WATCH_NORMAL_SILENCE_SEC)
     return max_silence_sec
 
 

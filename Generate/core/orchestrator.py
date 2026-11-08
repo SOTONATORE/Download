@@ -108,6 +108,8 @@ LOG_RETRY_PAUSE_BEFORE_DESTROY_SEC = 5.0
 LOG_PULL_INTERVAL_SEC = 60.0  # периодическая выгрузка логов готовой карты: не чаще раза в минуту
 LOG_LEVELS = ("INFO", "DEBUG")
 PROBE_TIMEOUT_SEC = 5.0      # таймаут проверки готовности и heartbeat (SPEC 8.2, 8.3 а)
+# сколько ждать поток записи heartbeat при остановке запуска (исправление H1)
+HEARTBEAT_JOIN_TIMEOUT_SEC = 5.0
 WAIT_LOG_INTERVAL_SEC = 30.0  # строка состояния ожидания воркера на карту: не чаще раза в 30 с
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
 COMFY_ANSWER_LIMIT_SEC = 300.0  # Правило A: ComfyUI на карте не ответил за 5 мин от аренды → карта снимается
@@ -1010,6 +1012,10 @@ class Orchestrator:
         self._heartbeat_sec = float(heartbeat_interval_sec)
         self.heartbeat_path = Path(heartbeat_path) if heartbeat_path else None
         self._last_heartbeat_tick = -1e9
+        # поток записи heartbeat (исправление H1): файл пишет отдельный демон-поток, а не основной цикл
+        self._hb_stop = threading.Event()
+        self._hb_thread = None
+        self._hb_error_logged = False
         self._probe_notes_logged = False
         self._weights_source_noted = False
         self._deadline_sec = job_deadline_min * 60.0
@@ -1458,7 +1464,11 @@ class Orchestrator:
     # --- запуск -------------------------------------------------------------
     def run(self) -> RunSummary:
         self._t0 = self.clock()
-        return self._run_body()
+        self._start_heartbeat_thread()  # исправление H1: запись heartbeat идёт в потоке на время запуска
+        try:
+            return self._run_body()
+        finally:
+            self._stop_heartbeat_thread()
 
     def _run_body(self) -> RunSummary:
         try:
@@ -1516,8 +1526,7 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)
             return summary
-        # SPEC 8.3 а: первый heartbeat пишется до фазы Gemini, чтобы наблюдатель не ждал дольше 10 минут
-        self._write_heartbeat()
+        # SPEC 8.3 а: первый heartbeat пишется до фазы Gemini (исправление H1: при старте потока, в run)
         try:
             try:
                 ready = self._generate(needed) if needed else []
@@ -2358,7 +2367,6 @@ class Orchestrator:
         try:
             fd, raw_path = tempfile.mkstemp(prefix="vast-logs-")
             os.close(fd)
-            self._write_heartbeat()  # heartbeat до первой попытки (F2)
             # budget (сек): предел времени на все попытки и паузы; None — прежнее поведение периодики (fix 4b)
             deadline = None if budget is None else self.clock() + float(budget)
             for attempt in range(1, attempts + 1):
@@ -2391,7 +2399,6 @@ class Orchestrator:
                     break
                 # пауза не длиннее остатка бюджета (fix 2, 3c; fix 4a)
                 self._pause_with_heartbeat(min(LOG_RETRY_PAUSE_BEFORE_DESTROY_SEC, left))
-            self._write_heartbeat()  # heartbeat после последней попытки (F2)
             log.warning("%s: логи Vast не получены после %d попыток.", _card_name(slot, cap=True), attempts)
             return False
         except Exception as exc:  # логи не должны мешать снятию карты
@@ -2407,18 +2414,14 @@ class Orchestrator:
     def _pause_with_heartbeat(self, total: float) -> None:
         """Пауза между попытками логов Vast (F2): та же общая длина, кусками не длиннее VAST_LOGS_PAUSE_SLICE_SEC.
 
-        Между кусками пишется файл heartbeat, чтобы 30-секундная пауза при 403 не выглядела для наблюдателя
-        (порог тишины 120 с) как молчание оркестратора. Пишется только файл: опрос карт идёт через _heartbeat,
-        который троттлится интервалом heartbeat_interval_sec и поэтому здесь не годится.
-        Принято: один HTTP-вызов со своим таймаутом (VastClient, 60 с) может задержать запись на время этого таймаута.
+        Файл heartbeat пишет отдельный поток (см. _heartbeat_loop), поэтому пауза его не пишет: тишина файла
+        при паузе не возникает, даже если основной цикл занят.
         """
         remaining = float(total)
-        self._write_heartbeat()
         while remaining > 0:
             step = min(VAST_LOGS_PAUSE_SLICE_SEC, remaining)
             self._sleep(step)
             remaining -= step
-            self._write_heartbeat()
 
     def _vast_logs_attempt(self, slot: _CardSlot, raw_path: str) -> tuple:
         """Одна попытка: запрос result_url и загрузка в raw_path. Возвращает (код HTTP или None, размер байт, этап).
@@ -2832,7 +2835,7 @@ class Orchestrator:
 
     # --- heartbeat (SPEC 8.3 а) -----------------------------------------------
     def _heartbeat(self, now: float) -> None:
-        """Каждые heartbeat_interval_sec: запрос с токеном к каждой карте с адресом, затем файл heartbeat.
+        """Каждые heartbeat_interval_sec: запрос с токеном к каждой карте с адресом. Файл пишет поток _heartbeat_loop.
 
         Любой запрос с верным токеном сбрасывает дед-свитч воркера, так что это и есть heartbeat карты.
         Сбой связи пишется в отладочный журнал и на карту не влияет (решают net_fail и таймауты).
@@ -2851,25 +2854,74 @@ class Orchestrator:
                 continue
             if resp.status_code == 200:
                 slot.last_ok_utc = _utc_now()
-        self._write_heartbeat()
 
     def _write_heartbeat(self) -> None:
         """Файл heartbeat для наблюдателя (этап 7). Без токенов и без адресов карт (SPEC 0.1)."""
         if getattr(self, "heartbeat_path", None) is None:
             return
+        slots = self._card_snapshot()
+        if slots is None:
+            return  # список карт не удалось скопировать: пропускаем одну запись, следующая идёт по интервалу
         record = {
             "utc": _utc_now(),
             "label": self.label,
             "cards": [
                 {"slot": s.index, "generation": s.generation, "instance_id": s.instance_id,
                  "state": s.state, "last_ok_utc": s.last_ok_utc}
-                for s in self._slots.values()
+                for s in slots
             ],
         }
         try:
             go.atomic_write_json(self.heartbeat_path, record)
         except OSError as exc:
             log.warning("Не удалось записать файл heartbeat: %s.", type(exc).__name__)
+
+    def _card_snapshot(self) -> Optional[list]:
+        """Копия списка карт для потока heartbeat (исправление H1).
+
+        Блокировки на состояние карт нет: основной цикл меняет _slots и slot.state без неё, поэтому поток
+        берёт копию одним вызовом list(). В CPython он выполняется под GIL без передачи управления, так что
+        изменение словаря во время копирования маловероятно; при RuntimeError — ещё одна попытка, затем None.
+        Атрибуты карт читаются как есть: состояние — одно строковое поле, его присвоение атомарно.
+        """
+        for _ in range(2):
+            try:
+                return list(self._slots.values())
+            except RuntimeError:  # словарь изменился во время копирования
+                continue
+        return None
+
+    def _start_heartbeat_thread(self) -> None:
+        """Запуск демон-потока записи heartbeat на время запуска (исправление H1). Без пути файла ничего не делает."""
+        if getattr(self, "heartbeat_path", None) is None:
+            return
+        self._hb_stop.clear()
+        self._write_heartbeat()  # первая запись синхронно: файл есть до фазы Gemini (SPEC 8.3 а)
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, name="heartbeat-writer", daemon=True)
+        self._hb_thread.start()
+        log.info("Поток heartbeat запущен: запись каждые %d с.", int(self._heartbeat_sec))
+
+    def _heartbeat_loop(self) -> None:
+        """Тело потока: записать файл heartbeat, затем ждать интервал; выход по сигналу остановки."""
+        while not self._hb_stop.is_set():
+            try:
+                self._write_heartbeat()
+            except Exception as exc:  # поток не должен падать молча: одно предупреждение на запуск
+                if not self._hb_error_logged:
+                    self._hb_error_logged = True
+                    log.warning("Поток heartbeat: запись не удалась: %s.", type(exc).__name__)
+            self._hb_stop.wait(self._heartbeat_sec)
+
+    def _stop_heartbeat_thread(self) -> None:
+        """Остановка потока heartbeat в конце запуска и итоговая запись файла (исправление H1)."""
+        thread = getattr(self, "_hb_thread", None)
+        if thread is None:
+            return
+        self._hb_stop.set()
+        thread.join(timeout=HEARTBEAT_JOIN_TIMEOUT_SEC)
+        self._hb_thread = None
+        self._write_heartbeat()  # итоговая запись в конце запуска
+        log.info("Поток heartbeat остановлен.")
 
     def _lookup_status(self, slot: _CardSlot) -> tuple:
         """Статус карты у Vast: (info, None) или (None, ошибка API). Ошибку разбирает вызывающий."""

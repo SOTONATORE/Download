@@ -172,10 +172,10 @@ def test_booting_card_is_not_killed_while_silence_under_900s(tmp_path):
     assert c.kills == []
 
 
-def test_ready_card_keeps_120s_limit(tmp_path):
+def test_ready_card_uses_300s_limit(tmp_path):
     c = _Clock(tmp_path, "ready")
-    c.write_hb(-200, "ready")                 # тишина 200 с у карты «ready»: уборка на первом обходе
-    assert cli._silence_limit_sec(c.hb, 120) == 120
+    c.write_hb(-400, "ready")                 # тишина 400 с у карты «ready» (исправление H2): порог 300 с, уборка на первом обходе
+    assert cli._silence_limit_sec(c.hb, 120) == 300
     assert _run(c) == "stopped"
     assert c.kills == [0.0]
 
@@ -190,3 +190,27 @@ def test_limit_without_cards_field_is_unchanged(tmp_path):
 def test_limit_with_unreadable_file_is_unchanged(tmp_path):
     hb = tmp_path / "missing.json"
     assert cli._silence_limit_sec(hb, 120) == 120
+
+
+def test_silence_limit_normal_state_is_300(tmp_path):
+    c = _Clock(tmp_path, "ready")
+    c.write_hb(0, "ready")
+    assert cli._silence_limit_sec(c.hb, 120) == 300      # исправление H2: обычное состояние, порог не короче 300 с
+
+
+def test_silence_limit_switching_is_900(tmp_path):
+    c = _Clock(tmp_path, "switching")
+    c.write_hb(0, "switching")
+    assert cli._silence_limit_sec(c.hb, 120) == 900      # переключение модели: порог 900 с не меняется
+
+
+def test_silence_limit_booting_is_900(tmp_path):
+    c = _Clock(tmp_path, "booting")
+    c.write_hb(0, "booting")
+    assert cli._silence_limit_sec(c.hb, 120) == 900      # прогрев: порог 900 с не меняется
+
+
+def test_silence_limit_keeps_larger_argument(tmp_path):
+    c = _Clock(tmp_path, "ready")
+    c.write_hb(0, "ready")
+    assert cli._silence_limit_sec(c.hb, 1200) == 1200    # больший аргумент вызывающего кода сохраняется
