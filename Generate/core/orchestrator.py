@@ -938,7 +938,7 @@ class Orchestrator:
         stall_timeout_min: int = 3,
         stage_max_min: int = 20,
         worker_ready_timeout_min: int = 10,
-        task_accept_timeout_min: int = 3,
+        task_accept_timeout_min: int = 10,
         heartbeat_interval_sec: int = 10,
         monitor_interval_sec: int = 10,
         min_inet_mbps: float = 800.0,
@@ -2938,6 +2938,7 @@ class Orchestrator:
             slot.profile = self._profile_for_role(slot.role)
             slot.state = "ready"
             slot.monitor = None  # монитор переключения закрыт
+            slot.ready_at = now  # срок принятия первой задачи считается от переключения, а не от первой готовности
             log.info("%s: переключение завершено, роль «%s».", _card_name(slot, cap=True), slot.role,
                      extra=KEY_EVENT_EXTRA)
         elif switch == "refused":
