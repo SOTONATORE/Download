@@ -35,12 +35,12 @@ def test_default_file_loads_and_matches_spec_values():
     assert cfg.gemini_models == ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite"]
     assert cfg.gemini_batch_size == 25
     assert cfg.disk_gb == 100
-    assert cfg.silent_host_timeout_min == 10
+    assert cfg.silent_host_timeout_min == 15
     assert cfg.worker_idle_timeout_min == 2
     assert cfg.max_cards == 1
     assert cfg.limit_clips == 0
     assert cfg.max_price_per_hour == 1.0
-    assert cfg.min_inet_mbps == 800
+    assert cfg.min_inet_mbps == 500
     assert cfg.job_deadline_min == 330
     assert cfg.gpu_max_sec is None          # берётся из профиля модели
     assert cl.load_profile_number(cfg.model_profile, "gpu_max_sec") == 10.0
@@ -107,7 +107,7 @@ def test_generate_workflow_defaults_match_config_default():
     cfg = cl.load_config()
     assert inputs["limit_clips"]["default"] == "0" and cfg.limit_clips == 0
     assert inputs["max_price_per_hour"]["default"] == "1.00" and cfg.max_price_per_hour == 1.0
-    assert inputs["min_inet_mbps"]["default"] == "800" and cfg.min_inet_mbps == 800
+    assert inputs["min_inet_mbps"]["default"] == "500" and cfg.min_inet_mbps == 500
     assert inputs["rental_type"]["default"] == "on-demand" and cfg.rental_type == "on-demand"
     # типы входов не менялись: числовые строки остаются строками, выбор остаётся выбором
     assert inputs["limit_clips"]["type"] == "string"
@@ -406,7 +406,7 @@ def test_profile_number_reads_value_and_rejects_bad_names():
 
 
 def test_max_inet_price_per_tb_default_and_required():
-    assert cl.load_config().max_inet_price_per_tb == 4.1
+    assert cl.load_config().max_inet_price_per_tb == 6.1
     raw = _base()
     del raw["max_inet_price_per_tb"]
     _assert_rejected(raw, "отсутствует обязательный ключ «max_inet_price_per_tb»")
@@ -429,7 +429,7 @@ NEW_KEYS_DEFAULTS = {
     "scan_sec": 300, "scan_step_sec": 20, "stable_max_spread": 0.05, "bid_margin": 0.03,
     "speed_check_at_pct": 10, "progress_step_pct": 10,
     "stall_timeout_min": 3, "stage_max_min": 20, "worker_ready_timeout_min": 10,
-    "task_accept_timeout_min": 3, "heartbeat_interval_sec": 10, "monitor_interval_sec": 10,
+    "task_accept_timeout_min": 10, "heartbeat_interval_sec": 10, "monitor_interval_sec": 10,
 }
 
 
