@@ -109,6 +109,10 @@ HEARTBEAT_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 FINISHED_SUFFIX = ".finished"
 # наблюдатель: сколько ждать первый файл heartbeat (решение владельца 18.10.2026); до первой записи карты не арендуются
 WATCH_FIRST_HEARTBEAT_LIMIT_SEC = 600
+# исправление P4: переключение модели и прогрев занимают минуты. Если у любой карты в файле heartbeat состояние
+# «switching» или «booting», порог тишины не меньше 900 с (= SWITCH_TIMEOUT_SEC в core/orchestrator.py)
+WATCH_LONG_STATE_SILENCE_SEC = 900
+WATCH_LONG_STATES = ("switching", "booting")
 # уборка по расписанию (SPEC 8.3 г): аварийный предел возраста карты и метки карт
 MAX_AGE_SEC = 6 * 3600
 GEN_LABEL_RE = re.compile(r"gen-([0-9]+)")
@@ -1045,6 +1049,25 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _silence_limit_sec(path: Path, max_silence_sec: int) -> int:
+    """Порог тишины для текущего обхода (исправление P4).
+
+    Состояния карт берутся из того же файла heartbeat (поле cards[].state, его пишет оркестратор).
+    Если у карты «switching» или «booting», порог не меньше WATCH_LONG_STATE_SILENCE_SEC; иначе прежний порог.
+    Файл не читается или карт нет: прежний порог. Содержимое файла не печатается.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cards = data.get("cards", []) if isinstance(data, dict) else []
+    except (OSError, ValueError):
+        return max_silence_sec
+    if not isinstance(cards, list):
+        return max_silence_sec
+    if any(isinstance(c, dict) and c.get("state") in WATCH_LONG_STATES for c in cards):
+        return max(max_silence_sec, WATCH_LONG_STATE_SILENCE_SEC)
+    return max_silence_sec
+
+
 def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check_every_sec: int,
                     first_limit_sec: int = WATCH_FIRST_HEARTBEAT_LIMIT_SEC,
                     kill=None, clock=time.monotonic, sleep=time.sleep,
@@ -1077,14 +1100,15 @@ def watch_heartbeat(run_id: str, heartbeat: Path, *, max_silence_sec: int, check
         if beat is not None:
             seen = True
             silence = (utc_now() - beat).total_seconds()
-            if silence <= max_silence_sec:
+            limit = _silence_limit_sec(heartbeat, max_silence_sec)  # исправление P4: для switching/booting порог длиннее
+            if silence <= limit:
                 if stalled:
                     stalled = False
                     log.info("heartbeat снова свежий: новая уборка возможна только после новой тишины.")
                 log.info("heartbeat свежий: последняя запись %d с назад.", int(silence))
             elif not stalled:
                 log.error("heartbeat не обновлялся %d с (порог %d с): уничтожаем карты запуска.",
-                          int(silence), max_silence_sec)
+                          int(silence), limit)
                 run_kill(run_id)
                 stalled = True
         elif seen:

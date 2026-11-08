@@ -146,7 +146,7 @@ def test_plan_split_photo_only_never_scores():
 def _orc_for_run(tmp_path, split: dict, photo_profile):
     """Собирает Orchestrator без __init__; split, разбор missing и запуск замещены.
 
-    Порядок вызовов реальный: _run_body -> _split_for_run -> (фейк _run_inner) -> _generate.
+    Порядок вызовов реальный: _run_body -> (фейк _run_inner: _apply_run_split по нужным клипам) -> _generate.
     Возвращает объект и список множеств, которые видел _generate.
     """
     orc = orch.Orchestrator.__new__(orch.Orchestrator)
@@ -169,6 +169,7 @@ def _orc_for_run(tmp_path, split: dict, photo_profile):
         return []
 
     def fake_run_inner(missing):
+        orc._apply_run_split(missing)  # P1: распределение строится по нужным клипам внутри _run_inner
         orc._generate(missing)
         return orch.RunSummary()
 

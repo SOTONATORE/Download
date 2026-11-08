@@ -1469,13 +1469,10 @@ class Orchestrator:
             if not missing and not self._previews:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
-            if not missing:
-                # только превью: клипов нет, распределение пустое, карты берут задачи превью из очереди фото
-                self._split = {"video": [], "photo": []}
-            else:
-                self._split = self._split_for_run(missing)  # STEP 3b: distribution.json до любых промптов
-            # STEP 7, блок B2: номера фото берём из распределения сразу, до _generate (build_prompts читает их там)
-            self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
+            # исправление P1: распределение считается в _run_inner, после uploader.prepare(), только по клипам, которых
+            # ещё нет в релизе; до этого шага номера фото неизвестны, поэтому здесь они пустые
+            self._split = None
+            self._photo_nums = set()
             if not getattr(self, "_video_queue", None):
                 self._video_queue = deque()  # очередь видео: пустая до _work
             if not getattr(self, "_photo_queue", None):
@@ -1508,6 +1505,7 @@ class Orchestrator:
         self._publisher = RunPublisher(uploader, self.repo, self._tmp, artifact=self._artifact,
                                        mask=self._mask_remote)
         needed = [n for n in missing if n not in done]
+        self._apply_run_split(needed)  # исправление P1: распределение только по нужным клипам; P2: фото-профиль без фото снимается
         summary = RunSummary(total_needed=len(needed), skipped_done=len(missing) - len(needed))
         self._total_needed = len(needed)  # тот же счётчик, что у итоговой строки (summary.total_needed)
         self._run_pos = {n: i for i, n in enumerate(needed, 1)}  # P2: место клипа в списке этого запуска
@@ -1535,6 +1533,24 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
         return summary
+
+    def _apply_run_split(self, needed: list) -> None:
+        """Исправления P1, P2: распределение видео и фото строится только по нужным клипам запуска.
+
+        Если среди нужных клипов нет фото и нет превью, фото-профиль снимается: роль фото не назначается,
+        веса фото-модели не грузятся. Распределение по фото в этом случае пустое, поэтому distribution.json
+        и фактическое распределение совпадают. Превью всегда идут в очередь фото, поэтому профиль остаётся.
+        """
+        if needed:
+            self._split = self._split_for_run(needed)  # STEP 3b: distribution.json по нужным клипам
+        else:
+            self._split = {"video": [], "photo": []}  # только превью или нечего делать: распределение пустое
+        photo_nums = set((self._split or {}).get("photo", []))
+        if self.photo_profile and not photo_nums and not getattr(self, "_previews", None):
+            log.info("Фото-клипов в этом запуске нет: фото-профиль не используется, веса фото не загружаются.")
+            self.photo_profile = None  # исправление P2
+        # STEP 7, блок B2: номера фото берём из распределения до _generate (build_prompts читает их там)
+        self._photo_nums = photo_nums if self.photo_profile else set()
 
     def _fill_summary(self, summary: RunSummary, needed: list) -> None:
         summary.completed = len(self._done)
@@ -1923,6 +1939,8 @@ class Orchestrator:
                                if n >= 1 and (photo_on or video_on) else [])
         if self._plan_idx < len(self._role_plan):
             return self._role_plan[self._plan_idx]
+        if not self._photo_queue and not self._video_queue and not (self._split or {}).get("photo"):
+            return "video"  # исправление P2: обе очереди пусты и фото в распределении нет: карта берёт видео, не фото
         return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
 
     def _work(self, ready: list) -> None:
