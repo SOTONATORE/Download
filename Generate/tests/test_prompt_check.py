@@ -10,6 +10,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
+    content_hits,
     find_camera_motion,
     PROBLEM_FORBIDDEN_FORMAT,
     PROBLEM_FORBIDDEN_SHOT_TYPE,
@@ -123,8 +124,8 @@ def test_max_rework_attempts_is_two():
 # ---------------------------------------------------------------- hook in gemini_prompts
 
 def test_hook_keeps_clip_after_repair_rounds(tmp_path):
-    # первый ответ и исправления содержат «map», но исправление ничего не меняет (0 исправлено):
-    # клип сохраняется с текстом последней версии и помечается на проверку без повтора
+    # первый ответ и все REPAIR_ROUNDS исправлений содержат «map»: прогон не останавливается,
+    # клип сохраняется с текстом последней версии и помечается на проверку
     t = ScriptedTransport([
         answer(1, "A detailed map of the Balkans on a wooden table."),
         answer(1, "A detailed map of the coast."),
@@ -137,8 +138,8 @@ def test_hook_keeps_clip_after_repair_rounds(tmp_path):
     res = next(r for r in results if r.num == 1)
     assert res.needs_review is True
     assert res.prompt.strip()
-    # один первичный вызов и один вызов исправления: пакет ничего не исправил, повтора нет
-    assert len(t.calls) == 2
+    # один первичный вызов и по одному вызову на каждый круг исправления
+    assert len(t.calls) == 1 + gp.REPAIR_ROUNDS
     assert res.review_reason
 
 
@@ -231,15 +232,19 @@ def test_fixed_clip_is_not_flagged(tmp_path):
     assert res[0].review_reason == ""
 
 
-def test_stalled_fix_batch_is_not_requeued(tmp_path):
-    # исправление ничего не меняет: один повтор пакета и сразу проверка, без пяти кругов
-    t = ScriptedTransport([
-        answer(1, "A detailed map of the Balkans on a wooden table."),
-        answer(1, "A map of the coast."),
-    ])
-    res = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
-    assert len(t.calls) == 2
-    assert res[0].needs_review is True
+def test_people_count_ignores_repeated_mentions():
+    # два человека, названных несколько раз, — это не четыре человека
+    from Generate.core.prompt_check import count_people
+    text = ("An older man with grey hair stands by the wall. Beside him, a middle-aged man stands facing him. "
+            "The older man turns his head. The middle-aged man lowers his gaze.")
+    assert count_people(text) == 2
+    assert content_hits(text, "video") == []
+
+
+def test_people_count_still_flags_three_people_and_crowds():
+    from Generate.core.prompt_check import count_people
+    assert count_people("An old man stands. A woman sits. A girl plays.") == 3
+    assert count_people("A crowd of men gathers. Two riders ride past.") >= 3
 
 
 def test_rework_counter_counts_every_clip_in_batch():

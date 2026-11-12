@@ -987,14 +987,6 @@ class _WaveJob:
             else:
                 c.rework_pending = found
                 requeue.append(c)
-        if requeue and fixed == 0:
-            # пакет ничего не исправил: повтор того же пакета дал бы тот же результат, клипы уходят на проверку
-            stalled, requeue = requeue, []
-            for c in stalled:
-                c.needs_review = True
-                c.review_reason = "; ".join(problem_ru(p) for p in c.rework_pending)
-            log.warning("%sФикс %d: ни один клип не исправлен, на проверку без повтора: %d, номера: %s.",
-                        self.tag, fix_no, len(stalled), _num_ranges([c.num for c in stalled]))
         ordered = sorted(clips, key=lambda c: c.num)
         with self.out_lock:
             self.out.update({c.num: c for c in ordered})
