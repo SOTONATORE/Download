@@ -444,6 +444,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "Never write the segment number, the word \"segment\" or any numbering into the prompt text. "
         f"Each prompt must be at most {cfg.max_prompt_chars} characters.\n\n"
         "# Hard rules for every prompt\n"
+        "The content rules come first and override the segment text: if the text describes a crowd, a "
+        "conversation, a battle or children, show the allowed version instead.\n\n"
+        + _content_rules(cfg.media) +
         "- Show moods and ideas only through visible physical cues. Never use mood or emotion "
         "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
@@ -452,7 +455,6 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
-        + _content_rules(cfg.media) +
         "- Before returning, check each prompt against the self-check checklist at the end of "
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
@@ -971,11 +973,9 @@ class _WaveJob:
             if not found:
                 c.rework_pending = []
                 c.prompt_raw = ""   # клип исправлен: сырого текста в записи нет
-                if c.review_reason.startswith(("исправление прервано", "очередь исправлений не выполнена")):
-                    # метка снимается только у клипов, чей флаг пришёл от прерванного исправления;
-                    # причина проверки последнего круга сюда не попадает: такие клипы не возвращаются в очередь
-                    c.needs_review = False
-                    c.review_reason = ""
+                # текст прошёл проверку, значит флаг первичного прохода и флаг прерванного исправления больше не нужны
+                c.needs_review = False
+                c.review_reason = ""
                 fixed += 1
             elif c.rework_round >= REPAIR_ROUNDS:
                 # круги кончились: текст последней версии сохраняется, клип помечается на проверку
@@ -987,6 +987,14 @@ class _WaveJob:
             else:
                 c.rework_pending = found
                 requeue.append(c)
+        if requeue and fixed == 0:
+            # пакет ничего не исправил: повтор того же пакета дал бы тот же результат, клипы уходят на проверку
+            stalled, requeue = requeue, []
+            for c in stalled:
+                c.needs_review = True
+                c.review_reason = "; ".join(problem_ru(p) for p in c.rework_pending)
+            log.warning("%sФикс %d: ни один клип не исправлен, на проверку без повтора: %d, номера: %s.",
+                        self.tag, fix_no, len(stalled), _num_ranges([c.num for c in stalled]))
         ordered = sorted(clips, key=lambda c: c.num)
         with self.out_lock:
             self.out.update({c.num: c for c in ordered})

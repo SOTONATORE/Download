@@ -123,8 +123,8 @@ def test_max_rework_attempts_is_two():
 # ---------------------------------------------------------------- hook in gemini_prompts
 
 def test_hook_keeps_clip_after_repair_rounds(tmp_path):
-    # первый ответ и все REPAIR_ROUNDS исправлений содержат «map»: прогон не останавливается,
-    # клип сохраняется с текстом последней версии и помечается на проверку
+    # первый ответ и исправления содержат «map», но исправление ничего не меняет (0 исправлено):
+    # клип сохраняется с текстом последней версии и помечается на проверку без повтора
     t = ScriptedTransport([
         answer(1, "A detailed map of the Balkans on a wooden table."),
         answer(1, "A detailed map of the coast."),
@@ -137,8 +137,8 @@ def test_hook_keeps_clip_after_repair_rounds(tmp_path):
     res = next(r for r in results if r.num == 1)
     assert res.needs_review is True
     assert res.prompt.strip()
-    # один первичный вызов и по одному вызову на каждый круг исправления
-    assert len(t.calls) == 1 + gp.REPAIR_ROUNDS
+    # один первичный вызов и один вызов исправления: пакет ничего не исправил, повтора нет
+    assert len(t.calls) == 2
     assert res.review_reason
 
 
@@ -215,3 +215,42 @@ def test_sheet_of_parchment_gives_phrase_and_stem_problems():
 
 def test_sheet_of_ice_is_not_forbidden():
     assert find_problems("A sheet of ice covers the lake.") == []
+
+
+# ---------------------------------------------------------------- флаг после исправления и остановка пакета
+
+def test_fixed_clip_is_not_flagged(tmp_path):
+    # первичный ответ с нарушением (флаг от шага 6), исправление прошло: флаг снимается, текст без стиля не нужен
+    t = ScriptedTransport([
+        answer(1, "A detailed map of the Balkans on a wooden table."),
+        answer(1, CLEAN),
+    ])
+    res = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
+    assert res[0].prompt == CLEAN
+    assert res[0].needs_review is False
+    assert res[0].review_reason == ""
+
+
+def test_stalled_fix_batch_is_not_requeued(tmp_path):
+    # исправление ничего не меняет: один повтор пакета и сразу проверка, без пяти кругов
+    t = ScriptedTransport([
+        answer(1, "A detailed map of the Balkans on a wooden table."),
+        answer(1, "A map of the coast."),
+    ])
+    res = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
+    assert len(t.calls) == 2
+    assert res[0].needs_review is True
+
+
+def test_rework_counter_counts_every_clip_in_batch():
+    # пакет исправления: строки «Prompt for segment_index N:» идут все, считаются все номера
+    from Generate.cli import _ReworkCounter
+
+    class Inner:
+        def generate_json(self, model, system, user, schema):
+            return "[]"
+
+    counter = _ReworkCounter(Inner())
+    user = "Prompt for segment_index 3: a map. x\nPrompt for segment_index 7: a sheet. y\nPrompt for segment_index 9: z"
+    counter.generate_json("m", "s", user, {})
+    assert counter.rework_nums == {3, 7, 9}

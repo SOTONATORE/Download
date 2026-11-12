@@ -1415,8 +1415,8 @@ class _ReworkCounter:
         self.rework_nums: set = set()
 
     def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
-        m = VERIFY_REWORK_RE.match(user or "")
-        if m:
+        # в пакете исправления строк «Prompt for segment_index N:» много: считаем каждую
+        for m in VERIFY_REWORK_RE.finditer(user or ""):
             self.rework_nums.add(int(m.group(1)))
         if reasoning_effort is None:
             # без параметра вызов такой же, как раньше
