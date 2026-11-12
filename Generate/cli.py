@@ -1464,21 +1464,22 @@ def _failure_reason(num: int, entry, errors: list) -> str:
 
 
 def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
-    """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
-    from Generate.core.prompt_check import (PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
+    """Для одного вида: готовые, нарушения слов и маркеров, нарушения содержания кадра, нарушения num_frames, не готовые."""
+    from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
                                             find_problems, problem_code, problem_ru)
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
 
-    ready = forbidden = leftover = frames_bad = 0
+    ready = forbidden = leftover = content = frames_bad = 0
     not_ready: list = []
     problems: list = []
+    media = "image" if photo else "video"
     for n in nums:
         entry = prompts.get(str(n))
         if not _prompt_ready(entry):
             not_ready.append(n)
             continue
         ready += 1
-        for p in find_problems(entry["prompt"]):
+        for p in find_problems(entry["prompt"], media):
             code = problem_code(p)
             if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
@@ -1486,11 +1487,14 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             elif code == PROBLEM_LEFTOVER_MARKER:
                 leftover += 1
                 problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code in CONTENT_CODES:
+                content += 1
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
         want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
         if entry.get("num_frames") != want:
             frames_bad += 1
             problems.append(f"{label} клип {n}: num_frames {entry.get('num_frames')!r}, по правилу {want!r}")
-    return ready, forbidden, leftover, frames_bad, not_ready, problems
+    return ready, forbidden, leftover, content, frames_bad, not_ready, problems
 
 
 def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
@@ -1509,6 +1513,10 @@ def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
         "### Проверка запрещённых слов и маркеров",
         f"- Видео: запрещённых типов кадра {v['forbidden']}, незаполненных маркеров {v['leftover']}",
         f"- Фото: запрещённых типов кадра {ph['forbidden']}, незаполненных маркеров {ph['leftover']}",
+        "",
+        "### Проверка содержания кадра (дети, толпа, мелкие предметы, речь, руки у огня, битвы, оружие, лица, внешность)",
+        f"- Видео: нарушений содержания {v['content']}",
+        f"- Фото: нарушений содержания {ph['content']}",
         "",
         "### Проверка num_frames",
         f"- Видео: несовпадений с правилом кадров профиля {v['frames_bad']}",
@@ -1612,10 +1620,9 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     prompts = run.state.get("prompts", {})
     video_nums = [n for n in missing if n not in photo_nums]
     photo_list = [n for n in missing if n in photo_nums]
-    v = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
-                 _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
-    p = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
-                 _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
+    keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
+    v = dict(zip(keys, _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
+    p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
     failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
                 + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
     failures.sort(key=lambda row: row[0])
@@ -1625,9 +1632,10 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     counts = {
         "video_nums": video_nums, "photo_nums": photo_list,
         "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
-                  "frames_bad": v["frames_bad"], "rework": rework_video},
+                  "content": v["content"], "frames_bad": v["frames_bad"], "rework": rework_video},
         "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
-                  "frames_bad": p["frames_bad"], "rework": rework_photo, "frames_rule": PHOTO_NUM_FRAMES},
+                  "content": p["content"], "frames_bad": p["frames_bad"], "rework": rework_photo,
+                  "frames_rule": PHOTO_NUM_FRAMES},
     }
     prep_args = {"video_model": video_model, "video_profile": args.video_profile,
                  "photo_profile": photo_profile, "missing": missing}

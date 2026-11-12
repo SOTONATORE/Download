@@ -26,13 +26,15 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
-                           make_problem, problem_ru, rework_remark)
+                           make_problem, problem_ru, rework_remark,
+                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
-                          make_problem, problem_ru, rework_remark)
+                          make_problem, problem_ru, rework_remark,
+                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -368,6 +370,41 @@ def attach_style(prompt: str, style_text: str) -> str:
     return prompt.rstrip().rstrip(".") + ". " + style_text
 
 
+def _content_rules(media: str) -> str:
+    """Жёсткие правила содержания кадра (решения владельца после разбора прогона).
+    Те же правила проверяет prompt_check.py: нарушение уходит на повтор, а не в GPU."""
+    people_limit = "one person" if media == "image" else "at most two people"
+    rules = (
+        "- Show only the people, animals and objects that the segment text names or directly implies. "
+        "Add no extra characters, animals, vehicles or props.\n"
+        f"- Show {people_limit}, each named once and described distinctly (age, clothing colour, hair). "
+        "Never show a crowd, a group, a row, a line or several people.\n"
+        "- Never show children, babies, boys, girls, teenagers or young people. If the segment mentions "
+        "them, show adults or no people, and keep the meaning through the setting.\n"
+        "- Every person wears named clothing. Never show anyone naked, shirtless or undressed.\n"
+        "- Show at most one or two horses, vehicles or animals, each described distinctly. No herds or rows.\n"
+        "- Show only large, clearly visible objects. No small objects and no hand actions with small things "
+        "(needles, thread, abacus, beads, cloth, bundles, cups, dung cakes; no stacking, stitching, tucking "
+        "or threading).\n"
+        "- No speech of any kind: no speaking, shouting, laughing, crying, singing, conversation, dialogue, "
+        "gestures for talking or moving lips. Show emotion only through posture.\n"
+        "- Keep hands and fingers away from fire, flames, candles and lanterns.\n"
+        "- No battles, charges, gallops in formation, gunfire, explosions, smoke puffs or dust clouds. "
+        "Show calm, static or slowly moving scenes.\n"
+        "- No weapons in the frame: no firearms, sabres, swords, spears or knives.\n"
+        "- When the text says something is absent (for example no saddle), describe the visible state "
+        "instead (for example a bare horse back).\n"
+        "- Derive the place, period and people's appearance from the segment text and its setting. Do not add "
+        "a nationality, ethnicity or skin tone the text does not mention.\n"
+    )
+    if media == "image":
+        rules += (
+            "- Never show close-ups, extreme close-ups or portraits. Show people from a medium or wide "
+            "distance, with faces small in the frame.\n"
+        )
+    return rules
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     if cfg.media == "video":
@@ -415,6 +452,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
+        + _content_rules(cfg.media) +
         "- Before returning, check each prompt against the self-check checklist at the end of "
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
@@ -449,6 +487,7 @@ class _Builder:
         if not wanted:
             raise GeminiInputError("Список нужных номеров пуст: нечего генерировать.")
         self.by_num = {s.num: s for s in segments}
+        self.texts = {s.num: s.text for s in segments}  # для проверки внешности по тексту сегмента
         absent = [n for n in wanted if n not in self.by_num]
         if absent:
             shown = ", ".join(str(n) for n in absent)  # полный список номеров, без обрезки
@@ -540,8 +579,13 @@ _STYLE_RULES = [
 _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
 
-def _style_reasons(prompt: str) -> list:
-    return [reason for rx, reason, _ in _STYLE_RULES if rx.search(prompt)]
+_STYLE_HINTS.update(CONTENT_HINT_BY_REASON)  # подсказки для повтора по содержанию кадра
+
+
+def _style_reasons(prompt: str, media: str = "video") -> list:
+    """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.)."""
+    style = [reason for rx, reason, _ in _STYLE_RULES if rx.search(prompt)]
+    return style + content_reasons(prompt, media)
 
 
 def _retry_note(nums, problems: list) -> str:
@@ -558,14 +602,15 @@ def _retry_note(nums, problems: list) -> str:
             "of the idea:\n" + "\n".join(lines))
 
 
-def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
+def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Optional[dict] = None) -> tuple:
     """Разбирает ответ Gemini. Возвращает (results, problems).
 
     results: dict num -> PromptResult для каждого ожидаемого номера, у которого есть непустая
       строка prompt. Если к нему есть претензия, needs_review=True и указана причина.
     problems: list[Problem]: нарушения (номер или None для проблемы всего ответа).
     Номера без записи в results не получили пригодного текста. Лишние номера не попадают в results
-    (фиксируются как Problem, но повторный запрос не вызывают: нужные данные целы)."""
+    (фиксируются как Problem, но повторный запрос не вызывают: нужные данные целы).
+    texts: номер -> текст сегмента; нужен для проверки внешности людей (не из текста ли она)."""
     expected = set(expected_nums)
     results: dict = {}
     problems: list = []
@@ -617,7 +662,9 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig) -> tuple:
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
-        reasons.extend(_style_reasons(prompt))
+        reasons.extend(_style_reasons(prompt, cfg.media))
+        if texts is not None and n in texts:
+            reasons.extend(ethnicity_reasons(prompt, texts[n]))
         extra = {k: v for k, v in item.items() if k not in ("segment_index", "prompt")}
         res = PromptResult(n, prompt, bool(reasons), "; ".join(reasons), extra)
         results[n] = res
@@ -637,8 +684,8 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 
 
 def _find_all_problems(text: str, cfg: PromptConfig) -> list:
-    """Нарушения промпта: запрещённые типы кадра и маркеры; для фото ещё движение камеры."""
-    problems = find_problems(text)
+    """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры."""
+    problems = find_problems(text, cfg.media)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     return list(dict.fromkeys(problems))
@@ -673,7 +720,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     tag: префикс строк журнала батча (имя волны в пуле, например «[видео] »); без пула пустой."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
-    results, problems = parse_and_validate(raw, expected, builder.cfg)
+    results, problems = parse_and_validate(raw, expected, builder.cfg, builder.texts)
     final: dict = {n: results[n] for n in expected if _is_clean(results, n, problems)}
     bad = [n for n in expected if n not in final]
     extras = [p for p in problems if p.num is not None and p.num not in set(expected)]
@@ -689,7 +736,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             if note:
                 rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
-            res2, prob2 = parse_and_validate(raw2, list(rb.nums), builder.cfg)
+            res2, prob2 = parse_and_validate(raw2, list(rb.nums), builder.cfg, builder.texts)
             for n in rb.nums:
                 if _is_clean(res2, n, prob2):
                     final[n] = res2[n]
@@ -895,7 +942,7 @@ class _WaveJob:
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
         try:
             raw = logged.generate_json(self.model, builder.system, user, builder.schema)
-            results, _ = parse_and_validate(raw, nums, builder.cfg)
+            results, _ = parse_and_validate(raw, nums, builder.cfg, builder.texts)
         except BaseException as exc:
             # пакет не выполнен (запрос или разбор): каждый клип пакета помечается на проверку с причиной.
             # rework_pending, rework_round и prompt_raw сохраняются; в очередь клипы не возвращаются.

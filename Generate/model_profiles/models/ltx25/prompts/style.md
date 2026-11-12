@@ -82,7 +82,14 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 
 ## 8. People, faces, text, logos
 
-- Describe people by age, hair, clothing and distinguishing features, plus physical cues for emotion. Keep to one or two people when possible.
+- Describe people by age, hair, clothing and distinguishing features, plus physical cues for emotion. Keep to one or two people; never a crowd, group, row or several people. Give each person a distinct description (age, clothing colour, hair) so no two people look alike. Every person wears named clothing; never show nudity.
+- **Children are not allowed.** Never show children, babies, boys, girls, teenagers or young people. If the segment mentions them, show adults or no people.
+- **No speech.** No speaking, shouting, laughing, crying, singing, conversation, dialogue or lip movement. Show emotion only through posture.
+- **No small objects.** Do not show small objects or hand actions with them (needles, thread, abacus, beads, cloth, bundles, cups, dung cakes, stacking, stitching, tucking). Show one large object or the wide scene instead.
+- **No fire contact.** Keep hands and fingers away from fire, flames, candles and lanterns.
+- **No battles or weapons.** No charges, gallops in formation, gunfire, explosions or smoke puffs. No firearms, sabres, swords, spears or knives.
+- **Few identical objects.** At most one or two horses, vehicles or animals, each described distinctly; no herds or rows.
+- When the text says something is absent (for example no saddle), describe the visible state instead (for example a bare horse back).
 - **On-screen text is unreliable** (spelling and consistency across frames are not guaranteed). Do not include readable text, captions, signs with words, subtitles, numbers, dates or titles in the frame. Do not quote the subtitle text as on-screen text. If the passage mentions a sign or a date, show something else that carries the idea.
 - **Logos** are unreliable. Do not request logos or brand marks. **(recommendation)** Also avoid naming brands and real, named people; describe a generic person or object instead.
 - **(recommendation)** Do not put spoken lines in quotation marks. Quoted text is treated as speech and would make characters talk. Narration is added elsewhere. Describe only what is visible.
