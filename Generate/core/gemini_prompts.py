@@ -444,9 +444,6 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "Never write the segment number, the word \"segment\" or any numbering into the prompt text. "
         f"Each prompt must be at most {cfg.max_prompt_chars} characters.\n\n"
         "# Hard rules for every prompt\n"
-        "The content rules come first and override the segment text: if the text describes a crowd, a "
-        "conversation, a battle or children, show the allowed version instead.\n\n"
-        + _content_rules(cfg.media) +
         "- Show moods and ideas only through visible physical cues. Never use mood or emotion "
         "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
         "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
@@ -455,6 +452,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
+        + _content_rules(cfg.media) +
         "- Before returning, check each prompt against the self-check checklist at the end of "
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
@@ -973,9 +971,16 @@ class _WaveJob:
             if not found:
                 c.rework_pending = []
                 c.prompt_raw = ""   # клип исправлен: сырого текста в записи нет
-                # текст прошёл проверку, значит флаг первичного прохода и флаг прерванного исправления больше не нужны
-                c.needs_review = False
-                c.review_reason = ""
+                # Флаг пересчитывается по новому тексту: исправленный промпт, прошедший все проверки
+                # (стиль, содержание, внешность по тексту сегмента), снимает старую причину. Раньше флаг
+                # снимался только у «прерванных» причин, и клипы с причиной содержания оставались на проверке.
+                rr = results.get(c.num)
+                if rr is not None and rr.prompt.strip():
+                    c.needs_review = rr.needs_review
+                    c.review_reason = rr.review_reason if rr.needs_review else ""
+                else:
+                    c.needs_review = False
+                    c.review_reason = ""
                 fixed += 1
             elif c.rework_round >= REPAIR_ROUNDS:
                 # круги кончились: текст последней версии сохраняется, клип помечается на проверку

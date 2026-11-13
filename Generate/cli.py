@@ -1415,8 +1415,8 @@ class _ReworkCounter:
         self.rework_nums: set = set()
 
     def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
-        # в пакете исправления строк «Prompt for segment_index N:» много: считаем каждую
-        for m in VERIFY_REWORK_RE.finditer(user or ""):
+        m = VERIFY_REWORK_RE.match(user or "")
+        if m:
             self.rework_nums.add(int(m.group(1)))
         if reasoning_effort is None:
             # без параметра вызов такой же, как раньше
@@ -1509,6 +1509,10 @@ def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
         f"- Готово промптов: видео {v['ready']}, фото {ph['ready']}",
         f"- Переписано проверкой (запрещённые типы кадра и маркеры): видео {v['rework']}, фото {ph['rework']}",
         f"- Не готово промптов: {len(failures)}",
+        f"- На проверку (флаг needs_review, текст не прошёл проверку или исправления кончились): "
+        f"видео {len(v['flagged'])}, фото {len(ph['flagged'])}"
+        + (f"; видео клипы: {v['flagged']}" if v["flagged"] else "")
+        + (f"; фото клипы: {ph['flagged']}" if ph["flagged"] else ""),
         "",
         "### Проверка запрещённых слов и маркеров",
         f"- Видео: запрещённых типов кадра {v['forbidden']}, незаполненных маркеров {v['leftover']}",
@@ -1629,17 +1633,23 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     rework_video = len(counting.rework_nums & set(video_nums))
     rework_photo = len(counting.rework_nums & set(photo_list))
 
+    # клипы, оставшиеся на проверке (флаг needs_review в записи): их нужно смотреть вручную
+    flag_video = [n for n in video_nums if (prompts.get(str(n)) or {}).get("needs_review")]
+    flag_photo = [n for n in photo_list if (prompts.get(str(n)) or {}).get("needs_review")]
     counts = {
         "video_nums": video_nums, "photo_nums": photo_list,
         "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
-                  "content": v["content"], "frames_bad": v["frames_bad"], "rework": rework_video},
+                  "content": v["content"], "frames_bad": v["frames_bad"], "rework": rework_video,
+                  "flagged": flag_video},
         "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
                   "content": p["content"], "frames_bad": p["frames_bad"], "rework": rework_photo,
-                  "frames_rule": PHOTO_NUM_FRAMES},
+                  "frames_rule": PHOTO_NUM_FRAMES, "flagged": flag_photo},
     }
     prep_args = {"video_model": video_model, "video_profile": args.video_profile,
                  "photo_profile": photo_profile, "missing": missing}
-    problems = v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+    problems = (v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+                + [f"видео клип {n}: на проверку" for n in flag_video]
+                + [f"фото клип {n}: на проверку" for n in flag_photo])
     report = _verify_report(prep_args, counts, failures)
     return PreparedPrompts(
         state=run.state, missing=missing, video_nums=video_nums, photo_nums=photo_list,
