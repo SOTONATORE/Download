@@ -252,36 +252,11 @@ _IMAGE_ONLY = frozenset({PROBLEM_CLOSE_FACE})
 # Люди по названию (для подсчёта): в видео не больше двух, в фото одного.
 _PERSON_RX = re.compile(
     r"\b(?:man|woman|person|boy|girl|child|soldier|officer|rider|horseman|villager|farmer|herder|elder|"
-    r"figure|worker|guard|warrior|fighter|traveller|traveler|lady|gentleman|mother|father|wife|husband|"
+    r"worker|guard|warrior|fighter|traveller|traveler|lady|gentleman|mother|father|wife|husband|"
     r"son|daughter|kid|baby|infant|teenager)\b",
     re.IGNORECASE,
 )
 PEOPLE_LIMIT = {"video": 2, "image": 1}
-# Вводящее упоминание человека («an older man», «beside her, a middle-aged man», «two riders»):
-# каждый человек в промпте вводится один раз, а дальше называется «the older man», «the woman in brown».
-# Считаем вводящие упоминания, а не все слова-названия: иначе два человека дают четыре «людей».
-_INTRO_RX = re.compile(
-    r"\b(an?|another|one|two|three|four|several|some|many)\s+(?:[\w-]+\s+){0,3}?"
-    r"(?:man|woman|person|boy|girl|child|soldier|officer|rider|horseman|villager|farmer|herder|elder|"
-    r"figure|worker|guard|warrior|fighter|traveller|traveler|lady|gentleman|mother|father|wife|husband|"
-    r"son|daughter|kid|baby|infant|teenager|men|women|people|children|soldiers|officers|riders|villagers|"
-    r"farmers|herders|elders|figures|workers|guards|warriors|fighters|travellers|travelers|ladies|gentlemen)\b",
-    re.IGNORECASE,
-)
-_INTRO_COUNT = {"a": 1, "an": 1, "another": 1, "one": 1, "two": 2, "three": 3, "four": 4,
-                "several": 3, "some": 3, "many": 4}
-
-
-def count_people(text: str) -> int:
-    """Сколько разных людей описано в промпте. Вводящие упоминания считаются по числу, остальные упоминания
-    считаются по имени: «the older man» после «an older man» — тот же человек."""
-    intros = 0
-    for m in _INTRO_RX.finditer(text or ""):
-        intros += _INTRO_COUNT.get(m.group(1).lower(), 1)
-    if intros:
-        return intros
-    # вводящих нет (например, «the man» без «a man»): различаем по тексту названия без артикля
-    return len({re.sub(r"^(the|a|an)\s+", "", m.group(0).lower()) for m in _PERSON_RX.finditer(text or "")})
 
 # Этнические и национальные признаки: допустимы, только если сегмент сам о них говорит.
 _ETHNIC_RX = re.compile(
@@ -299,6 +274,18 @@ ETHNIC_ROOTS = (
 )
 
 
+_DEFINITE_BEFORE = frozenset({"the", "his", "her", "their", "its", "my", "your", "this", "that", "these", "those", "our"})
+
+
+def _is_repeat_mention(text: str, start: int) -> bool:
+    """True, если упоминание человека отсылает к уже введённому («the man», «his wife», «the standing man»).
+
+    Считаются только введения: «One man», «a woman», «two officers». Повтор того же человека не считается вторым.
+    """
+    words = re.findall(r"[A-Za-z]+", text[max(0, start - 40):start].lower())[-2:]
+    return any(w in _DEFINITE_BEFORE for w in words)
+
+
 def content_hits(text: str, media: str = "video") -> list:
     """Нарушения содержания: список пар (код, фрагмент). Текст не меняется."""
     t = text or ""
@@ -307,10 +294,10 @@ def content_hits(text: str, media: str = "video") -> list:
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
-    people = count_people(t)
+    persons = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
     limit = PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
-    if people > limit:
-        hits.append((PROBLEM_PEOPLE_COUNT, f"людей в описании: {people}"))
+    if len(persons) > limit:
+        hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(persons)))
     return hits
 
 

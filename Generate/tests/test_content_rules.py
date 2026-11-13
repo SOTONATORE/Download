@@ -198,3 +198,15 @@ def test_photo_style_has_no_fixed_ottoman_setting():
     text = (STYLE_DIR / "zimage_turbo" / "prompts" / "style.md").read_text(encoding="utf-8")
     assert "Ottoman" not in text
     assert "Kazakh steppe" in text
+
+
+def test_repeat_mentions_of_one_person_are_not_counted():
+    # один человек, упомянутый повторно: не нарушение даже для фото (один человек)
+    prompt = ("One man in a military tunic stands on stone steps. The man holds a cap. "
+              "The standing man is lit from above. Static figure.")
+    assert pc.PROBLEM_PEOPLE_COUNT not in codes(prompt, "image")
+
+
+def test_two_introduced_people_still_counted_for_image():
+    prompt = "One man stands by the wall and a woman sits near the door."
+    assert pc.PROBLEM_PEOPLE_COUNT in codes(prompt, "image")
