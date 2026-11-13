@@ -387,7 +387,28 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     elif not os.path.isfile(style_file):
         # профили video и без поля type: прежняя подмена на профиль по умолчанию
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
-    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
+    # флаги ответа и исправлений из profile.yaml; без них поведение прежнее (refs выключены, on_unfixed: keep)
+    refs_enabled = _profile_flag(profile_lines, "refs_enabled", profile, default="false") == "true"
+    on_unfixed = _profile_flag(profile_lines, "on_unfixed", profile, default="keep")
+    if on_unfixed not in ("keep", "fail"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml on_unfixed должен быть «keep» или «fail».")
+    if _profile_flag(profile_lines, "refs_enabled", profile, default="false") not in ("true", "false"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml refs_enabled должен быть true или false.")
+    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed}
+    if refs_enabled:
+        # ответ с номерами референсов: список целых на каждый сегмент
+        kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
+    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset, **kwargs)
+
+
+def _profile_flag(lines: list, key: str, profile: str, default: str) -> str:
+    """Значение поля верхнего уровня из profile.yaml строкой, без PyYAML. Нет поля — default."""
+    for ln in lines:
+        if ln.startswith(key + ":"):
+            return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
+    return default
 
 
 def _key_names_range(provider: str) -> str:

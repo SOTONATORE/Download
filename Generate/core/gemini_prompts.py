@@ -100,6 +100,10 @@ class PromptConfig:
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
     # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
     preset: str = PRESET_NONE
+    # refs_enabled: ответ с полем refs (номера референсов), метки <imageN> проверяются; по умолчанию выключено
+    refs_enabled: bool = False
+    # on_unfixed: «keep» — клип с нарушением остаётся на проверке (прежнее поведение); «fail» — прогон останавливается
+    on_unfixed: str = "keep"
 
 
 @dataclass(frozen=True)
@@ -326,6 +330,13 @@ def _schema_type(t: Any) -> str:
     raise GeminiInputError(f"Неподдерживаемый тип в response_format: {t!r}.")
 
 
+def _schema_prop(t: Any) -> dict:
+    """Свойство схемы. Скаляр — как раньше; список из одного целого [int] (например refs) — массив целых."""
+    if isinstance(t, list) and len(t) == 1 and t[0] is int:
+        return {"type": "array", "items": {"type": "integer"}}
+    return {"type": _schema_type(t)}
+
+
 def response_schema(response_format: Any) -> dict:
     """JSON Schema массива объектов из примера формата: [{"segment_index": int, "prompt": str}]."""
     if (not isinstance(response_format, list) or len(response_format) != 1
@@ -334,7 +345,7 @@ def response_schema(response_format: Any) -> dict:
     item = response_format[0]
     if "segment_index" not in item or "prompt" not in item:
         raise GeminiInputError("В response_format обязательны поля segment_index и prompt.")
-    props = {name: {"type": _schema_type(t)} for name, t in item.items()}
+    props = {name: _schema_prop(t) for name, t in item.items()}
     return {"type": "array",
             "items": {"type": "object", "properties": props, "required": list(props)}}
 
@@ -457,6 +468,15 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
     ]
+    if cfg.refs_enabled:
+        # контракт с референсами (только профили с refs_enabled): номера и метки должны совпадать
+        parts[0] += (
+            "\n\n# Reference images\n"
+            "Each object also has \"refs\": a JSON list of distinct integers from 1 to 10, sorted ascending, "
+            "naming the reference images used for that segment (an empty list if none). "
+            "In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, where N is the "
+            "number of entries in refs; the tag <imageK> is the K-th entry of the sorted refs list. "
+            "Use each tag at least once and no other tags. A segment with no refs has no <imageN> tag.")
     # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
     if cfg.preset != PRESET_NONE:
         read_preset(cfg.preset)
@@ -581,6 +601,96 @@ _STYLE_HINTS = {reason: hint for _, reason, hint in _STYLE_RULES}
 
 _STYLE_HINTS.update(CONTENT_HINT_BY_REASON)  # подсказки для повтора по содержанию кадра
 
+# Проверка refs и меток <imageN> (только профили с refs_enabled). Причины — русские (журнал и повтор),
+# подсказки — английские (текст повтора, уходит в модель).
+REF_MAX = 10
+REF_REASON_MISSING = "refs: поле отсутствует"
+REF_REASON_NOT_LIST = "refs: не список"
+REF_REASON_NOT_INT = "refs: не целые числа"
+REF_REASON_RANGE = "refs: номер вне 1…10"
+REF_REASON_DUP = "refs: повторяющиеся номера"
+LABEL_REASON = "метки <imageN>: не совпадают с refs сегмента"
+REF_CODE_INVALID = "refs_invalid"
+REF_CODE_LABELS = "label_mismatch"
+_LABEL_RX = re.compile(r"<image(\d+)>")
+_REF_HINT_TEXT = ("Use the tags <image1>…<imageN>, where N is the number of entries in the refs list of this "
+                  "segment, numbered from 1 in ascending order of the refs numbers.")
+_STYLE_HINTS.update({
+    REF_REASON_MISSING: "Return a refs list of integers for this segment.",
+    REF_REASON_NOT_LIST: "Return refs as a JSON list of integers.",
+    REF_REASON_NOT_INT: "Return refs as integers only.",
+    REF_REASON_RANGE: "Each refs number must be between 1 and 10.",
+    REF_REASON_DUP: "Return each refs number only once.",
+    LABEL_REASON: _REF_HINT_TEXT,
+})
+
+
+def _check_refs(value: Any) -> tuple:
+    """(отсортированный список или None, причины). Пустой список допустим (сегмент без референсов)."""
+    if value is None:
+        return None, [REF_REASON_MISSING]
+    if not isinstance(value, list):
+        return None, [REF_REASON_NOT_LIST]
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in value):
+        return None, [REF_REASON_NOT_INT]
+    if any(v < 1 or v > REF_MAX for v in value):
+        return None, [REF_REASON_RANGE]
+    if len(set(value)) != len(value):
+        return None, [REF_REASON_DUP]
+    return sorted(value), []
+
+
+def _label_detail(prompt: str, refs: list) -> str:
+    """Пусто, если метки <imageN> совпадают с 1…len(refs); иначе английское описание для повтора."""
+    found = sorted(set(int(m) for m in _LABEL_RX.findall(prompt or "")))
+    expected = list(range(1, len(refs) + 1))
+    if found == expected:
+        return ""
+    tags = ", ".join(f"<image{n}>" for n in found) or "none"
+    want = (f"<image1>…<image{len(refs)}>" if refs else "no <imageN> tags")
+    return f"tags {tags} found, expected {want} for {len(refs)} refs"
+
+
+def _label_reasons(prompt: str, refs) -> list:
+    """Причина меток для parse_and_validate (русская). Только когда refs валидны."""
+    return [LABEL_REASON] if refs is not None and _label_detail(prompt, refs) else []
+
+
+def _ref_fix_problems(prompt: str, refs, invalid_reasons: list) -> list:
+    """Строки очереди исправлений для меток и refs: «код: «описание»», описание английское."""
+    out = []
+    if refs is not None:
+        detail = _label_detail(prompt, refs)
+        if detail:
+            out.append(f"{REF_CODE_LABELS}: «{detail}»")
+    elif invalid_reasons:
+        out.append(f"{REF_CODE_INVALID}: «refs must be a list of distinct integers 1…10»")
+    return out
+
+
+def _is_ref_problem(problem: str) -> bool:
+    return problem.partition(": ")[0] in (REF_CODE_LABELS, REF_CODE_INVALID)
+
+
+def _rework_text(problems: list) -> str:
+    """Английский текст повтора для строк очереди. Строки меток и refs — свой текст; остальные — как раньше."""
+    ref_items = [p for p in problems if _is_ref_problem(p)]
+    if not ref_items:
+        return rework_remark(problems)
+    base = rework_remark([p for p in problems if not _is_ref_problem(p)]) if len(ref_items) < len(problems) \
+        else rework_remark([])
+    lines = [p.partition(": ")[2] for p in ref_items]
+    return base + " Fix the image labels so that they match the refs list of this segment: " + \
+        " ".join(lines) + " Return the refs list unchanged unless a fix needs it."
+
+
+def _problem_ru_any(problem: str) -> str:
+    if _is_ref_problem(problem):
+        code, _, rest = problem.partition(": ")
+        head = LABEL_REASON if code == REF_CODE_LABELS else REF_REASON_NOT_LIST
+        return f"{head}: {rest}"
+    return problem_ru(problem)
+
 
 def _style_reasons(prompt: str, media: str = "video") -> list:
     """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.)."""
@@ -665,7 +775,17 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         reasons.extend(_style_reasons(prompt, cfg.media))
         if texts is not None and n in texts:
             reasons.extend(ethnicity_reasons(prompt, texts[n]))
+        refs, ref_reasons = None, []
+        if cfg.refs_enabled:
+            refs, ref_reasons = _check_refs(item.get("refs"))
+            reasons.extend(ref_reasons)
+            reasons.extend(_label_reasons(prompt, refs))
         extra = {k: v for k, v in item.items() if k not in ("segment_index", "prompt")}
+        if cfg.refs_enabled:
+            if refs is None:
+                extra.pop("refs", None)   # невалидный refs в запись не попадает
+            else:
+                extra["refs"] = refs      # валидный — отсортирован; пишется в prompts.json через extra
         res = PromptResult(n, prompt, bool(reasons), "; ".join(reasons), extra)
         results[n] = res
         for r in reasons:
@@ -683,11 +803,14 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
-def _find_all_problems(text: str, cfg: PromptConfig) -> list:
-    """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры."""
+def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
+    """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
+    refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
     problems = find_problems(text, cfg.media)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
+    if cfg.refs_enabled and refs is not None:
+        problems += _ref_fix_problems(text, refs, [])
     return list(dict.fromkeys(problems))
 
 
@@ -711,6 +834,22 @@ def _wave_summary(job) -> None:
     unfixed = [c.num for c in job.out.values() if c.needs_review and c.rework_pending]
     log.info("[%s] Итог волны до остановки: не исправлено клипов %d, номера: %s; в очереди исправлений клипов %d.",
              job.wave, len(unfixed), _num_ranges(unfixed) or "нет", len(job.rework_queue))
+
+
+def _fail_unfixed(results: list, cfg: PromptConfig) -> None:
+    """on_unfixed == «fail»: клипы, оставшиеся с нарушениями после всех кругов, останавливают прогон.
+
+    Вызывается после обеих волн, до генерации фото и видео. Уже записанные в prompts.json промпты
+    не удаляются: батчи сохраняются по ходу, поэтому повторный запуск продолжит с места остановки.
+    """
+    bad = [r for r in results if r.needs_review]
+    if not bad:
+        return
+    parts = [f"сегмент {r.num}: {r.review_reason or 'нарушение'}" for r in bad]
+    log.warning("Прогон остановлен (on_unfixed: fail): клипов с нарушениями %d.", len(bad))
+    raise GeminiError(
+        "Ошибка: после исправлений остались промпты с нарушениями (профиль с on_unfixed: fail), "
+        "генерация не запущена. " + "; ".join(parts) + ". Уже сохранённые промпты в prompts.json не удалены.")
 
 
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
@@ -753,7 +892,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     for n in list(final):
         r = final[n]
         if r.prompt.strip():
-            found = _find_all_problems(r.prompt, builder.cfg)
+            found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"))
             if found:
                 r.rework_pending = found
                 r.rework_round = 0
@@ -938,11 +1077,14 @@ class _WaveJob:
         nums = [c.num for c in clips]
         logged.start_batch(fix_no, "Фикс")   # номер попытки и номер пакета в строках повторов
         log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
-        lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {rework_remark(c.rework_pending)}" for c in clips]
+        lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
+                 + (f" Refs for segment_index {c.num}: {json.dumps(c.extra.get('refs', []))}."
+                    if builder.cfg.refs_enabled else "")
+                 for c in clips]
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
         try:
             raw = logged.generate_json(self.model, builder.system, user, builder.schema)
-            results, _ = parse_and_validate(raw, nums, builder.cfg, builder.texts)
+            results, fix_problems = parse_and_validate(raw, nums, builder.cfg, builder.texts)
         except BaseException as exc:
             # пакет не выполнен (запрос или разбор): каждый клип пакета помечается на проверку с причиной.
             # rework_pending, rework_round и prompt_raw сохраняются; в очередь клипы не возвращаются.
@@ -966,7 +1108,13 @@ class _WaveJob:
             if new_text.strip():
                 c.prompt_raw = new_text   # пустой ответ: прежний сырой текст остаётся
             c.rework_round = (c.rework_round or 0) + 1
-            found = _find_all_problems(c.prompt_raw, builder.cfg)  # проверка по сырому тексту, до стиля
+            rr_fix = results.get(c.num)
+            if builder.cfg.refs_enabled and rr_fix is not None and rr_fix.extra.get("refs") is not None:
+                c.extra["refs"] = rr_fix.extra["refs"]   # новый валидный refs ответа заменяет старый
+            ref_bad = [p.reason for p in fix_problems if p.num == c.num and p.reason.startswith("refs:")]
+            found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"))  # проверка по сырому тексту, до стиля
+            if ref_bad:
+                found = list(dict.fromkeys(found + _ref_fix_problems(c.prompt_raw, None, ref_bad)))
             c.prompt = attach_style(c.prompt_raw, self.style_text)  # в записи — текст со стилем, как у клипов вне очереди
             if not found:
                 c.rework_pending = []
@@ -986,7 +1134,7 @@ class _WaveJob:
                 # круги кончились: текст последней версии сохраняется, клип помечается на проверку
                 c.rework_pending = found
                 c.needs_review = True
-                c.review_reason = "; ".join(problem_ru(p) for p in found)
+                c.review_reason = "; ".join(_problem_ru_any(p) for p in found)
                 log.warning("%sКлип %d: не исправлено за %d кругов: %s.",
                             self.tag, c.num, REPAIR_ROUNDS, c.review_reason)
             else:
@@ -1331,6 +1479,8 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         out = job.out
 
     results = [out[n] for n in builder.wanted]
+    if cfg.on_unfixed == "fail":
+        _fail_unfixed(results, cfg)
     flagged = sum(1 for r in results if r.needs_review)
     log.info("Промпты готовы: %d, из них требуют проверки: %d.", len(results), flagged)
     # итог по волне: клипы с нарушениями, не исправленными за REPAIR_ROUNDS кругов (текст последней версии сохранён)
