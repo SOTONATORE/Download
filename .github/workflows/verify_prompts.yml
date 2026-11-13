@@ -67,6 +67,10 @@ on:
           - "gemma"
           - "nemotron"
         default: "auto"
+      fail_fast:
+        description: "при включении первая ошибка проверки промптов останавливает прогон сразу, без повтора и без исправлений; сырой ответ модели с ошибкой сохраняется в артефакт"
+        type: boolean
+        default: false
 
 concurrency:
   group: verify-gemini
@@ -137,6 +141,8 @@ jobs:
           PRESET: ${{ inputs.preset }}
           # auto = пусто: семейство берётся из профиля фото (ниши) или default_text_model
           TEXT_MODEL: ${{ inputs.text_model != 'auto' && inputs.text_model || '' }}
+          # режим fail_fast: GitHub передаёт boolean строкой true или false (разбор в скрипте строгий)
+          FAIL_FAST: ${{ inputs.fail_fast }}
           # Журнал как у generate.yml (SPEC 10): файл <каталог артефакта>/run/debug.log на уровне GEN_LOG_LEVEL.
           # Все файлы проверки лежат в одном каталоге артефакта.
           ART_DIR: verify-artifact
@@ -281,6 +287,12 @@ jobs:
           except ValueError:
               fail("limit_clips должен быть числом")
 
+          # fail_fast: строго true или false; другое значение — ошибка до аренды карт
+          fail_fast_text = os.environ.get("FAIL_FAST", "").strip()
+          if fail_fast_text not in ("true", "false"):
+              fail("FAIL_FAST допускает только значения true и false")
+          fail_fast = fail_fast_text == "true"
+
           # Тот же путь, что у cli run: профили, пресет, распределение, промпты (без Vast и релиза).
           from Generate.cli import prepare_prompts_only
 
@@ -298,6 +310,7 @@ jobs:
               preset=os.environ.get("PRESET") or "none",
               # та же семья, что проверили по ключам: иначе прогон взял бы text_model профиля видео
               text_model=text_env or text_from_photo or None,
+              fail_fast=fail_fast,
           )
           try:
               prep = prepare_prompts_only(ns)
@@ -373,3 +386,4 @@ jobs:
             verify-artifact/distribution.json
             verify-artifact/report.md
             verify-artifact/run/debug.log
+            verify-artifact/raw/
