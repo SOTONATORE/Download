@@ -365,7 +365,8 @@ def _style_dir(profile: str) -> str:
     return STYLE_DIR
 
 
-def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
+def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE,
+                         fail_fast: bool = False, raw_dir: Optional[str] = None):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
     try:
@@ -396,7 +397,8 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if _profile_flag(profile_lines, "refs_enabled", profile, default="false") not in ("true", "false"):
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml refs_enabled должен быть true или false.")
-    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed}
+    # fail_fast и raw_dir по умолчанию выключены: без них конфиг прежний
+    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir}
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
@@ -1620,8 +1622,13 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
 
     timing = _build_timing(cfg, args.video_profile)
-    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
-    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+    # fail_fast из ns (нет атрибута — выключено); сырой ответ — в <artifact_dir>/raw, только при проблеме
+    fail_fast = bool(getattr(args, "fail_fast", False))
+    raw_dir = str(Path(args.artifact_dir) / "raw") if args.artifact_dir else None
+    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset,
+                                      fail_fast=fail_fast, raw_dir=raw_dir)
+    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
+                                      fail_fast=fail_fast, raw_dir=raw_dir)
                  if photo_profile is not None else None)
     family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     counting = _ReworkCounter(_make_transport(cfg, family))

@@ -104,6 +104,10 @@ class PromptConfig:
     refs_enabled: bool = False
     # on_unfixed: «keep» — клип с нарушением остаётся на проверке (прежнее поведение); «fail» — прогон останавливается
     on_unfixed: str = "keep"
+    # fail_fast: первая проблема батча останавливает прогон сразу: без повтора и без исправлений; по умолчанию выключено
+    fail_fast: bool = False
+    # raw_dir: каталог для сырого ответа батча с проблемой (только при fail_fast); None = файлы не пишутся
+    raw_dir: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -856,6 +860,71 @@ def _fail_unfixed(results: list, cfg: PromptConfig) -> None:
         "генерация не запущена. " + "; ".join(parts) + ". Уже сохранённые промпты в prompts.json не удалены.")
 
 
+# fail_fast: фиксированные коды причин и их русские подписи. Текст причины в сообщение не попадает:
+# он может содержать фрагмент промпта из ответа модели (make_problem), а сообщение печатается в журнал.
+FAIL_FAST_LABELS = {
+    "empty": "пустой ответ",
+    "not_json": "ответ не является JSON",
+    "not_array": "ожидался JSON-массив",
+    "refs": "неверные refs или метки <imageN>",
+    "segment": "нарушение у сегмента: номер, пустой текст, ограничения или стиль",
+    "content": "нарушение в тексте промпта: запрещённый тип кадра, маркер или содержание",
+    "other": "прочее нарушение ответа",
+}
+
+
+def _is_refs_reason(text: str) -> bool:
+    return text.startswith("refs:") or _is_ref_problem(text)
+
+
+def _parse_slug(problems: list, expected: list) -> str:
+    """Код причины первой проблемы разбора (в том числе fail_all: пустой ответ, не JSON, не массив)."""
+    if not problems:
+        return "other"
+    first = problems[0]
+    if first.reason == "пустой ответ":
+        return "empty"
+    if first.reason == "ответ не является JSON":
+        return "not_json"
+    if first.reason == "ожидался JSON-массив":
+        return "not_array"
+    if _is_refs_reason(first.reason):
+        return "refs"
+    if first.num is not None and first.num in set(expected):
+        return "segment"
+    return "other"
+
+
+def _content_slug(found: list) -> str:
+    """Код причины нарушения в тексте промпта (шаг 6)."""
+    return "refs" if _is_refs_reason(found[0]) else "content"
+
+
+def _dump_raw(cfg: PromptConfig, batch_nums: list, slug: str, raw: str) -> None:
+    """fail_fast: сырой ответ батча с проблемой пишется в <raw_dir>/batch_<первый>-<последний>_<код>.txt.
+    Только при проблеме и только если raw_dir задан. В журнал текст не попадает: только путь файла.
+    Сбой записи не скрывает ошибку батча."""
+    if not cfg.raw_dir:
+        return
+    path = Path(cfg.raw_dir) / f"batch_{batch_nums[0]}-{batch_nums[-1]}_{slug}.txt"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(raw if isinstance(raw, str) else "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не удалось записать сырой ответ модели в файл %s (%s).", path, type(exc).__name__)
+
+
+def _fail_fast_stop(cfg: PromptConfig, batch_nums: list, bad_nums: list, slug: str, raw: str) -> None:
+    """fail_fast: первая проблема останавливает прогон. Сырой ответ уходит в файл, затем GeminiError. Повтора нет."""
+    _dump_raw(cfg, batch_nums, slug, raw)
+    shown = _num_ranges(list(bad_nums)) or "нет"
+    raise GeminiError(
+        f"Ошибка: проверка промптов остановлена (fail_fast): батч {batch_nums[0]}-{batch_nums[-1]}, "
+        f"клипы с нарушением: {shown}; причина: {FAIL_FAST_LABELS[slug]}. "
+        "Повтор и исправления не запускались.")
+
+
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
                tag: str = "") -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
@@ -870,6 +939,10 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     extras = [p for p in problems if p.num is not None and p.num not in set(expected)]
     if extras:
         log.warning("%sGemini вернул лишние номера: %d шт., они проигнорированы.", tag, len(extras))
+    if builder.cfg.fail_fast and (bad or problems):
+        # fail_fast: первая проблема батча останавливает прогон; повтора и исправлений нет
+        bad_nums = sorted({p.num for p in problems if p.num is not None} | set(bad))
+        _fail_fast_stop(builder.cfg, expected, bad_nums, _parse_slug(problems, expected), raw)
 
     if bad:
         log.warning("%sБатч %s..%s: нарушения в %d из %d записей, повторный запрос.",
@@ -907,6 +980,9 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
             if found:
+                if builder.cfg.fail_fast:
+                    # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
+                    _fail_fast_stop(builder.cfg, expected, [n], _content_slug(found), raw)
                 r.rework_pending = found
                 r.rework_round = 0
     return final
@@ -1087,6 +1163,9 @@ class _WaveJob:
         берутся у волны. Замков при вызове модели нет. Исключения транспорта не глотаются (как у батча).
         """
         builder = self.builder
+        if builder.cfg.fail_fast:
+            # fail_fast: исправлений нет; до запроса к модели исключение (защита на случай очереди из прошлого запуска)
+            raise GeminiError("Ошибка: исправление промптов не запускается в режиме fail_fast.")
         nums = [c.num for c in clips]
         logged.start_batch(fix_no, "Фикс")   # номер попытки и номер пакета в строках повторов
         log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
