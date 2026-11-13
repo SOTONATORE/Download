@@ -1,0 +1,54 @@
+{
+  "prompt": {
+    "node_id": "491",
+    "field": "prompt"
+  },
+  "seed": {
+    "node_id": "488",
+    "field": "seed"
+  },
+  "filename_prefix": {
+    "node_id": "461",
+    "field": "filename_prefix"
+  },
+  "ref_1": {
+    "node_id": "470",
+    "field": "image"
+  },
+  "ref_2": {
+    "node_id": "475",
+    "field": "image"
+  },
+  "ref_3": {
+    "node_id": "503",
+    "field": "image"
+  },
+  "ref_4": {
+    "node_id": "504",
+    "field": "image"
+  },
+  "ref_5": {
+    "node_id": "505",
+    "field": "image"
+  },
+  "ref_6": {
+    "node_id": "506",
+    "field": "image"
+  },
+  "ref_7": {
+    "node_id": "507",
+    "field": "image"
+  },
+  "ref_8": {
+    "node_id": "508",
+    "field": "image"
+  },
+  "ref_9": {
+    "node_id": "509",
+    "field": "image"
+  },
+  "ref_10": {
+    "node_id": "510",
+    "field": "image"
+  }
+}

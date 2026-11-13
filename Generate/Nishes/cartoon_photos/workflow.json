@@ -1,0 +1,311 @@
+{
+  "461": {
+    "inputs": {
+      "filename_prefix": "cartoon_photos",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "511",
+        0
+      ]
+    },
+    "class_type": "SaveImageAdvanced",
+    "_meta": {
+      "title": "Save Image (Advanced)",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "470": {
+    "inputs": {
+      "image": "ref_1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_1",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "475": {
+    "inputs": {
+      "image": "ref_2.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_2",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "487": {
+    "inputs": {
+      "samples": [
+        "488",
+        0
+      ],
+      "vae": [
+        "497",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "488": {
+    "inputs": {
+      "seed": 679152989211317,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "er_sde",
+      "scheduler": "linear_quadratic",
+      "denoise": 1,
+      "model": [
+        "490",
+        0
+      ],
+      "positive": [
+        "491",
+        0
+      ],
+      "negative": [
+        "491",
+        1
+      ],
+      "latent_image": [
+        "491",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "490": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "493",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "Qwen Image 2.1 Cache",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "491": {
+    "inputs": {
+      "prompt": "Keep the character and pose in <image1> unchanged, put this gold dress from <image2> on the character, preserve the original facial features, hair, body shape and pose, the denim shirt fits naturally on body, natural clothing folds, keep the original background and original lighting, high fashion editorial photography, sharp details",
+      "negative_prompt": "",
+      "resolution": 0,
+      "clip": [
+        "496",
+        0
+      ],
+      "images.image_1": [
+        "470",
+        0
+      ],
+      "vae": [
+        "497",
+        0
+      ],
+      "images.image_2": [
+        "475",
+        0
+      ],
+      "images.image_3": [
+        "503",
+        0
+      ],
+      "images.image_4": [
+        "504",
+        0
+      ],
+      "images.image_5": [
+        "505",
+        0
+      ],
+      "images.image_6": [
+        "506",
+        0
+      ],
+      "images.image_7": [
+        "507",
+        0
+      ],
+      "images.image_8": [
+        "508",
+        0
+      ],
+      "images.image_9": [
+        "509",
+        0
+      ],
+      "images.image_10": [
+        "510",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "493": {
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "496": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "497": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "503": {
+    "inputs": {
+      "image": "ref_3.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_3",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "504": {
+    "inputs": {
+      "image": "ref_4.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_4",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "505": {
+    "inputs": {
+      "image": "ref_5.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_5",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "506": {
+    "inputs": {
+      "image": "ref_6.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_6",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "507": {
+    "inputs": {
+      "image": "ref_7.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_7",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "508": {
+    "inputs": {
+      "image": "ref_8.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_8",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "509": {
+    "inputs": {
+      "image": "ref_9.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_9",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "510": {
+    "inputs": {
+      "image": "ref_10.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image ref_10",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  },
+  "511": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "width": 1920,
+      "height": 1080,
+      "crop": "center",
+      "image": [
+        "487",
+        0
+      ]
+    },
+    "class_type": "ImageScale",
+    "_meta": {
+      "title": "Crop to 1920x1080 (center)",
+      "cnr_id": "comfy-core",
+      "ver": "0.37.0"
+    }
+  }
+}
