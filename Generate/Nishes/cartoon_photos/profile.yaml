@@ -1,0 +1,45 @@
+# Generate/Nishes/cartoon_photos/profile.yaml
+# проверочный профиль для verify_prompts; параметры генерации ещё не проверены на стенде.
+
+name: cartoon_photos
+
+# тип результата: одиночное изображение (фото-ниша)
+type: image
+
+# размер кадра: 16:9, как итоговый ImageScale 511 в workflow.json
+width: 1920
+height: 1080
+
+# текст в промптах разрешён; семейство текстовой модели для ниши
+allow_text: true
+text_model: nemotron
+
+# референсы: метки <imageN> проверяются по списку refs сегмента
+refs_enabled: true
+
+# на клипе с нарушением после всех кругов прогон останавливается
+on_unfixed: fail
+
+# граф ComfyUI (API-формат) и привязки; узел сохранения картинки (SaveImageAdvanced)
+workflow:
+  file: "Generate/Nishes/cartoon_photos/workflow.json"
+  bindings_file: "Generate/Nishes/cartoon_photos/bindings.json"
+  output: {node_id: "461", type: image}
+
+# стиль промпта: временная заглушка, см. prompts/style.md
+prompt_style: "Generate/Nishes/cartoon_photos/prompts/style.md"
+
+# параметры из workflow.json (KSampler 488, ImageScale 511, ImageScale 511 lanczos)
+params:
+  cfg: 1                         # KSampler (488): cfg
+  steps: 8                       # KSampler (488): steps
+  sampler: "er_sde"              # KSampler (488): sampler_name
+  scheduler: "linear_quadratic"  # KSampler (488): scheduler
+  resolution: "1920x1080"        # ImageScale (511): width, height
+  upscale: "lanczos 1920x1080 (ImageScale 511)"  # ImageScale (511): upscale_method, crop center
+
+# файлы моделей из weights.json (имена как в workflow.json)
+model_files:
+  unet: "qwen_image_2.1_turbo_int8_convrot.safetensors"
+  clip: "qwen3vl_8b_int8_convrot.safetensors"
+  vae: "qwen_image_2.1_vae_bf16.safetensors"
