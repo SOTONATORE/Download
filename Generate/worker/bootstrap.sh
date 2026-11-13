@@ -353,7 +353,12 @@ export COMFY_OUTPUT_DIR="${COMFY_OUTPUT_DIR:-${COMFY_DIR}/output}"
 export COMFY_URL="${COMFY_URL:-http://127.0.0.1:18188}"  # ComfyUI в карте, порт из COMFYUI_ARGS (SPEC 8.5)
 export WORKER_HTTP_PORT="${WORKER_HTTP_PORT:-8000}"
 # Пути workflow и bindings берутся из папки профиля MODEL_PROFILE (по умолчанию ltx25). Переменные окружения имеют приоритет.
-BOOT_PROFILE_DIR="${REPO_DIR}/model_profiles/models/${MODEL_PROFILE:-ltx25}"
+# Если в models папки нет, берётся папка режима Nishes/<MODEL_PROFILE>/ (тот же порядок, что в setup.sh)
+BOOT_PROFILE_NAME="${MODEL_PROFILE:-ltx25}"
+BOOT_PROFILE_DIR="${REPO_DIR}/model_profiles/models/${BOOT_PROFILE_NAME}"
+if [ ! -d "${BOOT_PROFILE_DIR}" ] && [ -d "${REPO_DIR}/Nishes/${BOOT_PROFILE_NAME}" ]; then
+    BOOT_PROFILE_DIR="${REPO_DIR}/Nishes/${BOOT_PROFILE_NAME}"
+fi
 export WORKER_WORKFLOW_PATH="${WORKER_WORKFLOW_PATH:-${BOOT_PROFILE_DIR}/workflow.json}"
 export WORKER_BINDINGS_PATH="${WORKER_BINDINGS_PATH:-${BOOT_PROFILE_DIR}/bindings.json}"
 export GEN_LOG_LEVEL="${GEN_LOG_LEVEL:-INFO}"

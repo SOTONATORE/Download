@@ -52,9 +52,11 @@ CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
 
 # Переключение профиля на идле карты (POST /profile, шаг W4)
-# Корень репозитория Generate: папка на уровень выше worker/. Профили лежат в model_profiles/models/<имя>/.
+# Корень репозитория Generate: папка на уровень выше worker/. Профили лежат в model_profiles/models/<имя>/, режимы в Nishes/<имя>/.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_ROOT_DEFAULT = REPO_ROOT / "model_profiles" / "models"
+# Папки режимов (Nishes/<имя>/) ищутся после models/<имя>/; порядок тот же, что core/config_loader.profile_dir
+NISHES_ROOT_DEFAULT = REPO_ROOT / "Nishes"
 SWITCH_SCRIPT_DEFAULT = REPO_ROOT / "worker" / "switch_profile.sh"
 WEIGHTS_PLAN_DEFAULT = REPO_ROOT / "core" / "weights_plan.py"
 # Имя профиля: тот же шаблон, что PROFILE_NAME_PATTERN в core/model_constants.py. Воркер не импортирует core:
@@ -898,6 +900,20 @@ class SwitchFailed(Exception):
     """Переключение профиля не удалось: текст причины на русском, без токенов и адресов с токеном."""
 
 
+def find_profile_folder(models_root: Path, nishes_root: Path, name: str) -> Path:
+    """Папка профиля: сначала models_root/<имя>, затем nishes_root/<имя>.
+
+    Если нет ни в одной папке, возвращается путь в models_root (проверка «не найдена» выполняется отдельно).
+    """
+    primary = models_root / name
+    if primary.is_dir():
+        return primary
+    secondary = nishes_root / name
+    if secondary.is_dir():
+        return secondary
+    return primary
+
+
 def validate_profile_name(value: Any) -> Optional[str]:
     """Текст ошибки для имени профиля или None, если имя допустимо (проверка до любых действий)."""
     if not isinstance(value, str) or not _RE_PROFILE_NAME.fullmatch(value):
@@ -1211,7 +1227,8 @@ class WorkerApp:
                  profile_name: Optional[str] = None,
                  models_root: Any = None,
                  switch_script: Any = None,
-                 weights_plan_script: Any = None) -> None:
+                 weights_plan_script: Any = None,
+                 nishes_root: Any = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -1236,6 +1253,7 @@ class WorkerApp:
         # Профиль модели (POST /profile, шаг W4): стартовый из MODEL_PROFILE, по умолчанию ltx25 (как в setup.sh)
         self.profile_name = profile_name or os.environ.get(MODEL_PROFILE_ENV) or DEFAULT_MODEL_PROFILE
         self.models_root = Path(models_root) if models_root else MODELS_ROOT_DEFAULT
+        self.nishes_root = Path(nishes_root) if nishes_root else NISHES_ROOT_DEFAULT
         self.switch_script = Path(switch_script) if switch_script else SWITCH_SCRIPT_DEFAULT
         self.weights_plan_script = Path(weights_plan_script) if weights_plan_script else WEIGHTS_PLAN_DEFAULT
         self.switch_state = "idle"     # idle, switching, ready, failed, refused (SWITCH_STATES)
@@ -1274,7 +1292,7 @@ class WorkerApp:
 
     @property
     def profile_dir(self) -> Path:
-        return self.models_root / self.profile_name
+        return find_profile_folder(self.models_root, self.nishes_root, self.profile_name)
 
     def request_switch(self, name: str) -> Tuple[int, dict]:
         """Принимает переключение: (код ответа, тело). Отказ не трогает веса и ComfyUI.
@@ -1286,7 +1304,7 @@ class WorkerApp:
         error = validate_profile_name(name)
         if error is not None:
             return 400, {"error": error}
-        new_dir = self.models_root / name
+        new_dir = find_profile_folder(self.models_root, self.nishes_root, name)
         if not new_dir.is_dir() or any(not (new_dir / fname).is_file() for fname in PROFILE_REQUIRED_FILES):
             return 400, {"error": "Папка профиля не найдена или в ней нет profile.yaml, workflow.json или bindings.json."}
         reason = self.manager.begin_switch()

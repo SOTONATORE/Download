@@ -11,8 +11,13 @@ if [ -z "${COMFY_DIR}" ]; then
 fi
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # Профиль модели и его список весов лежат в model_profiles/models/<MODEL_PROFILE>/ (weights.json, profile.yaml).
+# Если там папки нет, берётся папка режима Nishes/<MODEL_PROFILE>/ (тот же порядок, что core/config_loader.profile_dir).
 # Читает их core/weights_plan.py: новая модель = новая папка, без правок этого файла. По умолчанию ltx25.
-PROFILE_DIR="${REPO_DIR}/model_profiles/models/${MODEL_PROFILE:-ltx25}"
+PROFILE_NAME="${MODEL_PROFILE:-ltx25}"
+PROFILE_DIR="${REPO_DIR}/model_profiles/models/${PROFILE_NAME}"
+if [ ! -d "${PROFILE_DIR}" ] && [ -d "${REPO_DIR}/Nishes/${PROFILE_NAME}" ]; then
+    PROFILE_DIR="${REPO_DIR}/Nishes/${PROFILE_NAME}"
+fi
 META="$(python3 "${REPO_DIR}/core/weights_plan.py" meta "${PROFILE_DIR}")" || { echo "[setup] ОШИБКА: профиль модели не читается: ${PROFILE_DIR} (код 1)."; exit 1; }
 # Проверка описания весов профиля (META из weights_plan.py meta): ровно три строки, значения по форме.
 # Пустой или битый вывод — остановка с понятной ошибкой, а не тихий пропуск загрузки.

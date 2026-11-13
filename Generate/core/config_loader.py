@@ -37,12 +37,14 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
-    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "profile_exists",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "load_profile_text_model", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = GENERATE_DIR / "config.default.yaml"
 MODEL_PROFILES_DIR = GENERATE_DIR / "model_profiles"
+# Папки режимов (Generate/Nishes/<имя>/): ищутся после model_profiles/models/<имя>/
+NISHES_DIR = GENERATE_DIR / "Nishes"
 # Лимит GitHub Actions на одно задание, минут (generate.yml: timeout-minutes: 360).
 ACTIONS_JOB_LIMIT_MIN = 360
 
@@ -460,10 +462,20 @@ def load_config(path: Optional[Path | str] = None,
 
 
 def profile_dir(profile: str) -> Path:
-    """Папка профиля модели: Generate/model_profiles/models/<profile>/ (имя проверяется)."""
+    """Папка профиля модели (имя проверяется).
+
+    Порядок поиска: Generate/model_profiles/models/<profile>/, затем Generate/Nishes/<profile>/.
+    Если нет ни одной папки, возвращается путь в models (как раньше, для сообщений об ошибке).
+    """
     if not re.fullmatch(_PROFILE_NAME_PATTERN, profile or ""):
         raise GeminiInputError("Недопустимое имя профиля модели.")
-    return MODEL_PROFILES_DIR / "models" / profile
+    primary = MODEL_PROFILES_DIR / "models" / profile
+    if primary.is_dir():
+        return primary
+    secondary = NISHES_DIR / profile
+    if secondary.is_dir():
+        return secondary
+    return primary
 
 
 def profile_exists(profile: str) -> bool:
@@ -498,6 +510,23 @@ def load_profile_frame_rule(profile: str) -> dict:
         raise GeminiInputError(
             f"В профиле {profile}/profile.yaml не задано правило кадров («frame_rule»).")
     return dict(rule)
+
+
+def load_profile_text_model(profile: str) -> Optional[str]:
+    """Семейство текстовой модели из profile.yaml (ключ text_model).
+
+    Нет файла profile.yaml или нет ключа — None (тогда берётся default_text_model из конфига).
+    Пустое или не строковое значение — ошибка входа.
+    """
+    if not profile_exists(profile):
+        return None
+    value = _read_profile(profile).get("text_model")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise GeminiInputError(
+            f"В профиле {profile}/profile.yaml ключ «text_model» должен быть непустой строкой.")
+    return value.strip()
 
 
 def load_profile_type(profile_name: str) -> str:

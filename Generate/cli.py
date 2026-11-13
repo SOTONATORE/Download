@@ -51,7 +51,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, load_profile_type, profile_dir, profile_exists)
+        load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
     from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core import previews
@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, load_profile_type, profile_dir, profile_exists)
+        load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
     from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
     from model_constants import PRESET_NONE  # type: ignore
     import previews  # type: ignore
@@ -97,6 +97,8 @@ DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
 STYLE_DIR = "Generate/model_profiles/models"
+# папка режимов: style.md режима лежит здесь, если профиля нет в model_profiles/models
+NISHES_DIR = "Generate/Nishes"
 # файлы, без которых профиль модели не запускается (проверяются до аренды, см. _check_profile_and_preset)
 PROFILE_REQUIRED_FILES = ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md")
 # запасной профиль, если профиля или файла стиля для выбранного профиля нет (прежнее поведение)
@@ -354,6 +356,15 @@ def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
     return None
 
 
+def _style_dir(profile: str) -> str:
+    """Папка, где лежит профиль для style.md: сначала STYLE_DIR, затем NISHES_DIR (тот же порядок, что profile_dir)."""
+    if os.path.isdir(os.path.join(STYLE_DIR, profile)):
+        return STYLE_DIR
+    if os.path.isdir(os.path.join(NISHES_DIR, profile)):
+        return NISHES_DIR
+    return STYLE_DIR
+
+
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
@@ -366,7 +377,7 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if media not in ("video", "image"):
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml не задан тип «type» (video или image).")
-    style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
+    style_file = f"{_style_dir(profile)}/{profile}/prompts/style.md"
     # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
     if load_profile_type(profile) == "image":
         if not os.path.isfile(style_file):
@@ -398,13 +409,16 @@ def _key_names_range(provider: str) -> str:
     return f"{KEY_ENV_PREFIX}1…{KEY_ENV_PREFIX}{KEY_ENV_COUNT}"
 
 
-def resolve_text_family(cfg: Config, requested: Optional[str]) -> tuple[str, str, Optional[list[str]]]:
-    """Семейство текстовой модели: requested (--text-model) или default_text_model из конфига.
+def resolve_text_family(cfg: Config, requested: Optional[str],
+                        profile: Optional[str] = None) -> tuple[str, str, Optional[list[str]]]:
+    """Семейство текстовой модели.
 
-    Возвращает (имя, провайдер, модели); у gemini модели могут быть None (берутся из gemini_models).
-    Неизвестное имя = ошибка входа (GeminiInputError, код 2).
+    Приоритет: requested (--text-model), затем text_model из profile.yaml профиля режима,
+    затем default_text_model из конфига. Возвращает (имя, провайдер, модели); у gemini модели
+    могут быть None (берутся из gemini_models). Неизвестное имя = ошибка входа (GeminiInputError, код 2).
     """
-    name = requested or cfg.default_text_model
+    from_profile = load_profile_text_model(profile) if profile else None
+    name = requested or from_profile or cfg.default_text_model
     if name not in cfg.text_model_families:
         raise GeminiInputError(
             f"Ошибка входных данных: неизвестное семейство текстовой модели «{name}». "
@@ -520,7 +534,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return code
     # семейство текстовой модели; для openrouter нужен хотя бы один ключ OPENROUTER (до любого вызова Vast)
     try:
-        family = resolve_text_family(_cfg, getattr(args, "text_model", None))
+        family = resolve_text_family(_cfg, getattr(args, "text_model", None), _cfg.model_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -655,9 +669,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
         return code
-    # семейство текстовой модели: --text-model или default_text_model из конфига (ошибка входа = код 2)
+    # семейство текстовой модели: --text-model, text_model профиля или default_text_model (ошибка входа = код 2)
     try:
-        family = resolve_text_family(cfg, getattr(args, "text_model", None))
+        family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -1588,7 +1602,7 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
     photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
                  if photo_profile is not None else None)
-    family = resolve_text_family(cfg, getattr(args, "text_model", None))
+    family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     counting = _ReworkCounter(_make_transport(cfg, family))
     gemini_options = _gemini_options(cfg, family)
 
