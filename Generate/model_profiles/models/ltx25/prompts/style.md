@@ -117,7 +117,7 @@ Illustrative pairs written for this guide (not official examples).
 
 **1. Abstract idea**
 Bad: Freedom and hope fill the air as society finally changes.
-Good: A wide shot of a crowd on a hillside at sunrise, people lifting their faces toward warm golden light as a flock of white birds rises from the grass. The camera tilts upward slowly, following the birds into a pale sky, and the sunlight stays soft and low.
+Good: A wide shot of a lone man on a hillside at sunrise, lifting his face toward warm golden light as a flock of white birds rises from the grass. The camera tilts upward slowly, following the birds into a pale sky, and the sunlight stays soft and low.
 
 **2. Negations**
 Bad: An empty street with no cars, no people, nothing blurry, don't show any signs.
@@ -153,7 +153,7 @@ Good: A medium shot of a young man in a hooded jacket walking down a narrow alle
 
 **10. Spoken lines and static description**
 Bad: The narrator says "The economy collapsed in 2008." A bank. A crowd. Lots of stress.
-Good: A medium shot outside a glass bank entrance on a grey afternoon, a handful of people in dark coats standing in a loose line and staring at the closed doors. A woman in a beige coat checks her watch, shifts her weight, then wraps her arms around herself against the wind. The camera drifts slowly to the left, revealing more of the waiting line.
+Good: A medium shot outside a glass bank entrance on a grey afternoon, a man in a dark coat standing still and staring at the closed doors. He checks his watch, shifts his weight, then wraps his arms around himself against the wind. The camera drifts slowly to the left, revealing the empty steps beside him.
 
 ## 11. Official examples
 

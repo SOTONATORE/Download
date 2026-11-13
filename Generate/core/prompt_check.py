@@ -225,7 +225,8 @@ _CONTENT_RX = (
     (PROBLEM_SPEECH, re.compile(
         r"\b(?:says?|said|speaks?|speaking|spoke|talks?|talking|talked|shout\w*|yell\w*|cry|cries|crying|cried|"
         r"laugh\w*|whisper\w*|asks?|asking|asked|answers?|answering|answered|repl(?:y|ies|ied)|sings?|singing|"
-        r"sang|lips?|mouth (?:moves|opens|is open|open)|dialogue|conversation|gestures?|gesturing|"
+        r"sang|lips? (?:move|moves|moving|part|parts|open|opens|tremble|trembles|quiver|quivers)|moving lips|"
+        r"mouth (?:moves|opens|is open|open)|dialogue|conversation|gestures?|gesturing|"
         r"gesticulat\w*|calls? out|hollers?|exclaims?|mutters?|murmurs?|chants?|chanting|screams?|screaming|"
         r"sobs?|sobbing|weeps?|weeping)\b", re.IGNORECASE)),
     # руки или пальцы рядом с огнём (в любом порядке, в пределах одного предложения)
@@ -235,7 +236,7 @@ _CONTENT_RX = (
         r"\b(?:fire|fires|flames?|campfires?|bonfires?|candles?|lanterns?|torch(?:es)?|embers?|firelight)\b"
         r"[^.;]{0,60}\b(?:hands?|fingers?|palms?)\b", re.IGNORECASE)),
     (PROBLEM_CHAOS, re.compile(
-        r"\b(?:charg\w*|gallop\w*|battles?|battling|skirmish\w*|explo\w*|gunfire|firing|shoot\w*|bullets?|"
+        r"\b(?:charg\w*|gallop\w*|battles?|battling|skirmish\w*|explo\w*|gunfire|firing|shoot(?:s|ing)? (?:at|back)|shot at|bullets?|"
         r"smoke puffs?|smoke clouds?|clouds? of (?:dust|smoke)|in formation|assault\w*|attack\w*|ambush\w*|"
         r"rush\w*|stampede\w*|riot\w*|fight\w*|blood\w*|wounded)\b", re.IGNORECASE)),
     (PROBLEM_WEAPON, re.compile(
