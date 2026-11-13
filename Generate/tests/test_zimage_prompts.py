@@ -29,12 +29,15 @@ def _style_body(text: str) -> str:
 class _FakePromptConfig:
     """Заглушка класса PromptConfig: запоминает аргументы конструктора."""
 
-    def __init__(self, style_file, batch_size, preset, media=None):
+    def __init__(self, style_file, batch_size, preset, media=None, refs_enabled=False, on_unfixed="keep"):
         # media принимается, как в настоящем PromptConfig (cli передаёт его при сборке)
         self.style_file = style_file
         self.batch_size = batch_size
         self.preset = preset
         self.media = media
+        # refs_enabled и on_unfixed: cli передаёт их всегда; значения по умолчанию как у PromptConfig
+        self.refs_enabled = refs_enabled
+        self.on_unfixed = on_unfixed
 
 
 @pytest.fixture

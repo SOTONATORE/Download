@@ -41,7 +41,7 @@ def test_refs_missing_is_problem():
     dup = [{"segment_index": 1, "prompt": "A wagon.", "refs": [2, 2]}]
     _, problems = gp.parse_and_validate(_raw(dup), [1], cfg)
     assert any(p.reason == gp.REF_REASON_DUP for p in problems)
-    unsorted = [{"segment_index": 1, "prompt": "A wagon.", "refs": [5, 2]}]
+    unsorted = [{"segment_index": 1, "prompt": "A wagon <image1> and a road <image2>.", "refs": [5, 2]}]
     results, problems = gp.parse_and_validate(_raw(unsorted), [1], cfg)
     assert problems == [] and results[1].extra["refs"] == [2, 5]
 

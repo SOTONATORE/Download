@@ -680,8 +680,12 @@ def _rework_text(problems: list) -> str:
     base = rework_remark([p for p in problems if not _is_ref_problem(p)]) if len(ref_items) < len(problems) \
         else rework_remark([])
     lines = [p.partition(": ")[2] for p in ref_items]
-    return base + " Fix the image labels so that they match the refs list of this segment: " + \
-        " ".join(lines) + " Return the refs list unchanged unless a fix needs it."
+    if any(p.partition(": ")[0] == REF_CODE_LABELS for p in ref_items):
+        return base + " Fix the image labels so that they match the refs list of this segment: " + \
+            " ".join(lines) + " Return the refs list unchanged unless a fix needs it."
+    # только невалидный refs (без меток): просим исправить сам список
+    return base + " Fix the refs list of this segment: " + " ".join(lines) + \
+        " Return refs as a JSON list of integers."
 
 
 def _problem_ru_any(problem: str) -> str:
@@ -862,6 +866,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     results, problems = parse_and_validate(raw, expected, builder.cfg, builder.texts)
     final: dict = {n: results[n] for n in expected if _is_clean(results, n, problems)}
     bad = [n for n in expected if n not in final]
+    invalid_refs: dict = {}   # номер -> причины refs, не исправленные повтором (только refs_enabled)
     extras = [p for p in problems if p.num is not None and p.num not in set(expected)]
     if extras:
         log.warning("%sGemini вернул лишние номера: %d шт., они проигнорированы.", tag, len(extras))
@@ -887,12 +892,20 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 if best is None:
                     best = PromptResult(n, "")
                 final[n] = PromptResult(n, best.prompt, True, reason, best.extra)
+                # невалидный refs, переживший повтор: как метки, уходит в очередь исправлений (шаг 6)
+                if builder.cfg.refs_enabled:
+                    src = prob2 if n in res2 else problems   # та же версия, что и best
+                    ref_left = [p.reason for p in src if p.num == n and p.reason.startswith("refs:")]
+                    if ref_left:
+                        invalid_refs[n] = ref_left
     # шаг 6 без запроса: запрещённые типы и маркеры помечаются очередью исправлений (rework_pending);
     # текст пока без стиля, исправление идёт пакетами после главных батчей (_WaveJob.process_fix)
     for n in list(final):
         r = final[n]
         if r.prompt.strip():
             found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"))
+            if n in invalid_refs:
+                found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
             if found:
                 r.rework_pending = found
                 r.rework_round = 0
@@ -1078,7 +1091,8 @@ class _WaveJob:
         logged.start_batch(fix_no, "Фикс")   # номер попытки и номер пакета в строках повторов
         log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
-                 + (f" Refs for segment_index {c.num}: {json.dumps(c.extra.get('refs', []))}."
+                 + (f" Refs for segment_index {c.num}: "
+                    f"{json.dumps(c.extra['refs']) if 'refs' in c.extra else 'missing or invalid, return a valid refs list'}."
                     if builder.cfg.refs_enabled else "")
                  for c in clips]
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
