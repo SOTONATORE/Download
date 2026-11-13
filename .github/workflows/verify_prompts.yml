@@ -16,6 +16,13 @@ on:
         description: "Путь к файлу missing"
         type: string
         default: "missing.txt"
+      niche:
+        description: "Ниша: none = обычный выбор ниже; другое значение = ниша, она переопределяет видео, фото и текстовую модель"
+        type: choice
+        options:
+          - "none"
+          - "cartoon_photos"
+        default: "none"
       video_profile:
         description: "Видео-модель: ltx25 = видео проверяется; none = видео не проверяется. Варианты сверяются с профилями без поля type (видео)"
         type: choice
@@ -51,14 +58,15 @@ on:
           - "test"
         default: "none"
       text_model:
-        description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"
+        description: "Семейство текстовой модели для промптов: auto = модель из профиля ниши, а если ниши нет, из config.default.yaml (default_text_model); nemotron-super-vl, gemini, gemma или nemotron = явный выбор"
         type: choice
         options:
+          - "auto"
           - "nemotron-super-vl"
           - "gemini"
           - "gemma"
           - "nemotron"
-        default: "nemotron-super-vl"
+        default: "auto"
 
 concurrency:
   group: verify-gemini
@@ -116,16 +124,19 @@ jobs:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
           # выбор моделей (none = модель выключена), как в generate.yml
-          VIDEO_MODEL: ${{ inputs.video_profile }}
-          PHOTO_MODEL: ${{ inputs.photo_profile }}
-          # профиль видео: при none запасной ltx25 (как в generate.yml); профиль фото: пусто при none
+          # ниша (не none) переопределяет видео и фото: видео выключено, фото = ниша, доля видео 0
+          VIDEO_MODEL: ${{ inputs.niche != 'none' && 'none' || inputs.video_profile }}
+          PHOTO_MODEL: ${{ inputs.niche != 'none' && inputs.niche || inputs.photo_profile }}
+          # профиль видео: при none запасной ltx25 (как в generate.yml); профиль фото: ниша, иначе выбор фото; пусто при none
           VIDEO_PROFILE: ${{ inputs.video_profile != 'none' && inputs.video_profile || 'ltx25' }}
-          PHOTO_PROFILE: ${{ inputs.photo_profile != 'none' && inputs.photo_profile || '' }}
-          VIDEO_PERCENT: ${{ inputs.video_percent }}
+          PHOTO_PROFILE: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_profile != 'none' && inputs.photo_profile || '') }}
+          # строка '0', а не число: при числе 0 выражение && || вернёт значение выбора
+          VIDEO_PERCENT: ${{ inputs.niche != 'none' && '0' || inputs.video_percent }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           PRESET: ${{ inputs.preset }}
-          TEXT_MODEL: ${{ inputs.text_model }}
+          # auto = пусто: семейство берётся из профиля фото (ниши) или default_text_model
+          TEXT_MODEL: ${{ inputs.text_model != 'auto' && inputs.text_model || '' }}
           # Журнал как у generate.yml (SPEC 10): файл <каталог артефакта>/run/debug.log на уровне GEN_LOG_LEVEL.
           # Все файлы проверки лежат в одном каталоге артефакта.
           ART_DIR: verify-artifact
@@ -201,7 +212,29 @@ jobs:
               cfg = load_config()
           except Exception as exc:  # noqa: BLE001
               fail("не удалось прочитать config.default.yaml: " + type(exc).__name__ + ": " + mask(exc))
-          family = os.environ.get("TEXT_MODEL", "").strip() or cfg.default_text_model
+
+          # Приоритет как у cli.resolve_text_family: TEXT_MODEL > text_model профиля фото (ниши) > default_text_model.
+          # Профиль фото ищется как config_loader.profile_dir: сначала models/, затем Nishes/.
+          def photo_profile_text_model(name):
+              # text_model из profile.yaml профиля фото; нет файла или ключа — None
+              folder = os.path.join("Generate", "model_profiles", "models", name)
+              if not os.path.isdir(folder):
+                  folder = os.path.join("Generate", "Nishes", name)
+              path = os.path.join(folder, "profile.yaml")
+              if not os.path.isfile(path):
+                  return None
+              import yaml
+              with open(path, encoding="utf-8") as fh:
+                  data = yaml.safe_load(fh) or {}
+              value = data.get("text_model") if isinstance(data, dict) else None
+              return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+          text_env = os.environ.get("TEXT_MODEL", "").strip()
+          photo_profile_env = os.environ.get("PHOTO_PROFILE", "").strip()
+          # без TEXT_MODEL и без профиля фото ответ тот же, что раньше (None -> cli берёт профиль видео или конфиг)
+          text_from_photo = photo_profile_text_model(photo_profile_env) if (not text_env and photo_profile_env) else None
+          family = text_env or text_from_photo or cfg.default_text_model
           spec = cfg.text_model_families.get(family)
           if spec is None:
               fail("неизвестное семейство текстовой модели: " + family)
@@ -263,7 +296,8 @@ jobs:
               intro_seconds=os.environ.get("INTRO_SECONDS") or "1200",
               limit_clips=limit,
               preset=os.environ.get("PRESET") or "none",
-              text_model=os.environ.get("TEXT_MODEL") or None,
+              # та же семья, что проверили по ключам: иначе прогон взял бы text_model профиля видео
+              text_model=text_env or text_from_photo or None,
           )
           try:
               prep = prepare_prompts_only(ns)
