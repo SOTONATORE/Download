@@ -283,8 +283,22 @@ def _is_repeat_mention(text: str, start: int) -> bool:
 
     Считаются только введения: «One man», «a woman», «two officers». Повтор того же человека не считается вторым.
     """
-    words = re.findall(r"[A-Za-z]+", text[max(0, start - 40):start].lower())[-2:]
+    words = re.findall(r"[A-Za-z]+", text[max(0, start - 40):start].lower())[-3:]
     return any(w in _DEFINITE_BEFORE for w in words)
+
+
+_PLURAL_PERSON_RX = re.compile(
+    r"\b(?:men|women|people|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|guards|"
+    r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters|figures)\b", re.IGNORECASE)
+_CROWD_RX = re.compile(r"\b(?:crowds?|groups?|troops?|several|many|dozens|multiple)\b", re.IGNORECASE)
+
+
+def count_people(text: str) -> int:
+    """Оценка числа людей в тексте: введения («One man», «a woman») по одному; множественное число — не меньше двух;
+    толпа и группа — не меньше трёх. Повторные упоминания одного человека не считаются."""
+    t = text or ""
+    singular = sum(1 for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
+    return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
 
 
 def content_hits(text: str, media: str = "video") -> list:
@@ -295,10 +309,11 @@ def content_hits(text: str, media: str = "video") -> list:
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
-    persons = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
     limit = PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
-    if len(persons) > limit:
-        hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(persons)))
+    if count_people(t) > limit:
+        found = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
+        found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t)
+        hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(found)))
     return hits
 
 
