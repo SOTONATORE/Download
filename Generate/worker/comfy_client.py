@@ -20,6 +20,8 @@ DEFAULT_TIMEOUT = 600.0
 REQUIRED_BINDINGS = ("prompt", "num_frames", "seed", "filename_prefix")
 # Для профиля изображения num_frames не нужен: он не требуется и не подставляется
 IMAGE_REQUIRED_BINDINGS = ("prompt", "seed", "filename_prefix")
+# Число слотов референсов в workflow: узлы LoadImage ref_1…ref_10 и входы images.image_1…image_10 узла промпта
+REF_SLOTS = 10
 PROFILE_TYPES = ("video", "image")
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".gif")
 # Файлы изображений для профиля типа image (фото): берутся, только если видео в результате нет
@@ -93,10 +95,58 @@ def profile_type() -> str:
     return value
 
 
+def _apply_refs(graph: dict, bindings: dict, refs: tuple) -> None:
+    """Оставляет в workflow только референсы refs (номера 1…10) и меняет граф на месте.
+
+    Узел промпта — тот, что в привязке «prompt»; у него входы images.image_1…images.image_K.
+    Неиспользуемый референс: его узел LoadImage удаляется, а все входы images.image_* узла промпта
+    убираются. Используемые референсы: LoadImage получает ref_N.png, входы images.image_1…images.image_K
+    идут по возрастанию N, так что наименьший номер попадает в image_1. Другие входы узла не меняются.
+    """
+    prompt_binding = bindings.get("prompt")
+    if not isinstance(prompt_binding, dict) or "node_id" not in prompt_binding:
+        raise ComfyError("Для референсов в привязках нет узла промпта «prompt».")
+    text_id = str(prompt_binding["node_id"])
+    text_node = graph.get(text_id)
+    if not isinstance(text_node, dict) or not isinstance(text_node.get("inputs"), dict):
+        raise ComfyError(f"В workflow нет узла промпта «{text_id}» для референсов.")
+    inputs = text_node["inputs"]
+    ref_nodes = {}  # номер референса -> id узла LoadImage из привязки ref_N
+    for n in range(1, REF_SLOTS + 1):
+        binding = bindings.get(f"ref_{n}")
+        if isinstance(binding, dict) and "node_id" in binding:
+            ref_nodes[n] = str(binding["node_id"])
+    for n in refs:
+        if n not in ref_nodes:
+            raise ComfyError(f"Для референса {n} нет привязки «ref_{n}».")
+    # входы images.image_* должны вести только на узлы референсов: иначе их нельзя безопасно переписать
+    known_ids = set(ref_nodes.values())
+    for key, value in inputs.items():
+        if key.startswith("images.image_"):
+            if not isinstance(value, list) or not value or str(value[0]) not in known_ids:
+                raise ComfyError(f"Вход «{key}» узла промпта ведёт не на привязанный референс.")
+    # 1. неиспользуемые референсы: удаляем их узлы LoadImage
+    for n, node_id in ref_nodes.items():
+        if n in refs:
+            continue
+        node = graph.get(node_id)
+        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+            raise ComfyError(f"Привязка «ref_{n}» должна указывать на узел LoadImage.")
+        del graph[node_id]
+    # 2. убираем все входы images.image_* узла промпта; используемые переподключим ниже
+    for key in [k for k in inputs if k.startswith("images.image_")]:
+        del inputs[key]
+    # 3. используемые референсы по возрастанию номера: image_1 получает наименьший
+    for slot, n in enumerate(sorted(refs), start=1):
+        _set_input(graph, bindings[f"ref_{n}"], f"ref_{n}", f"ref_{n}.png")
+        inputs[f"images.image_{slot}"] = [ref_nodes[n], 0]
+
+
 def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frames: int,
                     seed: int, filename_prefix: str,
                     extra_inputs: Optional[dict] = None,
-                    second_seed: Optional[int] = None) -> dict:
+                    second_seed: Optional[int] = None,
+                    refs: Optional[tuple] = None) -> dict:
     """Возвращает глубокую копию workflow с подставленными значениями.
 
     bindings: {имя: {"node_id": "6", "field": "text"}}. Обязательные имена:
@@ -104,6 +154,7 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
     каждое имя должно присутствовать в bindings.
     second_seed: сид нешифрованного (не привязанного) RandomNoise, то есть второго прохода;
     None = новый случайный сид. Привязанный сид (первый проход) задаётся только через bindings.
+    refs: отсортированный кортеж номеров референсов задачи (1…10); None = поле не передано, workflow не меняется.
     """
     is_image = profile_type() == "image"
     required = IMAGE_REQUIRED_BINDINGS if is_image else REQUIRED_BINDINGS
@@ -121,6 +172,8 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
         if name not in bindings:
             raise ComfyError(f"Для дополнительного входа «{name}» нет привязки.")
         _set_input(graph, bindings[name], name, value)
+    if refs is not None:
+        _apply_refs(graph, bindings, refs)
     # второй проход: каждый RandomNoise, которого нет в привязках, получает сид этого запуска
     bound_nodes = {str(b["node_id"]) for b in bindings.values()
                    if isinstance(b, dict) and "node_id" in b}

@@ -169,6 +169,32 @@ WEIGHTS_FAILED_RETIRE = "загрузка весов не удалась"
 ACCEPT_REASON = "задача не принята"
 PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
 
+# Число слотов референсов в workflow (как REF_SLOTS в worker/comfy_client.py)
+REFS_MAX = 10
+
+
+def _valid_refs(value) -> bool:
+    """Поле refs из prompts.json: список различных целых чисел от 1 до REFS_MAX (bool не считается числом)."""
+    if not isinstance(value, list):
+        return False
+    if any(isinstance(x, bool) or not isinstance(x, int) or not 1 <= x <= REFS_MAX for x in value):
+        return False
+    return len(set(value)) == len(value)
+
+
+def group_by_stack(nums: list, stack_of: Callable) -> list:
+    """Переставляет номера так, что задачи одного стека (набора референсов) идут подряд.
+
+    Стеки идут в порядке первого появления в исходном списке (порядок SRT); внутри стека порядок
+    сохраняется. Сами номера клипов не меняются. Задачи без референсов образуют группу с ключом ().
+    Если все номера без референсов, порядок не меняется.
+    """
+    groups: dict = {}
+    for num in nums:
+        groups.setdefault(stack_of(num), []).append(num)
+    return [num for group in groups.values() for num in group]
+
+
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
 _FAILED_STATUSES = frozenset({"failed", "error"})
 # Нехватка видеопамяти при рендере: фраза из текста ComfyUI, которую воркер передаёт в ошибке задачи (worker/comfy_client.py)
@@ -1952,11 +1978,18 @@ class Orchestrator:
             return "video"  # исправление P2: обе очереди пусты и фото в распределении нет: карта берёт видео, не фото
         return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
 
+    def _stack_of(self, num: int) -> tuple:
+        """Ключ стека клипа: отсортированный кортеж refs из prompts.json; () без поля или при некорректном поле."""
+        entry = self._prompts.get(str(num))
+        refs = entry.get("refs") if isinstance(entry, dict) else None
+        return tuple(sorted(refs)) if _valid_refs(refs) else ()
+
     def _work(self, ready: list) -> None:
         # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
         self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
-        self._video_queue = deque(n for n in ready if n not in self._photo_nums)
-        self._photo_queue = deque(n for n in ready if n in self._photo_nums)
+        # задачи одного стека (refs из prompts.json) идут подряд; номера клипов не меняются
+        self._video_queue = deque(group_by_stack([n for n in ready if n not in self._photo_nums], self._stack_of))
+        self._photo_queue = deque(group_by_stack([n for n in ready if n in self._photo_nums], self._stack_of))
         # превью идут в самый конец очереди фото, после всех обычных фото; видеоочередь не меняется
         self._photo_queue.extend(self._preview_order)
         drain_since: Optional[float] = None
@@ -3146,6 +3179,13 @@ class Orchestrator:
                 return
             payload = {"num": num, "prompt": entry["prompt"],
                        "num_frames": num_frames, "seed": self.seed_base + num}
+            if entry.get("refs") is not None:
+                # референсы задачи: поле уходит на воркер только когда оно есть в prompts.json (старые задачи без изменений)
+                if not _valid_refs(entry["refs"]):
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json некорректное поле refs")
+                    return
+                payload["refs"] = sorted(entry["refs"])
         try:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:

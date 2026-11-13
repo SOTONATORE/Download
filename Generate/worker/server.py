@@ -29,13 +29,13 @@ from urllib.parse import parse_qs
 
 try:
     from Generate.worker.comfy_client import (
-        ComfyClient, ComfyError, inject_workflow, new_second_pass_seed, set_profile_type)
+        ComfyClient, ComfyError, REF_SLOTS, inject_workflow, new_second_pass_seed, set_profile_type)
     from Generate.worker.comfy_output import (
         COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT)
     from Generate.worker.telemetry import SystemSampler, TelemetrySampler
 except ImportError:  # запуск прямо на карте, без пакета Generate
     from worker.comfy_client import (
-        ComfyClient, ComfyError, inject_workflow, new_second_pass_seed, set_profile_type)
+        ComfyClient, ComfyError, REF_SLOTS, inject_workflow, new_second_pass_seed, set_profile_type)
     from worker.comfy_output import COMFY_LOG_LOGGER, COMFY_MARK, ComfyOutputReader, PIECE_LIMIT
     from worker.telemetry import SystemSampler, TelemetrySampler
 
@@ -617,6 +617,7 @@ class _Task:
     path: Optional[Path] = None
     size_bytes: Optional[int] = None
     second_seed: Optional[int] = None  # сид второго прохода этого клипа (первый проход = seed)
+    refs: Optional[Tuple[int, ...]] = None  # номера референсов задачи (отсортированы); None = без изменений workflow
     acked: bool = False
     lines: Deque[str] = field(default_factory=collections.deque)  # журнал клипа целиком, без хвоста (этап 9в)
 
@@ -731,7 +732,8 @@ class TaskManager:
                 return task
         return None
 
-    def submit(self, num: int, prompt: str, num_frames: int, seed: int) -> str:
+    def submit(self, num: int, prompt: str, num_frames: int, seed: int,
+               refs: Optional[Tuple[int, ...]] = None) -> str:
         """Ставит клип в очередь. Идемпотентность: если для того же номера есть открытая задача
         (не подтверждена и не в ошибке), возвращается её id и новая задача не создаётся.
         Проверка идёт до лимита очереди: повтор не должен получить 429 из-за собственной задачи."""
@@ -746,7 +748,7 @@ class TaskManager:
                 if self._unacked_locked() >= self.max_unacked:
                     raise BacklogFullError()
                 task_id = uuid.uuid4().hex
-                task = _Task(task_id, num, prompt, num_frames, seed, received=received)
+                task = _Task(task_id, num, prompt, num_frames, seed, received=received, refs=refs)
                 self._log(task, "задача принята, в очереди")
                 self._tasks[task_id] = task
         if existing is not None:
@@ -856,7 +858,7 @@ class TaskManager:
                 task.second_seed = second_seed
             graph = inject_workflow(self.workflow, self.bindings, task.prompt,
                                     task.num_frames, task.seed, prefix, self.extra_inputs,
-                                    second_seed=second_seed)
+                                    second_seed=second_seed, refs=task.refs)
             self._set(task, "running", "постановка в очередь ComfyUI")
             started = time.monotonic()
             log.info("Клип %d: старт рендера в %s (id %s), сид первого прохода %d, сид второго прохода %d.",
@@ -921,7 +923,7 @@ def validate_profile_name(value: Any) -> Optional[str]:
     return None
 
 
-def _validate_payload(data: Any) -> Tuple[int, str, int, int]:
+def _validate_payload(data: Any) -> Tuple[int, str, int, int, Optional[Tuple[int, ...]]]:
     if not isinstance(data, dict):
         raise ValueError("Тело запроса должно быть JSON-объектом.")
 
@@ -939,7 +941,21 @@ def _validate_payload(data: Any) -> Tuple[int, str, int, int]:
     prompt = data.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Поле «prompt» должно быть непустой строкой.")
-    return num, prompt, num_frames, seed
+    # необязательное поле refs: номера референсов 1…REF_SLOTS; без поля workflow не меняется (старое поведение)
+    refs: Optional[Tuple[int, ...]] = None
+    if "refs" in data:
+        raw_refs = data["refs"]
+        if not isinstance(raw_refs, list):
+            raise ValueError("Поле «refs» должно быть списком целых чисел.")
+        for item in raw_refs:
+            if isinstance(item, bool) or not isinstance(item, int):
+                raise ValueError("Поле «refs» должно содержать только целые числа.")
+            if not 1 <= item <= REF_SLOTS:
+                raise ValueError(f"Номера в поле «refs» должны быть от 1 до {REF_SLOTS}.")
+        if len(set(raw_refs)) != len(raw_refs):
+            raise ValueError("Номера в поле «refs» не должны повторяться.")
+        refs = tuple(sorted(raw_refs))
+    return num, prompt, num_frames, seed, refs
 
 
 def _make_handler(app: "WorkerApp") -> type:
@@ -1103,7 +1119,7 @@ def _make_handler(app: "WorkerApp") -> type:
                 return self._error(413, "Тело запроса слишком большое.")
             raw = self.rfile.read(length)
             try:
-                num, prompt, num_frames, seed = _validate_payload(json.loads(raw.decode("utf-8")))
+                num, prompt, num_frames, seed, refs = _validate_payload(json.loads(raw.decode("utf-8")))
             except (ValueError, UnicodeDecodeError) as exc:
                 msg = str(exc) if isinstance(exc, ValueError) and not isinstance(
                     exc, (json.JSONDecodeError, UnicodeDecodeError)) else "Тело запроса — некорректный JSON."
@@ -1111,7 +1127,7 @@ def _make_handler(app: "WorkerApp") -> type:
             if app.switch_state == "failed":  # сбой переключения: карта больше не принимает клипы
                 return self._error(503, "Воркер не готов: переключение модели не удалось, карту нужно заменить.")
             try:
-                task_id = app.manager.submit(num, prompt, num_frames, seed)
+                task_id = app.manager.submit(num, prompt, num_frames, seed, refs=refs)
             except BacklogFullError:
                 return self._error(429, "Очередь заполнена, ожидается скачивание готовых клипов")
             except SwitchingError:

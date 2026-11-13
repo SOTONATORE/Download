@@ -35,6 +35,8 @@ ENV WORKER_BUILD=$WORKER_BUILD
 COPY Generate/worker/server.py Generate/worker/comfy_client.py Generate/worker/comfy_output.py \
      Generate/worker/telemetry.py Generate/worker/setup.sh /workspace/Generate/worker/
 COPY Generate/model_profiles/ /workspace/Generate/model_profiles/
+# Папка Nishes: профиль режима Nishes (cartoon_photos) доступен в образе, как model_profiles
+COPY Generate/Nishes/ /workspace/Generate/Nishes/
 
 RUN sed -i 's/\r$//' /workspace/Generate/worker/setup.sh \
     && chmod +x /workspace/Generate/worker/setup.sh
