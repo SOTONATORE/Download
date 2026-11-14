@@ -365,8 +365,18 @@ def _style_dir(profile: str) -> str:
     return STYLE_DIR
 
 
+def _srt_kwargs(profile: str, srt_path: str) -> dict:
+    """srt_path для _build_prompt_config — только профилю с text_language: srt; остальным вызов прежний (без аргумента)."""
+    try:
+        lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except (OSError, GeminiInputError):
+        return {}
+    return {"srt_path": srt_path} if _profile_flag(lines, "text_language", profile, default="") == "srt" else {}
+
+
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE,
-                         fail_fast: bool = False, raw_dir: Optional[str] = None):
+                         fail_fast: bool = False, raw_dir: Optional[str] = None,
+                         srt_path: Optional[str] = None):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
     try:
@@ -397,8 +407,25 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if _profile_flag(profile_lines, "refs_enabled", profile, default="false") not in ("true", "false"):
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml refs_enabled должен быть true или false.")
+    # relaxed_rules и text_language из profile.yaml: без ключей — пусто и None, как раньше
+    from Generate.core.gemini_prompts import REF_MAX, count_ref_files, detect_srt_language, profile_relaxation
+    relaxed_rules, text_language = profile_relaxation(profile_lines, profile)
+    for rule in sorted(relaxed_rules):
+        # один раз на прогон и профиль; текст модели в лог не пишется
+        log.info("Правило «%s» отключено профилем %s (relaxed_rules): проверка этого правила пропускается.",
+                 rule, profile)
+    # язык текста в кадре: «srt» — определяется по SRT прогона (код); явное название из профиля — как задано
+    frame_language = None
+    if text_language == "srt":
+        frame_language = detect_srt_language(srt_path) if srt_path else None
+    elif text_language is not None:
+        frame_language = text_language
+    # референсы: число ref_N.png в refs профиля, не больше REF_MAX; без refs_enabled — REF_MAX, как раньше
+    ref_max = count_ref_files(profile_dir(profile) / "refs", profile) if refs_enabled else REF_MAX
     # fail_fast и raw_dir по умолчанию выключены: без них конфиг прежний
-    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir}
+    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir,
+              "relaxed_rules": relaxed_rules, "text_language": text_language, "frame_language": frame_language,
+              "ref_max": ref_max}
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
@@ -735,8 +762,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     stage = "таймингов и промптов"
     try:
         timing = _build_timing(cfg, cfg.model_profile)
-        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
-        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset,
+                                          **_srt_kwargs(cfg.model_profile, args.srt))
+        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
+                                                 **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"
@@ -1500,7 +1529,8 @@ def _failure_reason(num: int, entry, errors: list) -> str:
     return f"статус «{entry.get('status')}»"
 
 
-def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
+def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool,
+                 relaxed=frozenset()) -> tuple:
     """Для одного вида: готовые, нарушения слов и маркеров, нарушения содержания кадра, нарушения num_frames, не готовые."""
     from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
                                             find_problems, problem_code, problem_ru)
@@ -1516,7 +1546,7 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             not_ready.append(n)
             continue
         ready += 1
-        for p in find_problems(entry["prompt"], media):
+        for p in find_problems(entry["prompt"], media, relaxed):
             code = problem_code(p)
             if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
@@ -1626,9 +1656,11 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     fail_fast = bool(getattr(args, "fail_fast", False))
     raw_dir = str(Path(args.artifact_dir) / "raw") if args.artifact_dir else None
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset,
-                                      fail_fast=fail_fast, raw_dir=raw_dir)
+                                      fail_fast=fail_fast, raw_dir=raw_dir,
+                                      **_srt_kwargs(args.video_profile, args.srt))
     photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
-                                      fail_fast=fail_fast, raw_dir=raw_dir)
+                                      fail_fast=fail_fast, raw_dir=raw_dir,
+                                      **_srt_kwargs(photo_profile, args.srt))
                  if photo_profile is not None else None)
     family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     counting = _ReworkCounter(_make_transport(cfg, family))
@@ -1667,8 +1699,10 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     video_nums = [n for n in missing if n not in photo_nums]
     photo_list = [n for n in missing if n in photo_nums]
     keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
-    v = dict(zip(keys, _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
-    p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
+    v = dict(zip(keys, _type_counts("видео", video_nums, prompts, expected_frames, photo=False,
+                                    relaxed=prompt_cfg.relaxed_rules)))
+    p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True,
+                                    relaxed=photo_cfg.relaxed_rules if photo_cfg is not None else frozenset())))
     failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
                 + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
     failures.sort(key=lambda row: row[0])

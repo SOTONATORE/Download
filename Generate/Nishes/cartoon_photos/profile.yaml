@@ -17,6 +17,13 @@ text_model: nemotron
 # референсы: метки <imageN> проверяются по списку refs сегмента
 refs_enabled: true
 
+# правила проверки, которые ниша отключает: только art_medium, small_objects, frame_text;
+# правила безопасности (дети, нагота, люди, оружие и др.) здесь отключить нельзя
+relaxed_rules: [art_medium, small_objects, frame_text]
+
+# язык текста внутри кадра: srt — берётся из SRT текущего прогона (язык определяет код, не модель)
+text_language: "srt"
+
 # на клипе с нарушением после всех кругов прогон останавливается
 on_unfixed: fail
 

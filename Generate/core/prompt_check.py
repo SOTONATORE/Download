@@ -250,6 +250,11 @@ _CONTENT_RX = (
 )
 _IMAGE_ONLY = frozenset({PROBLEM_CLOSE_FACE})
 
+# Правила, которые профиль может отключить (relaxed_rules). Только эти три id; правила безопасности сюда не входят.
+RELAXABLE_RULES = frozenset({"art_medium", "small_objects", "frame_text"})
+# отключаемое правило → код нарушения содержания (art_medium — в gemini_prompts, frame_text — в системной инструкции)
+_RELAXED_CONTENT_CODE = {"small_objects": PROBLEM_SMALL_OBJECT}
+
 # Люди по названию (для подсчёта): в видео не больше двух, в фото одного.
 _PERSON_RX = re.compile(
     r"\b(?:man|woman|person|boy|girl|child|soldier|officer|rider|horseman|villager|farmer|herder|elder|"
@@ -301,11 +306,15 @@ def count_people(text: str) -> int:
     return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
 
 
-def content_hits(text: str, media: str = "video") -> list:
-    """Нарушения содержания: список пар (код, фрагмент). Текст не меняется."""
+def content_hits(text: str, media: str = "video", relaxed=frozenset()) -> list:
+    """Нарушения содержания: список пар (код, фрагмент). Текст не меняется.
+    relaxed: отключённые профилем правила из RELAXABLE_RULES; правила безопасности отключить нельзя."""
     t = text or ""
     hits = []
+    skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE)
     for code, rx in _CONTENT_RX:
+        if code in skipped:
+            continue
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
@@ -317,9 +326,9 @@ def content_hits(text: str, media: str = "video") -> list:
     return hits
 
 
-def content_reasons(prompt: str, media: str = "video") -> list:
+def content_reasons(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
     """Причины содержания по-русски для needs_review (без фрагментов), без повторов."""
-    return list(dict.fromkeys(CONTENT_REASON_RU[code] for code, _ in content_hits(prompt, media)))
+    return list(dict.fromkeys(CONTENT_REASON_RU[code] for code, _ in content_hits(prompt, media, relaxed)))
 
 
 def ethnicity_reasons(prompt: str, segment_text: str) -> list:
@@ -332,7 +341,7 @@ def ethnicity_reasons(prompt: str, segment_text: str) -> list:
     return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
 
 
-def find_problems(prompt: str, media: str = "video") -> list:
+def find_problems(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     problems = []
@@ -344,7 +353,7 @@ def find_problems(prompt: str, media: str = "video") -> list:
         problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
         problems.append(make_problem(PROBLEM_LEFTOVER_MARKER, m.group(0)))
-    for code, fragment in content_hits(text, media):
+    for code, fragment in content_hits(text, media, relaxed):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем
     return list(dict.fromkeys(problems))

@@ -27,14 +27,14 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark,
-                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons)
+                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark,
-                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons)
+                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -91,6 +91,10 @@ class GeminiRuntimeError(GeminiError):
 # Конфиг и результаты
 # ---------------------------------------------------------------------------
 
+# Лимит референсов (слоты графа ComfyUI). Выше PromptConfig: поле ref_max берёт значение отсюда.
+REF_MAX = 10
+
+
 @dataclass
 class PromptConfig:
     style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
@@ -108,6 +112,14 @@ class PromptConfig:
     fail_fast: bool = False
     # raw_dir: каталог для сырого ответа батча с проблемой (только при fail_fast); None = файлы не пишутся
     raw_dir: Optional[str] = None
+    # relaxed_rules: отключённые профилем правила из RELAXABLE_RULES; по умолчанию ничего не отключено
+    relaxed_rules: frozenset = frozenset()
+    # text_language: None — как раньше; «srt» — язык текста в кадре из SRT; иначе название языка из профиля
+    text_language: Optional[str] = None
+    # frame_language: английское название языка текста в кадре; None, пока SRT не разобран
+    frame_language: Optional[str] = None
+    # ref_max: число допустимых референсов профиля (число ref_N.png, не больше REF_MAX); по умолчанию REF_MAX
+    ref_max: int = REF_MAX
 
 
 @dataclass(frozen=True)
@@ -420,28 +432,55 @@ def _content_rules(media: str) -> str:
     return rules
 
 
+def _output_language_sentence(cfg: PromptConfig) -> str:
+    """Предложение о языке вывода для Task-блока. Без relaxed_rules и text_language — прежняя фраза.
+
+    frame_text: текст в кадре пишется на языке из следующего правила; text_language: язык текста в кадре.
+    Нет языка при заданном text_language — ошибка, а не тихое «English» (см. profile.yaml, text_language).
+    """
+    text = ""
+    if "frame_text" in cfg.relaxed_rules:
+        text += "Text that appears inside the frame is written in the on-frame language named in the next rule. "
+    if cfg.text_language is None:
+        return text + "Always write the output in English."
+    if not cfg.frame_language:
+        raise GeminiInputError(
+            "Ошибка входных данных: text_language задан, но язык текста в кадре не определён (нет разобранного SRT).")
+    return text + (f"Write all prompt text in English, except text that appears inside the frame, "
+                   f"which must be written in {cfg.frame_language}.")
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
+    # строки art_medium и frame_text: при отключении правила строки нет; без отключения текст тот же, что раньше
     if cfg.media == "video":
         kind = "text-to-video prompt"
-        camera_rules = (
+        medium = "" if "art_medium" in cfg.relaxed_rules else (
             "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-            "or camera or lens equipment; camera movement is the only camera wording allowed.\n"
-            "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
-            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
-            "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
-            "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
+            "or camera or lens equipment; camera movement is the only camera wording allowed.\n")
+        paper = "" if "frame_text" in cfg.relaxed_rules else (
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n")
+        camera_rules = (
+            medium
+            + "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            + paper
+            + "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
+            + "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
             "the move ends (for a static camera: what the frame holds on).\n"
         )
     elif cfg.media == "image":
         kind = "text-to-image prompt, one still frame"
-        camera_rules = (
+        medium = "" if "art_medium" in cfg.relaxed_rules else (
             "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-            "or camera or lens equipment; camera or lens equipment is forbidden.\n"
-            "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
-            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n"
-            "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
-            "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
+            "or camera or lens equipment; camera or lens equipment is forbidden.\n")
+        paper = "" if "frame_text" in cfg.relaxed_rules else (
+            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n")
+        camera_rules = (
+            medium
+            + "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
+            + paper
+            + "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
+            + "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
             "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n"
         )
     else:
@@ -451,7 +490,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "You receive subtitle segments of a narrated video. For every segment write ONE "
         + kind + ", in English, that visually illustrates what the segment says, "
         "following the style guide below. Use the Sentence, Before and After lines only to "
-        "understand the meaning; the >>marked<< part is the passage to illustrate. The source subtitle text may be in any language. Always write the output in English.\n\n"
+        "understand the meaning; the >>marked<< part is the passage to illustrate. The source subtitle text may be in any language. " + _output_language_sentence(cfg) + "\n\n"
         "# Output contract\n"
         "Return a JSON array with exactly one object per requested segment: "
         "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
@@ -476,7 +515,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         # контракт с референсами (только профили с refs_enabled): номера и метки должны совпадать
         parts[0] += (
             "\n\n# Reference images\n"
-            "Each object also has \"refs\": a JSON list of distinct integers from 1 to 10, sorted ascending, "
+            f"Each object also has \"refs\": a JSON list of distinct integers from 1 to {cfg.ref_max}, sorted ascending, "
             "naming the reference images used for that segment (an empty list if none). "
             "In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, where N is the "
             "number of entries in refs; the tag <imageK> is the K-th entry of the sorted refs list. "
@@ -569,6 +608,8 @@ def _garbage_reason(prompt: str) -> str:
 # Проверка стиля по правилам models/<профиль>/prompts/style.md: отрицания, кавычки, keyword spam, эмоциональные метки.
 # Цифры намеренно не запрещены ("35-year-old", "3 candles" допустимы).
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
+# причина правила art_medium (отключается профилем: relaxed_rules); вынесена, чтобы пропуск знал, какое правило снять
+_ART_MEDIUM_REASON = "стиль: художественная техника"
 _STYLE_RULES = [
     (re.compile(r"\b(?:no|not|without|never|nothing|nobody|none|"
                 r"(?:don|doesn|isn|aren|can|won)['\u2019]?t|cannot)\b", re.I),
@@ -596,7 +637,7 @@ _STYLE_RULES = [
      "aperture, focal length, shot on. Describe only the scene and its one camera move."),
     (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
                 r"stickmen?|pixel\s+art)\b", re.I),
-     "стиль: художественная техника",
+     _ART_MEDIUM_REASON,
      "Remove art-medium words such as illustration, cartoon, anime, watercolor, oil painting, sketch, "
      "stickman, pixel art. Describe the real scene instead."),
 ]
@@ -607,7 +648,6 @@ _STYLE_HINTS.update(CONTENT_HINT_BY_REASON)  # подсказки для пов�
 
 # Проверка refs и меток <imageN> (только профили с refs_enabled). Причины — русские (журнал и повтор),
 # подсказки — английские (текст повтора, уходит в модель).
-REF_MAX = 10
 REF_REASON_MISSING = "refs: поле отсутствует"
 REF_REASON_NOT_LIST = "refs: не список"
 REF_REASON_NOT_INT = "refs: не целые числа"
@@ -629,16 +669,28 @@ _STYLE_HINTS.update({
 })
 
 
-def _check_refs(value: Any) -> tuple:
-    """(отсортированный список или None, причины). Пустой список допустим (сегмент без референсов)."""
+def _range_reason(limit: int) -> str:
+    """Причина «номер вне 1…limit». Для лимита REF_MAX — прежний текст REF_REASON_RANGE."""
+    if limit == REF_MAX:
+        return REF_REASON_RANGE
+    return f"refs: номер вне 1…{limit} (в нише {limit} референсов)"
+
+
+# подсказка для повтора при любом числе референсов профиля (1…REF_MAX); для REF_MAX текст тот же, что выше
+_STYLE_HINTS.update({_range_reason(k): f"Each refs number must be between 1 and {k}." for k in range(1, REF_MAX + 1)})
+
+
+def _check_refs(value: Any, limit: int = REF_MAX) -> tuple:
+    """(отсортированный список или None, причины). Пустой список допустим (сегмент без референсов).
+    limit: число референсов профиля (ref_max); без аргумента — REF_MAX, как раньше."""
     if value is None:
         return None, [REF_REASON_MISSING]
     if not isinstance(value, list):
         return None, [REF_REASON_NOT_LIST]
     if any(isinstance(v, bool) or not isinstance(v, int) for v in value):
         return None, [REF_REASON_NOT_INT]
-    if any(v < 1 or v > REF_MAX for v in value):
-        return None, [REF_REASON_RANGE]
+    if any(v < 1 or v > limit for v in value):
+        return None, [_range_reason(limit)]
     if len(set(value)) != len(value):
         return None, [REF_REASON_DUP]
     return sorted(value), []
@@ -700,10 +752,190 @@ def _problem_ru_any(problem: str) -> str:
     return problem_ru(problem)
 
 
-def _style_reasons(prompt: str, media: str = "video") -> list:
-    """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.)."""
-    style = [reason for rx, reason, _ in _STYLE_RULES if rx.search(prompt)]
-    return style + content_reasons(prompt, media)
+def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
+    """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.).
+    relaxed: отключённые профилем правила; art_medium снимает стилевое правило, small_objects — в содержании."""
+    style = [reason for rx, reason, _ in _STYLE_RULES
+             if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)]
+    return style + content_reasons(prompt, media, relaxed)
+
+
+# ---------------------------------------------------------------------------
+# Профиль ниши: relaxed_rules, text_language, референсы. Поля читаются строками profile.yaml, без PyYAML.
+# ---------------------------------------------------------------------------
+
+def _profile_value(lines: list, key: str) -> Optional[str]:
+    """Сырое значение поля верхнего уровня: регистр сохраняется, комментарий и кавычки убраны. Нет поля — None."""
+    for ln in lines:
+        if ln.startswith(key + ":"):
+            return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'") or None
+    return None
+
+
+def parse_flow_list(value: str, key: str, profile: str) -> list:
+    """Список вида [a, b] из значения поля. Другой вид значения — ошибка по-русски."""
+    text = (value or "").strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml {key} должен быть списком вида [a, b].")
+    return [item.strip().strip("\"'") for item in text[1:-1].split(",") if item.strip()]
+
+
+def parse_relaxed_rules(names: list, profile: str) -> frozenset:
+    """relaxed_rules профиля: только id из RELAXABLE_RULES. Иное имя — ошибка при загрузке профиля."""
+    bad = [n for n in names if n not in RELAXABLE_RULES]
+    if bad:
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml в relaxed_rules недопустимо: "
+            f"{', '.join(bad)}. Допустимые значения: {', '.join(sorted(RELAXABLE_RULES))}.")
+    return frozenset(names)
+
+
+def profile_relaxation(lines: list, profile: str) -> tuple:
+    """(relaxed_rules, text_language) из строк profile.yaml. Нет ключей — (пусто, None), как раньше.
+
+    text_language: None; «srt» (язык берётся из SRT прогона); или название языка латиницей (задано явно).
+    frame_text без text_language — ошибка: правило «следующее правило» без языка указывало бы в пустоту.
+    """
+    raw_rules = _profile_value(lines, "relaxed_rules")
+    names = parse_flow_list(raw_rules, "relaxed_rules", profile) if raw_rules is not None else []
+    relaxed = parse_relaxed_rules(names, profile)
+    text_language = _profile_value(lines, "text_language")
+    if text_language is not None and text_language != "srt" and not re.fullmatch(r"[A-Za-z]+", text_language):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml text_language должен быть «srt» "
+            f"или название языка латиницей, например Russian.")
+    if "frame_text" in relaxed and text_language is None:
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml relaxed_rules содержит frame_text, "
+            f"но text_language не задан: нужен язык текста в кадре.")
+    return relaxed, text_language
+
+
+# Определение языка текста по SRT: код, не модель. Пороги — числа ниже.
+SRT_MIN_LETTERS = 20        # меньше букв в тексте — язык не определяется
+SRT_SCRIPT_SHARE = 0.80     # доля основного письма среди букв; ниже — текст смешанный
+SRT_MIN_STOP_HITS = 3       # минимум слов-маркеров у лучшего латинского языка
+SRT_MIN_STOP_SHARE = 0.10   # и доля таких слов среди всех латинских слов
+
+_SRT_INDEX_RX = re.compile(r"^\s*\d+\s*$")
+_SRT_TIMING_RX = re.compile(r"^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->")
+_SRT_TAG_RX = re.compile(r"<[^>]*>|\{[^}]*\}")
+# письменности: (название, диапазоны кодовых точек)
+_SCRIPT_RANGES = (
+    ("Latin", ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF))),
+    ("Cyrillic", ((0x0400, 0x052F),)),
+    ("Greek", ((0x0370, 0x03FF),)),
+    ("Arabic", ((0x0600, 0x06FF),)),
+    ("Hebrew", ((0x0590, 0x05FF),)),
+    ("Devanagari", ((0x0900, 0x097F),)),
+    ("Thai", ((0x0E00, 0x0E7F),)),
+    ("Hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF))),
+    ("Kana", ((0x3040, 0x30FF),)),
+    ("Han", ((0x3400, 0x4DBF), (0x4E00, 0x9FFF))),
+)
+_SCRIPT_LANGUAGE = {"Cyrillic": "Russian", "Greek": "Greek", "Arabic": "Arabic", "Hebrew": "Hebrew",
+                    "Devanagari": "Hindi", "Thai": "Thai", "Hangul": "Korean", "Kana": "Japanese", "Han": "Chinese"}
+# фиксированная таблица стоп-слов для латиницы (слова, характерные для языка)
+_LATIN_STOPWORDS = {
+    "English": {"the", "and", "is", "are", "of", "to", "in", "that", "it", "with", "for", "this", "was", "not",
+                "be", "have", "you", "they", "on", "at", "but"},
+    "Spanish": {"el", "los", "las", "de", "que", "y", "en", "es", "un", "una", "por", "con", "para", "no", "lo",
+                "pero", "como", "del"},
+    "French": {"le", "les", "des", "est", "et", "une", "du", "pour", "avec", "pas", "que", "qui", "sur", "dans",
+               "je", "il", "nous", "vous", "ce", "au"},
+    "German": {"der", "die", "das", "und", "ist", "nicht", "ich", "ein", "eine", "mit", "auf", "für", "sie",
+               "dass", "zu", "dem", "den", "auch", "wir", "sich"},
+    "Portuguese": {"o", "os", "as", "do", "da", "em", "um", "uma", "para", "com", "não", "mais", "você", "ele",
+                   "ela", "são", "se", "ao"},
+    "Italian": {"il", "di", "che", "è", "sono", "della", "gli", "anche", "questo", "ma", "come", "non", "per",
+                "con", "una", "nel", "sei"},
+    "Turkish": {"bir", "ve", "bu", "da", "için", "ile", "çok", "ne", "ama", "daha", "gibi", "olan", "ben", "sen",
+                "biz", "değil", "var", "yok"},
+    "Indonesian": {"yang", "dan", "di", "ini", "itu", "untuk", "dengan", "tidak", "saya", "kami", "dari", "ada",
+                   "akan", "bisa", "sudah", "juga", "kita", "mereka", "atau", "adalah"},
+}
+
+
+def _script_of(ch: str) -> str:
+    cp = ord(ch)
+    for name, ranges in _SCRIPT_RANGES:
+        if any(lo <= cp <= hi for lo, hi in ranges):
+            return name
+    return ""
+
+
+def detect_srt_language(path) -> str:
+    """Название языка текста в SRT по-английски («Russian»). Неясно — GeminiInputError по-русски.
+
+    Шаги: строки-индексы и тайминги отбрасываются; буквы делятся по письменностям; основная письменность
+    должна дать не меньше SRT_SCRIPT_SHARE букв; не латиница — таблица письменность→язык; латиница — стоп-слова.
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        raise GeminiInputError(f"Ошибка входных данных: SRT для языка текста в кадре не прочитан: {path}") from None
+    kept = []
+    for line in raw.splitlines():
+        if not line.strip() or _SRT_INDEX_RX.match(line) or _SRT_TIMING_RX.match(line):
+            continue
+        kept.append(_SRT_TAG_RX.sub("", line))
+    text = "\n".join(kept)
+    counts: dict = {}
+    for ch in text:
+        if ch.isalpha():
+            script = _script_of(ch)
+            if script:
+                counts[script] = counts.get(script, 0) + 1
+    letters = sum(counts.values())
+    hint = "Задайте text_language в профиле явно (название языка латиницей, например Russian)."
+    if letters < SRT_MIN_LETTERS:
+        raise GeminiInputError(
+            f"Ошибка входных данных: язык текста в SRT не определён, мало букв ({letters}). {hint}")
+    top, top_n = max(counts.items(), key=lambda kv: kv[1])
+    if top_n / letters < SRT_SCRIPT_SHARE:
+        raise GeminiInputError(
+            f"Ошибка входных данных: язык текста в SRT не определён, текст смешанный "
+            f"(основная письменность {top} даёт {top_n / letters:.0%} букв). {hint}")
+    if top != "Latin":
+        return _SCRIPT_LANGUAGE[top]
+    tokens = re.findall(r"[^\W\d_]+", text.lower())
+    scores = {lang: sum(1 for t in tokens if t in words) for lang, words in _LATIN_STOPWORDS.items()}
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_lang, best = ranked[0]
+    second = ranked[1][1]
+    if best < max(SRT_MIN_STOP_HITS, SRT_MIN_STOP_SHARE * len(tokens)) or best == second:
+        raise GeminiInputError(
+            f"Ошибка входных данных: язык текста в SRT не определён (нет явного языка или ничья между языками). {hint}")
+    return best_lang
+
+
+_REF_FILE_RX = re.compile(r"ref_(\d+)\.png")
+
+
+def count_ref_files(refs_dir, profile: str) -> int:
+    """Число допустимых референсов: ref_1.png…ref_N.png в папке refs профиля, не больше REF_MAX.
+
+    Нет папки, нет файлов или номера не идут подряд с 1 — ошибка при загрузке профиля.
+    """
+    folder = Path(refs_dir)
+    if not folder.is_dir():
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile} refs_enabled: true, но папки refs нет: {folder}")
+    nums = set()
+    for p in folder.iterdir():
+        m = _REF_FILE_RX.fullmatch(p.name)
+        if m:
+            nums.add(int(m.group(1)))
+    nums = sorted(nums)
+    if not nums:
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile} в папке refs нет файлов ref_N.png: {folder}")
+    if nums != list(range(1, len(nums) + 1)):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile} номера референсов должны идти подряд с 1 "
+            f"(ref_1.png … ref_{len(nums)}.png), найдено: {nums}")
+    return min(len(nums), REF_MAX)
 
 
 def _retry_note(nums, problems: list) -> str:
@@ -780,12 +1012,12 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
-        reasons.extend(_style_reasons(prompt, cfg.media))
+        reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules))
         if texts is not None and n in texts:
             reasons.extend(ethnicity_reasons(prompt, texts[n]))
         refs, ref_reasons = None, []
         if cfg.refs_enabled:
-            refs, ref_reasons = _check_refs(item.get("refs"))
+            refs, ref_reasons = _check_refs(item.get("refs"), cfg.ref_max)
             reasons.extend(ref_reasons)
             reasons.extend(_label_reasons(prompt, refs))
         extra = {k: v for k, v in item.items() if k not in ("segment_index", "prompt")}
@@ -814,7 +1046,7 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
-    problems = find_problems(text, cfg.media)
+    problems = find_problems(text, cfg.media, cfg.relaxed_rules)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if cfg.refs_enabled and refs is not None:
