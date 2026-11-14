@@ -910,10 +910,12 @@ def parse_allowed_refs(lines: list, profile: str):
 
 
 # Определение языка текста по SRT: библиотека lingua (lingua-language-detector, Generate/requirements-lang.txt).
-# Пороги — числа ниже; ниже порога — ошибка с просьбой задать text_language явно.
+# Решение о языке принимает lingua (detect_language_of) с минимальным относительным отрывом LINGUA_MIN_GAP.
+# LINGUA_MIN_CONFIDENCE не участвует в решении: только для строки в логе. Не определено — ошибка с просьбой
+# задать text_language явно.
 SRT_MIN_LETTERS = 20          # меньше букв в тексте — язык не определяется
-LINGUA_MIN_CONFIDENCE = 0.80  # уверенность лучшего языка не ниже этого значения
-LINGUA_MIN_GAP = 0.10         # отрыв лучшего языка от второго не меньше этого значения
+LINGUA_MIN_CONFIDENCE = 0.80  # только для лога: уверенность выбранного языка пишется в строку лога
+LINGUA_MIN_GAP = 0.10         # минимальный относительный отрыв лучшего языка от второго (задаётся детектору)
 
 _SRT_INDEX_RX = re.compile(r"^\s*\d+\s*$")
 _SRT_TIMING_RX = re.compile(r"^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->")
@@ -931,16 +933,19 @@ def _lingua_detector():
             raise GeminiInputError(
                 "Ошибка входных данных: для языка текста по SRT нужна библиотека lingua-language-detector "
                 "(Generate/requirements-lang.txt), она не установлена.") from None
-        _LINGUA_DETECTOR = LanguageDetectorBuilder.from_all_languages().build()
+        # минимальный относительный отрыв: lingua сама возвращает None, если отрыв меньше LINGUA_MIN_GAP
+        _LINGUA_DETECTOR = (LanguageDetectorBuilder.from_all_languages()
+                            .with_minimum_relative_distance(LINGUA_MIN_GAP)
+                            .build())
     return _LINGUA_DETECTOR
 
 
 def detect_srt_language(path) -> str:
     """Название языка текста в SRT по-английски («Russian»). Неясно — GeminiInputError по-русски.
 
-    Строки-индексы, тайминги и теги отбрасываются. Букв меньше SRT_MIN_LETTERS — ошибка. Иначе lingua даёт
-    уверенность по языкам: лучший язык принимается, если его уверенность не ниже LINGUA_MIN_CONFIDENCE и
-    отрыв от второго не ниже LINGUA_MIN_GAP. Текст SRT в лог не пишется.
+    Строки-индексы, тайминги и теги отбрасываются. Букв меньше SRT_MIN_LETTERS — ошибка. Иначе решение о языке
+    принимает lingua (detect_language_of): None — ошибка, язык не определён. Уверенность пишется только в лог.
+    Текст SRT в лог не пишется.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8-sig")
@@ -957,18 +962,17 @@ def detect_srt_language(path) -> str:
     if letters < SRT_MIN_LETTERS:
         raise GeminiInputError(
             f"Ошибка входных данных: язык текста в SRT не определён, мало букв ({letters}). {hint}")
-    values = _lingua_detector().compute_language_confidence_values(text)
-    if not values:
-        raise GeminiInputError(f"Ошибка входных данных: язык текста в SRT не определён. {hint}")
-    top = values[0]
-    second = values[1].value if len(values) > 1 else 0.0
-    gap = top.value - second
-    if top.value < LINGUA_MIN_CONFIDENCE or gap < LINGUA_MIN_GAP:
+    detector = _lingua_detector()
+    # решение lingua: None — смешанный текст или отрыв меньше LINGUA_MIN_GAP; порог уверенности здесь не проверяется
+    language = detector.detect_language_of(text)
+    if language is None:
         raise GeminiInputError(
-            f"Ошибка входных данных: язык текста в SRT не определён: текст смешанный или язык неясен "
-            f"(уверенность {top.value:.2f}, отрыв {gap:.2f}). {hint}")
-    name = top.language.name.title()
-    log.info("Язык текста в кадре определён по SRT: %s, уверенность %.2f.", name, top.value)
+            f"Ошибка входных данных: язык текста в SRT не определён: текст смешанный или язык неясен. {hint}")
+    name = language.name.title()
+    # уверенность нужна только для строки в лог; на решение не влияет
+    values = detector.compute_language_confidence_values(text)
+    confidence = next((cv.value for cv in values if cv.language == language), 0.0)
+    log.info("Язык текста в кадре определён по SRT: %s, уверенность %.2f.", name, confidence)
     return name
 
 

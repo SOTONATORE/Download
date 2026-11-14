@@ -31,7 +31,7 @@ class _FakePromptConfig:
 
     def __init__(self, style_file, batch_size, preset, media=None, refs_enabled=False, on_unfixed="keep",
                  fail_fast=False, raw_dir=None, relaxed_rules=None, text_language=None,
-                 frame_language=None, ref_max=10, response_format=None):
+                 frame_language=None, ref_max=10, response_format=None, **kwargs):
         # media принимается, как в настоящем PromptConfig (cli передаёт его при сборке)
         self.style_file = style_file
         self.batch_size = batch_size
@@ -50,6 +50,9 @@ class _FakePromptConfig:
         self.ref_max = ref_max
         self.response_format = (
             [{"segment_index": int, "prompt": str}] if response_format is None else response_format)
+        # прочие аргументы, которые cli передаёт через **kwargs (allowed_refs, niche_preset_file): сохраняются как атрибуты
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
 @pytest.fixture
