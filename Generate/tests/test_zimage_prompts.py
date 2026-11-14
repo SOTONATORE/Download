@@ -29,7 +29,9 @@ def _style_body(text: str) -> str:
 class _FakePromptConfig:
     """Заглушка класса PromptConfig: запоминает аргументы конструктора."""
 
-    def __init__(self, style_file, batch_size, preset, media=None, refs_enabled=False, on_unfixed="keep"):
+    def __init__(self, style_file, batch_size, preset, media=None, refs_enabled=False, on_unfixed="keep",
+                 fail_fast=False, raw_dir=None, relaxed_rules=None, text_language=None,
+                 frame_language=None, ref_max=10, response_format=None):
         # media принимается, как в настоящем PromptConfig (cli передаёт его при сборке)
         self.style_file = style_file
         self.batch_size = batch_size
@@ -38,6 +40,16 @@ class _FakePromptConfig:
         # refs_enabled и on_unfixed: cli передаёт их всегда; значения по умолчанию как у PromptConfig
         self.refs_enabled = refs_enabled
         self.on_unfixed = on_unfixed
+        # остальные поля, которые cli передаёт через **kwargs; значения по умолчанию как у PromptConfig
+        self.fail_fast = fail_fast
+        self.raw_dir = raw_dir
+        # relaxed_rules и response_format у PromptConfig — фабрики по умолчанию; None даёт то же значение
+        self.relaxed_rules = frozenset() if relaxed_rules is None else relaxed_rules
+        self.text_language = text_language
+        self.frame_language = frame_language
+        self.ref_max = ref_max
+        self.response_format = (
+            [{"segment_index": int, "prompt": str}] if response_format is None else response_format)
 
 
 @pytest.fixture

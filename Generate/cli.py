@@ -52,7 +52,9 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
-    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
+    from Generate.core.gemini_prompts import (
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, profile_relaxation,
+        read_preset)
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core import previews
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
@@ -69,7 +71,9 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
-    from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
+    from gemini_prompts import (  # type: ignore
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, profile_relaxation,
+        read_preset)
     from model_constants import PRESET_NONE  # type: ignore
     import previews  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
@@ -408,7 +412,6 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml refs_enabled должен быть true или false.")
     # relaxed_rules и text_language из profile.yaml: без ключей — пусто и None, как раньше
-    from Generate.core.gemini_prompts import REF_MAX, count_ref_files, detect_srt_language, profile_relaxation
     relaxed_rules, text_language = profile_relaxation(profile_lines, profile)
     for rule in sorted(relaxed_rules):
         # один раз на прогон и профиль; текст модели в лог не пишется
