@@ -16,8 +16,8 @@ Text on the frame: write it in the on-frame language named in the task. Use hand
 
 Crossing out: draw two red diagonal strokes over the scene, like brush strokes, to show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene, for example a person with equipment and two red diagonal strokes over the scene.
 
-Prompt form: write one or two plain sentences that describe exactly what is visible: the place, the single person and what they do, and any object, label or diagram. End every prompt with this exact sentence: Flat 2D style, bold outlines, flat colour fills.
+Prompt form: write one or two plain sentences that describe exactly what is visible: the place, the single person and what they do, and any object, label or diagram.
 
 Label rule: when a segment uses references, write one tag for each reference in its refs list. The tags follow the ascending order of the refs list: <image1> is the lowest number in refs, <image2> the next, and so on. Use each tag at least once, and only those tags.
 
-Final check before each prompt is returned: one scene, one main subject, one person at most, plain props only, the face shown whole and small in the scene, mood shown only through visible actions, describing only the scene itself, quotation marks absent, the fixed ending in place, and at least one reference used.
+Final check before each prompt is returned: one scene, one main subject, one person at most, plain props only, the face shown whole and small in the scene, mood shown only through visible actions, describing only the scene itself, quotation marks absent, and at least one reference used.
