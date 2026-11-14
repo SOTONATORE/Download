@@ -29,7 +29,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            make_problem, problem_ru, rework_remark,
                            CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
                            CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
-                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES)
+                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
+                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -38,7 +39,8 @@ except ImportError:  # pragma: no cover
                           make_problem, problem_ru, rework_remark,
                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
-                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES)
+                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
+                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -449,11 +451,13 @@ def attach_style(prompt: str, style_text: str) -> str:
 
 RULES_FILE_NAME = "rules.yaml"
 RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
-              "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children")
+              "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children",
+              "scene_motion_wording")
 _RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
 _RULES_BOOL_KEYS = ("animals_count", "static_frame")
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
                         "weapons": "weapons_allowed", "close_faces": "close_faces_allowed"}
+SCENE_MOTION_VALUES = ("keep", "drop")
 _NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
                  9: "nine", 10: "ten"}
 _EMOTION_SENTENCE = {
@@ -492,6 +496,8 @@ _MEDIUM_LINE_VIDEO = ("- Describe only the scene and its motion. Never name a me
                       "or camera or lens equipment; camera movement is the only camera wording allowed.\n")
 _MEDIUM_LINE_IMAGE = ("- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
                       "or camera or lens equipment; camera or lens equipment is forbidden.\n")
+# scene_motion_wording drop: те же слова без «and its motion», остальная строка без изменений
+_MEDIUM_LINE_IMAGE_STILL = _MEDIUM_LINE_IMAGE.replace(" and its motion", "", 1)
 _PAPER_LINE = ("- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, "
                "sheets and folded paper. Show the place or the activity instead, without readable text.\n")
 _CONTRAST_LINE = ("- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible "
@@ -535,6 +541,10 @@ def _rule_scalar(key: str, value: str, source: str):
         if value != "forbidden":
             raise rules_error(source, "ключ children фиксирован и не настраивается: допустимо только forbidden.")
         return None
+    if key == "scene_motion_wording":
+        if value not in SCENE_MOTION_VALUES:
+            raise rules_error(source, f"ключ scene_motion_wording должен быть keep или drop; получено «{value}».")
+        return value
     choices = EMOTION_VALUES if key == "emotion" else SUBJECT_SOURCE_VALUES
     if value not in choices:
         raise rules_error(source, f"ключ {key} должен быть одним из: {', '.join(choices)}; получено «{value}».")
@@ -658,7 +668,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         # static_frame true: один неподвижный кадр и запрет движения камеры; false — без них (rules.yaml)
         kind = "text-to-image prompt, one still frame" if rules.static_frame else "text-to-image prompt"
         camera_end = _NO_CAMERA_MOVE_LINE if rules.static_frame else ""
-        medium = "" if "art_medium" in cfg.relaxed_rules else _MEDIUM_LINE_IMAGE
+        image_line = _MEDIUM_LINE_IMAGE if rules.scene_motion_wording == "keep" else _MEDIUM_LINE_IMAGE_STILL
+        medium = "" if "art_medium" in cfg.relaxed_rules else image_line
     else:
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     paper = "" if "frame_text" in cfg.relaxed_rules else _PAPER_LINE
@@ -1161,6 +1172,8 @@ def _retry_note(nums, problems: list, max_characters: Optional[int] = None, anim
     max_characters: при заданном лимите персонажей подсказка о людях и животных берётся из people_hint."""
     lines = []
     people_reason = CONTENT_REASON_RU[PROBLEM_PEOPLE_COUNT]
+    many_reason = CONTENT_REASON_RU[PROBLEM_MANY_OF_ONE]
+    by_count = animal_plurals_by_count(max_characters, animals_count)
     for n in nums:
         hints = []
         for p in problems:
@@ -1168,6 +1181,8 @@ def _retry_note(nums, problems: list, max_characters: Optional[int] = None, anim
                 continue
             if max_characters is not None and p.reason == people_reason:
                 hints.append(people_hint(max_characters, animals_count))
+            elif by_count and p.reason == many_reason:
+                hints.append(MANY_OF_ONE_VEHICLES_HINT_EN)
             elif p.reason in _STYLE_HINTS:
                 hints.append(_STYLE_HINTS[p.reason])
         if hints:

@@ -9,6 +9,8 @@ small_objects: allowed
 speech: forbidden
 # оружие в кадре запрещено
 weapons: forbidden
+# описание сцены в промптах изображения без слов «and its motion» (фото — один неподвижный кадр)
+scene_motion_wording: drop
 # крупные планы лиц запрещены (только фото)
 close_faces: forbidden
 # фото: один неподвижный кадр, без слов о движении камеры

@@ -231,6 +231,7 @@ class RulesValues:
     emotion: str = "posture"                     # posture_and_action | posture | action
     subject_source: str = "text_and_context"     # text_only | text_and_context
     horses_vehicles_animals_max: int = 2         # лимит лошадей, машин и животных в группе (текст для модели)
+    scene_motion_wording: str = "keep"           # keep | drop: слова «and its motion» в строке медиа для изображений (rules: scene_motion_wording)
 
 
 def rule_skipped_codes(rules: RulesValues) -> frozenset:
@@ -238,6 +239,30 @@ def rule_skipped_codes(rules: RulesValues) -> frozenset:
     pairs = ((rules.small_objects_allowed, PROBLEM_SMALL_OBJECT), (rules.speech_allowed, PROBLEM_SPEECH),
              (rules.weapons_allowed, PROBLEM_WEAPON), (rules.close_faces_allowed, PROBLEM_CLOSE_FACE))
     return frozenset(code for allowed, code in pairs if allowed)
+
+
+# Подсказка «много одинаковых» для машин и механизмов: животные при гейте считаются лимитом персонажей
+MANY_OF_ONE_VEHICLES_HINT_EN = ("Show at most one or two vehicles or machines, each with a distinct description. "
+                                "No rows or fleets.")
+
+# Много одинаковых: животные во множественном числе и машины или механизмы (два списка с теми же словами, что были)
+_MANY_OF_ONE_ANIMAL_WORDS = ("horses", "camels", "sheep", "cows", "donkeys", "goats", "dogs", "oxen")
+_MANY_OF_ONE_VEHICLE_WORDS = ("cars", "carts", "trucks", "tanks", "cattle", "machines", "vehicles", "motorcycles",
+                              "bikes", "wagons", "carriages", "tractors")
+
+
+def _word_list_rx(words) -> re.Pattern:
+    return re.compile(r"\b(?:" + "|".join(words) + r")\b", re.IGNORECASE)
+
+
+_MANY_OF_ONE_ALL_RX = _word_list_rx(_MANY_OF_ONE_ANIMAL_WORDS + _MANY_OF_ONE_VEHICLE_WORDS)
+_MANY_OF_ONE_VEHICLES_RX = _word_list_rx(_MANY_OF_ONE_VEHICLE_WORDS)
+
+
+def animal_plurals_by_count(max_characters: Optional[int], animals_count: bool = True) -> bool:
+    """True, если животные во множественном числе проверяются лимитом персонажей, а не правилом «много одинаковых».
+    Гейт: задан max_characters и животные входят в подсчёт. Без max_characters — прежняя проверка обоих списков."""
+    return max_characters is not None and bool(animals_count)
 
 
 _CONTENT_RX = (
@@ -252,9 +277,7 @@ _CONTENT_RX = (
         r"\b(?:people|men|women|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|"
         r"guards|warriors|fighters|travell?ers|figures|persons|crowds?|groups?|troops?|several|many|dozens|"
         r"multiple|rows? of|lines? of)\b", re.IGNORECASE)),
-    (PROBLEM_MANY_OF_ONE, re.compile(
-        r"\b(?:horses|cars|carts|trucks|tanks|camels|sheep|cattle|cows|machines|vehicles|motorcycles|bikes|"
-        r"wagons|carriages|dogs|goats|donkeys|oxen|tractors)\b", re.IGNORECASE)),
+    (PROBLEM_MANY_OF_ONE, _MANY_OF_ONE_ALL_RX),
     (PROBLEM_SMALL_OBJECT, re.compile(
         r"\b(?:abacus|abacuses|needles?|threads?|threading|beads?|coins?|pens?|pencils?|cups?|bowls?|spoons?|"
         r"pillows?|bundles?|cloths?|rags?|ropes?|strings?|stitch\w*|sew\w*|sewing|stacking|stacks? of|"
@@ -357,11 +380,24 @@ def _animal_matches(text: str) -> list:
     return [m for m in _ANIMAL_RX.finditer(text) if not _is_repeat_mention(text, m.start())]
 
 
+# Число перед животным: слово two–five или цифра 2–9 сразу перед словом (через пробелы)
+_NUMBER_BEFORE_ANIMAL_RX = re.compile(r"(?:\b(two|three|four|five)|\b([2-9]))\s+$", re.IGNORECASE)
+_NUMBER_WORD_VALUE = {"two": 2, "three": 3, "four": 4, "five": 5}
+
+
+def _animal_count(text: str, m) -> int:
+    """Животных в одном упоминании: число перед словом; без числа — множественное 2, единственное 1."""
+    before = _NUMBER_BEFORE_ANIMAL_RX.search(text[:m.start()])
+    if before:
+        return _NUMBER_WORD_VALUE[before.group(1).lower()] if before.group(1) else int(before.group(2))
+    return 2 if m.group(1) else 1
+
+
 def count_characters(text: str, animals_count: bool = True) -> int:
-    """Персонажи для max_characters: люди (count_people), животные (одно — 1, множественное — 2) и герой (1, если назван).
-    animals_count False (rules.yaml): животные не входят в подсчёт."""
+    """Персонажи для max_characters: люди (count_people), животные (число перед словом, иначе множественное — 2,
+    единственное — 1) и герой (1, если назван). animals_count False (rules.yaml): животные не входят в подсчёт."""
     t = text or ""
-    animals = sum(2 if m.group(1) else 1 for m in _animal_matches(t)) if animals_count else 0
+    animals = sum(_animal_count(t, m) for m in _animal_matches(t)) if animals_count else 0
     return count_people(t) + animals + (1 if _HERO_RX.search(t) else 0)
 
 
@@ -385,9 +421,13 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
     rules = rules or RulesValues()
     hits = []
     skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE) | rule_skipped_codes(rules)
+    # гейт: животные во множественном числе считает лимит персонажей; список машин проверяется всегда
+    many_rx = _MANY_OF_ONE_VEHICLES_RX if animal_plurals_by_count(max_characters, rules.animals_count) else _MANY_OF_ONE_ALL_RX
     for code, rx in _CONTENT_RX:
         if code in skipped:
             continue
+        if code == PROBLEM_MANY_OF_ONE:
+            rx = many_rx
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
