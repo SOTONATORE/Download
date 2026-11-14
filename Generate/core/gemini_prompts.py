@@ -656,6 +656,12 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
                    f"which must be written in {cfg.frame_language}.")
 
 
+def _allowed_combo_lines(allowed) -> str:
+    """Строки разрешённых сочетаний для системной инструкции: по одному на строку, номера через «, ».
+    Берутся из тех же кортежей, что проверяет _combo_bad (cfg.allowed_refs); порядок — по возрастанию кортежей."""
+    return "\n".join(", ".join(str(n) for n in combo) for combo in sorted(allowed))
+
+
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
     rules = cfg.rules
@@ -701,13 +707,24 @@ def build_system_instruction(cfg: PromptConfig) -> str:
     ]
     if cfg.refs_enabled:
         # контракт с референсами (только профили с refs_enabled): номера и метки должны совпадать
+        if cfg.allowed_refs is None:
+            # профили без allowed_refs: текст прежний, байт в байт
+            refs_rule = "naming the reference images used for that segment (an empty list if none). "
+            no_refs_rule = "A segment with no refs has no <imageN> tag."
+        else:
+            # профили с allowed_refs: сочетания берутся из тех же кортежей, что проверяет _combo_bad
+            refs_rule = ("naming the reference images used for that segment. "
+                         "refs must be exactly one of the allowed combinations listed below, and never an empty list. "
+                         "Allowed combinations, one per line:\n"
+                         + _allowed_combo_lines(cfg.allowed_refs) + "\n")
+            no_refs_rule = "Every segment has at least one reference, so every segment has at least one <imageN> tag."
         parts[0] += (
             "\n\n# Reference images\n"
             f"Each object also has \"refs\": a JSON list of distinct integers from 1 to {cfg.ref_max}, sorted ascending, "
-            "naming the reference images used for that segment (an empty list if none). "
-            "In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, where N is the "
+            + refs_rule
+            + "In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, where N is the "
             "number of entries in refs; the tag <imageK> is the K-th entry of the sorted refs list. "
-            "Use each tag at least once and no other tags. A segment with no refs has no <imageN> tag.")
+            "Use each tag at least once and no other tags. " + no_refs_rule)
     # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
     if cfg.preset != PRESET_NONE:
         read_preset(cfg.preset)
@@ -1392,11 +1409,32 @@ def _dump_raw(cfg: PromptConfig, batch_nums: list, slug: str, raw: str) -> None:
         log.warning("Не удалось записать сырой ответ модели в файл %s (%s).", path, type(exc).__name__)
 
 
+def _dump_debug(cfg: PromptConfig, system, user) -> None:
+    """fail_fast: системная инструкция и текст запроса батча с проблемой пишутся в <родитель raw_dir>/debug/
+    (system_instruction.txt, user_request.txt). Только при проблеме и только если raw_dir задан.
+    В журнал содержимое не попадает: только путь к папке. Сбой записи не скрывает ошибку батча."""
+    if not cfg.raw_dir:
+        return
+    folder = Path(cfg.raw_dir).parent / "debug"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, text in (("system_instruction.txt", system), ("user_request.txt", user)):
+            if text is None:
+                continue
+            with open(folder / name, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+    except Exception:  # noqa: BLE001
+        log.warning("Не удалось записать отладочные файлы промпта в папку %s.", folder)
+
+
 def _fail_fast_stop(cfg: PromptConfig, batch_nums: list, bad_nums: list, slug: str, raw: str,
-                    rule_label: Optional[str] = None) -> None:
+                    rule_label: Optional[str] = None, system: Optional[str] = None,
+                    user: Optional[str] = None) -> None:
     """fail_fast: первая проблема останавливает прогон. Сырой ответ уходит в файл, затем GeminiError. Повтора нет.
-    rule_label: фиксированная русская подпись правила (из таблиц кодов); без неё — общая подпись по slug."""
+    rule_label: фиксированная русская подпись правила (из таблиц кодов); без неё — общая подпись по slug.
+    system, user: системная инструкция и текст запроса батча для отладочных файлов (только при raw_dir)."""
     _dump_raw(cfg, batch_nums, slug, raw)
+    _dump_debug(cfg, system, user)
     shown = _num_ranges(list(bad_nums)) or "нет"
     raise GeminiError(
         f"Ошибка: проверка промптов остановлена (fail_fast): батч {batch_nums[0]}-{batch_nums[-1]}, "
@@ -1443,7 +1481,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
         slug = _parse_slug(problems, expected)
         # подпись правила — только для ниши с max_characters; у остальных ниш сообщение прежнее
         label = _segment_rule_label(problems) if (slug == "segment" and builder.cfg.max_characters is not None) else None
-        _fail_fast_stop(builder.cfg, expected, bad_nums, slug, raw, label)
+        _fail_fast_stop(builder.cfg, expected, bad_nums, slug, raw, label, system=batch.system, user=batch.user)
 
     if bad:
         log.warning("%sБатч %s..%s: нарушения в %d из %d записей, повторный запрос.",
@@ -1484,7 +1522,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                 if builder.cfg.fail_fast:
                     # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
                     _fail_fast_stop(builder.cfg, expected, [n], _content_slug(found), raw,
-                                    _content_rule_label(found, builder.cfg.max_characters))
+                                    _content_rule_label(found, builder.cfg.max_characters),
+                                    system=batch.system, user=batch.user)
                 r.rework_pending = found
                 r.rework_round = 0
     return final
