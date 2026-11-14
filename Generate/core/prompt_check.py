@@ -12,6 +12,7 @@
 """
 
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 # Английские основы. Соответствуют русскому списку frame_rules.py:
@@ -208,6 +209,37 @@ def problem_label(code: str) -> Optional[str]:
 # Содержание кадра
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Значения правил содержания из prompts/rules.yaml (ниша или модель). Файл читает gemini_prompts.load_rules.
+# Поля по умолчанию дают прежнее поведение ltx25 и zimage_turbo.
+# ---------------------------------------------------------------------------
+
+EMOTION_VALUES = ("posture_and_action", "posture", "action")
+SUBJECT_SOURCE_VALUES = ("text_only", "text_and_context")
+
+
+@dataclass
+class RulesValues:
+    max_characters: Optional[int] = None         # персонажи в кадре; None — лимит людей (max_people_per_image или по виду медиа)
+    animals_count: bool = True                   # животные входят в max_characters
+    max_people_per_image: Optional[int] = None   # лимит людей, если max_characters не задан; None — PEOPLE_LIMIT по виду медиа
+    small_objects_allowed: bool = False          # мелкие предметы разрешены (rules: small_objects)
+    speech_allowed: bool = False                 # речь и движение губ разрешены (rules: speech)
+    weapons_allowed: bool = False                # оружие в кадре разрешено (rules: weapons)
+    close_faces_allowed: bool = False            # крупные планы лиц разрешены (rules: close_faces; только фото)
+    static_frame: bool = True                    # фото: один неподвижный кадр, без слов о движении камеры
+    emotion: str = "posture"                     # posture_and_action | posture | action
+    subject_source: str = "text_and_context"     # text_only | text_and_context
+    horses_vehicles_animals_max: int = 2         # лимит лошадей, машин и животных в группе (текст для модели)
+
+
+def rule_skipped_codes(rules: RulesValues) -> frozenset:
+    """Коды нарушений, которые правила ниши отключают (значение allowed). Правила безопасности сюда не входят."""
+    pairs = ((rules.small_objects_allowed, PROBLEM_SMALL_OBJECT), (rules.speech_allowed, PROBLEM_SPEECH),
+             (rules.weapons_allowed, PROBLEM_WEAPON), (rules.close_faces_allowed, PROBLEM_CLOSE_FACE))
+    return frozenset(code for allowed, code in pairs if allowed)
+
+
 _CONTENT_RX = (
     (PROBLEM_CHILD, re.compile(
         r"\b(?:child|children|kids?|boys?|girls?|babies|baby|infants?|toddlers?|sons?|daughters?|"
@@ -325,29 +357,34 @@ def _animal_matches(text: str) -> list:
     return [m for m in _ANIMAL_RX.finditer(text) if not _is_repeat_mention(text, m.start())]
 
 
-def count_characters(text: str) -> int:
-    """Персонажи для max_characters: люди (count_people), животные (одно — 1, множественное — 2) и герой (1, если назван)."""
+def count_characters(text: str, animals_count: bool = True) -> int:
+    """Персонажи для max_characters: люди (count_people), животные (одно — 1, множественное — 2) и герой (1, если назван).
+    animals_count False (rules.yaml): животные не входят в подсчёт."""
     t = text or ""
-    animals = sum(2 if m.group(1) else 1 for m in _animal_matches(t))
+    animals = sum(2 if m.group(1) else 1 for m in _animal_matches(t)) if animals_count else 0
     return count_people(t) + animals + (1 if _HERO_RX.search(t) else 0)
 
 
-def people_hint(max_characters: Optional[int]) -> str:
+def people_hint(max_characters: Optional[int], animals_count: bool = True) -> str:
     """Подсказка модели при повторе за число персонажей. Без max_characters — прежняя подсказка."""
     if max_characters is None:
         return CONTENT_HINT_EN[PROBLEM_PEOPLE_COUNT]
-    return (f"Show at most {max_characters} characters in total, people and animals together, the main hero "
+    scope = "people and animals together" if animals_count else "people only"
+    return (f"Show at most {max_characters} characters in total, {scope}, the main hero "
             "included. Describe every character other than the main hero fully (age, clothing colour, hair, "
             "or the animal's colour and size). No crowds, groups, rows or plural people.")
 
 
-def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
+def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
+                 rules: Optional[RulesValues] = None) -> list:
     """Нарушения содержания: список пар (код, фрагмент). Текст не меняется.
     relaxed: отключённые профилем правила из RELAXABLE_RULES; правила безопасности отключить нельзя.
-    max_characters: лимит персонажей профиля (герой и остальные); None — прежний PEOPLE_LIMIT."""
+    max_characters: лимит персонажей профиля (герой и остальные); None — прежний PEOPLE_LIMIT.
+    rules: значения rules.yaml; None — значения по умолчанию (прежнее поведение)."""
     t = text or ""
+    rules = rules or RulesValues()
     hits = []
-    skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE)
+    skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE) | rule_skipped_codes(rules)
     for code, rx in _CONTENT_RX:
         if code in skipped:
             continue
@@ -355,22 +392,24 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
     if max_characters is None:
-        limit = PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
+        limit = rules.max_people_per_image if rules.max_people_per_image is not None else PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
         if count_people(t) > limit:
             found = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
             found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t)
             hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(found)))
-    elif count_characters(t) > max_characters:
+    elif count_characters(t, rules.animals_count) > max_characters:
         found = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
-        found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t) + [m.group(0) for m in _animal_matches(t)]
+        animal_words = [m.group(0) for m in _animal_matches(t)] if rules.animals_count else []
+        found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t) + animal_words
         hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(found)))
     return hits
 
 
-def content_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
+def content_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
+                    rules: Optional[RulesValues] = None) -> list:
     """Причины содержания по-русски для needs_review (без фрагментов), без повторов."""
     return list(dict.fromkeys(CONTENT_REASON_RU[code]
-                              for code, _ in content_hits(prompt, media, relaxed, max_characters)))
+                              for code, _ in content_hits(prompt, media, relaxed, max_characters, rules)))
 
 
 def ethnicity_reasons(prompt: str, segment_text: str) -> list:
@@ -383,7 +422,8 @@ def ethnicity_reasons(prompt: str, segment_text: str) -> list:
     return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
 
 
-def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
+def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
+                  rules: Optional[RulesValues] = None) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     problems = []
@@ -395,7 +435,7 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
         problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
         problems.append(make_problem(PROBLEM_LEFTOVER_MARKER, m.group(0)))
-    for code, fragment in content_hits(text, media, relaxed, max_characters):
+    for code, fragment in content_hits(text, media, relaxed, max_characters, rules):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем
     return list(dict.fromkeys(problems))

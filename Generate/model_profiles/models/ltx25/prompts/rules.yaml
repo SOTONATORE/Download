@@ -1,0 +1,13 @@
+# Правила содержания кадра для модели ltx25 (видео). Значения дают прежнее поведение: текст инструкции и проверка не меняются.
+# max_characters не задан: действует лимит людей (max_people_per_image)
+animals_count: true
+max_people_per_image: 2
+small_objects: forbidden
+speech: forbidden
+weapons: forbidden
+close_faces: forbidden
+static_frame: true
+emotion: posture
+subject_source: text_and_context
+horses_vehicles_animals_max: 2
+children: forbidden

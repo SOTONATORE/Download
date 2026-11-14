@@ -1,0 +1,23 @@
+# Правила содержания кадра для ниши cartoon_photos. Только значения; ключи на английском.
+# Ключ max_characters: персонажи в кадре (герой и остальные, люди и животные вместе); лимит людей тогда не действует.
+max_characters: 4
+# животные входят в max_characters
+animals_count: true
+# мелкие предметы разрешены (соответствует relaxed_rules в profile.yaml)
+small_objects: allowed
+# речь и движение губ запрещены
+speech: forbidden
+# оружие в кадре запрещено
+weapons: forbidden
+# крупные планы лиц запрещены (только фото)
+close_faces: forbidden
+# фото: один неподвижный кадр, без слов о движении камеры
+static_frame: true
+# эмоции показываются позой и действиями
+emotion: posture_and_action
+# объекты и текст в кадре только из строки Text
+subject_source: text_only
+# лимит лошадей, машин и животных в одной группе (текст для модели)
+horses_vehicles_animals_max: 3
+# дети запрещены всегда (фиксировано, не настраивается)
+children: forbidden

@@ -1,6 +1,6 @@
 Style guide for the cartoon_photos niche.
 
-Each segment becomes one still frame: one scene, one action, drawn in the flat cartoon style of reference 1. Every prompt uses at least one reference from the refs list of its segment. Reference 1 is the base style and is added to most segments. Reference 6 is the main character and is added after the base style whenever the character appears. Choose the reference that matches the content of the segment, and use only reference numbers that appear in the refs list.
+Each segment becomes one scene with one action, drawn in the flat cartoon style of reference 1. Every prompt uses at least one reference from the refs list of its segment. Reference 1 is the base style and is added to most segments. Reference 6 is the main character and is added after the base style whenever the character appears. Choose the reference that matches the content of the segment, and use only reference numbers that appear in the refs list.
 
 Reference roles:
 - ref_1 (base style): a flat landscape with a bright sky, a green grass line, brown soil layers and grey rock below, with bold dark outlines and flat colour fills. Use it for any scene with ground, soil, rock, sky or water.
@@ -28,4 +28,4 @@ Each object, character and setting in a prompt comes from the segment text alone
 
 Label rule: when a segment uses references, write one tag for each reference in its refs list. The tags follow the ascending order of the refs list: <image1> is the lowest number in refs, <image2> the next, and so on. Use each tag at least once, and only those tags.
 
-Final check before each prompt is returned: one scene, at most three non-hero characters, people or animals, each fully described, plain props only, the face shown whole and small in the scene, mood shown only through visible actions, describing only the scene itself, quotation marks absent, and at least one reference used.
+Final check before each prompt is returned: one scene, the character count follows rules.yaml, each character fully described, plain props only, describing only the scene itself, quotation marks absent, and at least one reference used.

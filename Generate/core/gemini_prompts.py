@@ -28,7 +28,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark,
                            CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
-                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label)
+                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
+                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -36,7 +37,8 @@ except ImportError:  # pragma: no cover
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark,
                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
-                          CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label)
+                          CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
+                           RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -128,6 +130,19 @@ class PromptConfig:
     allowed_refs: Optional[frozenset] = None
     # niche_preset_file: prompts/preset.md папки ниши, если пресет «none»; None — файла нет
     niche_preset_file: Optional[str] = None
+    # rules: значения prompts/rules.yaml папки ниши или модели; по умолчанию — значения прежнего поведения
+    rules: RulesValues = field(default_factory=RulesValues)
+
+    def __post_init__(self) -> None:
+        # max_characters задаётся в rules.yaml; поле cfg.max_characters — то же значение (сверяется)
+        if self.max_characters is None:
+            self.max_characters = self.rules.max_characters
+        elif self.rules.max_characters is None:
+            self.rules.max_characters = self.max_characters
+        elif self.max_characters != self.rules.max_characters:
+            raise GeminiInputError(
+                f"Ошибка входных данных: max_characters в конфиге ({self.max_characters}) "
+                f"не совпадает с rules.yaml ({self.rules.max_characters}).")
 
 
 @dataclass(frozen=True)
@@ -427,45 +442,190 @@ def attach_style(prompt: str, style_text: str) -> str:
     return prompt.rstrip().rstrip(".") + ". " + style_text
 
 
-def _content_rules(media: str, max_characters: Optional[int] = None) -> str:
-    """Жёсткие правила содержания кадра (решения владельца после разбора прогона).
-    Те же правила проверяет prompt_check.py: нарушение уходит на повтор, а не в GPU."""
-    people_limit = "one person" if media == "image" else "at most two people"
+# ---------------------------------------------------------------------------
+# Правила содержания из prompts/rules.yaml: только значения, английские ключи, без PyYAML.
+# Строки с ключом подставляются из RulesValues; строки без ключа — фиксированные (safety и общие правила).
+# ---------------------------------------------------------------------------
+
+RULES_FILE_NAME = "rules.yaml"
+RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
+              "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children")
+_RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
+_RULES_BOOL_KEYS = ("animals_count", "static_frame")
+_RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
+                        "weapons": "weapons_allowed", "close_faces": "close_faces_allowed"}
+_NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
+                 9: "nine", 10: "ten"}
+_EMOTION_SENTENCE = {
+    "posture": "Show emotion only through posture.",
+    "posture_and_action": "Show emotion only through posture and visible actions.",
+    "action": "Show emotion only through visible actions.",
+}
+
+# фиксированные строки содержания (ключа в rules.yaml нет)
+_SHOW_ONLY_LINE = ("- Show only the people, animals and objects that the segment text names or directly implies. "
+                   "Add no extra characters, animals, vehicles or props.\n")
+_CHILDREN_LINE = ("- Never show children, babies, boys, girls, teenagers or young people. If the segment mentions "
+                  "them, show adults or no people, and keep the meaning through the setting.\n")
+_NUDITY_LINE = "- Every person wears named clothing. Never show anyone naked, shirtless or undressed.\n"
+_SMALL_OBJECTS_LINE = ("- Show only large, clearly visible objects. No small objects and no hand actions with small things "
+                       "(needles, thread, abacus, beads, cloth, bundles, cups, dung cakes; no stacking, stitching, tucking "
+                       "or threading).\n")
+_SPEECH_FORBIDDEN_START = ("- No speech of any kind: no speaking, shouting, laughing, crying, singing, conversation, dialogue, "
+                           "gestures for talking or moving lips. ")
+_FIRE_LINE = "- Keep hands and fingers away from fire, flames, candles and lanterns.\n"
+_CHAOS_LINE = ("- No battles, charges, gallops in formation, gunfire, explosions, smoke puffs or dust clouds. "
+               "Show calm, static or slowly moving scenes.\n")
+_WEAPONS_LINE = "- No weapons in the frame: no firearms, sabres, swords, spears or knives.\n"
+_ABSENT_LINE = ("- When the text says something is absent (for example no saddle), describe the visible state "
+                "instead (for example a bare horse back).\n")
+_ETHNICITY_LINE = ("- Derive the place, period and people's appearance from the segment text and its setting. Do not add "
+                   "a nationality, ethnicity or skin tone the text does not mention.\n")
+_CLOSE_FACES_LINE = ("- Never show close-ups, extreme close-ups or portraits. Show people from a medium or wide "
+                     "distance, with faces small in the frame.\n")
+_MOOD_LINE = ("- Show moods and ideas only through visible physical cues. Never use mood or emotion "
+              "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
+              "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n")
+_OUTFIT_LINE = ("- Give each person one consistent outfit; do not mix conflicting garments such as a "
+                "suit and an overcoat unless the layering is stated clearly.\n")
+_MEDIUM_LINE_VIDEO = ("- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+                      "or camera or lens equipment; camera movement is the only camera wording allowed.\n")
+_MEDIUM_LINE_IMAGE = ("- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
+                      "or camera or lens equipment; camera or lens equipment is forbidden.\n")
+_PAPER_LINE = ("- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, "
+               "sheets and folded paper. Show the place or the activity instead, without readable text.\n")
+_CONTRAST_LINE = ("- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible "
+                  "action or scene. Never describe X and never use a negation to refer to it.\n")
+_ASPECT_LINE = ("- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or "
+                "sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n")
+_ONE_CAMERA_MOVE_LINE = ("- Exactly one camera move. Finish the camera sentence with how the frame looks when "
+                         "the move ends (for a static camera: what the frame holds on).\n")
+_NO_CAMERA_MOVE_LINE = ("- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
+                        "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n")
+_FINAL_CHECK_LINE = ("- Before returning, check each prompt against the self-check checklist at the end of "
+                     "the style guide and rewrite any prompt that fails it.")
+_SUBJECT_TEXT_ONLY_LINE = ("Objects and on-frame text come from the Text line only; the Sentence, Before and After lines "
+                           "are for understanding the meaning.")
+
+
+def rules_error(source: str, text: str) -> GeminiInputError:
+    """Ошибка rules.yaml по-русски: название файла и текст про ключ."""
+    return GeminiInputError(f"Ошибка входных данных: в {source} {text}")
+
+
+def _rule_scalar(key: str, value: str, source: str):
+    """Значение одного ключа rules.yaml. Неверный вид — ошибка по-русски с именем ключа."""
+    if key in _RULES_INT_KEYS:
+        try:
+            number = int(value)
+        except ValueError:
+            number = 0
+        if number < 1:
+            raise rules_error(source, f"ключ {key} должен быть целым числом не меньше 1, получено «{value}».")
+        return number
+    if key in _RULES_BOOL_KEYS:
+        if value not in ("true", "false"):
+            raise rules_error(source, f"ключ {key} должен быть true или false, получено «{value}».")
+        return value == "true"
+    if key in _RULES_SWITCH_FIELDS:
+        if value not in ("allowed", "forbidden"):
+            raise rules_error(source, f"ключ {key} должен быть allowed или forbidden, получено «{value}».")
+        return value == "allowed"
+    if key == "children":
+        if value != "forbidden":
+            raise rules_error(source, "ключ children фиксирован и не настраивается: допустимо только forbidden.")
+        return None
+    choices = EMOTION_VALUES if key == "emotion" else SUBJECT_SOURCE_VALUES
+    if value not in choices:
+        raise rules_error(source, f"ключ {key} должен быть одним из: {', '.join(choices)}; получено «{value}».")
+    return value
+
+
+def parse_rules_text(text: str, source: str) -> RulesValues:
+    """Разбор prompts/rules.yaml: только строки вида key: value (как в profile.yaml, без вложенности)."""
+    fields = {}
+    seen = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        body = raw.split("#", 1)[0].rstrip()
+        if not body.strip():
+            continue
+        if body[0] in " \t":
+            raise rules_error(source, f"строка {number}: вложенные значения не поддерживаются, нужен вид key: value.")
+        key, sep, value = body.partition(":")
+        if not sep:
+            raise rules_error(source, f"строка {number}: нужен вид key: value.")
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key not in RULES_KEYS:
+            raise rules_error(source, f"неизвестный ключ «{key}». Допустимые ключи: {', '.join(RULES_KEYS)}.")
+        if key in seen:
+            raise rules_error(source, f"ключ «{key}» повторяется.")
+        seen.add(key)
+        parsed = _rule_scalar(key, value, source)
+        if parsed is None:
+            continue
+        fields[_RULES_SWITCH_FIELDS.get(key, key)] = parsed
+    return RulesValues(**fields)
+
+
+def load_rules(path) -> RulesValues:
+    """Читает prompts/rules.yaml папки ниши или модели. Файла нет — значения по умолчанию (прежнее поведение)."""
+    rules_file = Path(path)
+    if not rules_file.is_file():
+        return RulesValues()
+    return parse_rules_text(rules_file.read_text(encoding="utf-8"), str(rules_file))
+
+
+def _count_word(n: int) -> str:
+    return _NUMBER_WORDS.get(n, str(n))
+
+
+def _people_line(media: str, max_characters: Optional[int], rules: RulesValues) -> str:
     if max_characters is None:
-        people_line = (f"- Show {people_limit}, each named once and described distinctly (age, clothing colour, hair). "
-                       "Never show a crowd, a group, a row, a line or several people.\n")
-    else:
-        people_line = ("- Show at most " + str(max_characters) + " characters in total, people and animals together, "
-                       "the main hero included. Describe every character other than the main hero fully. "
-                       "Never show a crowd, a group, a row, a line or several people.\n")
-    rules = (
-        "- Show only the people, animals and objects that the segment text names or directly implies. "
-        "Add no extra characters, animals, vehicles or props.\n"
-        + people_line +
-        "- Never show children, babies, boys, girls, teenagers or young people. If the segment mentions "
-        "them, show adults or no people, and keep the meaning through the setting.\n"
-        "- Every person wears named clothing. Never show anyone naked, shirtless or undressed.\n"
-        "- Show at most one or two horses, vehicles or animals, each described distinctly. No herds or rows.\n"
-        "- Show only large, clearly visible objects. No small objects and no hand actions with small things "
-        "(needles, thread, abacus, beads, cloth, bundles, cups, dung cakes; no stacking, stitching, tucking "
-        "or threading).\n"
-        "- No speech of any kind: no speaking, shouting, laughing, crying, singing, conversation, dialogue, "
-        "gestures for talking or moving lips. Show emotion only through posture.\n"
-        "- Keep hands and fingers away from fire, flames, candles and lanterns.\n"
-        "- No battles, charges, gallops in formation, gunfire, explosions, smoke puffs or dust clouds. "
-        "Show calm, static or slowly moving scenes.\n"
-        "- No weapons in the frame: no firearms, sabres, swords, spears or knives.\n"
-        "- When the text says something is absent (for example no saddle), describe the visible state "
-        "instead (for example a bare horse back).\n"
-        "- Derive the place, period and people's appearance from the segment text and its setting. Do not add "
-        "a nationality, ethnicity or skin tone the text does not mention.\n"
+        limit = (rules.max_people_per_image if rules.max_people_per_image is not None
+                 else PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"]))
+        phrase = "one person" if limit == 1 else f"at most {_count_word(limit)} people"
+        return (f"- Show {phrase}, each named once and described distinctly (age, clothing colour, hair). "
+                "Never show a crowd, a group, a row, a line or several people.\n")
+    scope = "people and animals together" if rules.animals_count else "people only"
+    return ("- Show at most " + str(max_characters) + " characters in total, " + scope + ", "
+            "the main hero included. Describe every character other than the main hero fully. "
+            "Never show a crowd, a group, a row, a line or several people.\n")
+
+
+def _horses_line(limit: int) -> str:
+    phrase = "one or two" if limit == 2 else _count_word(limit)
+    return f"- Show at most {phrase} horses, vehicles or animals, each described distinctly. No herds or rows.\n"
+
+
+def _speech_line(rules: RulesValues) -> str:
+    emotion = _EMOTION_SENTENCE[rules.emotion]
+    if rules.speech_allowed:
+        return f"- {emotion}\n"
+    return _SPEECH_FORBIDDEN_START + emotion + "\n"
+
+
+def _content_rules(media: str, max_characters: Optional[int] = None, rules: Optional[RulesValues] = None) -> str:
+    """Правила содержания кадра: строки из rules.yaml и фиксированные строки.
+    Те же значения читает prompt_check.py: нарушение уходит на повтор, а не в GPU."""
+    rv = rules or RulesValues()
+    text = (
+        _SHOW_ONLY_LINE
+        + _people_line(media, max_characters, rv)
+        + _CHILDREN_LINE
+        + _NUDITY_LINE
+        + _horses_line(rv.horses_vehicles_animals_max)
+        + ("" if rv.small_objects_allowed else _SMALL_OBJECTS_LINE)
+        + _speech_line(rv)
+        + _FIRE_LINE
+        + _CHAOS_LINE
+        + ("" if rv.weapons_allowed else _WEAPONS_LINE)
+        + _ABSENT_LINE
+        + _ETHNICITY_LINE
     )
-    if media == "image":
-        rules += (
-            "- Never show close-ups, extreme close-ups or portraits. Show people from a medium or wide "
-            "distance, with faces small in the frame.\n"
-        )
-    return rules
+    if media == "image" and not rv.close_faces_allowed:
+        text += _CLOSE_FACES_LINE
+    return text
 
 
 def _output_language_sentence(cfg: PromptConfig) -> str:
@@ -488,45 +648,30 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
 
 def build_system_instruction(cfg: PromptConfig) -> str:
     style = strip_user_only(Path(cfg.style_file).read_text(encoding="utf-8"))
+    rules = cfg.rules
     # строки art_medium и frame_text: при отключении правила строки нет; без отключения текст тот же, что раньше
     if cfg.media == "video":
         kind = "text-to-video prompt"
-        medium = "" if "art_medium" in cfg.relaxed_rules else (
-            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-            "or camera or lens equipment; camera movement is the only camera wording allowed.\n")
-        paper = "" if "frame_text" in cfg.relaxed_rules else (
-            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n")
-        camera_rules = (
-            medium
-            + "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
-            + paper
-            + "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
-            + "- Exactly one camera move. Finish the camera sentence with how the frame looks when "
-            "the move ends (for a static camera: what the frame holds on).\n"
-        )
+        camera_end = _ONE_CAMERA_MOVE_LINE
+        medium = "" if "art_medium" in cfg.relaxed_rules else _MEDIUM_LINE_VIDEO
     elif cfg.media == "image":
-        kind = "text-to-image prompt, one still frame"
-        medium = "" if "art_medium" in cfg.relaxed_rules else (
-            "- Describe only the scene and its motion. Never name a medium, rendering method, film look, "
-            "or camera or lens equipment; camera or lens equipment is forbidden.\n")
-        paper = "" if "frame_text" in cfg.relaxed_rules else (
-            "- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, sheets and folded paper. Show the place or the activity instead, without readable text.\n")
-        camera_rules = (
-            medium
-            + "- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible action or scene. Never describe X and never use a negation to refer to it.\n"
-            + paper
-            + "- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n"
-            + "- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
-            "or any motion of the camera or the frame. Describe the single still frame as a finished state.\n"
-        )
+        # static_frame true: один неподвижный кадр и запрет движения камеры; false — без них (rules.yaml)
+        kind = "text-to-image prompt, one still frame" if rules.static_frame else "text-to-image prompt"
+        camera_end = _NO_CAMERA_MOVE_LINE if rules.static_frame else ""
+        medium = "" if "art_medium" in cfg.relaxed_rules else _MEDIUM_LINE_IMAGE
     else:
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
+    paper = "" if "frame_text" in cfg.relaxed_rules else _PAPER_LINE
+    camera_rules = medium + _CONTRAST_LINE + paper + _ASPECT_LINE + camera_end
+    # subject_source text_only: объекты и текст в кадре только из строки Text; у text_and_context строки нет
+    subject_line = ("\n" + _SUBJECT_TEXT_ONLY_LINE) if rules.subject_source == "text_only" else ""
     parts = [
         "# Task\n"
         "You receive subtitle segments of a narrated video. For every segment write ONE "
         + kind + ", in English, that visually illustrates what the segment says, "
         "following the style guide below. Use the Sentence, Before and After lines only to "
-        "understand the meaning; the >>marked<< part is the passage to illustrate. The source subtitle text may be in any language. " + _output_language_sentence(cfg) + "\n\n"
+        "understand the meaning; the >>marked<< part is the passage to illustrate. The source subtitle text may be in any language. "
+        + _output_language_sentence(cfg) + subject_line + "\n\n"
         "# Output contract\n"
         "Return a JSON array with exactly one object per requested segment: "
         "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
@@ -534,17 +679,13 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         "Never write the segment number, the word \"segment\" or any numbering into the prompt text. "
         f"Each prompt must be at most {cfg.max_prompt_chars} characters.\n\n"
         "# Hard rules for every prompt\n"
-        "- Show moods and ideas only through visible physical cues. Never use mood or emotion "
-        "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
-        "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n"
-        "- No negations (no, not, without, never, nothing), no quotation marks, "
+        + _MOOD_LINE
+        + "- No negations (no, not, without, never, nothing), no quotation marks, "
         "no keyword lists (4k, masterpiece, trending).\n"
-        + camera_rules +
-        "- Give each person one consistent outfit; do not mix conflicting garments such as a "
-        "suit and an overcoat unless the layering is stated clearly.\n"
-        + _content_rules(cfg.media, cfg.max_characters) +
-        "- Before returning, check each prompt against the self-check checklist at the end of "
-        "the style guide and rewrite any prompt that fails it.",
+        + camera_rules
+        + _OUTFIT_LINE
+        + _content_rules(cfg.media, cfg.max_characters, rules)
+        + _FINAL_CHECK_LINE,
         "# Style guide\n" + style,
     ]
     if cfg.refs_enabled:
@@ -807,12 +948,13 @@ def _problem_ru_any(problem: str) -> str:
     return problem_ru(problem)
 
 
-def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
+def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
+                   rules: Optional[RulesValues] = None) -> list:
     """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.).
     relaxed: отключённые профилем правила; art_medium снимает стилевое правило, small_objects — в содержании."""
     style = [reason for rx, reason, _ in _STYLE_RULES
              if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)]
-    return style + content_reasons(prompt, media, relaxed, max_characters)
+    return style + content_reasons(prompt, media, relaxed, max_characters, rules)
 
 
 # ---------------------------------------------------------------------------
@@ -1014,7 +1156,7 @@ def count_ref_files(refs_dir, profile: str) -> int:
     return min(len(nums), REF_MAX)
 
 
-def _retry_note(nums, problems: list, max_characters: Optional[int] = None) -> str:
+def _retry_note(nums, problems: list, max_characters: Optional[int] = None, animals_count: bool = True) -> str:
     """Текст для повторного запроса: что именно исправить. Пусто, если стилевых нарушений нет.
     max_characters: при заданном лимите персонажей подсказка о людях и животных берётся из people_hint."""
     lines = []
@@ -1025,7 +1167,7 @@ def _retry_note(nums, problems: list, max_characters: Optional[int] = None) -> s
             if p.num != n:
                 continue
             if max_characters is not None and p.reason == people_reason:
-                hints.append(people_hint(max_characters))
+                hints.append(people_hint(max_characters, animals_count))
             elif p.reason in _STYLE_HINTS:
                 hints.append(_STYLE_HINTS[p.reason])
         if hints:
@@ -1096,7 +1238,7 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
-        reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules, cfg.max_characters))
+        reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules))
         if texts is not None and n in texts:
             reasons.extend(ethnicity_reasons(prompt, texts[n]))
         refs, ref_reasons = None, []
@@ -1132,7 +1274,7 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
-    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters)
+    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if cfg.refs_enabled and refs is not None:
@@ -1293,7 +1435,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
                     tag, expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
-            note = _retry_note(rb.nums, problems, builder.cfg.max_characters)
+            note = _retry_note(rb.nums, problems, builder.cfg.max_characters, builder.cfg.rules.animals_count)
             if note:
                 rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
