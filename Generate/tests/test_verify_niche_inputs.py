@@ -77,7 +77,7 @@ def test_niche_has_prompt_files():
     style = CARTOON_DIR / "prompts" / "style.md"
     assert style.is_file()
     first_line = style.read_text(encoding="utf-8").splitlines()[0]
-    assert first_line.startswith("TEMPORARY VERIFY STUB")
+    assert first_line.startswith("Style guide for the cartoon_photos niche")
 
 
 def test_niche_env_expressions_mention_niche_input():
