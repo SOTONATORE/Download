@@ -452,11 +452,12 @@ def attach_style(prompt: str, style_text: str) -> str:
 RULES_FILE_NAME = "rules.yaml"
 RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
               "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children",
-              "scene_motion_wording")
+              "scene_motion_wording", "object_sets")
 _RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
 _RULES_BOOL_KEYS = ("animals_count", "static_frame")
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
-                        "weapons": "weapons_allowed", "close_faces": "close_faces_allowed"}
+                        "weapons": "weapons_allowed", "close_faces": "close_faces_allowed",
+                        "object_sets": "object_sets_forbidden"}
 SCENE_MOTION_VALUES = ("keep", "drop")
 _NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
                  9: "nine", 10: "ten"}
@@ -475,6 +476,8 @@ _NUDITY_LINE = "- Every person wears named clothing. Never show anyone naked, sh
 _SMALL_OBJECTS_LINE = ("- Show only large, clearly visible objects. No small objects and no hand actions with small things "
                        "(needles, thread, abacus, beads, cloth, bundles, cups, dung cakes; no stacking, stitching, tucking "
                        "or threading).\n")
+_OBJECT_SET_LINE = ("- Show one object, or two or three objects of one kind. "
+                    "Never show stacks, piles, rows or lines of objects.\n")
 _SPEECH_FORBIDDEN_START = ("- No speech of any kind: no speaking, shouting, laughing, crying, singing, conversation, dialogue, "
                            "gestures for talking or moving lips. ")
 _FIRE_LINE = "- Keep hands and fingers away from fire, flames, candles and lanterns.\n"
@@ -533,6 +536,11 @@ def _rule_scalar(key: str, value: str, source: str):
         if value not in ("true", "false"):
             raise rules_error(source, f"ключ {key} должен быть true или false, получено «{value}».")
         return value == "true"
+    if key == "object_sets":
+        # обратная полярность: forbidden включает проверку наборов предметов (поле object_sets_forbidden)
+        if value not in ("allowed", "forbidden"):
+            raise rules_error(source, f"ключ object_sets должен быть allowed или forbidden, получено «{value}».")
+        return value == "forbidden"
     if key in _RULES_SWITCH_FIELDS:
         if value not in ("allowed", "forbidden"):
             raise rules_error(source, f"ключ {key} должен быть allowed или forbidden, получено «{value}».")
@@ -626,6 +634,7 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
         + _NUDITY_LINE
         + _horses_line(rv.horses_vehicles_animals_max)
         + ("" if rv.small_objects_allowed else _SMALL_OBJECTS_LINE)
+        + (_OBJECT_SET_LINE if rv.object_sets_forbidden else "")
         + _speech_line(rv)
         + _FIRE_LINE
         + _CHAOS_LINE

@@ -23,3 +23,5 @@ subject_source: text_only
 horses_vehicles_animals_max: 3
 # дети запрещены всегда (фиксировано, не настраивается)
 children: forbidden
+# наборы предметов: стопки, кучи, ряды и линии предметов запрещены (allowed | forbidden)
+object_sets: forbidden

@@ -101,6 +101,8 @@ PROBLEM_CHAOS = "battle_or_chaos"
 PROBLEM_WEAPON = "weapon"
 PROBLEM_CLOSE_FACE = "close_face"
 PROBLEM_ETHNICITY = "ethnicity_not_in_text"
+# наборы предметов (стопки, кучи, ряды, линии): только при rules object_sets: forbidden
+PROBLEM_OBJECT_SET = "object_set"
 
 # Подписи на английском для промпта Gemini и на русском для журнала, отчёта и текста ошибки.
 _PROBLEM_EN = {
@@ -131,6 +133,7 @@ CONTENT_REASON_RU = {
     PROBLEM_WEAPON: "оружие в кадре",
     PROBLEM_CLOSE_FACE: "крупный план лица",
     PROBLEM_ETHNICITY: "внешность или происхождение не из текста сегмента",
+    PROBLEM_OBJECT_SET: "стопки, кучи, ряды или линии предметов",
 }
 CONTENT_LABEL_EN = {
     PROBLEM_CHILD: "child in frame",
@@ -144,8 +147,10 @@ CONTENT_LABEL_EN = {
     PROBLEM_WEAPON: "weapon in frame",
     PROBLEM_CLOSE_FACE: "close-up of a face",
     PROBLEM_ETHNICITY: "origin or features not in the segment text",
+    PROBLEM_OBJECT_SET: "stacks, piles, rows or lines of objects",
 }
 CONTENT_HINT_EN = {
+    PROBLEM_OBJECT_SET: "Describe one object, or two or three objects; never write stacks, piles, rows or lines of objects.",
     PROBLEM_CHILD: "Remove every child, boy, girl, baby or young person. Show only adults, or no people, "
                    "and keep the segment's meaning through the setting and the objects.",
     PROBLEM_NUDITY: "Every person wears named clothing (for example a wool shirt, trousers, a greatcoat). "
@@ -232,6 +237,7 @@ class RulesValues:
     subject_source: str = "text_and_context"     # text_only | text_and_context
     horses_vehicles_animals_max: int = 2         # лимит лошадей, машин и животных в группе (текст для модели)
     scene_motion_wording: str = "keep"           # keep | drop: слова «and its motion» в строке медиа для изображений (rules: scene_motion_wording)
+    object_sets_forbidden: bool = False          # стопки, кучи, ряды и линии предметов запрещены (rules: object_sets: forbidden)
 
 
 def rule_skipped_codes(rules: RulesValues) -> frozenset:
@@ -310,6 +316,10 @@ _CONTENT_RX = (
         r"faces? up close)\b", re.IGNORECASE)),
 )
 _IMAGE_ONLY = frozenset({PROBLEM_CLOSE_FACE})
+# наборы предметов: отдельный шаблон, включается только правилом object_sets: forbidden (см. content_hits)
+_OBJECT_SET_RX = re.compile(r"\b(?:stacks?|piles?|rows?|lines?) of\b", re.IGNORECASE)
+# шаблон людей берём из _CONTENT_RX: «rows of» и «lines of» уже отмечены как PROBLEM_PEOPLE_COUNT
+_PEOPLE_COUNT_RX = dict(_CONTENT_RX)[PROBLEM_PEOPLE_COUNT]
 
 # Правила, которые профиль может отключить (relaxed_rules). Только эти три id; правила безопасности сюда не входят.
 RELAXABLE_RULES = frozenset({"art_medium", "small_objects", "frame_text"})
@@ -431,6 +441,11 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
+    # наборы предметов: не зависят от relaxed и от rule_skipped_codes; совпадение с людьми (тот же фрагмент) не дублируем
+    if rules.object_sets_forbidden:
+        people_spans = {m.span() for m in _PEOPLE_COUNT_RX.finditer(t)}
+        hits.extend((PROBLEM_OBJECT_SET, m.group(0)) for m in _OBJECT_SET_RX.finditer(t)
+                    if m.span() not in people_spans)
     if max_characters is None:
         limit = rules.max_people_per_image if rules.max_people_per_image is not None else PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
         if count_people(t) > limit:
