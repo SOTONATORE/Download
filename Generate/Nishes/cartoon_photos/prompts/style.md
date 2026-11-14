@@ -10,9 +10,11 @@ Reference roles:
 - ref_5 (comparison): two panels side by side, divided by a dashed line, each with a title above it and a short label inside. Use it for comparing two situations.
 - ref_6 (main character): a plain round white head with a simple expression, a blue short-sleeved shirt, blue jeans and white shoes, standing straight, full body, on a white background. Use it whenever the character appears.
 
+Reference combinations: choose exactly one of the following combinations, and list its numbers in the refs list. Base style alone: ref_1. Base style with the character: ref_1 and ref_6. Base style with the on-frame text: ref_1 and ref_2. Base style with the character and the on-frame text: ref_1, ref_2 and ref_6. The on-frame text alone: ref_2. One diagram alone: ref_3, ref_4 or ref_5. A diagram is always used alone. The character always comes with the base style.
+
 Visual style: bold dark outlines around every shape, flat colour fills with at most one simple shadow, simple readable shapes, and a limited bright palette of sky blue, green, brown, grey and orange. Diagrams sit on a plain white or pale background. Keep surfaces flat, with simple lighting drawn as shapes only.
 
-Text on the frame: write it in the on-frame language named in the task. Use handwritten capital letters, large enough to read at a glance, and keep it to one short phrase. The default colour is black. On a dark background use white. Use red only for the most important word or number. Any other colour is allowed when it stays easy to read.
+Text on the frame: a text is either one short phrase of at most 4 words, or one object described with one word for each part, using at most 4 parts. Use only one text phrase in each frame. Write the text in the on-frame language named in the task. Use handwritten capital letters, large enough to read at a glance. The default colour is black. On a dark background use white. Use red only for the most important word or number. Any other colour is allowed when it stays easy to read.
 
 Crossing out: draw two red diagonal strokes over the scene, like brush strokes, to show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene, for example a person with equipment and two red diagonal strokes over the scene.
 

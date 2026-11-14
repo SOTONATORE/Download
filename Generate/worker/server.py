@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,11 @@ DEFAULT_IDLE_TIMEOUT_MIN = 2
 DEFAULT_MAX_UNACKED = 3
 # Папка вывода ComfyUI: bootstrap.sh находит ComfyUI и передаёт путь в COMFY_OUTPUT_DIR (поиск один, в bootstrap).
 # Этот дефолт нужен только без переменных окружения и строится от COMFY_DIR (тоже от bootstrap).
-DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or "/opt/workspace-internal/ComfyUI", "output")
+# Папка ComfyUI по умолчанию (как у bootstrap.sh); переменная COMFY_DIR переопределяет её
+DEFAULT_COMFY_DIR = "/opt/workspace-internal/ComfyUI"
+DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or DEFAULT_COMFY_DIR, "output")
+# Папка входа ComfyUI: сюда копируются референсы ниши (LoadImage читает ref_N.png из неё)
+COMFY_INPUT_DIR_ENV = "COMFY_INPUT_DIR"
 MAX_BODY_BYTES = 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
@@ -902,6 +907,76 @@ class SwitchFailed(Exception):
     """Переключение профиля не удалось: текст причины на русском, без токенов и адресов с токеном."""
 
 
+# --- референсы ниши (refs_enabled: true): копия в папку входа ComfyUI ---
+_NICHE_REF_RX = re.compile(r"ref_(\d+)\.png")
+
+
+class NicheRefsError(RuntimeError):
+    """Референсы ниши не скопированы; текст по-русски пишется в журнал и в причину сбоя."""
+
+
+def comfy_input_dir() -> Path:
+    """Папка входа ComfyUI: COMFY_INPUT_DIR, иначе COMFY_DIR с «/input» на конце."""
+    explicit = os.environ.get(COMFY_INPUT_DIR_ENV, "")
+    if explicit:
+        return Path(explicit)
+    return Path(os.environ.get("COMFY_DIR") or DEFAULT_COMFY_DIR) / "input"
+
+
+def _yaml_flag_true(path: Path, key: str) -> bool:
+    """Поле верхнего уровня из profile.yaml равно true; читается строкой, без PyYAML."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for ln in lines:
+        if ln.startswith(key + ":"):
+            return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'") == "true"
+    return False
+
+
+def copy_niche_refs(refs_dir: Path, input_dir: Path) -> list:
+    """Копирует refs_dir/ref_N.png в input_dir под теми же именами и сверяет размер каждого файла.
+
+    Номера должны идти подряд с 1. Нет папки или пропуск номера — NicheRefsError по-русски.
+    """
+    if not refs_dir.is_dir():
+        raise NicheRefsError(f"папки референсов ниши нет: {refs_dir}.")
+    nums = []
+    for p in refs_dir.iterdir():
+        m = _NICHE_REF_RX.fullmatch(p.name)
+        if m:
+            nums.append(int(m.group(1)))
+    nums.sort()
+    if not nums or nums != list(range(1, len(nums) + 1)):
+        raise NicheRefsError(f"в папке референсов ниши номера ref_N.png должны идти подряд с 1: {refs_dir}.")
+    try:
+        input_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise NicheRefsError(f"не создана папка входа ComfyUI {input_dir}: {type(exc).__name__}.") from None
+    names = []
+    for n in nums:
+        name = f"ref_{n}.png"
+        src, dst = refs_dir / name, input_dir / name
+        try:
+            shutil.copyfile(src, dst)
+        except OSError as exc:
+            raise NicheRefsError(f"не удалось скопировать {name} в папку ComfyUI: {type(exc).__name__}.") from None
+        if not dst.is_file() or dst.stat().st_size != src.stat().st_size:
+            raise NicheRefsError(f"размер {name} в папке ComfyUI не совпадает с источником.")
+        names.append(name)
+    log.info("Референсы ниши скопированы в папку ComfyUI: %d файлов, папка %s.", len(names), input_dir)
+    return names
+
+
+def prepare_niche_refs(profile_dir: Path, nishes_root: Path, input_dir: Path) -> list:
+    """Копия референсов для ниши с refs_enabled: true. Видео, zimage_turbo и прочие профили не трогаются."""
+    folder = Path(profile_dir)
+    if folder.parent != Path(nishes_root) or not _yaml_flag_true(folder / "profile.yaml", "refs_enabled"):
+        return []
+    return copy_niche_refs(folder / "refs", Path(input_dir))
+
+
 def find_profile_folder(models_root: Path, nishes_root: Path, name: str) -> Path:
     """Папка профиля: сначала models_root/<имя>, затем nishes_root/<имя>.
 
@@ -1274,6 +1349,13 @@ class WorkerApp:
         self.weights_plan_script = Path(weights_plan_script) if weights_plan_script else WEIGHTS_PLAN_DEFAULT
         self.switch_state = "idle"     # idle, switching, ready, failed, refused (SWITCH_STATES)
         self.switch_reason = ""
+        # референсы ниши при старте (стартовый MODEL_PROFILE — ниша с refs_enabled): копия до первой задачи
+        try:
+            prepare_niche_refs(self.profile_dir, self.nishes_root, comfy_input_dir())
+        except NicheRefsError as exc:
+            self.switch_state = "failed"   # /task отказывает с причиной, как при сбое переключения
+            self.switch_reason = mask_secrets(str(exc))
+            log.error("Референсы ниши не скопированы при старте: %s", self.switch_reason)
         self.deadman = DeadManSwitch(idle_timeout_seconds,
                                      on_idle_timeout or self._default_shutdown,
                                      check_interval)
@@ -1355,6 +1437,11 @@ class WorkerApp:
                 return
             if rc != 0:
                 raise SwitchFailed(script_line or f"скрипт переключения завершился с кодом {rc}.")
+            # референсы ниши до смены workflow: первая задача читает ref_N.png из папки входа ComfyUI
+            try:
+                prepare_niche_refs(new_dir, self.nishes_root, comfy_input_dir())
+            except NicheRefsError as exc:
+                raise SwitchFailed(str(exc)) from None
             set_profile_type(info["type"])
             self.manager.end_switch(workflow, bindings)
             self.profile_name = name

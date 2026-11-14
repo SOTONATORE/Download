@@ -53,7 +53,7 @@ try:  # пакетный и «плоский» импорт
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
     from Generate.core.gemini_prompts import (
-        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, profile_relaxation,
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation,
         read_preset)
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core import previews
@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists)
     from gemini_prompts import (  # type: ignore
-        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, profile_relaxation,
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation,
         read_preset)
     from model_constants import PRESET_NONE  # type: ignore
     import previews  # type: ignore
@@ -378,6 +378,21 @@ def _srt_kwargs(profile: str, srt_path: str) -> dict:
     return {"srt_path": srt_path} if _profile_flag(lines, "text_language", profile, default="") == "srt" else {}
 
 
+def _niche_preset_file(profile: str, preset: str) -> Optional[str]:
+    """Файл prompts/preset.md папки ниши: только при пресете «none» и профиле из папки Nishes.
+    Именованный пресет (не none) не меняется; у других профилей файла нет — None."""
+    if preset != PRESET_NONE:
+        return None
+    try:
+        folder = profile_dir(profile)
+    except GeminiInputError:
+        return None
+    if folder.parent.name != "Nishes" or folder.name != profile:
+        return None
+    path = folder / "prompts" / "preset.md"
+    return str(path) if path.is_file() else None
+
+
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE,
                          fail_fast: bool = False, raw_dir: Optional[str] = None,
                          srt_path: Optional[str] = None):
@@ -425,10 +440,15 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
         frame_language = text_language
     # референсы: число ref_N.png в refs профиля, не больше REF_MAX; без refs_enabled — REF_MAX, как раньше
     ref_max = count_ref_files(profile_dir(profile) / "refs", profile) if refs_enabled else REF_MAX
+    # allowed_refs: разрешённые сочетания refs из profile.yaml; без поля — None, как раньше
+    allowed_refs = parse_allowed_refs(profile_lines, profile)
+    # пресет ниши: файл prompts/preset.md, если пресет не выбран («none»)
+    niche_preset_file = _niche_preset_file(profile, preset)
     # fail_fast и raw_dir по умолчанию выключены: без них конфиг прежний
     kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir,
               "relaxed_rules": relaxed_rules, "text_language": text_language, "frame_language": frame_language,
-              "ref_max": ref_max}
+              "ref_max": ref_max, "allowed_refs": allowed_refs if refs_enabled else None,
+              "niche_preset_file": niche_preset_file}
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]

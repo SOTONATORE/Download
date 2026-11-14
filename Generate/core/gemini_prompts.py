@@ -120,6 +120,10 @@ class PromptConfig:
     frame_language: Optional[str] = None
     # ref_max: число допустимых референсов профиля (число ref_N.png, не больше REF_MAX); по умолчанию REF_MAX
     ref_max: int = REF_MAX
+    # allowed_refs: разрешённые сочетания номеров refs (отсортированные кортежи) из profile.yaml; None — без проверки
+    allowed_refs: Optional[frozenset] = None
+    # niche_preset_file: prompts/preset.md папки ниши, если пресет «none»; None — файла нет
+    niche_preset_file: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +394,28 @@ def read_preset(preset: str) -> str:
     return text
 
 
+def read_niche_preset(path: str) -> str:
+    """Текст файла пресета ниши (prompts/preset.md): USER_ONLY вырезан, как у именованного пресета."""
+    file = Path(path)
+    try:
+        text = strip_user_only(file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        raise GeminiInputError(f"Пресет ниши не удалось прочитать: {file}.") from None
+    if not text:
+        raise GeminiInputError(f"Пресет ниши пуст: в файле {file} нет текста.")
+    return text
+
+
+def preset_text(preset: str, niche_preset_file: Optional[str] = None) -> str:
+    """Текст пресета для промптов: один путь для всех. Имя пресета задано — читается он, как прежде;
+    «none» и есть файл пресета ниши — текст файла; иначе пусто."""
+    if preset != PRESET_NONE:
+        return read_preset(preset)
+    if niche_preset_file:
+        return read_niche_preset(niche_preset_file)
+    return ""
+
+
 def attach_style(prompt: str, style_text: str) -> str:
     """Дописывает текст стиля в конец готового промпта через «. ». Пустой стиль — промпт без изменений."""
     if not style_text:
@@ -654,6 +680,8 @@ REF_REASON_NOT_INT = "refs: не целые числа"
 REF_REASON_RANGE = "refs: номер вне 1…10"
 REF_REASON_DUP = "refs: повторяющиеся номера"
 LABEL_REASON = "метки <imageN>: не совпадают с refs сегмента"
+REF_REASON_COMBO = "refs: сочетание не разрешено профилем"
+REF_COMBO_HINT = "Use only one of the allowed reference combinations listed in the style guide."
 REF_CODE_INVALID = "refs_invalid"
 REF_CODE_LABELS = "label_mismatch"
 _LABEL_RX = re.compile(r"<image(\d+)>")
@@ -666,6 +694,7 @@ _STYLE_HINTS.update({
     REF_REASON_RANGE: "Each refs number must be between 1 and 10.",
     REF_REASON_DUP: "Return each refs number only once.",
     LABEL_REASON: _REF_HINT_TEXT,
+    REF_REASON_COMBO: REF_COMBO_HINT,
 })
 
 
@@ -696,6 +725,14 @@ def _check_refs(value: Any, limit: int = REF_MAX) -> tuple:
     return sorted(value), []
 
 
+def _combo_bad(refs, cfg) -> bool:
+    """True, если отсортированные refs сегмента не равны ни одному разрешённому сочетанию профиля.
+    Без allowed_refs или при невалидном refs — False (проверка сочетания не применяется)."""
+    if cfg.allowed_refs is None or refs is None:
+        return False
+    return tuple(sorted(refs)) not in cfg.allowed_refs
+
+
 def _label_detail(prompt: str, refs: list) -> str:
     """Пусто, если метки <imageN> совпадают с 1…len(refs); иначе английское описание для повтора."""
     found = sorted(set(int(m) for m in _LABEL_RX.findall(prompt or "")))
@@ -720,7 +757,10 @@ def _ref_fix_problems(prompt: str, refs, invalid_reasons: list) -> list:
         if detail:
             out.append(f"{REF_CODE_LABELS}: «{detail}»")
     elif invalid_reasons:
-        out.append(f"{REF_CODE_INVALID}: «refs must be a list of distinct integers 1…10»")
+        if REF_REASON_COMBO in invalid_reasons:
+            out.append(f"{REF_CODE_INVALID}: «{REF_COMBO_HINT}»")
+        else:
+            out.append(f"{REF_CODE_INVALID}: «refs must be a list of distinct integers 1…10»")
     return out
 
 
@@ -747,7 +787,12 @@ def _rework_text(problems: list) -> str:
 def _problem_ru_any(problem: str) -> str:
     if _is_ref_problem(problem):
         code, _, rest = problem.partition(": ")
-        head = LABEL_REASON if code == REF_CODE_LABELS else REF_REASON_NOT_LIST
+        if code == REF_CODE_LABELS:
+            head = LABEL_REASON
+        elif rest == f"«{REF_COMBO_HINT}»":
+            head = REF_REASON_COMBO
+        else:
+            head = REF_REASON_NOT_LIST
         return f"{head}: {rest}"
     return problem_ru(problem)
 
@@ -800,6 +845,13 @@ def profile_relaxation(lines: list, profile: str) -> tuple:
     raw_rules = _profile_value(lines, "relaxed_rules")
     names = parse_flow_list(raw_rules, "relaxed_rules", profile) if raw_rules is not None else []
     relaxed = parse_relaxed_rules(names, profile)
+    # allow_text: true — текст в кадре разрешён: правило frame_text отключено; без поля или false — как раньше
+    allow_text = _profile_value(lines, "allow_text")
+    if allow_text not in (None, "true", "false"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml allow_text должен быть true или false.")
+    if allow_text == "true":
+        relaxed = relaxed | {"frame_text"}
     text_language = _profile_value(lines, "text_language")
     if text_language is not None and text_language != "srt" and not re.fullmatch(r"[A-Za-z]+", text_language):
         raise GeminiInputError(
@@ -812,64 +864,83 @@ def profile_relaxation(lines: list, profile: str) -> tuple:
     return relaxed, text_language
 
 
-# Определение языка текста по SRT: код, не модель. Пороги — числа ниже.
-SRT_MIN_LETTERS = 20        # меньше букв в тексте — язык не определяется
-SRT_SCRIPT_SHARE = 0.80     # доля основного письма среди букв; ниже — текст смешанный
-SRT_MIN_STOP_HITS = 3       # минимум слов-маркеров у лучшего латинского языка
-SRT_MIN_STOP_SHARE = 0.10   # и доля таких слов среди всех латинских слов
+# Разрешённые сочетания refs (allowed_refs): строки в кавычках, в каждой номера через запятую.
+# parse_flow_list здесь не годится: он режет по каждой запятой, и «1,2» распалось бы на два номера.
+_QUOTED_ITEM_RX = re.compile(r"""\s*(?:"([^"]*)"|'([^']*)')\s*""")
+
+
+def _allowed_error(profile: str, detail: str) -> GeminiInputError:
+    return GeminiInputError(f"Ошибка входных данных: в профиле {profile}/profile.yaml allowed_refs {detail}.")
+
+
+def parse_allowed_refs(lines: list, profile: str):
+    """frozenset отсортированных кортежей номеров из allowed_refs; нет поля — None (проверки нет).
+
+    Каждая запись — строка в кавычках: номера от 1 до REF_MAX через запятую, без повторов.
+    Иное — ошибка при загрузке профиля."""
+    raw = _profile_value(lines, "allowed_refs")
+    if raw is None:
+        return None
+    text = raw.strip()
+    form = "должен быть списком вида [\"1\", \"1,2\"]"
+    if not (text.startswith("[") and text.endswith("]")):
+        raise _allowed_error(profile, form)
+    inner = text[1:-1]
+    items, pos = [], 0
+    while True:
+        m = _QUOTED_ITEM_RX.match(inner, pos)
+        if m is None:
+            raise _allowed_error(profile, form)
+        items.append(m.group(1) if m.group(1) is not None else m.group(2))
+        pos = m.end()
+        if inner[pos:].strip() == "":
+            break
+        if not inner[pos:].lstrip().startswith(","):
+            raise _allowed_error(profile, form)
+        pos = inner.index(",", pos) + 1
+    combos = set()
+    for item in items:
+        nums = item.split(",") if re.fullmatch(r"\d+(,\d+)*", item) else None
+        values = [int(x) for x in nums] if nums else []
+        if not values or any(v < 1 or v > REF_MAX for v in values) or len(set(values)) != len(values):
+            raise _allowed_error(profile, f"содержит недопустимую запись «{item}»: нужны номера от 1 до "
+                                              f"{REF_MAX} через запятую без повторов, например «1,2»")
+        combos.add(tuple(sorted(values)))
+    return frozenset(combos)
+
+
+# Определение языка текста по SRT: библиотека lingua (lingua-language-detector, Generate/requirements-lang.txt).
+# Пороги — числа ниже; ниже порога — ошибка с просьбой задать text_language явно.
+SRT_MIN_LETTERS = 20          # меньше букв в тексте — язык не определяется
+LINGUA_MIN_CONFIDENCE = 0.80  # уверенность лучшего языка не ниже этого значения
+LINGUA_MIN_GAP = 0.10         # отрыв лучшего языка от второго не меньше этого значения
 
 _SRT_INDEX_RX = re.compile(r"^\s*\d+\s*$")
 _SRT_TIMING_RX = re.compile(r"^\s*\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->")
 _SRT_TAG_RX = re.compile(r"<[^>]*>|\{[^}]*\}")
-# письменности: (название, диапазоны кодовых точек)
-_SCRIPT_RANGES = (
-    ("Latin", ((0x0041, 0x005A), (0x0061, 0x007A), (0x00C0, 0x024F), (0x1E00, 0x1EFF))),
-    ("Cyrillic", ((0x0400, 0x052F),)),
-    ("Greek", ((0x0370, 0x03FF),)),
-    ("Arabic", ((0x0600, 0x06FF),)),
-    ("Hebrew", ((0x0590, 0x05FF),)),
-    ("Devanagari", ((0x0900, 0x097F),)),
-    ("Thai", ((0x0E00, 0x0E7F),)),
-    ("Hangul", ((0xAC00, 0xD7AF), (0x1100, 0x11FF))),
-    ("Kana", ((0x3040, 0x30FF),)),
-    ("Han", ((0x3400, 0x4DBF), (0x4E00, 0x9FFF))),
-)
-_SCRIPT_LANGUAGE = {"Cyrillic": "Russian", "Greek": "Greek", "Arabic": "Arabic", "Hebrew": "Hebrew",
-                    "Devanagari": "Hindi", "Thai": "Thai", "Hangul": "Korean", "Kana": "Japanese", "Han": "Chinese"}
-# фиксированная таблица стоп-слов для латиницы (слова, характерные для языка)
-_LATIN_STOPWORDS = {
-    "English": {"the", "and", "is", "are", "of", "to", "in", "that", "it", "with", "for", "this", "was", "not",
-                "be", "have", "you", "they", "on", "at", "but"},
-    "Spanish": {"el", "los", "las", "de", "que", "y", "en", "es", "un", "una", "por", "con", "para", "no", "lo",
-                "pero", "como", "del"},
-    "French": {"le", "les", "des", "est", "et", "une", "du", "pour", "avec", "pas", "que", "qui", "sur", "dans",
-               "je", "il", "nous", "vous", "ce", "au"},
-    "German": {"der", "die", "das", "und", "ist", "nicht", "ich", "ein", "eine", "mit", "auf", "für", "sie",
-               "dass", "zu", "dem", "den", "auch", "wir", "sich"},
-    "Portuguese": {"o", "os", "as", "do", "da", "em", "um", "uma", "para", "com", "não", "mais", "você", "ele",
-                   "ela", "são", "se", "ao"},
-    "Italian": {"il", "di", "che", "è", "sono", "della", "gli", "anche", "questo", "ma", "come", "non", "per",
-                "con", "una", "nel", "sei"},
-    "Turkish": {"bir", "ve", "bu", "da", "için", "ile", "çok", "ne", "ama", "daha", "gibi", "olan", "ben", "sen",
-                "biz", "değil", "var", "yok"},
-    "Indonesian": {"yang", "dan", "di", "ini", "itu", "untuk", "dengan", "tidak", "saya", "kami", "dari", "ada",
-                   "akan", "bisa", "sudah", "juga", "kita", "mereka", "atau", "adalah"},
-}
+_LINGUA_DETECTOR = None   # детектор строится один раз на процесс
 
 
-def _script_of(ch: str) -> str:
-    cp = ord(ch)
-    for name, ranges in _SCRIPT_RANGES:
-        if any(lo <= cp <= hi for lo, hi in ranges):
-            return name
-    return ""
+def _lingua_detector():
+    """Детектор lingua по всем языкам. Импорт здесь, а не на уровне модуля: без библиотеки модуль грузится."""
+    global _LINGUA_DETECTOR
+    if _LINGUA_DETECTOR is None:
+        try:
+            from lingua import LanguageDetectorBuilder
+        except ImportError:
+            raise GeminiInputError(
+                "Ошибка входных данных: для языка текста по SRT нужна библиотека lingua-language-detector "
+                "(Generate/requirements-lang.txt), она не установлена.") from None
+        _LINGUA_DETECTOR = LanguageDetectorBuilder.from_all_languages().build()
+    return _LINGUA_DETECTOR
 
 
 def detect_srt_language(path) -> str:
     """Название языка текста в SRT по-английски («Russian»). Неясно — GeminiInputError по-русски.
 
-    Шаги: строки-индексы и тайминги отбрасываются; буквы делятся по письменностям; основная письменность
-    должна дать не меньше SRT_SCRIPT_SHARE букв; не латиница — таблица письменность→язык; латиница — стоп-слова.
+    Строки-индексы, тайминги и теги отбрасываются. Букв меньше SRT_MIN_LETTERS — ошибка. Иначе lingua даёт
+    уверенность по языкам: лучший язык принимается, если его уверенность не ниже LINGUA_MIN_CONFIDENCE и
+    отрыв от второго не ниже LINGUA_MIN_GAP. Текст SRT в лог не пишется.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8-sig")
@@ -881,33 +952,24 @@ def detect_srt_language(path) -> str:
             continue
         kept.append(_SRT_TAG_RX.sub("", line))
     text = "\n".join(kept)
-    counts: dict = {}
-    for ch in text:
-        if ch.isalpha():
-            script = _script_of(ch)
-            if script:
-                counts[script] = counts.get(script, 0) + 1
-    letters = sum(counts.values())
+    letters = sum(1 for ch in text if ch.isalpha())
     hint = "Задайте text_language в профиле явно (название языка латиницей, например Russian)."
     if letters < SRT_MIN_LETTERS:
         raise GeminiInputError(
             f"Ошибка входных данных: язык текста в SRT не определён, мало букв ({letters}). {hint}")
-    top, top_n = max(counts.items(), key=lambda kv: kv[1])
-    if top_n / letters < SRT_SCRIPT_SHARE:
+    values = _lingua_detector().compute_language_confidence_values(text)
+    if not values:
+        raise GeminiInputError(f"Ошибка входных данных: язык текста в SRT не определён. {hint}")
+    top = values[0]
+    second = values[1].value if len(values) > 1 else 0.0
+    gap = top.value - second
+    if top.value < LINGUA_MIN_CONFIDENCE or gap < LINGUA_MIN_GAP:
         raise GeminiInputError(
-            f"Ошибка входных данных: язык текста в SRT не определён, текст смешанный "
-            f"(основная письменность {top} даёт {top_n / letters:.0%} букв). {hint}")
-    if top != "Latin":
-        return _SCRIPT_LANGUAGE[top]
-    tokens = re.findall(r"[^\W\d_]+", text.lower())
-    scores = {lang: sum(1 for t in tokens if t in words) for lang, words in _LATIN_STOPWORDS.items()}
-    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-    best_lang, best = ranked[0]
-    second = ranked[1][1]
-    if best < max(SRT_MIN_STOP_HITS, SRT_MIN_STOP_SHARE * len(tokens)) or best == second:
-        raise GeminiInputError(
-            f"Ошибка входных данных: язык текста в SRT не определён (нет явного языка или ничья между языками). {hint}")
-    return best_lang
+            f"Ошибка входных данных: язык текста в SRT не определён: текст смешанный или язык неясен "
+            f"(уверенность {top.value:.2f}, отрыв {gap:.2f}). {hint}")
+    name = top.language.name.title()
+    log.info("Язык текста в кадре определён по SRT: %s, уверенность %.2f.", name, top.value)
+    return name
 
 
 _REF_FILE_RX = re.compile(r"ref_(\d+)\.png")
@@ -1019,6 +1081,8 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         if cfg.refs_enabled:
             refs, ref_reasons = _check_refs(item.get("refs"), cfg.ref_max)
             reasons.extend(ref_reasons)
+            if _combo_bad(refs, cfg):
+                reasons.append(REF_REASON_COMBO)
             reasons.extend(_label_reasons(prompt, refs))
         extra = {k: v for k, v in item.items() if k not in ("segment_index", "prompt")}
         if cfg.refs_enabled:
@@ -1051,6 +1115,8 @@ def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if cfg.refs_enabled and refs is not None:
         problems += _ref_fix_problems(text, refs, [])
+        if _combo_bad(refs, cfg):
+            problems.append(f"{REF_CODE_INVALID}: «{REF_COMBO_HINT}»")
     return list(dict.fromkeys(problems))
 
 
@@ -1699,7 +1765,7 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
     # построитель знает нужные номера и номера очереди; батчи строятся только для нужных номеров
     builder = _Builder(segments, list(wanted_nums) + [r.num for r in seeds], cfg)
     # текст пресета читается до первого запроса: ошибка файла остаётся ошибкой входа
-    style_text = read_preset(cfg.preset) if cfg.preset != PRESET_NONE else ""
+    style_text = preset_text(cfg.preset, cfg.niche_preset_file)
     t_all = time.monotonic()
     batches = builder.batches(list(wanted_nums))
     # ключи для баннера: те же ключи провайдера, что и для числа потоков; ошибка чтения — ноль
