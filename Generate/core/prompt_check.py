@@ -12,6 +12,7 @@
 """
 
 import re
+from typing import Optional
 
 # Английские основы. Соответствуют русскому списку frame_rules.py:
 # map = карта, calendar = календарь, document = документ, chart = график, diagram = диаграмма,
@@ -198,6 +199,11 @@ def problem_ru(problem: str) -> str:
     return f"{_PROBLEM_RU[code]}: {rest}"
 
 
+def problem_label(code: str) -> Optional[str]:
+    """Русская подпись правила по коду нарушения (фиксированный текст из таблицы); None, если код неизвестен."""
+    return _PROBLEM_RU.get(code)
+
+
 # ---------------------------------------------------------------------------
 # Содержание кадра
 # ---------------------------------------------------------------------------
@@ -306,9 +312,39 @@ def count_people(text: str) -> int:
     return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
 
 
-def content_hits(text: str, media: str = "video", relaxed=frozenset()) -> list:
+# Животные для подсчёта персонажей (нужны только при max_characters): одиночное и множественное число
+_ANIMAL_RX = re.compile(
+    r"\b(?:dog|cat|horse|cow|goat|sheep|bird|wolf|fox|bear|rabbit|camel|donkey|goose|chicken|pig)(s|es)?\b",
+    re.IGNORECASE)
+# Герой кадра: по style.md он назван «the main character» или «main hero»; считается один раз
+_HERO_RX = re.compile(r"\bmain (?:character|hero)\b", re.IGNORECASE)
+
+
+def _animal_matches(text: str) -> list:
+    """Упоминания животных, которые вводят новое животное (повтор «the dog» не считается)."""
+    return [m for m in _ANIMAL_RX.finditer(text) if not _is_repeat_mention(text, m.start())]
+
+
+def count_characters(text: str) -> int:
+    """Персонажи для max_characters: люди (count_people), животные (одно — 1, множественное — 2) и герой (1, если назван)."""
+    t = text or ""
+    animals = sum(2 if m.group(1) else 1 for m in _animal_matches(t))
+    return count_people(t) + animals + (1 if _HERO_RX.search(t) else 0)
+
+
+def people_hint(max_characters: Optional[int]) -> str:
+    """Подсказка модели при повторе за число персонажей. Без max_characters — прежняя подсказка."""
+    if max_characters is None:
+        return CONTENT_HINT_EN[PROBLEM_PEOPLE_COUNT]
+    return (f"Show at most {max_characters} characters in total, people and animals together, the main hero "
+            "included. Describe every character other than the main hero fully (age, clothing colour, hair, "
+            "or the animal's colour and size). No crowds, groups, rows or plural people.")
+
+
+def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
     """Нарушения содержания: список пар (код, фрагмент). Текст не меняется.
-    relaxed: отключённые профилем правила из RELAXABLE_RULES; правила безопасности отключить нельзя."""
+    relaxed: отключённые профилем правила из RELAXABLE_RULES; правила безопасности отключить нельзя.
+    max_characters: лимит персонажей профиля (герой и остальные); None — прежний PEOPLE_LIMIT."""
     t = text or ""
     hits = []
     skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE)
@@ -318,17 +354,23 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset()) -> list:
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
-    limit = PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
-    if count_people(t) > limit:
+    if max_characters is None:
+        limit = PEOPLE_LIMIT.get(media, PEOPLE_LIMIT["video"])
+        if count_people(t) > limit:
+            found = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
+            found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t)
+            hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(found)))
+    elif count_characters(t) > max_characters:
         found = [m.group(0) for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start())]
-        found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t)
+        found += _PLURAL_PERSON_RX.findall(t) + _CROWD_RX.findall(t) + [m.group(0) for m in _animal_matches(t)]
         hits.append((PROBLEM_PEOPLE_COUNT, ", ".join(found)))
     return hits
 
 
-def content_reasons(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
+def content_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
     """Причины содержания по-русски для needs_review (без фрагментов), без повторов."""
-    return list(dict.fromkeys(CONTENT_REASON_RU[code] for code, _ in content_hits(prompt, media, relaxed)))
+    return list(dict.fromkeys(CONTENT_REASON_RU[code]
+                              for code, _ in content_hits(prompt, media, relaxed, max_characters)))
 
 
 def ethnicity_reasons(prompt: str, segment_text: str) -> list:
@@ -341,7 +383,7 @@ def ethnicity_reasons(prompt: str, segment_text: str) -> list:
     return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
 
 
-def find_problems(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
+def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     problems = []
@@ -353,7 +395,7 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset()) -> lis
         problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
         problems.append(make_problem(PROBLEM_LEFTOVER_MARKER, m.group(0)))
-    for code, fragment in content_hits(text, media, relaxed):
+    for code, fragment in content_hits(text, media, relaxed, max_characters):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем
     return list(dict.fromkeys(problems))

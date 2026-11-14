@@ -27,14 +27,16 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark,
-                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES)
+                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
+                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark,
-                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES)
+                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
+                          CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -100,6 +102,8 @@ class PromptConfig:
     style_file: str                  # путь к файлу стиля models/<профиль>/prompts/style.md (из профиля)
     media: str                       # тип промпта: "video" или "image"; без значения по умолчанию
     max_prompt_chars: int = 1500
+    # max_characters: число персонажей в кадре (герой и остальные: люди и животные) из profile.yaml; None — PEOPLE_LIMIT
+    max_characters: Optional[int] = None
     batch_size: int = 20
     response_format: Any = field(default_factory=lambda: [{"segment_index": int, "prompt": str}])
     # пресет профиля: Generate/model_profiles/presets/prompts/<preset>.md; «none» = без пресета
@@ -423,15 +427,21 @@ def attach_style(prompt: str, style_text: str) -> str:
     return prompt.rstrip().rstrip(".") + ". " + style_text
 
 
-def _content_rules(media: str) -> str:
+def _content_rules(media: str, max_characters: Optional[int] = None) -> str:
     """Жёсткие правила содержания кадра (решения владельца после разбора прогона).
     Те же правила проверяет prompt_check.py: нарушение уходит на повтор, а не в GPU."""
     people_limit = "one person" if media == "image" else "at most two people"
+    if max_characters is None:
+        people_line = (f"- Show {people_limit}, each named once and described distinctly (age, clothing colour, hair). "
+                       "Never show a crowd, a group, a row, a line or several people.\n")
+    else:
+        people_line = ("- Show at most " + str(max_characters) + " characters in total, people and animals together, "
+                       "the main hero included. Describe every character other than the main hero fully. "
+                       "Never show a crowd, a group, a row, a line or several people.\n")
     rules = (
         "- Show only the people, animals and objects that the segment text names or directly implies. "
         "Add no extra characters, animals, vehicles or props.\n"
-        f"- Show {people_limit}, each named once and described distinctly (age, clothing colour, hair). "
-        "Never show a crowd, a group, a row, a line or several people.\n"
+        + people_line +
         "- Never show children, babies, boys, girls, teenagers or young people. If the segment mentions "
         "them, show adults or no people, and keep the meaning through the setting.\n"
         "- Every person wears named clothing. Never show anyone naked, shirtless or undressed.\n"
@@ -532,7 +542,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + camera_rules +
         "- Give each person one consistent outfit; do not mix conflicting garments such as a "
         "suit and an overcoat unless the layering is stated clearly.\n"
-        + _content_rules(cfg.media) +
+        + _content_rules(cfg.media, cfg.max_characters) +
         "- Before returning, check each prompt against the self-check checklist at the end of "
         "the style guide and rewrite any prompt that fails it.",
         "# Style guide\n" + style,
@@ -797,12 +807,12 @@ def _problem_ru_any(problem: str) -> str:
     return problem_ru(problem)
 
 
-def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset()) -> list:
+def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None) -> list:
     """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.).
     relaxed: отключённые профилем правила; art_medium снимает стилевое правило, small_objects — в содержании."""
     style = [reason for rx, reason, _ in _STYLE_RULES
              if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)]
-    return style + content_reasons(prompt, media, relaxed)
+    return style + content_reasons(prompt, media, relaxed, max_characters)
 
 
 # ---------------------------------------------------------------------------
@@ -1004,12 +1014,20 @@ def count_ref_files(refs_dir, profile: str) -> int:
     return min(len(nums), REF_MAX)
 
 
-def _retry_note(nums, problems: list) -> str:
-    """Текст для повторного запроса: что именно исправить. Пусто, если стилевых нарушений нет."""
+def _retry_note(nums, problems: list, max_characters: Optional[int] = None) -> str:
+    """Текст для повторного запроса: что именно исправить. Пусто, если стилевых нарушений нет.
+    max_characters: при заданном лимите персонажей подсказка о людях и животных берётся из people_hint."""
     lines = []
+    people_reason = CONTENT_REASON_RU[PROBLEM_PEOPLE_COUNT]
     for n in nums:
-        hints = [_STYLE_HINTS[p.reason] for p in problems
-                 if p.num == n and p.reason in _STYLE_HINTS]
+        hints = []
+        for p in problems:
+            if p.num != n:
+                continue
+            if max_characters is not None and p.reason == people_reason:
+                hints.append(people_hint(max_characters))
+            elif p.reason in _STYLE_HINTS:
+                hints.append(_STYLE_HINTS[p.reason])
         if hints:
             lines.append(f"- segment_index: {n}: " + " ".join(dict.fromkeys(hints)))
     if not lines:
@@ -1078,7 +1096,7 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
-        reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules))
+        reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules, cfg.max_characters))
         if texts is not None and n in texts:
             reasons.extend(ethnicity_reasons(prompt, texts[n]))
         refs, ref_reasons = None, []
@@ -1114,7 +1132,7 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
-    problems = find_problems(text, cfg.media, cfg.relaxed_rules)
+    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if cfg.refs_enabled and refs is not None:
@@ -1217,14 +1235,35 @@ def _dump_raw(cfg: PromptConfig, batch_nums: list, slug: str, raw: str) -> None:
         log.warning("Не удалось записать сырой ответ модели в файл %s (%s).", path, type(exc).__name__)
 
 
-def _fail_fast_stop(cfg: PromptConfig, batch_nums: list, bad_nums: list, slug: str, raw: str) -> None:
-    """fail_fast: первая проблема останавливает прогон. Сырой ответ уходит в файл, затем GeminiError. Повтора нет."""
+def _fail_fast_stop(cfg: PromptConfig, batch_nums: list, bad_nums: list, slug: str, raw: str,
+                    rule_label: Optional[str] = None) -> None:
+    """fail_fast: первая проблема останавливает прогон. Сырой ответ уходит в файл, затем GeminiError. Повтора нет.
+    rule_label: фиксированная русская подпись правила (из таблиц кодов); без неё — общая подпись по slug."""
     _dump_raw(cfg, batch_nums, slug, raw)
     shown = _num_ranges(list(bad_nums)) or "нет"
     raise GeminiError(
         f"Ошибка: проверка промптов остановлена (fail_fast): батч {batch_nums[0]}-{batch_nums[-1]}, "
-        f"клипы с нарушением: {shown}; причина: {FAIL_FAST_LABELS[slug]}. "
+        f"клипы с нарушением: {shown}; причина: {rule_label or FAIL_FAST_LABELS[slug]}. "
         "Повтор и исправления не запускались.")
+
+
+def _segment_rule_label(problems: list) -> Optional[str]:
+    """Подпись правила для fail_fast по первой проблеме сегмента. Код в разборе не передаётся, поэтому подпись
+    берётся только тогда, когда причина совпадает с фиксированной подписью правила; иначе None (общая подпись)."""
+    if not problems:
+        return None
+    reason = problems[0].reason
+    fixed = set(CONTENT_REASON_RU.values()) | {r for _, r, _ in _STYLE_RULES}
+    return reason if reason in fixed else None
+
+
+def _content_rule_label(found: list, max_characters: Optional[int] = None) -> Optional[str]:
+    """Подпись правила для fail_fast по первому нарушению текста промпта (код до «: » в записи make_problem).
+    Только при заданном max_characters (ниша с лимитом персонажей), иначе общая подпись — как раньше.
+    None для refs и для неизвестного кода: тогда общая подпись."""
+    if max_characters is None or _content_slug(found) != "content":
+        return None
+    return problem_label(problem_code(found[0]))
 
 
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
@@ -1244,14 +1283,17 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     if builder.cfg.fail_fast and (bad or problems):
         # fail_fast: первая проблема батча останавливает прогон; повтора и исправлений нет
         bad_nums = sorted({p.num for p in problems if p.num is not None} | set(bad))
-        _fail_fast_stop(builder.cfg, expected, bad_nums, _parse_slug(problems, expected), raw)
+        slug = _parse_slug(problems, expected)
+        # подпись правила — только для ниши с max_characters; у остальных ниш сообщение прежнее
+        label = _segment_rule_label(problems) if (slug == "segment" and builder.cfg.max_characters is not None) else None
+        _fail_fast_stop(builder.cfg, expected, bad_nums, slug, raw, label)
 
     if bad:
         log.warning("%sБатч %s..%s: нарушения в %d из %d записей, повторный запрос.",
                     tag, expected[0], expected[-1], len(bad), len(expected))
         retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
         for rb in retry:
-            note = _retry_note(rb.nums, problems)
+            note = _retry_note(rb.nums, problems, builder.cfg.max_characters)
             if note:
                 rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
@@ -1284,7 +1326,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             if found:
                 if builder.cfg.fail_fast:
                     # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
-                    _fail_fast_stop(builder.cfg, expected, [n], _content_slug(found), raw)
+                    _fail_fast_stop(builder.cfg, expected, [n], _content_slug(found), raw,
+                                    _content_rule_label(found, builder.cfg.max_characters))
                 r.rework_pending = found
                 r.rework_round = 0
     return final

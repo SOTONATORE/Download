@@ -444,11 +444,19 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     allowed_refs = parse_allowed_refs(profile_lines, profile)
     # пресет ниши: файл prompts/preset.md, если пресет не выбран («none»)
     niche_preset_file = _niche_preset_file(profile, preset)
+    # max_characters и max_prompt_chars из profile.yaml: без ключей — PEOPLE_LIMIT и 1500, как раньше
+    max_characters = _profile_int(profile_lines, "max_characters", profile)
+    max_prompt_chars = _profile_int(profile_lines, "max_prompt_chars", profile)
     # fail_fast и raw_dir по умолчанию выключены: без них конфиг прежний
     kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir,
               "relaxed_rules": relaxed_rules, "text_language": text_language, "frame_language": frame_language,
               "ref_max": ref_max, "allowed_refs": allowed_refs if refs_enabled else None,
               "niche_preset_file": niche_preset_file}
+    # передаём только заданные ключи: без них конфиг и фейки получают те же аргументы, что раньше
+    if max_characters is not None:
+        kwargs["max_characters"] = max_characters
+    if max_prompt_chars is not None:
+        kwargs["max_prompt_chars"] = max_prompt_chars
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
@@ -461,6 +469,17 @@ def _profile_flag(lines: list, key: str, profile: str, default: str) -> str:
         if ln.startswith(key + ":"):
             return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
     return default
+
+
+def _profile_int(lines: list, key: str, profile: str) -> Optional[int]:
+    """Целое поле верхнего уровня из profile.yaml. Нет поля — None (поведение как раньше); не целое ≥1 — ошибка."""
+    raw = _profile_flag(lines, key, profile, default="")
+    if raw == "":
+        return None
+    if not raw.isdigit() or int(raw) < 1:
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml {key} должен быть целым числом не меньше 1.")
+    return int(raw)
 
 
 def _key_names_range(provider: str) -> str:
@@ -1553,7 +1572,7 @@ def _failure_reason(num: int, entry, errors: list) -> str:
 
 
 def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool,
-                 relaxed=frozenset()) -> tuple:
+                 relaxed=frozenset(), max_characters=None) -> tuple:
     """Для одного вида: готовые, нарушения слов и маркеров, нарушения содержания кадра, нарушения num_frames, не готовые."""
     from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
                                             find_problems, problem_code, problem_ru)
@@ -1569,7 +1588,7 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             not_ready.append(n)
             continue
         ready += 1
-        for p in find_problems(entry["prompt"], media, relaxed):
+        for p in find_problems(entry["prompt"], media, relaxed, max_characters):
             code = problem_code(p)
             if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
@@ -1723,9 +1742,12 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     photo_list = [n for n in missing if n in photo_nums]
     keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
     v = dict(zip(keys, _type_counts("видео", video_nums, prompts, expected_frames, photo=False,
-                                    relaxed=prompt_cfg.relaxed_rules)))
+                                    relaxed=prompt_cfg.relaxed_rules,
+                                    max_characters=getattr(prompt_cfg, "max_characters", None))))
     p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True,
-                                    relaxed=photo_cfg.relaxed_rules if photo_cfg is not None else frozenset())))
+                                    relaxed=photo_cfg.relaxed_rules if photo_cfg is not None else frozenset(),
+                                    max_characters=getattr(photo_cfg, "max_characters", None)
+                                    if photo_cfg is not None else None)))
     failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
                 + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
     failures.sort(key=lambda row: row[0])
