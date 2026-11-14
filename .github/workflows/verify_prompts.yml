@@ -101,6 +101,33 @@ jobs:
       - name: Установка зависимостей
         run: pip install -r Generate/requirements-dev.txt
 
+      # lingua нужна только профилю с text_language: srt (язык текста по SRT); имена профилей те же, что у шага промптов
+      - name: Нужен ли lingua (язык текста по SRT)
+        id: lang_need
+        env:
+          VIDEO_NAME: ${{ inputs.niche != 'none' && 'none' || inputs.video_profile != 'none' && inputs.video_profile || 'ltx25' }}
+          PHOTO_NAME: ${{ inputs.niche != 'none' && inputs.niche || inputs.photo_profile }}
+        run: |
+          need=false
+          for name in "$VIDEO_NAME" "$PHOTO_NAME"; do
+            if [ -z "$name" ] || [ "$name" = "none" ]; then continue; fi
+            for f in "Generate/Nishes/$name/profile.yaml" "Generate/model_profiles/models/$name/profile.yaml"; do
+              if [ -f "$f" ] && grep -Eq '^text_language:[[:space:]]*"?srt"?' "$f"; then need=true; fi
+            done
+          done
+          echo "needed=$need" >> "$GITHUB_OUTPUT"
+
+      - name: Кэш pip для lingua
+        if: steps.lang_need.outputs.needed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-lingua-${{ hashFiles('Generate/requirements-lang.txt') }}
+
+      - name: Установка lingua (язык текста по SRT)
+        if: steps.lang_need.outputs.needed == 'true'
+        run: pip install -r Generate/requirements-lang.txt
+
       # Входы передаются через env, а не подстановкой в текст скрипта (SPEC 0.2).
       # Имена env совпадают с generate.yml; значения выбора профилей выводятся так же, как там.
       - name: Проверка генерации промптов
