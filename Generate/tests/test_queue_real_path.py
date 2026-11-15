@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import socket
@@ -84,7 +85,9 @@ def _segments() -> list:
 
 def _real_cfg() -> gp.PromptConfig:
     # те же аргументы, что в prepare_prompts_only: профиль фото, размер батча, пресет «none», fail_fast выключен
-    return cli._build_prompt_config(NICHE, 25, "none", fail_fast=False, raw_dir=None, srt_path=None)
+    cfg = cli._build_prompt_config(NICHE, 25, "none", fail_fast=False, raw_dir=None, srt_path=None)
+    # язык текста в кадре: английский (без разбора SRT поле пустое)
+    return dataclasses.replace(cfg, frame_language="English")
 
 
 def test_parse_flagged_batch_clips_get_two_fix_rounds_without_pool(monkeypatch):

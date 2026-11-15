@@ -1706,6 +1706,31 @@ def limit_by_type(video_nums, photo_nums, limit) -> list:
     return sorted(video[: math.ceil(limit / 2)] + photo[: limit // 2])
 
 
+def _log_text_cards_count(nums, prompts) -> None:
+    """Считает клипы с текстовой карточкой (ref_2) среди номеров nums и пишет строку в журнал.
+
+    Норма: не больше 1 на 5 клипов (округление вверх), то есть 5 на 25. Превышение даёт предупреждение.
+    Только журнал: на ход прогона счёт не влияет; сбой разбора записи не должен ронять проверку.
+    """
+    total = len(nums)
+    if total == 0:
+        return
+    count = 0
+    for n in nums:
+        entry = prompts.get(str(n)) if isinstance(prompts, dict) else None
+        extra = entry.get("extra") if isinstance(entry, dict) else None
+        refs = extra.get("refs") if isinstance(extra, dict) else None
+        if isinstance(refs, (list, tuple)) and 2 in refs:
+            count += 1
+    limit = math.ceil(total / 5)
+    line = (f"Текстовые карточки (ref_2): {count} из {total} клипов, "
+            f"норма не больше {limit} на {total} клипов.")
+    if count > limit:
+        log.warning("Предупреждение. %s Текстовых карточек больше нормы.", line)
+    else:
+        log.info(line)
+
+
 def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     """Подготовка промптов как у cmd_run до поиска карт: профили, пресет, распределение, промпты, проверка.
 
@@ -1788,6 +1813,8 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             raise GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
 
     prompts = run.state.get("prompts", {})
+    # только проверка: счёт текстовых карточек (в refs есть 2); строка в журнале, прогон не останавливается
+    _log_text_cards_count(missing, prompts)
     video_nums = [n for n in missing if n not in photo_nums]
     photo_list = [n for n in missing if n in photo_nums]
     keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
