@@ -1578,6 +1578,13 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"))
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
+            if not found and r.needs_review and r.review_reason and builder.cfg.refs_enabled \
+                    and not builder.cfg.fail_fast:
+                # Клип с текстом и флагом разбора (стиль, длина, этнос), но без находок по содержанию: раньше он не
+                # попадал в очередь и оставался на проверке без единого исправления. Теперь идёт в очередь с причинами
+                # разбора, как клип из ответа исправления (process_fix). Только профили с refs_enabled; прочие
+                # профили (ltx25, zimage_turbo) ведут себя как раньше.
+                found = [_PARSE_PREFIX + x for x in dict.fromkeys(r.review_reason.split("; ")) if x]
             if found:
                 if builder.cfg.fail_fast:
                     # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
