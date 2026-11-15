@@ -85,6 +85,23 @@ def test_cartoon_instruction_has_no_no_refs_tag_line():
             in text)
 
 
+def test_cartoon_instruction_and_style_guide_use_reference_number_rule():
+    # Комментарий: инструкция и style.md называют правило «номер референса», а не позицию в refs (K-th entry).
+    text = _cartoon_instruction()
+    style = (NICHE / "prompts" / "style.md").read_text(encoding="utf-8")
+    assert "written with the number of that reference" in text
+    assert "write the number of that reference itself" in style
+    assert "K-th entry" not in text
+    assert "K-th entry" not in style
+
+
+def test_normaliser_maps_six_to_two_and_keeps_positions_for_refs_one_and_six():
+    # Комментарий: refs [1, 6]; <image6> — номер 6, то есть позиция 2. <image1> и <image2> — позиции, не меняются.
+    assert gp._normalise_labels("A boy waves at <image6>.", [1, 6]) == "A boy waves at <image2>."
+    assert gp._normalise_labels("A dog <image1> and a boy <image2>.", [1, 6]) == "A dog <image1> and a boy <image2>."
+    assert gp._normalise_labels("A dog <image1> sits.", [1, 6]) == "A dog <image1> sits."
+
+
 # --- (b) профили без allowed_refs: байт в байт -------------------------------------------------------
 
 @pytest.mark.parametrize("folder, media, sha, size", [

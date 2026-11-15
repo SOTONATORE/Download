@@ -720,6 +720,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
             # профили без allowed_refs: текст прежний, байт в байт
             refs_rule = "naming the reference images used for that segment (an empty list if none). "
             no_refs_rule = "A segment with no refs has no <imageN> tag."
+            # текст метки без allowed_refs прежний, байт в байт
+            tag_rule = ("In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, "
+                        "where N is the number of entries in refs; the tag <imageK> is the K-th entry of the sorted refs list. ")
         else:
             # профили с allowed_refs: сочетания берутся из тех же кортежей, что проверяет _combo_bad
             refs_rule = ("naming the reference images used for that segment. "
@@ -727,13 +730,17 @@ def build_system_instruction(cfg: PromptConfig) -> str:
                          "Allowed combinations, one per line:\n"
                          + _allowed_combo_lines(cfg.allowed_refs) + "\n")
             no_refs_rule = "Every segment has at least one reference, so every segment has at least one <imageN> tag."
+            # Русский: метки с allowed_refs — по номеру референса (как в style.md), а не по позиции в refs;
+            # нормализатор переводит номера в позиции до проверок. Только профили с allowed_refs (cartoon_photos).
+            tag_rule = ("In the prompt, label each reference image with one tag for each entry in refs, "
+                        "written with the number of that reference: <image6> for reference 6, <image2> for reference 2. "
+                        "List the tags from the lowest reference number to the highest. ")
         parts[0] += (
             "\n\n# Reference images\n"
             f"Each object also has \"refs\": a JSON list of distinct integers from 1 to {cfg.ref_max}, sorted ascending, "
             + refs_rule
-            + "In the prompt, label the reference images with the tags <image1>, <image2> … <imageN>, where N is the "
-            "number of entries in refs; the tag <imageK> is the K-th entry of the sorted refs list. "
-            "Use each tag at least once and no other tags. " + no_refs_rule)
+            + tag_rule
+            + "Use each tag at least once and no other tags. " + no_refs_rule)
     # пресет в системную инструкцию не входит: здесь только проверка имени и файла, текст дописывает generate_prompts
     if cfg.preset != PRESET_NONE:
         read_preset(cfg.preset)
