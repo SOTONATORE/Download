@@ -1534,6 +1534,17 @@ class _ReworkCounter:
         self._inner = inner
         self.rework_nums: set = set()
 
+    @property
+    def provider(self) -> str:
+        # провайдер читается у внутреннего транспорта; без атрибута — gemini, как в gemini_orchestrator
+        return getattr(self._inner, "provider", "gemini")
+
+    def __getattr__(self, name):
+        # прочие атрибуты (active_model и т.п.) берём у внутреннего транспорта; _inner задан в __init__
+        if name == "_inner" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
     def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
         # в пакете исправления строк «Prompt for segment_index N:» несколько: учитываются все номера
         for m in VERIFY_REWORK_RE.finditer(user or ""):

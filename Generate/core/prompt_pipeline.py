@@ -305,9 +305,22 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
     state до барьера пула, поэтому пишут в один словарь prompts. Ошибка видео вне батчей останавливает пул.
     Ошибка фото пробрасывается после обеих волн; видео имеет приоритет, если упали обе.
     """
-    total = _pool_threads(provider, gemini_options.get("openrouter_sends_per_window"))
-    video_threads = total // 2
-    pool = gp.SharedBatchPool({VIDEO_WAVE: video_threads, PHOTO_WAVE: total - video_threads}, bind=watch.bind)
+    sends = gemini_options.get("openrouter_sends_per_window")
+    if provider == "openrouter":
+        # OpenRouter: каждой волне — ключи × отправки; потоки волны не больше её батчей (per_wave_cap в пуле).
+        # Лимит отправок по каждому ключу держит транспорт, поэтому лишние потоки только ждут.
+        try:
+            keys = gp._provider_key_count(provider)
+        except Exception:  # ключей нет или не прочитались: как в generate_prompts, ноль
+            keys = 0
+        per_wave = gp.openrouter_thread_count(keys, sends)
+        log.info("Потоки OpenRouter: ключей %d, отправок в окне %s, потоков на волну до %d (не больше батчей волны).",
+                 keys, sends if sends is not None else "не задано", per_wave)
+        pool = gp.SharedBatchPool({VIDEO_WAVE: per_wave, PHOTO_WAVE: per_wave}, bind=watch.bind, per_wave_cap=True)
+    else:
+        total = _pool_threads(provider, sends)
+        video_threads = total // 2
+        pool = gp.SharedBatchPool({VIDEO_WAVE: video_threads, PHOTO_WAVE: total - video_threads}, bind=watch.bind)
     box: dict = {}
 
     def run_photo() -> None:

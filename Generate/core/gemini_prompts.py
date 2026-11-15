@@ -1470,6 +1470,9 @@ def _content_rule_label(found: list, max_characters: Optional[int] = None) -> Op
     return problem_label(problem_code(found[0]))
 
 
+_DUP_REASON = "номер повторяется в ответе"   # причина дубликата номера: относится к формату ответа
+
+
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
                tag: str = "") -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
@@ -1492,10 +1495,22 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
         label = _segment_rule_label(problems) if (slug == "segment" and builder.cfg.max_characters is not None) else None
         _fail_fast_stop(builder.cfg, expected, bad_nums, slug, raw, label, system=batch.system, user=batch.user)
 
-    if bad:
-        log.warning("%sБатч %s..%s: нарушения в %d из %d записей, повторный запрос.",
-                    tag, expected[0], expected[-1], len(bad), len(expected))
-        retry = builder.batches(bad)  # bad <= batch_size: ровно один батч
+    # нарушения правил (номер с текстом и причинами) повтора не получают: клип с needs_review уходит
+    # в очередь исправлений шага 6, как и раньше. Повтор — только для ответа без пригодного текста (формат)
+    fmt_bad = [n for n in bad if n not in results or _DUP_REASON in results[n].review_reason]
+    for n in bad:
+        if n in fmt_bad:
+            continue
+        best = results[n]
+        final[n] = PromptResult(n, best.prompt, True, best.review_reason, best.extra)
+        if builder.cfg.refs_enabled:
+            ref_left = [p.reason for p in problems if p.num == n and p.reason.startswith("refs:")]
+            if ref_left:
+                invalid_refs[n] = ref_left
+    if fmt_bad:
+        log.warning("%sБатч %s..%s: нет пригодного ответа по %d из %d записей, повторный запрос.",
+                    tag, expected[0], expected[-1], len(fmt_bad), len(expected))
+        retry = builder.batches(fmt_bad)  # fmt_bad <= batch_size: ровно один батч
         for rb in retry:
             note = _retry_note(rb.nums, problems, builder.cfg.max_characters, builder.cfg.rules.animals_count)
             if note:
@@ -1563,7 +1578,7 @@ class _LoggedTransport:
         except Exception as exc:
             # безопасное сообщение GeminiRuntimeError не содержит тела ответа; прочим классам — только имя класса
             detail = f" ({exc})" if isinstance(exc, GeminiRuntimeError) else ""
-            log.warning("%s%s %d: попытка %d не удалась, класс ошибки %s%s.",
+            log.warning("%s%s %s: попытка %d не удалась, класс ошибки %s%s.",
                         self._tag, self._unit, self._batch_no, self._attempt, type(exc).__name__, detail)
             raise
 
@@ -1596,6 +1611,17 @@ def openrouter_thread_count(key_count: int, sends_per_window: Optional[int] = No
     return max(1, key_count) * per_key
 
 
+def openrouter_wave_threads(key_count: int, sends_per_window: Optional[int], n_batches: int) -> int:
+    """Потоки одной волны OpenRouter: min(ключи × отправки, число батчей волны), не меньше одного.
+
+    Один поток нужен и при нуле батчей: очередь исправлений волны всё равно выполняется потоком."""
+    return max(1, min(openrouter_thread_count(key_count, sends_per_window), n_batches))
+
+
+EMPTY_LENGTH_CODE = "EMPTY_RESPONSE_LENGTH"            # код ошибки OpenRouter: пустой ответ по лимиту вывода
+EMPTY_LENGTH_REASON = "пустой ответ по лимиту вывода"  # причина needs_review для половины, упавшей снова
+
+
 class _WaveJob:
     """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
 
@@ -1626,16 +1652,34 @@ class _WaveJob:
         self.rework_queue: list = list(rework or [])  # клипы, ждущие исправления (PromptResult); меняются под замком очереди
         self.fix_no = 0                   # номер последнего пакета исправлений волны (с 1); растёт под замком очереди пула, без пула — в вызывающем потоке
         self.pool = None                  # общий пул, если волна в нём; ставится в arrive_and_wait
+        self.labels: list = [str(i + 1) for i in range(len(batches))]  # метка батча: номер или x.1 / x.2
+        self.is_half: list = [False] * len(batches)  # половина разделённого по лимиту вывода батча: не делится снова
+        self.base_count = len(batches)    # число батчей волны до разделения (для строк «из N»)
+        self.round_pkgs: list = []        # пакеты текущего раунда исправлений, ещё не выданные: (номер пакета, клипы)
+        self.round_inflight = 0           # пакеты раунда, которые выполняются сейчас
+        self.round_no = 0                 # номер последнего раунда исправлений волны (с 1)
 
     def process(self, logged, idx: int) -> None:
         """Выполняет батч idx: запрос, стиль, журнал, затем out и on_batch под out_lock. Исключения не глотает."""
-        batch_no = idx + 1
+        label = self.labels[idx]   # номер батча или x.1 / x.2 для половины
+        batch_no = label           # имя батча в строках журнала ниже
         batch = self.batches[idx]
-        logged.start_batch(batch_no)
-        log.info("%sБатч %d из %d: начало, клипов в батче: %d.", self.tag, batch_no, len(self.batches),
+        logged.start_batch(label)
+        log.info("%sБатч %s из %d: начало, клипов в батче: %d.", self.tag, label, self.base_count,
                  len(batch.nums), extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
-        batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
+        try:
+            batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
+        except GeminiRuntimeError as exc:
+            if getattr(exc, "code", "") != EMPTY_LENGTH_CODE:
+                raise  # прочие ошибки: как раньше, волна останавливается
+            if not self.is_half[idx] and len(batch.nums) > 1:
+                self._split_batch(idx, batch)  # батч заменяется двумя половинами; результата пока нет
+                return
+            # половина (или один клип), упавшая снова: без деления, клипы на проверку с причиной
+            log.warning("%sБатч %s: пустой ответ по лимиту вывода и без деления, клипы на проверку: %s.",
+                        self.tag, label, _num_ranges(sorted(batch.nums)))
+            batch_res = {n: PromptResult(n, "", True, EMPTY_LENGTH_REASON) for n in batch.nums}
         for r in batch_res.values():
             if r.prompt.strip() and r.rework_pending:
                 # клип в очереди исправлений: сырой текст в prompt_raw (по нему проверка и исправление), в prompt — со стилем
@@ -1655,14 +1699,14 @@ class _WaveJob:
                 digest = hashlib.sha256(r.prompt.encode("utf-8")).hexdigest()[:12]
                 log.info("Промпт принят: клип %d, %d символов, sha256 %s.", n, len(r.prompt), digest)
         if review_nums:
-            log.warning("%sБатч %d: промпты требуют проверки, клипы: %s.",
+            log.warning("%sБатч %s: промпты требуют проверки, клипы: %s.",
                         self.tag, batch_no, ", ".join(str(n) for n in review_nums))
         # клипы с нарушениями: в запись уходят со стилем, сырой текст в prompt_raw; в очередь исправлений — после записи
         queued = [batch_res[n] for n in batch.nums if n in batch_res and batch_res[n].rework_pending]
         if queued:
-            log.info("%sБатч %d: клипов с нарушениями, в очереди исправлений: %d.", self.tag, batch_no, len(queued))
+            log.info("%sБатч %s: клипов с нарушениями, в очереди исправлений: %d.", self.tag, batch_no, len(queued))
         with_text = sum(1 for r in batch_res.values() if r.prompt.strip())
-        log.info("%sБатч %d: получено промптов с текстом: %d из %d, за %.1f с.",
+        log.info("%sБатч %s: получено промптов с текстом: %d из %d, за %.1f с.",
                  self.tag, batch_no, with_text, len(batch_res), time.monotonic() - t_batch,
                  extra=KEY_EVENT_EXTRA)
         with self.out_lock:
@@ -1670,6 +1714,49 @@ class _WaveJob:
             if self.on_batch is not None:
                 self.on_batch([batch_res[n] for n in batch.nums])
         self.enqueue(queued)
+
+    def _split_batch(self, idx: int, batch) -> None:
+        """Пустой ответ по лимиту вывода: батч idx заменяется половинами x.1 и x.2 в конце очереди волны.
+
+        Номера делятся пополам: первая половина n // 2 номеров (для 25 клипов — 12), вторая остальные (13).
+        Каждая половина — один батч (не больше batch_size). Очередь выдаёт их как обычные батчи, в том числе разным ключам.
+        """
+        nums = sorted(batch.nums)
+        cut = len(nums) // 2
+        label = self.labels[idx]
+        first = self.builder.batches(nums[:cut])[0]
+        second = self.builder.batches(nums[cut:])[0]
+        items = [(f"{label}.1", first), (f"{label}.2", second)]
+        if self.pool is not None:
+            self.pool.add_batches(self, items)
+        else:
+            with self.sched_lock:
+                self.append_batches(items)
+        log.warning("%sБатч %s: пустой ответ по лимиту вывода, батч разделён на %s.1 (%d клипов) и %s.2 (%d клипов).",
+                    self.tag, label, label, len(first.nums), label, len(second.nums))
+
+    def append_batches(self, items: list) -> None:
+        """Добавляет батчи-половины в конец очереди волны. Вызывается под замком очереди (пул или одиночная волна)."""
+        for label, b in items:
+            self.batches.append(b)
+            self.labels.append(label)
+            self.is_half.append(True)
+
+    def start_round(self) -> None:
+        """Новый раунд исправлений: снимок очереди режется на пакеты по FIX_BATCH_SIZE по порядку.
+
+        Раунд — это клипы очереди на момент начала. Клипы, которые вернутся с нарушениями, попадут в очередь
+        и пойдут в следующий раунд. Вызывается под замком очереди (пул) или без потоков волны (одиночная волна).
+        """
+        clips = list(self.rework_queue)
+        self.rework_queue.clear()
+        self.round_no += 1
+        pkgs = []
+        for i in range(0, len(clips), FIX_BATCH_SIZE):
+            self.fix_no += 1   # номер пакета волны: растёт и здесь, под замком очереди
+            pkgs.append((self.fix_no, clips[i:i + FIX_BATCH_SIZE]))
+        self.round_pkgs = pkgs
+        log.info("%sРаунд исправлений %d: клипов %d, пакетов %d.", self.tag, self.round_no, len(clips), len(pkgs))
 
     def enqueue(self, clips: list) -> None:
         """Ставит клипы в очередь исправлений. Замок очереди не держится при вызове модели."""
@@ -1688,10 +1775,13 @@ class _WaveJob:
         новых пакетов не берёт, поэтому замок очереди не нужен. Клипы не возвращаются в очередь; rework_pending
         и prompt_raw сохраняются, повторный запуск продолжит исправление. Записываются один раз под out_lock.
         """
-        if not self.rework_queue:
-            return
         left = list(self.rework_queue)
+        for _no, clips in self.round_pkgs:   # пакеты раунда, не выданные из-за остановки
+            left.extend(clips)
+        self.round_pkgs = []
         self.rework_queue.clear()
+        if not left:
+            return
         for c in left:
             c.needs_review = True
             c.review_reason = "очередь исправлений не выполнена: прогон остановлен"
@@ -1807,9 +1897,11 @@ class SharedBatchPool:
     чтения общего состояния идут до первого on_batch, и обе волны пишут в один словарь prompts.
     """
 
-    def __init__(self, shares: dict, bind: Optional[Callable] = None) -> None:
+    def __init__(self, shares: dict, bind: Optional[Callable] = None, per_wave_cap: bool = False) -> None:
         self._shares = dict(shares)
         self._bind = bind
+        # per_wave_cap: число потоков волны — её доля (ключи × отправки), но не больше числа её батчей; чужая волна не делит
+        self._per_wave_cap = per_wave_cap
         self._cond = threading.Condition()   # очередь батчей пула
         self._arrived: set = set()           # волны, которые пришли в пул или вышли
         self._jobs: dict = {}                # волна -> _WaveJob
@@ -1831,6 +1923,8 @@ class SharedBatchPool:
             self._arrived.add(wave)
             self._cond.notify_all()
             self._cond.wait_for(lambda: set(self._shares) <= self._arrived)
+            if self._per_wave_cap:
+                return max(1, min(int(self._shares[wave]), len(job.batches)))
             other_has_work = any(j is not None and (j.batches or j.rework_queue)
                                  for w, j in self._jobs.items() if w != wave)
             if other_has_work:
@@ -1855,6 +1949,12 @@ class SharedBatchPool:
         """Первая ошибка пула (не-Gemini) или None."""
         with self._cond:
             return self._fatal
+
+    def add_batches(self, job: "_WaveJob", items: list) -> None:
+        """Добавляет половины батчей волны в очередь пула и будит потоки."""
+        with self._cond:
+            job.append_batches(items)
+            self._cond.notify_all()
 
     def _take(self, own: str):
         """Следующая работа потока: ('main', волна, idx) или ('fix', волна, (номер пакета, клипы)); None, когда работы больше не будет.
@@ -1894,34 +1994,46 @@ class SharedBatchPool:
         return None
 
     def _pick_fix(self, own: str):
-        """Под замком очереди: пакет исправлений одной волны (своя, затем чужая) или None."""
+        """Под замком очереди: пакет исправлений одной волны (своя, затем чужая) или None.
+
+        Раунды по барьеру: сначала пакеты уже начатого раунда. Новый раунд (снимок очереди) начинается только
+        когда предыдущий полностью выполнен (round_inflight == 0). Полный пакет — сразу; остаток — когда
+        нигде не выполняется главный батч (как и раньше).
+        """
         order = [own] + [w for w in self._shares if w != own]
         for w in order:
             job = self._jobs.get(w)
-            if job is not None and not job.stopped and len(job.rework_queue) >= FIX_BATCH_SIZE:
+            if job is not None and not job.stopped and job.round_pkgs:
+                return self._cut_fix(job)
+        for w in order:
+            job = self._jobs.get(w)
+            if (job is not None and not job.stopped and job.round_inflight == 0
+                    and len(job.rework_queue) >= FIX_BATCH_SIZE):
                 return self._cut_fix(job)
         if all(j.main_inflight == 0 for j in self._jobs.values() if j is not None):
             for w in order:
                 job = self._jobs.get(w)
-                if job is not None and not job.stopped and job.rework_queue:
+                if (job is not None and not job.stopped and job.round_inflight == 0
+                        and job.rework_queue):
                     return self._cut_fix(job)
         return None
 
     @staticmethod
     def _cut_fix(job: "_WaveJob"):
-        """Под замком очереди: снимает с очереди до FIX_BATCH_SIZE клипов, отмечает выполнение и выдаёт номер пакета волны."""
-        clips = job.rework_queue[:FIX_BATCH_SIZE]
-        del job.rework_queue[:FIX_BATCH_SIZE]
+        """Под замком очереди: выдаёт следующий пакет раунда волны; раунд начинается здесь, если пакетов нет."""
+        if not job.round_pkgs:
+            job.start_round()
+        fix_no, clips = job.round_pkgs.pop(0)
         job.inflight += 1
-        job.fix_no += 1   # номер берётся здесь, под замком пула: два потока не получат один номер
-        return job, clips, job.fix_no
+        job.round_inflight += 1
+        return job, clips, fix_no
 
     def _idle(self) -> bool:
         """Под замком очереди: в не остановленных волнах не осталось ни батчей, ни исправлений, ни выполнений."""
         for job in self._jobs.values():
             if job is None or job.stopped:
                 continue
-            if job.next_idx < len(job.batches) or job.rework_queue or job.inflight:
+            if job.next_idx < len(job.batches) or job.rework_queue or job.round_pkgs or job.inflight:
                 return False
         return True
 
@@ -1937,6 +2049,8 @@ class SharedBatchPool:
             job.inflight -= 1
             if kind == "main":
                 job.main_inflight -= 1
+            if kind == "fix":
+                job.round_inflight -= 1   # пакет раунда завершён (с ошибкой или без): барьер раунда
             if exc is not None:
                 # ошибка не глотается: первая ошибка волны; новые батчи волны не берём, запущенные доходят до конца
                 if not job.first_error:
@@ -1951,7 +2065,7 @@ class SharedBatchPool:
         with self._cond:
             self._cond.wait_for(lambda: job.inflight == 0 and (
                 job.stopped or self._fatal is not None
-                or (job.next_idx >= len(job.batches) and not job.rework_queue)))
+                or (job.next_idx >= len(job.batches) and not job.rework_queue and not job.round_pkgs)))
 
     def run_worker(self, own: str) -> None:
         """Тело потока пула: берёт главные батчи и пакеты исправлений, пока есть работа. Ошибка батча не останавливает поток."""
@@ -2045,6 +2159,9 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         else:
             n_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES, len(batches)))
         log.info("Батчи выполняются в %d потоках.", n_workers)
+        if provider == "openrouter":
+            log.info("Потоки OpenRouter: ключей %d, отправок в окне %s, потоков %d.",
+                     key_count, sends_per_window if sends_per_window is not None else "не задано", n_workers)
 
         queue_lock = threading.Lock()    # очередь батчей, флаг остановки, первая ошибка и очередь исправлений
         job = _WaveJob(kind, builder, batches, transport, model, style_text, on_batch,
@@ -2080,16 +2197,35 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
                 th.start()
             for th in threads:
                 th.join()
-        # исправления очереди этой волны: потоков уже нет, пакеты идут по одному (без пула)
-        logged_fix = _LoggedTransport(transport)
+        # исправления очереди этой волны: потоков уже нет; раунды по барьеру, пакеты раунда — параллельно
         while job.rework_queue and not first_error:
-            clips = job.rework_queue[:FIX_BATCH_SIZE]
-            del job.rework_queue[:FIX_BATCH_SIZE]
-            job.fix_no += 1   # потоков уже нет, счётчик меняет только этот поток: замок не нужен
-            try:
-                job.process_fix(logged_fix, clips, job.fix_no)
-            except BaseException as exc:
-                first_error.append(exc)
+            job.start_round()
+            fix_threads = max(1, min(n_workers, len(job.round_pkgs)))
+
+            def fix_worker() -> None:
+                logged_fix = _LoggedTransport(transport)   # журнал свой у каждого потока
+                while True:
+                    with queue_lock:
+                        if first_error or not job.round_pkgs:
+                            return
+                        fix_no, clips = job.round_pkgs.pop(0)
+                    try:
+                        job.process_fix(logged_fix, clips, fix_no)
+                    except BaseException as exc:
+                        with queue_lock:
+                            if not first_error:
+                                first_error.append(exc)
+                        return
+
+            if fix_threads == 1:
+                fix_worker()
+            else:
+                fix_ths = [threading.Thread(target=fix_worker, name=f"gemini-fix-{i + 1}")
+                           for i in range(fix_threads)]
+                for th in fix_ths:
+                    th.start()
+                for th in fix_ths:
+                    th.join()
         job.abandon_queue()   # клипы очереди остановленной волны не исправлены: на проверку, с причиной
         if first_error:
             _wave_summary(job)
