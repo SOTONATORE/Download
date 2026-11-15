@@ -45,7 +45,7 @@ def _profile_lines():
 # --- а) набор отключаемых правил ---------------------------------------------------------------
 
 def test_relaxable_rules_is_exactly_three_ids_and_no_safety_rule():
-    assert pc.RELAXABLE_RULES == frozenset({"art_medium", "small_objects", "frame_text"})
+    assert pc.RELAXABLE_RULES == frozenset({"art_medium", "small_objects", "frame_text", "emotion"})
     for name in ("PROBLEM_CHILD", "PROBLEM_NUDITY", "PROBLEM_PEOPLE_COUNT", "PROBLEM_MANY_OF_ONE",
                  "PROBLEM_SPEECH", "PROBLEM_FIRE_HANDS", "PROBLEM_CHAOS", "PROBLEM_WEAPON",
                  "PROBLEM_CLOSE_FACE", "PROBLEM_ETHNICITY"):
@@ -203,7 +203,7 @@ def test_default_refs_range_keeps_old_reason():
 
 def test_cartoon_profile_reports_relaxed_rules_and_text_language():
     relaxed, text_language = gp.profile_relaxation(_profile_lines(), "cartoon_photos")
-    assert relaxed == RELAX_ALL
+    assert relaxed == frozenset({"art_medium", "small_objects", "frame_text", "emotion"})
     assert text_language == "srt"
 
 

@@ -824,6 +824,8 @@ def _garbage_reason(prompt: str) -> str:
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 # причина правила art_medium (отключается профилем: relaxed_rules); вынесена, чтобы пропуск знал, какое правило снять
 _ART_MEDIUM_REASON = "стиль: художественная техника"
+# причина правила emotion (отключается профилем: relaxed_rules); вынесена, чтобы пропуск знал, какое правило снять
+_EMOTION_REASON = "стиль: эмоциональная метка"
 _NEGATION_REASON = "стиль: отрицание"
 # префикс причины, пришедшей с разбора ответа на исправление: такие причины не проходят через таблицы кодов нарушений
 _PARSE_PREFIX = "разбор: "
@@ -844,7 +846,7 @@ _STYLE_RULES = [
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
                 r"confused|happy|angry|afraid|scared|joyful|stillness)\b", re.I),
-     "стиль: эмоциональная метка",
+     _EMOTION_REASON,
      "Replace mood or emotion words (thoughtful, solemn, serene, tense, cinematic, stillness) "
      "with visible physical cues or concrete objects."),
     (re.compile(r"\b(?:film\s+(?:still|grain)|anamorphic|bokeh|depth\s+of\s+field|35\s?mm|"
@@ -1023,7 +1025,8 @@ def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_c
     relaxed: отключённые профилем правила; art_medium снимает стилевое правило, small_objects — в содержании."""
     style = [reason for rx, reason, _ in _STYLE_RULES
              if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)
-             and not (reason == _NEGATION_REASON and "frame_text" in relaxed and _only_caps_matches(prompt, rx))]
+             and not (reason == _NEGATION_REASON and "frame_text" in relaxed and _only_caps_matches(prompt, rx))
+             and not (reason == _EMOTION_REASON and "emotion" in relaxed)]
     return style + content_reasons(prompt, media, relaxed, max_characters, rules)
 
 

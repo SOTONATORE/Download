@@ -321,8 +321,8 @@ _OBJECT_SET_RX = re.compile(r"\b(?:stacks?|piles?|rows?|lines?) of\b", re.IGNORE
 # шаблон людей берём из _CONTENT_RX: «rows of» и «lines of» уже отмечены как PROBLEM_PEOPLE_COUNT
 _PEOPLE_COUNT_RX = dict(_CONTENT_RX)[PROBLEM_PEOPLE_COUNT]
 
-# Правила, которые профиль может отключить (relaxed_rules). Только эти три id; правила безопасности сюда не входят.
-RELAXABLE_RULES = frozenset({"art_medium", "small_objects", "frame_text"})
+# Правила, которые профиль может отключить (relaxed_rules). Только эти четыре id; правила безопасности сюда не входят.
+RELAXABLE_RULES = frozenset({"art_medium", "small_objects", "frame_text", "emotion"})
 # отключаемое правило → код нарушения содержания (art_medium — в gemini_prompts, frame_text — в системной инструкции)
 _RELAXED_CONTENT_CODE = {"small_objects": PROBLEM_SMALL_OBJECT}
 
