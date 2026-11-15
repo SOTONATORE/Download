@@ -952,6 +952,7 @@ class Orchestrator:
         http_timeout_sec: float = 60.0,
         log_level: str = "INFO",
         photo_profile: Optional[str] = None,   # профиль фото (type: image); None: фото не делаются
+        segments_all: bool = False,            # список клипов: все сегменты SRT (segments: all в profile.yaml); False — missing.txt
         photo_prompt_cfg=None,                 # настройки промптов для фото
         prompts_file: Optional[str] = None,    # файл промптов для превью (prompts.txt); None = превью не делаются
         prompts_count: str = "выкл",           # переключатель превью: выкл / 1..4 (вариантов на промпт)
@@ -1006,6 +1007,7 @@ class Orchestrator:
         self.log_level = log_level
         self.segments = segments
         self.missing_path = missing_path
+        self.segments_all = bool(segments_all)  # True: клипы — все номера SRT, missing.txt не читается (только выбор номеров)
         self.cfg = cfg
         self.timing_params = timing_params
         self.release_store = release_store
@@ -1501,7 +1503,7 @@ class Orchestrator:
             if self.pilot:
                 return self._run_pilot()
             self._prepare_previews()  # превью из prompts.txt: до аренды; без файла/фото-модели — ошибка входа
-            missing = parse_missing(self.missing_path, self.segments)
+            missing = wanted_segment_numbers(self.segments, self.missing_path, self.segments_all)
             if not missing and not self._previews:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
@@ -3374,6 +3376,19 @@ class Orchestrator:
             self._artifact.card_instance(slot, dict(getattr(info, "raw", None) or {}))
         except Exception as exc:
             log.warning("Не удалось сохранить JSON карты %d: %s.", slot.instance_id, type(exc).__name__)
+
+
+def wanted_segment_numbers(segments: list, missing_path, segments_all: bool) -> list:
+    """Номера клипов для запуска и проверки.
+
+    segments_all (segments: all в profile.yaml ниши): все номера SRT по возрастанию, missing.txt не читается.
+    Иначе — parse_missing, как раньше.
+    """
+    if segments_all:
+        numbers = sorted({s.num for s in segments})
+        log.info("Сегменты для ниши: все из SRT (missing.txt не используется), сегментов %d.", len(numbers))
+        return numbers
+    return parse_missing(missing_path, segments)
 
 
 def run_generation(*args, **kwargs) -> RunSummary:

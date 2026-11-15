@@ -494,6 +494,23 @@ def _profile_int(lines: list, key: str, profile: str) -> Optional[int]:
     return int(raw)
 
 
+def _segments_mode(profile: str) -> str:
+    """Режим списка клипов из profile.yaml ниши: «missing» (номера из missing.txt, по умолчанию) или «all» (все сегменты SRT).
+
+    Нет поля segments — «missing», как раньше; любое другое значение — ошибка входа, до трат.
+    """
+    try:
+        lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except (OSError, GeminiInputError):
+        return "missing"
+    mode = _profile_flag(lines, "segments", profile, default="missing")
+    if mode not in ("missing", "all"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml segments должен быть «missing» или «all», "
+            f"а не «{mode}».")
+    return mode
+
+
 def _key_names_range(provider: str) -> str:
     """Диапазон имён переменных ключей семейства для вывода (значения ключей не выводятся).
 
@@ -811,6 +828,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         input_code = _check_photo_profile(photo_profile)
         if input_code is not None:
             return input_code
+    # segments: all в profile.yaml ниши (фото): ошибка значения — до любых трат и аренды карт
+    try:
+        segments_all = photo_profile is not None and _segments_mode(photo_profile) == "all"
+    except GeminiInputError as e:
+        _err(str(e))
+        return EXIT_INPUT
 
     # текущий шаг подготовки: нужен, чтобы при ошибке назвать место, не раскрывая текст чужого исключения
     stage = "таймингов и промптов"
@@ -883,6 +906,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             max_cards=cfg.max_cards,
             photo_profile=photo_profile,
             photo_prompt_cfg=photo_prompt_cfg,
+            # список клипов из всех сегментов SRT (segments: all в profile.yaml ниши); по умолчанию — missing.txt
+            segments_all=segments_all,
             # превью из prompts.txt: «выкл» = не делаются
             prompts_file=args.prompts_file or None,
             prompts_count=args.prompts_count or previews.PREVIEW_COUNT_OFF,
@@ -1712,7 +1737,9 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     if code is not None:
         raise GeminiInputError("Ошибка входных данных: конфигурация не загружена (см. сообщение выше).")
     segments = parse_srt(args.srt)
-    missing = list(parse_missing(args.missing, segments))
+    # segments: all в profile.yaml ниши (фото): все номера SRT по возрастанию; иначе missing.txt, как раньше
+    segments_all = photo_profile is not None and _segments_mode(photo_profile) == "all"
+    missing = list(orch_mod.wanted_segment_numbers(segments, args.missing, segments_all))
     if not missing:
         raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
 
