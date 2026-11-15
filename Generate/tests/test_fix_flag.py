@@ -51,6 +51,11 @@ def _job(reply: str, clip: gp.PromptResult):
     job.pool = None
     job.rework_queue = []
     job.sched_lock = __import__("threading").Lock()
+    job.round_no = 0
+    job.pkg_round = {}
+    job.round_left = {}
+    job.round_stats = {}
+    job.stat_lock = __import__("threading").Lock()
     return job
 
 

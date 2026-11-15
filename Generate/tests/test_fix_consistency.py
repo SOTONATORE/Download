@@ -94,6 +94,11 @@ def _job(clip: gp.PromptResult, queued: list):
     job.pool = None
     job.rework_queue = []
     job.sched_lock = threading.Lock()
+    job.round_no = 0                  # номер раунда: process_fix читает его при пустом pkg_round
+    job.pkg_round = {}                # номер пакета -> раунд (для журнала)
+    job.round_left = {}               # раунд -> пакетов, ещё не выполненных
+    job.round_stats = {}              # раунд -> счётчики итога
+    job.stat_lock = threading.Lock()  # замок счётчиков раунда
     job.enqueue = lambda clips: queued.append(list(clips))   # очередь исправлений: что вернули в очередь
     return job
 

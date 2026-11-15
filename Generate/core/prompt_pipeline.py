@@ -289,6 +289,27 @@ def _pool_threads(provider: str, sends_per_window: Optional[int] = None) -> int:
     return min(max(keys, 1), gp.MAX_PARALLEL_BATCHES)
 
 
+def _photo_only_pool(watch, gemini_options: dict):
+    """Общий пул для прогона, где есть только фото-волна (видео нет).
+
+    Потоки те же, что фото получает в двух волнах: OpenRouter — ключи × openrouter_sends_per_window,
+    прочие провайдеры — как _pool_threads. per_wave_cap ограничивает их числом батчей волны прямо в
+    arrive_and_wait, поэтому число батчей здесь заранее не нужно. Без пула исправления очереди начинались
+    бы только после конца всех главных батчей; пул даёт им выполняться раньше.
+    """
+    provider = getattr(watch, "provider", "gemini")
+    sends = gemini_options.get("openrouter_sends_per_window")
+    if provider == "openrouter":
+        try:
+            keys = gp._provider_key_count(provider)
+        except Exception:  # ключей нет или не прочитались: как в _run_waves_together, ноль
+            keys = 0
+        threads = gp.openrouter_thread_count(keys, sends)
+    else:
+        threads = _pool_threads(provider, sends)
+    return gp.SharedBatchPool({PHOTO_WAVE: threads}, bind=watch.bind, per_wave_cap=True)
+
+
 def _progress_for(video: list, photo: list, started: float):
     """Функция строки прогресса для колбэков сохранения пула: читает словарь prompts и вызывается под замком состояния."""
     def progress(prompts: dict) -> str:
@@ -409,9 +430,11 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                                     managed=managed, state=state, lock=lock)
             if run_photo:
                 state = _load_shared(state, prompts_path, segments, file_profile)
+                # Русский: фото без видео тоже через общий пул, чтобы очередь исправлений шла до конца главных батчей
                 _photo_step(photo, segments=segments, photo_cfg=photo_cfg, watch=watch,
                             prompts_path=prompts_path, gemini_options=gemini_options,
-                            errors=errors, aborts=aborts, managed=managed, state=state, lock=lock)
+                            errors=errors, aborts=aborts, managed=managed, state=state, lock=lock,
+                            pool=_photo_only_pool(watch, gemini_options))
         state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]

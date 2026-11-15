@@ -937,6 +937,25 @@ def _label_detail(prompt: str, refs: list) -> str:
     return f"tags {tags} found, expected {want} for {len(refs)} refs"
 
 
+def _normalise_labels(prompt: str, refs) -> str:
+    """Метки <imageN> переводятся из номеров референсов в позиции в refs (только профили с refs_enabled).
+
+    Модель пишет номер референса (<image6> для референса 6), а ComfyUI и проверка меток ждут позицию в refs
+    (1…len(refs)). Если каждая метка — номер из refs, она заменяется на позицию + 1. Если номера не из refs,
+    текст не меняется: модель могла написать позиции, и проверка меток решит. refs: проверенный список или None;
+    при None текст не меняется, метки проверит _label_reasons как раньше.
+    """
+    if refs is None or not prompt:
+        return prompt
+    found = [int(m) for m in _LABEL_RX.findall(prompt)]
+    if not found:
+        return prompt
+    pos = {n: i + 1 for i, n in enumerate(refs)}
+    if all(n in pos for n in found):
+        return _LABEL_RX.sub(lambda m: f"<image{pos[int(m.group(1))]}>", prompt)
+    return prompt
+
+
 def _label_reasons(prompt: str, refs) -> list:
     """Причина меток для parse_and_validate (русская). Только когда refs валидны."""
     return [LABEL_REASON] if refs is not None and _label_detail(prompt, refs) else []
@@ -1310,6 +1329,10 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
             problems.append(Problem(n, "пустой prompt"))
             continue
         prompt = " ".join(raw_prompt.split())   # один абзац: переводы строк в пробелы
+        if cfg.refs_enabled:
+            # Русский: метки переводятся в позиции до всех проверок (длина, стиль, этнос, метки); refs берётся
+            # из ответа только если он валиден, иначе текст не меняется и метки проверит _label_reasons
+            prompt = _normalise_labels(prompt, _check_refs(item.get("refs"), cfg.ref_max)[0])
         if len(prompt) > cfg.max_prompt_chars:
             reasons.append(f"длина {len(prompt)} больше лимита {cfg.max_prompt_chars}")
         g = _garbage_reason(prompt)
@@ -1769,6 +1792,10 @@ class _WaveJob:
                         self.tag, batch_no, ", ".join(str(n) for n in review_nums))
         # клипы с нарушениями: в запись уходят со стилем, сырой текст в prompt_raw; в очередь исправлений — после записи
         queued = [batch_res[n] for n in batch.nums if n in batch_res and batch_res[n].rework_pending]
+        for r in queued:
+            # Русский: причина клипа в очереди — по его текущему тексту, той же функцией, что у исправления;
+            # раньше здесь оставалась причина разбора, и она могла не совпадать с текстом
+            r.review_reason = "; ".join(_problem_ru_any(p) for p in r.rework_pending)
         if queued:
             log.info("%sБатч %s: клипов с нарушениями, в очереди исправлений: %d.", self.tag, batch_no, len(queued))
         with_text = sum(1 for r in batch_res.values() if r.prompt.strip())

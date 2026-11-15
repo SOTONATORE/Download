@@ -68,7 +68,7 @@ def test_niche_profile_has_required_keys():
     assert data["allow_text"] is True
     assert data["refs_enabled"] is True
     assert data["on_unfixed"] == "keep"
-    assert data["text_model"] == "nemotron"
+    assert data["text_model"] == "nemotron-super-vl"
     assert str(data["workflow"]["output"]["node_id"]) == "461"
 
 

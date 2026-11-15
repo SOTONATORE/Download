@@ -68,10 +68,18 @@ def _photo_hard(monkeypatch, seg=2):
         kw.update(photo_nums=set(needed), photo_profile="photo-x", photo_cfg=object())
         return real(needed, **kw)
 
-    def fake_generate(segments, wanted, cfg, transport, model, on_batch=None):
-        transport.generate_json(model, "sys", "user", {})           # успешный вызов до ошибки
-        on_batch([types.SimpleNamespace(num=1, prompt="промпт 1", review_reason="", needs_review=False, extra={})])
-        raise gp.GeminiRuntimeError(HARD_TEXT.replace("Сегмент 2", f"Сегмент {seg}"))
+    def fake_generate(segments, wanted, cfg, transport, model, on_batch=None, pool=None, wave=None, **kw):
+        # Комментарий: поток пула перед батчем вызывает bind(волна); фейк работает в главном потоке, поэтому bind
+        # вызывается здесь, иначе вызовы не относятся к волне фото и жёсткая ошибка не считается жёсткой.
+        if pool is not None:
+            pool._bind(wave)
+        try:
+            transport.generate_json(model, "sys", "user", {})           # успешный вызов до ошибки
+            on_batch([types.SimpleNamespace(num=1, prompt="промпт 1", review_reason="", needs_review=False, extra={})])
+            raise gp.GeminiRuntimeError(HARD_TEXT.replace("Сегмент 2", f"Сегмент {seg}"))
+        finally:
+            if pool is not None:
+                pool._bind(None)
 
     monkeypatch.setattr(orch, "build_prompts", as_photo)
     monkeypatch.setattr(orch.gp, "generate_prompts", fake_generate)

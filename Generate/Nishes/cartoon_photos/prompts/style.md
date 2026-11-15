@@ -32,6 +32,6 @@ Other people and animals are drawn in the base style of reference 1 alone: bold 
 
 Each object, character and setting in a prompt comes from the segment text alone, and it is added only when the segment text names it.
 
-Label rule: when a segment uses references, write one tag for each reference in its refs list. The tags follow the ascending order of the refs list: <image1> is the lowest number in refs, <image2> the next, and so on. Use each tag at least once, and only those tags.
+Label rule: when a segment uses references, write one tag for each reference in its refs list, and write the number of that reference itself: <image6> for reference 6, <image2> for reference 2. Write the tags in the order of the refs list, from the lowest reference number to the highest. Use each tag at least once, and only those tags.
 
 Final check before each prompt is returned: one scene, the character count follows rules.yaml, each character fully described, plain props only, describing only the scene itself, quotation marks absent, and at least one reference used.

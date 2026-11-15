@@ -74,7 +74,7 @@ def test_photo_entry_has_num_frames_one_and_no_timing_fields(monkeypatch, tmp_pa
     video_calls: list = []
     monkeypatch.setattr(pp.go, "generate_and_store", _fake_video_store(video_calls))
 
-    def fake_generate_prompts(segments, wanted, cfg, transport, model, on_batch=None):
+    def fake_generate_prompts(segments, wanted, cfg, transport, model, on_batch=None, **kw):  # pool, wave — от пула фото
         results = [gp.PromptResult(num=n, prompt=f"фото {n}") for n in wanted]
         on_batch(results)
         return results
@@ -207,3 +207,24 @@ def test_partition_same_for_generate_and_verify_rule(tmp_path, monkeypatch):
     # множество, по которому строится генерация, равно списку фото из распределения
     assert seen == [set(split["photo"])]
     assert orc._photo_nums == set(split["photo"])
+
+
+def test_photo_only_run_passes_shared_pool_to_photo_wave(monkeypatch, tmp_path):
+    # Комментарий: прогон только с фото (видео нет): _photo_step передаёт общий пул и имя волны фото,
+    # поэтому очередь исправлений выполняется через пул, а не после join всех потоков.
+    seen: dict = {}
+
+    def fake_generate_prompts(segments, wanted, cfg, transport, model, on_batch=None, **kw):
+        seen.update(kw)
+        results = [gp.PromptResult(num=n, prompt=f"фото {n}") for n in wanted]
+        on_batch(results)
+        return results
+
+    monkeypatch.setattr(pp.gp, "generate_prompts", fake_generate_prompts)
+    run = pp.build_prompts(
+        [2, 4], segments=srt_segments(), photo_nums={2, 4}, cfg="cfg", profile="ltx25", timing="timing",
+        photo_profile="zimage_turbo", photo_cfg="photo_cfg", transport=None, gemini_options={},
+        prompts_path=tmp_path / "prompts.json")
+    assert isinstance(seen["pool"], pp.gp.SharedBatchPool)   # пул передан фото-волне
+    assert seen["wave"] == pp.PHOTO_WAVE
+    assert run.ready == [2, 4]
