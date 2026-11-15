@@ -102,7 +102,7 @@ def test_requeued_clip_carries_reason_of_its_own_text(tmp_path):
     expected = "; ".join(gp._problem_ru_any(p) for p in gp._find_all_problems(clip.prompt_raw, cfg))
     assert clip.review_reason == expected
     assert pc.CONTENT_REASON_RU[pc.PROBLEM_CHILD] in clip.review_reason
-    assert clip.needs_review is True
+    assert clip.needs_review is False        # в очереди клип ещё не на проверке: остался круг
 
 
 # --- 2.1 полный пакет раньше главного батча; остаток — когда главных нет в работе -----------------
