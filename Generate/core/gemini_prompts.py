@@ -733,7 +733,7 @@ def build_system_instruction(cfg: PromptConfig) -> str:
             # Русский: метки с allowed_refs — по номеру референса (как в style.md), а не по позиции в refs;
             # нормализатор переводит номера в позиции до проверок. Только профили с allowed_refs (cartoon_photos).
             tag_rule = ("In the prompt, label each reference image with one tag for each entry in refs, "
-                        "written with the number of that reference: <image6> for reference 6, <image2> for reference 2. "
+                        "written with the position of that image in the sorted refs list: <image1> for the first entry, <image2> for the second. Tags name positions, never reference numbers. "
                         "List the tags from the lowest reference number to the highest. ")
         parts[0] += (
             "\n\n# Reference images\n"
@@ -1989,7 +1989,7 @@ class _WaveJob:
                 # Русский: в очередь уходит текст этого круга, поэтому причина — тоже этого круга; раньше
                 # review_reason оставался от прошлого круга, и on_batch писал старую причину рядом с новым prompt
                 c.rework_pending = found
-                c.needs_review = True
+                c.needs_review = False   # в очереди клип ещё не на проверке: остался круг
                 c.review_reason = "; ".join(_problem_ru_any(p) for p in found)
                 requeue.append(c)
         ordered = sorted(clips, key=lambda c: c.num)

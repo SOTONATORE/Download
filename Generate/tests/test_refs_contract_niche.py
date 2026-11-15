@@ -89,8 +89,8 @@ def test_cartoon_instruction_and_style_guide_use_reference_number_rule():
     # Комментарий: инструкция и style.md называют правило «номер референса», а не позицию в refs (K-th entry).
     text = _cartoon_instruction()
     style = (NICHE / "prompts" / "style.md").read_text(encoding="utf-8")
-    assert "written with the number of that reference" in text
-    assert "write the number of that reference itself" in style
+    assert "written with the position of that image" in text
+    assert "the tags follow its positions" in style
     assert "K-th entry" not in text
     assert "K-th entry" not in style
 
