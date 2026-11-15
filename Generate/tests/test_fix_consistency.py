@@ -142,7 +142,7 @@ def test_parse_flagged_clip_after_repair_rounds_is_marked_and_run_stops():
     assert clip.needs_review is True
     assert NEGATION in clip.review_reason            # причина с разбора, по-русски
     assert gp._PARSE_PREFIX + NEGATION in clip.rework_pending
-    cfg = gp.PromptConfig(media="image", on_unfixed="fail")
+    cfg = gp.PromptConfig(media="image", on_unfixed="fail", style_file=str(STYLE))
     with pytest.raises(gp.GeminiError, match="on_unfixed"):
         gp._fail_unfixed([clip], cfg)
 
