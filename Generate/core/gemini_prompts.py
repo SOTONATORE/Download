@@ -824,10 +824,13 @@ def _garbage_reason(prompt: str) -> str:
 # Формат: (регулярка, причина для needs_review, подсказка для Gemini при повторном запросе).
 # причина правила art_medium (отключается профилем: relaxed_rules); вынесена, чтобы пропуск знал, какое правило снять
 _ART_MEDIUM_REASON = "стиль: художественная техника"
+_NEGATION_REASON = "стиль: отрицание"
+# префикс причины, пришедшей с разбора ответа на исправление: такие причины не проходят через таблицы кодов нарушений
+_PARSE_PREFIX = "разбор: "
 _STYLE_RULES = [
     (re.compile(r"\b(?:no|not|without|never|nothing|nobody|none|"
                 r"(?:don|doesn|isn|aren|can|won)['\u2019]?t|cannot)\b", re.I),
-     "стиль: отрицание",
+     _NEGATION_REASON,
      "Remove negations (no, not, without, never, nothing); describe only what is present."),
     (re.compile(r"[\"\u201c\u201d\u00ab\u00bb]"),
      "стиль: кавычки",
@@ -956,7 +959,26 @@ def _is_ref_problem(problem: str) -> bool:
     return problem.partition(": ")[0] in (REF_CODE_LABELS, REF_CODE_INVALID)
 
 
+def _parse_hint_en(item: str) -> str:
+    """Английская подсказка для причины разбора: текст правила стиля или общий (причина по-русски в запрос не идёт)."""
+    reason = item[len(_PARSE_PREFIX):]
+    for _rx, label, hint in _STYLE_RULES:
+        if label == reason:
+            return hint
+    return "Fix the problem found when the previous version was checked; keep the rest of the prompt."
+
+
 def _rework_text(problems: list) -> str:
+    """Английский текст повтора для строк очереди: причины разбора — подсказкой, остальное как раньше."""
+    parse = [p for p in problems if p.startswith(_PARSE_PREFIX)]
+    rest = [p for p in problems if not p.startswith(_PARSE_PREFIX)]
+    base = ("Rewrite this prompt. Keep the subject, count, action and setting from the segment. "
+            "Output only the rewritten prompt.") if parse and not rest else _rework_text_core(rest)
+    hints = " ".join(dict.fromkeys(_parse_hint_en(p) for p in parse))
+    return base + (" " + hints if hints else "")
+
+
+def _rework_text_core(problems: list) -> str:
     """Английский текст повтора для строк очереди. Строки меток и refs — свой текст; остальные — как раньше."""
     ref_items = [p for p in problems if _is_ref_problem(p)]
     if not ref_items:
@@ -973,6 +995,8 @@ def _rework_text(problems: list) -> str:
 
 
 def _problem_ru_any(problem: str) -> str:
+    if problem.startswith(_PARSE_PREFIX):
+        return problem[len(_PARSE_PREFIX):]
     if _is_ref_problem(problem):
         code, _, rest = problem.partition(": ")
         if code == REF_CODE_LABELS:
@@ -985,12 +1009,21 @@ def _problem_ru_any(problem: str) -> str:
     return problem_ru(problem)
 
 
+def _only_caps_matches(prompt: str, rx) -> bool:
+    # Исключение для текста на кадре: если профиль снимает frame_text, отрицание, написанное только заглавными
+    # словами из двух и более букв (например, «NO TOOLS» на табличке), правилом стиля не считается;
+    # строчные и смешанные совпадения (no, No) по-прежнему нарушают правило.
+    found = [m.group(0) for m in rx.finditer(prompt)]
+    return bool(found) and all(len(t) >= 2 and t.isupper() for t in found)
+
+
 def _style_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
                    rules: Optional[RulesValues] = None) -> list:
     """Стилевые причины и причины содержания кадра (дети, толпа, мелкие предметы, речь и т. д.).
     relaxed: отключённые профилем правила; art_medium снимает стилевое правило, small_objects — в содержании."""
     style = [reason for rx, reason, _ in _STYLE_RULES
-             if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)]
+             if rx.search(prompt) and not (reason == _ART_MEDIUM_REASON and "art_medium" in relaxed)
+             and not (reason == _NEGATION_REASON and "frame_text" in relaxed and _only_caps_matches(prompt, rx))]
     return style + content_reasons(prompt, media, relaxed, max_characters, rules)
 
 
@@ -1848,6 +1881,14 @@ class _WaveJob:
             found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"))  # проверка по сырому тексту, до стиля
             if ref_bad:
                 found = list(dict.fromkeys(found + _ref_fix_problems(c.prompt_raw, None, ref_bad)))
+            # Флаг разбора ответа на исправление (стиль, длина, формат): клип без находок по сырому тексту, но с флагом,
+            # ставится в очередь с этой причиной; на REPAIR_ROUNDS помечается на проверку, как и остальные клипы
+            rr_now = results.get(c.num)
+            parse_reasons = [p.reason for p in fix_problems if p.num == c.num]
+            if not parse_reasons and rr_now is not None and rr_now.needs_review:
+                parse_reasons = [rr_now.review_reason or "ответ помечен на проверку"]
+            if not found and parse_reasons:
+                found = [_PARSE_PREFIX + r for r in dict.fromkeys(parse_reasons)]
             c.prompt = attach_style(c.prompt_raw, self.style_text)  # в записи — текст со стилем, как у клипов вне очереди
             if not found:
                 c.rework_pending = []

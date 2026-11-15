@@ -1503,7 +1503,7 @@ class Orchestrator:
             if self.pilot:
                 return self._run_pilot()
             self._prepare_previews()  # превью из prompts.txt: до аренды; без файла/фото-модели — ошибка входа
-            missing = wanted_segment_numbers(self.segments, self.missing_path, self.segments_all)
+            missing = wanted_segment_numbers(self.segments, self.missing_path, getattr(self, "segments_all", False))
             if not missing and not self._previews:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()

@@ -162,6 +162,8 @@ def _orc_for_run(tmp_path, split: dict, photo_profile):
     orc._video_queue = orch.deque()
     orc._photo_queue = orch.deque()
     orc._split = None
+    if not hasattr(orc, "segments_all"):
+        orc.segments_all = False   # флаг задаёт конструктор; без __init__ он задаётся здесь
     seen: list = []
 
     def fake_generate(needed):
