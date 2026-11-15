@@ -1317,7 +1317,9 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
             reasons.append(g)
         reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules))
         if texts is not None and n in texts:
-            reasons.extend(ethnicity_reasons(prompt, texts[n]))
+            # Русский: корень этнического признака ищем в тексте сегмента и соседних (n-1, n+1); нет соседа — пусто
+            window = " ".join(str(texts.get(k) or "") for k in (n - 1, n, n + 1))
+            reasons.extend(ethnicity_reasons(prompt, window))
         refs, ref_reasons = None, []
         if cfg.refs_enabled:
             refs, ref_reasons = _check_refs(item.get("refs"), cfg.ref_max)
@@ -1665,6 +1667,23 @@ EMPTY_LENGTH_CODE = "EMPTY_RESPONSE_LENGTH"            # код ошибки Ope
 EMPTY_LENGTH_REASON = "пустой ответ по лимиту вывода"  # причина needs_review для половины, упавшей снова
 
 
+def _nums_ranges(nums) -> str:
+    """Русский: номера клипов диапазонами, например «1–3, 5, 7–8»."""
+    xs = sorted(int(n) for n in nums)
+    if not xs:
+        return "нет"
+    parts, start = [], xs[0]
+    prev = xs[0]
+    for x in xs[1:]:
+        if x == prev + 1:
+            prev = x
+            continue
+        parts.append(str(start) if start == prev else f"{start}–{prev}")
+        start = prev = x
+    parts.append(str(start) if start == prev else f"{start}–{prev}")
+    return ", ".join(parts)
+
+
 class _WaveJob:
     """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
 
@@ -1698,6 +1717,10 @@ class _WaveJob:
         self.labels: list = [str(i + 1) for i in range(len(batches))]  # метка батча: номер или x.1 / x.2
         self.is_half: list = [False] * len(batches)  # половина разделённого по лимиту вывода батча: не делится снова
         self.base_count = len(batches)    # число батчей волны до разделения (для строк «из N»)
+        self.pkg_round: dict = {}         # номер пакета -> номер раунда (для журнала)
+        self.round_left: dict = {}        # раунд -> пакетов, ещё не выполненных
+        self.round_stats: dict = {}       # раунд -> счётчики для строки итога раунда
+        self.stat_lock = threading.Lock() # счётчики раунда; короткий замок, без вызова модели
         self.round_pkgs: list = []        # пакеты текущего раунда исправлений, ещё не выданные: (номер пакета, клипы)
         self.round_inflight = 0           # пакеты раунда, которые выполняются сейчас
         self.round_no = 0                 # номер последнего раунда исправлений волны (с 1)
@@ -1798,7 +1821,11 @@ class _WaveJob:
         for i in range(0, len(clips), FIX_BATCH_SIZE):
             self.fix_no += 1   # номер пакета волны: растёт и здесь, под замком очереди
             pkgs.append((self.fix_no, clips[i:i + FIX_BATCH_SIZE]))
+            self.pkg_round[self.fix_no] = self.round_no
         self.round_pkgs = pkgs
+        self.round_left[self.round_no] = len(pkgs)
+        self.round_stats[self.round_no] = {"in": len(clips), "fixed": 0, "returned": 0, "review": 0,
+                                           "t0": time.monotonic()}
         log.info("%sРаунд исправлений %d: клипов %d, пакетов %d.", self.tag, self.round_no, len(clips), len(pkgs))
 
     def enqueue(self, clips: list) -> None:
@@ -1851,7 +1878,9 @@ class _WaveJob:
             raise GeminiError("Ошибка: исправление промптов не запускается в режиме fail_fast.")
         nums = [c.num for c in clips]
         logged.start_batch(fix_no, "Фикс")   # номер попытки и номер пакета в строках повторов
-        log.info("%sФикс %d: начало, клипов в пакете: %d.", self.tag, fix_no, len(clips), extra=KEY_EVENT_EXTRA)
+        rnd = self.pkg_round.get(fix_no, self.round_no)
+        log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
+                 self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
                  + (f" Refs for segment_index {c.num}: "
                     f"{json.dumps(c.extra['refs']) if 'refs' in c.extra else 'missing or invalid, return a valid refs list'}."
@@ -1859,6 +1888,7 @@ class _WaveJob:
                  for c in clips]
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
         try:
+            t_req = time.monotonic()
             raw = logged.generate_json(self.model, builder.system, user, builder.schema)
             results, fix_problems = parse_and_validate(raw, nums, builder.cfg, builder.texts)
         except BaseException as exc:
@@ -1922,16 +1952,36 @@ class _WaveJob:
                 log.warning("%sКлип %d: не исправлено за %d кругов: %s.",
                             self.tag, c.num, REPAIR_ROUNDS, c.review_reason)
             else:
+                # Русский: в очередь уходит текст этого круга, поэтому причина — тоже этого круга; раньше
+                # review_reason оставался от прошлого круга, и on_batch писал старую причину рядом с новым prompt
                 c.rework_pending = found
+                c.needs_review = True
+                c.review_reason = "; ".join(_problem_ru_any(p) for p in found)
                 requeue.append(c)
         ordered = sorted(clips, key=lambda c: c.num)
         with self.out_lock:
             self.out.update({c.num: c for c in ordered})
             if self.on_batch is not None:
                 self.on_batch(ordered)
-        if self.pool is not None:
-            log.info("%sФикс: круг %d, клипов %d, исправлено %d, осталось %d.",
-                     self.tag, max(c.rework_round for c in clips), len(clips), fixed, len(clips) - fixed)
+        # Русский: строка пакета (запрос, исходы, причины по номерам) и итог раунда, когда раунд выполнен
+        req_s = time.monotonic() - t_req
+        back_ids = {id(c) for c in requeue}
+        left = [c for c in clips if c.needs_review and id(c) not in back_ids]
+        detail = "; ".join(f"{c.num}: {c.review_reason}" for c in left) or "нет"
+        log.info("%sФикс: круг %d, пакет %d, запрос %.1f с, исправлено %d, в очередь %d, на проверке %d (%s).",
+                 self.tag, rnd, fix_no, req_s, fixed, len(requeue), len(left), detail)
+        with self.stat_lock:
+            st = self.round_stats.get(rnd)
+            if st is not None:
+                st["fixed"] += fixed
+                st["returned"] += len(requeue)
+                st["review"] += len(left)
+                self.round_left[rnd] -= 1
+                if self.round_left[rnd] == 0:
+                    log.info("Раунд исправлений %d: на входе клипов %d, исправлено %d, возвращено %d, "
+                             "на проверке %d, длительность %.1f с.",
+                             rnd, st["in"], st["fixed"], st["returned"], st["review"],
+                             time.monotonic() - st["t0"])
         self.enqueue(requeue)
 
 
@@ -2010,19 +2060,23 @@ class SharedBatchPool:
     def _take(self, own: str):
         """Следующая работа потока: ('main', волна, idx) или ('fix', волна, (номер пакета, клипы)); None, когда работы больше не будет.
 
-        Порядок: главный батч (своя волна, затем чужая). Если главных не осталось: пакет исправлений, полный
-        (FIX_BATCH_SIZE клипов одной волны) сразу; остаток — только когда нигде не выполняется главный батч (исправления других волн не мешают).
-        Иначе поток ждёт в wait(); замок при ожидании отпускается. Ошибка пула останавливает выдачу.
+        Порядок: 1) полный пакет исправлений (FIX_BATCH_SIZE клипов) — раньше главного батча, даже если главные ещё есть;
+        2) главный батч (своя волна, затем чужая); 3) остаток исправлений (меньше FIX_BATCH_SIZE) — только когда нигде
+        не выполняется главный батч. Иначе поток ждёт в wait(); замок при ожидании отпускается. Ошибка пула останавливает выдачу.
         """
         with self._cond:
             while True:
                 if self._fatal is not None:
                     return None
+                fix = self._pick_fix(own, remainder=False)
+                if fix is not None:
+                    job, clips, fix_no = fix
+                    return "fix", job, (fix_no, clips)
                 main = self._pick_main(own)
                 if main is not None:
                     job, idx = main
                     return "main", job, idx
-                fix = self._pick_fix(own)
+                fix = self._pick_fix(own, remainder=True)
                 if fix is not None:
                     job, clips, fix_no = fix
                     return "fix", job, (fix_no, clips)
@@ -2044,29 +2098,33 @@ class SharedBatchPool:
             return job, idx
         return None
 
-    def _pick_fix(self, own: str):
+    def _pick_fix(self, own: str, remainder: bool):
         """Под замком очереди: пакет исправлений одной волны (своя, затем чужая) или None.
 
-        Раунды по барьеру: сначала пакеты уже начатого раунда. Новый раунд (снимок очереди) начинается только
-        когда предыдущий полностью выполнен (round_inflight == 0). Полный пакет — сразу; остаток — когда
-        нигде не выполняется главный батч (как и раньше).
+        remainder=False: только полный пакет (FIX_BATCH_SIZE клипов). Полный пакет снимка раунда выдаётся сразу;
+        новый раунд начинается, когда пакетов раунда не осталось, а в очереди не меньше FIX_BATCH_SIZE клипов.
+        Барьера раунда нет: клип, вернувшийся с нарушением, сразу попадает в очередь и уходит в следующий пакет.
+        remainder=True: остаток (меньше FIX_BATCH_SIZE) — только когда нигде не выполняется главный батч.
         """
         order = [own] + [w for w in self._shares if w != own]
+        alive = []
         for w in order:
             job = self._jobs.get(w)
-            if job is not None and not job.stopped and job.round_pkgs:
-                return self._cut_fix(job)
-        for w in order:
-            job = self._jobs.get(w)
-            if (job is not None and not job.stopped and job.round_inflight == 0
-                    and len(job.rework_queue) >= FIX_BATCH_SIZE):
-                return self._cut_fix(job)
-        if all(j.main_inflight == 0 for j in self._jobs.values() if j is not None):
-            for w in order:
-                job = self._jobs.get(w)
-                if (job is not None and not job.stopped and job.round_inflight == 0
-                        and job.rework_queue):
+            if job is not None and not job.stopped:
+                alive.append(job)
+        if not remainder:
+            for job in alive:
+                if job.round_pkgs and len(job.round_pkgs[0][1]) >= FIX_BATCH_SIZE:
                     return self._cut_fix(job)
+            for job in alive:
+                if not job.round_pkgs and len(job.rework_queue) >= FIX_BATCH_SIZE:
+                    return self._cut_fix(job)
+            return None
+        if any(j.main_inflight for j in self._jobs.values() if j is not None):
+            return None
+        for job in alive:
+            if job.round_pkgs or job.rework_queue:
+                return self._cut_fix(job)
         return None
 
     @staticmethod

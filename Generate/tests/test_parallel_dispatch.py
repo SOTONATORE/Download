@@ -160,42 +160,53 @@ def test_half_failing_again_is_flagged_and_run_continues(tmp_path, monkeypatch):
     assert not any(by[n].needs_review for n in range(13, 31))  # вторая половина и батч 2 — в порядке
 
 
-# е. Раунды исправлений по барьеру: два пакета первого раунда стартуют до любого пакета второго
+# е. Раунды исправлений в пуле: второй раунд стартует, пока пакет первого раунда ещё выполняется
 
-class _FixRoundTransport:
-    def __init__(self, barrier):
-        self.barrier = barrier
+class _FixOverlapTransport:
+    """Пакет 1–25 первого раунда ждёт старта пакета второго раунда (клипы 26–50); если его нет, ждёт 5 с."""
+
+    def __init__(self):
         self.lock = threading.Lock()
-        self.events = []     # ("start" | "end", наименьший номер пакета)
-        self.fix_calls = 0
+        self.release = threading.Event()
+        self.waited_ok = False
+        self.calls = []          # номера клипов каждого пакета исправления, по порядку вызовов
+        self.lo26 = 0
 
     def generate_json(self, model, system, user, schema):
         fixed = [int(x) for x in FIX_RE.findall(user)]
         if not fixed:
-            return _answer(_main_nums(user), MAP)              # основной запрос: все клипы с нарушением шага 6
-        lo = min(fixed)
+            return _answer(_main_nums(user), MAP)              # основной запрос: все клипы с нарушением
         with self.lock:
-            self.events.append(("start", lo))
-            self.fix_calls += 1
-            first_round = self.fix_calls <= 2
-        if first_round:
-            self.barrier.wait()                                # оба пакета первого раунда должны идти вместе
-        text = CLEAN if max(fixed) <= 25 else MAP              # клипы 26–50 остаются с нарушением
-        with self.lock:
-            self.events.append(("end", lo))
-        return _answer(fixed, text)
+            self.calls.append(sorted(fixed))
+            if min(fixed) == 26:
+                self.lo26 += 1
+                second = self.lo26 == 2
+            else:
+                second = False
+        if second:
+            self.release.set()                                  # пакет второго раунда стартовал
+            return _answer(fixed, CLEAN)
+        if min(fixed) == 26:
+            return _answer(fixed, MAP)                          # первый раунд: 26–50 остаются с нарушением
+        self.waited_ok = self.release.wait(timeout=5)           # 1–25 ждут старта второго раунда
+        return _answer(fixed, CLEAN)
 
 
 def test_fix_round_barrier(tmp_path, monkeypatch):
-    monkeypatch.setattr(gp, "_provider_key_count", lambda provider: 2)
+    # Комментарий: раньше второй раунд ждал конца первого (round_inflight == 0). Теперь клипы, вернувшиеся
+    # с нарушением, уходят в следующий пакет сразу. Проверяем: пакет второго раунда стартовал при выполняющемся
+    # пакете первого; ни один клип не потерян; ни один клип не исправлен дважды в одном пакете; rework_round
+    # увеличен ровно на одно исправление каждого клипа.
     monkeypatch.setattr(gp, "log", mock.MagicMock())
-    t = _FixRoundTransport(threading.Barrier(2, timeout=5))
-    gp.generate_prompts(_segs(50), list(range(1, 51)), _cfg(tmp_path, 25), t, "m")
-
-    assert t.events[0][0] == "start" and t.events[1][0] == "start"   # оба пакета раунда 1 стартовали
-    assert {t.events[0][1], t.events[1][1]} == {1, 26}
-    assert [e[0] for e in t.events[2:4]] == ["end", "end"]           # второй раунд — только после обоих
-    assert t.events[4] == ("start", 26)                              # первый пакет раунда 2 (клипы 26–50)
+    t = _FixOverlapTransport()
+    pool = gp.SharedBatchPool({"photo": 2})
+    res = gp.generate_prompts(_segs(50), list(range(1, 51)), _cfg(tmp_path, 25), t, "m",
+                              pool=pool, wave="photo")
+    by = {r.num: r for r in res}
+    assert t.waited_ok is True                                  # второй раунд стартовал, пока 1–25 выполнялся
+    assert sorted(by) == list(range(1, 51))                     # ни один клип не потерян
+    assert all(len(set(c)) == len(c) for c in t.calls)          # ни один клип не исправлен дважды в пакете
+    assert by[1].rework_round == 1 and by[26].rework_round == 2  # одно исправление на клип за круг
 
 
 # ж. Прочая ошибка транспорта по-прежнему останавливает прогон

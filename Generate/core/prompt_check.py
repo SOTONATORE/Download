@@ -336,8 +336,10 @@ _PERSON_RX = re.compile(
 PEOPLE_LIMIT = {"video": 2, "image": 1}
 
 # Этнические и национальные признаки: допустимы, только если сегмент сам о них говорит.
+# Названия мест и животных (East African grassland, African elephant) не признак внешности: проверяются
+# только формы про людей (African man, African woman, African people, African boy, African girl).
 _ETHNIC_RX = re.compile(
-    r"\b(?:dark[- ]skinned|dark skin|african|africans|arabs?|arabic (?:man|men|woman|women|people|boy|girl)|"
+    r"\b(?:dark[- ]skinned|dark skin|african (?:man|men|woman|women|people|boy|girl)|arabs?|arabic (?:man|men|woman|women|people|boy|girl)|"
     r"indians?|south asians?|middle[- ]eastern|asians?|chinese|japanese|korean|"
     r"black (?:man|men|woman|women|people|person|boy|girl|villagers?|soldiers?|riders?|workers?|farmers?|"
     r"herders?))\b",

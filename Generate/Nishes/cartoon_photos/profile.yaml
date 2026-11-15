@@ -10,9 +10,9 @@ type: image
 width: 1920
 height: 1080
 
-# текст в промптах разрешён; семейство текстовой модели для ниши
+# текст в промптах разрешён; семейство текстовой модели для ниши (nemotron-super-vl: nvidia/nemotron-3.5-super-vl:free)
 allow_text: true
-text_model: nemotron
+text_model: nemotron-super-vl
 
 # референсы: метки <imageN> проверяются по списку refs сегмента
 refs_enabled: true
