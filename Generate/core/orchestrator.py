@@ -49,7 +49,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .segment_split import all_photo, select_video_segments, to_segments
     from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
     from .video_value import SCORE_BATCH_SIZE, score_segments, write_distribution
-    from .config_loader import DEFAULT_MODEL_PROFILE
+    from .config_loader import DEFAULT_MODEL_PROFILE, profile_refs_enabled
     from .naming import clip_filename
     from . import previews
     from .card_roles import plan_card_roles
@@ -74,7 +74,7 @@ except ImportError:  # pragma: no cover
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
     from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
     from video_value import SCORE_BATCH_SIZE, score_segments, write_distribution  # type: ignore
-    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
+    from config_loader import DEFAULT_MODEL_PROFILE, profile_refs_enabled  # type: ignore
     from naming import clip_filename  # type: ignore
     import previews  # type: ignore
     import ssh_probe  # type: ignore
@@ -180,6 +180,20 @@ def _valid_refs(value) -> bool:
     if any(isinstance(x, bool) or not isinstance(x, int) or not 1 <= x <= REFS_MAX for x in value):
         return False
     return len(set(value)) == len(value)
+
+
+def _entry_refs(entry) -> Optional[list]:
+    """Поле refs задачи из prompts.json: сначала верхний уровень entry["refs"], затем entry["extra"]["refs"].
+
+    Генерация пишет refs внутрь extra; превью и старые файлы пишут на верхний уровень. None — поля нет.
+    """
+    if not isinstance(entry, dict):
+        return None
+    refs = entry.get("refs")
+    if refs is None:
+        extra = entry.get("extra")
+        refs = extra.get("refs") if isinstance(extra, dict) else None
+    return refs
 
 
 def group_by_stack(nums: list, stack_of: Callable) -> list:
@@ -1982,9 +1996,12 @@ class Orchestrator:
 
     def _stack_of(self, num: int) -> tuple:
         """Ключ стека клипа: отсортированный кортеж refs из prompts.json; () без поля или при некорректном поле."""
-        entry = self._prompts.get(str(num))
-        refs = entry.get("refs") if isinstance(entry, dict) else None
+        refs = _entry_refs(self._prompts.get(str(num)))
         return tuple(sorted(refs)) if _valid_refs(refs) else ()
+
+    def _refs_enabled_for_role(self, role: str) -> bool:
+        """Профиль роли карты принимает референсы (refs_enabled в profile.yaml, без имён ниш)."""
+        return profile_refs_enabled(self._profile_for_role(role))
 
     def _work(self, ready: list) -> None:
         # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
@@ -3176,6 +3193,9 @@ class Orchestrator:
             if preview.refs is not None:
                 # референсы блока: поле уходит только когда оно есть в файле промптов (старые блоки без изменений)
                 payload["refs"] = list(preview.refs)
+            elif self._refs_enabled_for_role(slot.role):
+                # превью без референсов в профиле с refs: явный пустой список (иначе воркер падает на ref_7..10)
+                payload["refs"] = []
             log.info("генерация превью: промпт %d, сид %d", preview.x, preview.y, extra=KEY_EVENT_EXTRA)
         else:
             entry = self._prompts.get(str(num))
@@ -3188,13 +3208,17 @@ class Orchestrator:
                 return
             payload = {"num": num, "prompt": entry["prompt"],
                        "num_frames": num_frames, "seed": self.seed_base + num}
-            if entry.get("refs") is not None:
+            entry_refs = _entry_refs(entry)
+            if entry_refs is not None:
                 # референсы задачи: поле уходит на воркер только когда оно есть в prompts.json (старые задачи без изменений)
-                if not _valid_refs(entry["refs"]):
+                if not _valid_refs(entry_refs):
                     self._attempts[num] = MAX_ATTEMPTS
                     self._fail_clip(num, "в prompts.json некорректное поле refs")
                     return
-                payload["refs"] = sorted(entry["refs"])
+                payload["refs"] = sorted(entry_refs)
+            elif self._refs_enabled_for_role(slot.role):
+                # профиль с референсами, а у клипа их нет: явный пустой список, воркер уберёт все LoadImage (SPEC 8.1)
+                payload["refs"] = []
         try:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:

@@ -334,9 +334,10 @@ class ReleaseUploader:
         self._log(f"Создан релиз {pt} (ГЕНЕРАЦИЯ · ЧАСТЬ {n}).")
         return pt
 
-    def upload_clip(self, path: str) -> bool:
+    def upload_clip(self, path: str, refresh_links: bool = True) -> bool:
         """Загружает клип или фото в активную часть ГЕНЕРАЦИЯ; False, если номер уже загружен.
-        После загрузки обновляет generated_links.txt в финале."""
+        После загрузки обновляет generated_links.txt в финале, если refresh_links=True (по умолчанию, как раньше).
+        refresh_links=False: файл ссылок обновит отдельный вызов refresh_links() (пакетное обновление)."""
         self._ensure_prepared()
         name = os.path.basename(path)
         num = _clip_num_any(name, self.template)
@@ -349,8 +350,13 @@ class ReleaseUploader:
         self._counts[tag] += 1
         self.asset_tags[name] = tag
         self.done.add(num)
-        self._refresh_links()
+        if refresh_links:
+            self._refresh_links()
         return True
+
+    def refresh_links(self) -> None:
+        """Перезаписывает generated_links.txt в финале по текущему состоянию загруженных клипов (публичный вход)."""
+        self._refresh_links()
 
     def upload_preview(self, path: str) -> None:
         """Превью preview_<x>_<y>.png -> ФИНАЛ · ГЕНЕРАЦИЯ (исключение: превью - медиа, но живут в финале).

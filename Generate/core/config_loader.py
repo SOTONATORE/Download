@@ -529,6 +529,19 @@ def load_profile_text_model(profile: str) -> Optional[str]:
     return value.strip()
 
 
+def profile_refs_enabled(profile_name: str) -> bool:
+    """Профиль принимает референсы (refs_enabled: true в profile.yaml). Без профиля или поля — False.
+
+    Не выбрасывает исключений: оркестратор при False просто не передаёт поле refs (поведение ltx25 и zimage_turbo).
+    """
+    if not profile_name:
+        return False
+    try:
+        return _read_profile(profile_name).get("refs_enabled") is True
+    except (GeminiInputError, ValueError):
+        return False
+
+
 def load_profile_type(profile_name: str) -> str:
     """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
     value = _read_profile(profile_name).get("type", "video")

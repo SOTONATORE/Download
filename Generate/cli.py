@@ -125,7 +125,9 @@ WATCH_NORMAL_SILENCE_SEC = 300
 MAX_AGE_SEC = 6 * 3600
 GEN_LABEL_RE = re.compile(r"gen-([0-9]+)")
 PILOT_LABEL_RE = re.compile(r"pilot-(.+)")
-CARD_LABEL_PREFIXES = ("gen-", "pilot-")
+# метка ручного теста воркфлоу (test-workflows): уборка по kill-cards и cleanup_vast узнаёт её так же, как gen-/pilot-
+TESTWF_LABEL_RE = re.compile(r"testwf-([0-9]+)")
+CARD_LABEL_PREFIXES = ("gen-", "pilot-", "testwf-")
 # статусы запуска GitHub Actions, при которых запуск ещё идёт (SPEC 8.3 г)
 ACTIVE_RUN_STATUSES = ("in_progress", "queued", "waiting", "requested", "pending")
 GH_STATUS_TIMEOUT_SEC = 60
@@ -1316,9 +1318,9 @@ def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- уборка по расписанию (SPEC 8.3 г)
 
 def parse_card_label(label: Optional[str]) -> Optional[str]:
-    """Номер запуска из метки карты: gen-<номер> или pilot-<что угодно>. None, если метка не разобрана."""
+    """Номер запуска из метки карты: gen-<номер>, testwf-<номер> или pilot-<что угодно>. None, если метка не разобрана."""
     text = label or ""
-    m = GEN_LABEL_RE.fullmatch(text) or PILOT_LABEL_RE.fullmatch(text)
+    m = GEN_LABEL_RE.fullmatch(text) or TESTWF_LABEL_RE.fullmatch(text) or PILOT_LABEL_RE.fullmatch(text)
     return m.group(1) if m else None
 
 
