@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -214,6 +216,10 @@ def group_by_stack(nums: list, stack_of: Callable) -> list:
 
 
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
+# A2: generated_links.txt обновляется после каждых N клипов, выгруженных в фоне
+LINKS_REFRESH_EVERY = 20
+# A2: период записи в лог, пока фоновая выгрузка ещё идёт при остановке
+UPLOAD_JOIN_LOG_SEC = 60.0
 _FAILED_STATUSES = frozenset({"failed", "error"})
 # Нехватка видеопамяти при рендере: фраза из текста ComfyUI, которую воркер передаёт в ошибке задачи (worker/comfy_client.py)
 OUT_OF_MEMORY_TEXT = "out of memory"
@@ -941,6 +947,9 @@ class RunPublisher:
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
+    _upload_thread = None     # A2: фоновый поток выгрузки, существует только внутри _work
+    _pending_uploads: int = 0  # A2: скачано, но ещё не выгружено в Release
+    _uploaded_since_links: int = 0  # A2: выгружено с последнего обновления generated_links.txt
     _total_needed: int = 0  # клипов нужно в этом запуске: знаменатель строк «клип N из M» (задаёт run)
     # превью по умолчанию (без __init__, как в тестах): ничего не делается; только для чтения
     prompts_file = None
@@ -1187,6 +1196,12 @@ class Orchestrator:
         self._done: set = set()
         self._failed: set = set()
         self._durations: list = []
+        # A2: общая блокировка состояния (главный поток и фоновая выгрузка); RLock: вложенные вызовы безопасны
+        self._state_lock = threading.RLock()
+        self._upload_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._upload_thread: Optional[threading.Thread] = None
+        self._pending_uploads: int = 0
+        self._uploaded_since_links: int = 0
         self._bad_machines: set = set()
         self._bad_offers: set = set()
         # предложения, по которым отправлен запрос аренды (успешный или нет): в этом запуске не выбираются снова (9е-3)
@@ -1686,7 +1701,7 @@ class Orchestrator:
 
     def _finish(self, summary: RunSummary) -> None:
         """F1 (3)-(4) и E2: отчёт, архив логов и служебные файлы; итоговая строка последней."""
-        self._log_budget()
+        self._log_budget()  # A2: к этому моменту фоновая выгрузка уже дозалита (см. _work)
         pub = self._publisher
         if pub is not None and self._tmp:
             report_path = os.path.join(self._tmp, REPORT_FILENAME)
@@ -1970,23 +1985,49 @@ class Orchestrator:
             log.warning("Без готового промпта осталось клипов: %d.", len(needed) - len(ready))
         return ready
 
+    def _lock_state(self) -> threading.RLock:
+        """Блокировка общего состояния. Создаётся лениво: объекты без __init__ (тесты) тоже получают её."""
+        lock = self.__dict__.get("_state_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self._state_lock = lock
+        return lock
+
+    def _upload_q(self) -> "queue.Queue":
+        """Очередь фоновой выгрузки; создаётся лениво по тем же причинам, что и блокировка."""
+        q = self.__dict__.get("_upload_queue")
+        if q is None:
+            q = queue.Queue()
+            self._upload_queue = q
+        return q
+
     def _save_state(self) -> None:
-        try:
-            go.atomic_write_json(self.prompts_path, self._state)
-        except OSError as exc:
-            log.warning("Не удалось сохранить файл промптов %s: %s: %s.",
-                        self.prompts_path, type(exc).__name__, exc)
+        with self._lock_state():
+            try:
+                go.atomic_write_json(self.prompts_path, self._state)
+            except OSError as exc:
+                log.warning("Не удалось сохранить файл промптов %s: %s: %s.",
+                            self.prompts_path, type(exc).__name__, exc)
 
     def _mark(self, num: int, status: str) -> None:
-        entry = self._prompts.get(str(num))
-        if isinstance(entry, dict):
-            entry["render_status"] = status
-            self._save_state()
+        with self._lock_state():
+            entry = self._prompts.get(str(num))
+            if isinstance(entry, dict):
+                entry["render_status"] = status
+                self._save_state()
 
     # --- основной цикл -------------------------------------------------------
+    def _render_inflight(self) -> int:
+        # незавершённые клипы на картах, включая задачи в буфере (не только выполняющиеся); без выгрузки
+        return sum(len(s.tasks) for s in list(self._slots.values()))
+
+    def _pending_uploads_count(self) -> int:
+        with self._lock_state():
+            return getattr(self, "_pending_uploads", 0)
+
     def _inflight(self) -> int:
-        # незавершённые клипы на картах, включая задачи в буфере (не только выполняющиеся)
-        return sum(len(s.tasks) for s in self._slots.values())
+        # A2: клипы, скачанные с карты и ждущие GitHub Release, тоже незавершённая работа: цикл не выходит раньше
+        return self._render_inflight() + self._pending_uploads_count()
 
     @property
     def _queue(self) -> deque:
@@ -2051,6 +2092,14 @@ class Orchestrator:
         return profile_refs_enabled(self._profile_for_role(role))
 
     def _work(self, ready: list) -> None:
+        # A2: фоновый поток выгрузки живёт на время цикла; при любом выходе дозаливаются все скачанные клипы
+        self._start_upload_thread()
+        try:
+            self._work_loop(ready)
+        finally:
+            self._stop_upload_thread()
+
+    def _work_loop(self, ready: list) -> None:
         # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
         self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
         # задачи одного стека (refs из prompts.json) идут подряд; номера клипов не меняются
@@ -2143,10 +2192,12 @@ class Orchestrator:
 
     # --- аренда --------------------------------------------------------------
     def _desired(self, now: float) -> int:
-        remaining = len(self._video_queue) + len(self._photo_queue) + self._inflight()
+        remaining = len(self._video_queue) + len(self._photo_queue) + self._render_inflight()
         if remaining <= 0:
             return 0
-        avg = sum(self._durations) / len(self._durations) if self._durations else self.render_estimate
+        with self._lock_state():
+            durs = list(self._durations)
+        avg = sum(durs) / len(durs) if durs else self.render_estimate
         time_left = max(1.0, self._deadline_sec - (now - self._t0))
         need = math.ceil(remaining * avg / (time_left * 0.8))
         return max(1, min(self.max_cards, need, remaining))
@@ -3104,7 +3155,7 @@ class Orchestrator:
 
     def _assigned_slot(self, num: int) -> Optional[_CardSlot]:
         """Слот, на котором сейчас назначен клип (состояние assigned, SPEC 8.2); None, если клип free."""
-        for slot in self._slots.values():
+        for slot in list(self._slots.values()):
             if any(t.num == num for t in slot.tasks):
                 return slot
         return None
@@ -3164,11 +3215,17 @@ class Orchestrator:
         """Клип возвращается в состояние free: в очередь, если он не done, не назначен и уже не в очереди."""
         if num in self._done or num in self._failed or num in self._queue_of(num) or self._assigned_slot(num):
             return
-        if self._attempts.get(num, 0) > 0:
-            self._attempts[num] -= 1
-        self._queue_of(num).appendleft(num)
+        with self._lock_state():
+            if self._attempts.get(num, 0) > 0:
+                self._attempts[num] -= 1
+            self._queue_of(num).appendleft(num)
 
     def _fail_clip(self, num: int, reason: str) -> None:
+        # A2: состояние общее с фоновой выгрузкой: вся запись под блокировкой (RLock допускает вложенный вызов)
+        with self._lock_state():
+            self._fail_clip_body(num, reason)
+
+    def _fail_clip_body(self, num: int, reason: str) -> None:
         preview = self._previews.get(num)
         if preview is not None:
             self._fail_preview(preview, reason)
@@ -3265,7 +3322,8 @@ class Orchestrator:
                  extra=CONSOLE_SKIP_EXTRA)
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
-        num = self._queue_for_role(slot.role).popleft()
+        with self._lock_state():
+            num = self._queue_for_role(slot.role).popleft()
         owner = self._assigned_slot(num)
         if owner is not None or num in self._done:
             # повторный POST /task для назначенного клипа создал бы дубль на воркере (SPEC 8.2, 13.1 п. 3)
@@ -3319,7 +3377,8 @@ class Orchestrator:
         except _WorkerHttpError as exc:
             if exc.status == 429:
                 # воркер занят (backpressure): клип возвращается в начало очереди без попытки и без сбоя карты
-                self._queue_for_role(slot.role).appendleft(num)
+                with self._lock_state():
+                    self._queue_for_role(slot.role).appendleft(num)
                 blocked = getattr(self, "_tick_429", None)
                 if blocked is not None:
                     blocked.add(slot.index)  # до следующего обхода этой карте задачи не назначаем
@@ -3327,12 +3386,12 @@ class Orchestrator:
                           _card_name(slot, cap=True), num)
                 return
             slot.net_fail += 1
-            self._attempts[num] = self._attempts.get(num, 0) + 1
+            self._bump_attempts(num)
             self._fail_clip(num, f"воркер ответил {exc}")
             return
         slot.contacted = True
         slot.net_fail = 0
-        self._attempts[num] = self._attempts.get(num, 0) + 1
+        self._bump_attempts(num)
         data = self._json(resp)
         tid = str(data.get("id") or data.get("task_id") or num)
         slot.tasks.append(_Task(num, tid, now))  # задача встаёт в буфер карты; состояние queued до статуса running
@@ -3415,6 +3474,141 @@ class Orchestrator:
         except httpx.HTTPError as exc:
             raise _WorkerNetError(type(exc).__name__) from None
 
+    # --- A2: скачивание, ack и фоновая выгрузка в Release -------------------------
+    def _bump_attempts(self, num: int) -> None:
+        """Счётчик попыток клипа: запись под блокировкой состояния (фоновый поток читает его при отказе)."""
+        with self._lock_state():
+            self._attempts[num] = self._attempts.get(num, 0) + 1
+
+    def _start_upload_thread(self) -> None:
+        """Один фоновый поток выгрузки на запуск: все вызовы ReleaseUploader и gh идут только из него."""
+        self._upload_thread = threading.Thread(target=self._upload_worker, name="release-uploader", daemon=True)
+        self._upload_thread.start()
+
+    def _upload_worker(self) -> None:
+        q = self._upload_q()
+        while True:
+            item = q.get()
+            try:
+                if item is None:
+                    return
+                self._process_upload(item)
+            finally:
+                q.task_done()
+
+    def _stop_upload_thread(self) -> None:
+        """Дозаливка перед выходом из _work: None ставится в конец очереди, поэтому все скачанные клипы уходят в Release раньше.
+
+        Ожидание без таймаута: иначе _tmp удалился бы, пока файлы ещё нужны загрузчику. Раз в минуту пишется строка о ходе.
+        """
+        thread = self._upload_thread
+        if thread is None:
+            return
+        q = self._upload_q()
+        q.put(None)
+        while thread.is_alive():
+            thread.join(timeout=UPLOAD_JOIN_LOG_SEC)
+            if thread.is_alive():
+                log.info("Дозаливка в Release продолжается: клипов в очереди %d.", self._pending_uploads_count())
+        self._upload_thread = None
+        # поток завершился аварийно: остаток очереди разбирает главный поток, чтобы ничего не потерять
+        while True:
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if item is not None:
+                    self._process_upload(item)
+            finally:
+                q.task_done()
+
+    def _enqueue_upload(self, num: int, path: str, duration: float, is_preview: bool, card: str) -> None:
+        item = (num, path, duration, is_preview, card)
+        with self._lock_state():
+            self._pending_uploads += 1  # счётчик растёт ДО постановки: _inflight не отпустит цикл раньше времени
+        if getattr(self, "_upload_thread", None) is None:
+            # вне _work (прямой вызов, тесты): выгрузка в этом же потоке, как раньше
+            self._process_upload(item)
+            return
+        self._upload_q().put(item)
+
+    @staticmethod
+    def _accepts_refresh(uploader) -> bool:
+        """Есть ли у upload_clip параметр refresh_links (заглушки в тестах принимают только путь)."""
+        try:
+            return "refresh_links" in inspect.signature(uploader.upload_clip).parameters
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _release_download(path: str) -> None:
+        """Удаляет скачанный файл и его каталог задачи, если тот уже пуст."""
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+
+    def _process_upload(self, item: tuple) -> None:
+        """Выгрузка одного скачанного клипа. Файл удаляется всегда, счётчик ожидающих уменьшается всегда."""
+        num, path, duration, is_preview, card = item
+        try:
+            self._upload_one(num, path, duration, is_preview, card)
+        finally:
+            self._release_download(path)
+            with self._lock_state():
+                self._pending_uploads -= 1
+
+    def _upload_one(self, num: int, path: str, duration: float, is_preview: bool, card: str) -> None:
+        uploader = self._uploader
+        try:
+            if uploader is None:
+                raise gp.GeminiRuntimeError("загрузчик Release не открыт")
+            if is_preview:
+                uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
+            elif self._accepts_refresh(uploader):
+                uploader.upload_clip(path, refresh_links=False)  # файл ссылок обновляется пакетом ниже
+            else:
+                uploader.upload_clip(path)
+        except Exception as exc:
+            with self._lock_state():
+                self._fail_clip(num, f"не удалось загрузить в Release: {exc}")
+            return
+        if is_preview:
+            with self._lock_state():
+                preview = self._previews.get(num)
+                if preview is not None:
+                    # превью не входит в счётчики клипов (готово/из скольких, ср. время клипа, покрытие SRT)
+                    preview.status = previews.STATUS_DONE
+                    log.info("генерация превью: промпт %d, сид %d: готово, в итоговом релизе", preview.x, preview.y,
+                             extra=KEY_EVENT_EXTRA)
+            return
+        # пакетное обновление generated_links.txt: после LINKS_REFRESH_EVERY выгруженных клипов
+        with self._lock_state():
+            self._uploaded_since_links += 1
+            refresh_now = self._uploaded_since_links >= LINKS_REFRESH_EVERY
+            if refresh_now:
+                self._uploaded_since_links = 0
+        if refresh_now and hasattr(uploader, "refresh_links"):
+            try:
+                uploader.refresh_links()
+            except Exception as exc:  # сбой ссылок не отменяет уже выгруженный клип
+                log.warning("Не удалось обновить generated_links.txt: %s", exc)
+        with self._lock_state():
+            self._done.add(num)
+            self._durations.append(duration)
+            self._mark(num, "done")
+            log.info("Клип %d выдан в Release (рендер: %s, %.1f с).", num, card, duration)
+            total = self._total_needed
+            done = len(self._done)
+            log.info("%s: готов", self._clip_label(num), extra=KEY_EVENT_EXTRA)
+            log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
+                     extra=KEY_EVENT_EXTRA)
+
     def _finish_clip(self, slot: _CardSlot, now: float, task: Optional[_Task] = None) -> None:
         # без аргумента task берётся текущая задача карты (прежний вызов); с task — конкретная задача буфера
         task = task if task is not None else slot.task
@@ -3423,54 +3617,27 @@ class Orchestrator:
             name = preview.filename
         else:
             name = f"{task.num}.png" if slot.role == "photo" else clip_filename(task.num, self.width, self.template)
-        path = os.path.join(self._tmp, name)
-        reason = ""
-        try:
-            self._download(slot, task.id, path)
-            if preview is not None:
-                self._uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
-            else:
-                self._uploader.upload_clip(path)
-        except (_WorkerNetError, _WorkerHttpError) as exc:
-            reason = f"не удалось скачать клип с воркера ({exc})"
-        except gp.GeminiRuntimeError as exc:
-            reason = f"не удалось загрузить клип в Release: {exc}"
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        self._drop_task(slot, task)  # снимается только эта задача; буфер карты остаётся
-        if reason:
-            self._fail_clip(task.num, reason)
-            return
-        if preview is not None:
-            # превью не входит в счётчики клипов (готово/из скольких, ср. время клипа, покрытие SRT)
-            preview.status = previews.STATUS_DONE
-            log.info("генерация превью: промпт %d, сид %d: готово, в итоговом релизе", preview.x, preview.y,
-                     extra=KEY_EVENT_EXTRA)
-            try:
-                self._call(slot, "POST", f"/ack/{task.id}")
-            except (_WorkerNetError, _WorkerHttpError):
-                log.warning("Воркер не подтвердил удаление превью %s.", preview.filename)
-            return
-        self._done.add(task.num)
+        # имя файла сохраняется (uploader разбирает номер по basename); уникальность даёт каталог задачи
+        path = os.path.join(self._tmp, "pending", task.id, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # задача снимается с карты сразу: буфер не ждёт GitHub, её файл учитывается в _pending_uploads
+        self._drop_task(slot, task)
         # время рендера от старта на карте (running_since), а не от постановки в буфер
         started_at = task.running_since if task.running_since is not None else task.started
         duration = max(0.0, now - started_at)
-        self._durations.append(duration)
-        self._mark(task.num, "done")
-        log.info("Клип %d выдан в Release (рендер: %s, %.1f с).",
-                 task.num, _card_name(slot), duration)
-        total = self._total_needed
-        done = len(self._done)
-        log.info("%s: готов", self._clip_label(task.num), extra=KEY_EVENT_EXTRA)
-        log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
-                 extra=KEY_EVENT_EXTRA)
+        try:
+            self._download(slot, task.id, path)
+        except (_WorkerNetError, _WorkerHttpError) as exc:
+            self._release_download(path)  # частично скачанный файл не нужен
+            with self._lock_state():
+                self._fail_clip(task.num, f"не удалось скачать клип с воркера ({exc})")
+            return
+        # файл уже у оркестратора: воркер освобождает диск сразу; сбой ack сам файл не отменяет
         try:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):
-            log.warning("Воркер не подтвердил удаление клипа %d с диска карты.", task.num)
+            log.warning("Воркер не подтвердил удаление файла %s с диска карты.", name)
+        self._enqueue_upload(task.num, path, duration, preview is not None, _card_name(slot))
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:
