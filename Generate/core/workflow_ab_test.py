@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import threading
 import time
 import uuid
@@ -33,22 +34,28 @@ try:
     import httpx
     from Generate.core import gemini_prompts as gp
     from Generate.core import ssh_probe
-    from Generate.core.budget import BudgetTracker
-    from Generate.core.log_setup import mask_text, secret_mask_values, set_known_secrets
+    from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
+    from Generate.core.budget import BudgetError, BudgetTracker
+    from Generate.core.log_setup import (mask_external, mask_fetched_text, mask_text, secret_mask_values,
+                                         set_known_secrets)
     from Generate.core.orchestrator import (
-        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _internal_ports_view, _valid_worker_build,
-        _worker_onstart)
-    from Generate.core.vast_client import OfferFilter, VastError, remove_instance_fields
+        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, NOT_FOUND_LIMIT, STOPPED_AFTER_START_STATUSES, _has_start_marker,
+        _internal_ports_view, _valid_worker_build, _worker_onstart)
+    from Generate.core.vast_client import (OfferFilter, VastError, VastInstanceNotFound,
+                                           remove_instance_fields)
 except ImportError:  # pragma: no cover - плоский импорт из каталога core
     import httpx  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import ssh_probe  # type: ignore
-    from budget import BudgetTracker  # type: ignore
-    from log_setup import mask_text, secret_mask_values, set_known_secrets  # type: ignore
+    from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
+    from budget import BudgetError, BudgetTracker  # type: ignore
+    from log_setup import (mask_external, mask_fetched_text, mask_text, secret_mask_values,  # type: ignore
+                           set_known_secrets)
     from orchestrator import (  # type: ignore
-        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _internal_ports_view, _valid_worker_build,
-        _worker_onstart)
-    from vast_client import OfferFilter, VastError, remove_instance_fields  # type: ignore
+        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, NOT_FOUND_LIMIT, STOPPED_AFTER_START_STATUSES, _has_start_marker,
+        _internal_ports_view, _valid_worker_build, _worker_onstart)
+    from vast_client import (OfferFilter, VastError, VastInstanceNotFound,  # type: ignore
+                             remove_instance_fields)
 
 
 log = logging.getLogger("Generate.workflow_ab_test")
@@ -64,6 +71,8 @@ BINDINGS_PATH = NICHE_DIR / "bindings.json"
 
 COMFY_REMOTE_PORT = 18188        # порт ComfyUI внутри карты (COMFYUI_ARGS: --port 18188)
 WORKER_HTTP_PORT = 8000          # внешний порт воркера, по которому идёт /health
+LOGS_TAIL_LINES = 2000           # строк журнала контейнера при запросе логов снимаемой карты через Vast
+AFFORD_ESTIMATE_SEC = 1800.0     # время, на которое проверяется остаток бюджета перед арендой (как в can_afford)
 TUNNEL_READY_SEC = 30.0          # ожидание открытия SSH-туннеля
 KEEPALIVE_SEC = 10.0             # пинг /health, чтобы DeadManSwitch воркера не сработал
 POLL_SEC = 15.0                  # опрос статуса карты и /health до готовности
@@ -621,14 +630,266 @@ def _write_summary(artifact: _Artifact, summary: ABRunSummary, *, keepalive_ping
 def _masked_instance_json(info) -> dict:
     """Срез ответа Vast для instance.json (как RunArtifact.card_instance в orchestrator).
 
-    Убираются публичный IP, внешние порты, direct_port_*, extra_env и instance_api_key
-    (remove_instance_fields + _internal_ports_view); текст дополнительно маскируется.
+    remove_instance_fields убирает адрес, внешние порты, ssh, extra_env и instance_api_key (в имени
+    ключа есть «port», поэтому и поле ports тоже уходит). Затем поле ports добавляется заново, но
+    только с внутренними портами 8000 и 18188 и значениями «***» (_internal_ports_view). Текст
+    дополнительно маскируется.
     """
     safe = remove_instance_fields(info.raw)
     view = _internal_ports_view(info.raw)
     if view is not None:
-        safe["internal_ports"] = view
+        safe["ports"] = view
     return json.loads(mask_text(json.dumps(safe, ensure_ascii=False, default=str)))
+
+
+def _slot_rel(gen: int) -> str:
+    """Каталог артефакта одной карты: cards/slot1_generation<поколение>."""
+    return f"cards/slot1_generation{gen}"
+
+
+def _mask_card_text(text: str, card: "_Card") -> str:
+    """Текст, полученный с карты (журнал загрузки, логи): внутренние порты сохраняются, адреса карты маскируются."""
+    return mask_external(mask_fetched_text(text, keep_internal_ports=True), card.external_values())
+
+
+class _CardFailed(Exception):
+    """Карта не годна к работе: её нужно снять и взять следующее предложение. Текст причины фиксирован."""
+
+
+@dataclass
+class _Card:
+    """Одна арендованная карта в этом запуске. Адреса живут только в памяти и в артефакте маскируются."""
+    instance_id: int
+    offer_id: int
+    machine_id: Optional[int]
+    price: float
+    gen: int
+    rented_at: float
+    slot_rel: str
+    url: Optional[str] = None
+    public_ip: Optional[str] = None
+    direct_port: Optional[int] = None
+    ssh_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    misses: int = 0           # подряд ошибок опроса Vast; сбрасывается при любом успешном ответе
+    rate_set: bool = False    # ставка из ответа Vast уже передана в учёт бюджета
+
+    def external_values(self) -> list:
+        return [self.public_ip, self.direct_port, self.ssh_host, self.ssh_port]
+
+
+@dataclass
+class _RentState:
+    """Состояние аренды в пределах одного запуска (SPEC 8.2)."""
+    bad_machines: set = field(default_factory=set)   # постоянный список bad_hosts.txt и машины снятых карт
+    bad_offers: set = field(default_factory=set)     # предложения, по которым аренда не удалась
+    used_offers: set = field(default_factory=set)    # предложения, уже взятые в аренду в этом запуске
+    rent_requests: int = 0                           # запросы аренды (с ошибкой и без): лимит max_rent_tries
+    generation: int = 0                              # поколение последней карты
+    current: Optional["_Card"] = None                # карта, которая сейчас учитывается (уборка в finally)
+
+
+def _rental_price(offer, cfg) -> float:
+    """Цена для бюджета и заявки аренды.
+
+    Прерываемая аренда: ставка bid = цена предложения + bid_margin, округлённая до 3 знаков
+    (как в оркестраторе и vast_stable_run.sh). Обычная: dph_total, а если его нет, цена предложения.
+    """
+    if cfg.interruptible:
+        return round(float(offer.price_per_hr) + float(cfg.bid_margin), 3)
+    return offer.dph_total if offer.dph_total > 0 else offer.price_per_hr
+
+
+def _outbid(info) -> bool:
+    """Прерываемая карта перебита: по статусу или по тексту статуса Vast (маркер «outbid»)."""
+    return info.actual_status == "outbid" or "outbid" in (info.status_msg or "").lower()
+
+
+def _rent_next(vast, cfg, state: _RentState, budget, *, image: str, label: str, onstart: str,
+               env: dict) -> _Card:
+    """Арендует первое подходящее предложение. Ошибка создания — следующее предложение; исчерпание — ABRuntimeError."""
+    if state.rent_requests >= cfg.max_rent_tries:
+        raise ABRuntimeError(f"исчерпан лимит запросов аренды (max_rent_tries = {cfg.max_rent_tries})")
+    try:
+        offers = vast.search_offers(_offer_filter(cfg))
+    except VastError as exc:
+        raise ABRuntimeError(f"поиск предложений Vast не удался: {type(exc).__name__}") from exc
+    eligible = [o for o in offers
+                if o.offer_id not in state.bad_offers and o.offer_id not in state.used_offers
+                and o.machine_id not in state.bad_machines]
+    eligible.sort(key=lambda o: o.price_per_hr)
+    for offer in eligible:
+        price = _rental_price(offer, cfg)
+        if cfg.interruptible and price > cfg.max_price_per_hour:
+            log.warning("Предложение %d пропущено: ставка bid %.3f USD/ч выше лимита %.2f USD/ч.",
+                        offer.offer_id, price, cfg.max_price_per_hour)
+            continue
+        if not budget.can_afford(price, AFFORD_ESTIMATE_SEC):
+            log.warning("Бюджета не хватает на предложение %d (остаток %.4f USD).",
+                        offer.offer_id, budget.remaining_budget())
+            continue
+        if state.rent_requests >= cfg.max_rent_tries:
+            raise ABRuntimeError(f"исчерпан лимит запросов аренды (max_rent_tries = {cfg.max_rent_tries})")
+        state.rent_requests += 1
+        state.used_offers.add(offer.offer_id)
+        try:
+            instance_id = vast.create_instance(
+                offer.offer_id, image, cfg.disk_gb, env_vars=env, label=label, onstart=onstart,
+                bid_price=price if cfg.interruptible else None)
+        except VastError as exc:
+            state.bad_offers.add(offer.offer_id)
+            log.warning("Не удалось создать карту по предложению %d: %s. Пробую следующее предложение.",
+                        offer.offer_id, type(exc).__name__)
+            continue
+        budget.track_instance_start(instance_id, price)
+        state.generation += 1
+        log.info("Арендована карта %d по предложению %d: %.4f USD/ч (поколение %d).",
+                 instance_id, offer.offer_id, price, state.generation)
+        return _Card(instance_id=instance_id, offer_id=offer.offer_id, machine_id=offer.machine_id,
+                     price=price, gen=state.generation, rented_at=time.monotonic(),
+                     slot_rel=_slot_rel(state.generation))
+    raise ABRuntimeError("нет предложения, которое проходит фильтр цены, бюджета и списка плохих машин")
+
+
+def _wait_ready(vast, card: _Card, cfg, token: str, budget, stop: Optional[threading.Event]) -> None:
+    """Опрос карты до готовности: /health ok, ComfyUI отвечает, есть SSH-адрес.
+
+    Возвращается при готовности. Причина замены карты — _CardFailed. Остановка сигналом и правило A
+    (ComfyUI не ответил за 5 мин) — ABRuntimeError, как раньше.
+    """
+    silent_sec = cfg.silent_host_timeout_min * 60
+    while True:
+        if stop is not None and stop.is_set():
+            raise ABRuntimeError("остановлено сигналом")
+        elapsed = time.monotonic() - card.rented_at
+        if elapsed >= silent_sec:
+            raise _CardFailed(f"карта не ответила за {cfg.silent_host_timeout_min} мин")
+        try:
+            info = vast.get_instance(card.instance_id)
+        except VastError as exc:
+            # VastInstanceNotFound тоже сюда; оба вида ошибок считаются подряд до NOT_FOUND_LIMIT
+            card.misses += 1
+            if isinstance(exc, VastInstanceNotFound):
+                log.warning("Карта %d не найдена в ответе Vast (подряд: %d из %d).",
+                            card.instance_id, card.misses, NOT_FOUND_LIMIT)
+                reason = "экземпляр не найден в Vast"
+            else:
+                log.warning("Опрос карты %d: ошибка Vast %s (подряд: %d из %d).",
+                            card.instance_id, type(exc).__name__, card.misses, NOT_FOUND_LIMIT)
+                reason = "Vast не отвечает по карте"
+            if card.misses >= NOT_FOUND_LIMIT:
+                raise _CardFailed(reason)
+            time.sleep(POLL_SEC)
+            continue
+        card.misses = 0  # любой успешный ответ обнуляет счётчик
+        card.public_ip = info.public_ip or card.public_ip
+        card.direct_port = info.direct_port or card.direct_port
+        card.ssh_host = info.ssh_host or card.ssh_host
+        card.ssh_port = info.ssh_port or card.ssh_port
+        if info.dph > 0 and not card.rate_set:
+            card.rate_set = True
+            try:
+                budget.set_dph(card.instance_id, info.dph)
+            except BudgetError as exc:
+                log.warning("Ставка карты %d в учёте бюджета не обновлена: %s.", card.instance_id, type(exc).__name__)
+        if info.actual_status in STOPPED_AFTER_START_STATUSES or info.intended_status == "stopped":
+            raise _CardFailed("карта остановлена хостом")
+        if info.status_msg and _has_start_marker(info.status_msg):
+            raise _CardFailed("ошибка запуска карты по тексту статуса Vast")
+        if cfg.interruptible and _outbid(info):
+            raise _CardFailed("прерываемая карта перебита другой ставкой")
+        if info.disk_gb is not None and info.disk_gb < cfg.disk_gb:
+            raise _CardFailed("диск карты меньше заданного")
+        if info.actual_status == "running" and info.public_ip and info.direct_port:
+            card.url = f"http://{info.public_ip}:{info.direct_port}"
+            health = _probe_health(card.url, token)
+            if health is not None:
+                if health.get("comfy_state") == "dead":
+                    raise _CardFailed("процесс ComfyUI на карте завершился")
+                if health.get("reason") == "weights_failed":
+                    raise _CardFailed("воркер сообщил о сбое загрузки весов")
+                if health.get("ok") is True:
+                    if health.get("comfy_alive") is True and card.ssh_host and card.ssh_port:
+                        return
+                    if "comfy_alive" in health and health.get("comfy_alive") is not True and \
+                            elapsed >= COMFY_ANSWER_LIMIT_SEC:
+                        raise ABRuntimeError("ComfyUI на карте не ответил за 5 мин от аренды (правило A)")
+        time.sleep(POLL_SEC)
+
+
+def _save_card_logs(vast, card: _Card, token: str, artifact: "_Artifact") -> None:
+    """Журнал снимаемой карты: GET /logs воркера, если адрес известен, иначе логи контейнера через Vast.
+
+    Текст маскируется (mask_fetched_text + адреса карты). Адрес результата Vast не логируется.
+    """
+    rel = f"{card.slot_rel}/logs.txt"
+    if card.url:
+        try:
+            resp = httpx.get(card.url + "/logs", headers={"X-Worker-Token": token}, timeout=HTTP_TIMEOUT_SEC)
+            if resp.status_code == 200:
+                artifact.write_text(rel, _mask_card_text(resp.text, card))
+                log.info("Журнал воркера снятой карты сохранён.")
+                return
+            log.warning("GET /logs воркера: HTTP %d.", resp.status_code)
+        except httpx.HTTPError as exc:
+            log.warning("GET /logs воркера не удался: %s.", type(exc).__name__)
+    try:
+        result_url = vast.request_logs(card.instance_id, tail=LOGS_TAIL_LINES)
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "vast_logs.txt")
+            code = vast.download_logs(result_url, dest)
+            if code == 200 and os.path.exists(dest):
+                text = Path(dest).read_text(encoding="utf-8", errors="replace")
+                artifact.write_text(rel, _mask_card_text(text, card))
+                log.info("Логи контейнера снятой карты через Vast сохранены.")
+            else:
+                log.warning("Логи контейнера через Vast не загружены: HTTP %d.", code)
+    except (VastError, OSError) as exc:
+        log.warning("Логи контейнера через Vast не получены: %s.", type(exc).__name__)
+
+
+def _retire_card(vast, card: _Card, reason: str, *, budget, token: str, artifact: "_Artifact",
+                 state: _RentState) -> None:
+    """Снимает плохую карту: логи (best effort), учёт бюджета, уничтожение. Ошибки уборки не прерывают запуск."""
+    log.warning("Карта %d снимается: %s.", card.instance_id, reason)
+    artifact.write_text(f"{card.slot_rel}/status.txt", f"снята: {reason}\n")
+    if card.machine_id is not None:
+        state.bad_machines.add(card.machine_id)  # машина больше не предлагается в этом запуске
+    try:
+        _save_card_logs(vast, card, token, artifact)
+    except Exception as exc:  # noqa: BLE001 - логи не должны срывать замену карты
+        log.warning("Логи снимаемой карты не сохранены: %s.", type(exc).__name__)
+    try:
+        budget.track_instance_stop(card.instance_id)
+    except BudgetError as exc:
+        log.warning("Учёт бюджета карты %d при снятии: %s.", card.instance_id, type(exc).__name__)
+    try:
+        vast.destroy_instance(card.instance_id)
+    except VastError as exc:
+        log.error("Снятие карты %d не подтверждено: %s. Проверьте kill-cards.", card.instance_id, type(exc).__name__)
+    state.current = None
+
+
+def _acquire_ready_card(vast, cfg, state: _RentState, budget, artifact: "_Artifact", *, token: str, image: str,
+                        label: str, onstart: str, env: dict, meta_base: dict, summary: "ABRunSummary",
+                        stop: Optional[threading.Event]) -> _Card:
+    """Аренда и ожидание до готовности; плохие карты снимаются, берётся следующее предложение."""
+    while True:
+        card = _rent_next(vast, cfg, state, budget, image=image, label=label, onstart=onstart, env=env)
+        state.current = card
+        summary.instance_id = card.instance_id
+        artifact.write_text(f"{card.slot_rel}/meta.json", json.dumps({
+            **meta_base, "instance_id": card.instance_id, "offer_id": card.offer_id,
+            "price_per_hr": card.price, "generation": card.gen,
+        }, ensure_ascii=False, indent=2) + "\n")
+        artifact.write_text(f"{card.slot_rel}/status.txt", "rented\n")
+        try:
+            _wait_ready(vast, card, cfg, token, budget, stop)
+        except _CardFailed as exc:
+            _retire_card(vast, card, str(exc), budget=budget, token=token, artifact=artifact, state=state)
+            continue
+        artifact.write_text(f"{card.slot_rel}/status.txt", "ready\n")
+        return card
 
 
 def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: str = "",
@@ -636,9 +897,11 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
                 stop: Optional[threading.Event] = None) -> ABRunSummary:
     """Один прогон: аренда карты, 16 сцен через SSH-туннель, PNG в артефакт, уборка в finally.
 
-    Ошибки входа (номер сборки, номер запуска, сборка графов) бросаются до аренды: ABInputError.
-    Ошибки карты, туннеля, ComfyUI бросаются как ABRuntimeError уже после аренды; карта в любом случае
-    уничтожается через destroy_by_label. Релизы (Release) не затрагиваются.
+    Ошибки входа (номер сборки, номер запуска, сборка графов, bad_hosts.txt) бросаются до аренды: ABInputError.
+    Ошибки аренды, карты, туннеля, ComfyUI бросаются как ABRuntimeError. Плохая карта (не запустилась,
+    мёртвый ComfyUI, перебита, нет диска и т.п.) снимается, и берётся следующее предложение в пределах
+    max_rent_tries и бюджета. Карта в любом случае уничтожается; при сбое уничтожения срабатывает
+    destroy_by_label. Релизы (Release) не затрагиваются.
     """
     # --- проверка входа до любых трат ---
     if not _valid_worker_build(worker_build):
@@ -650,6 +913,10 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
     try:
         onstart = _worker_onstart(worker_build)
     except gp.GeminiInputError as exc:
+        raise ABInputError(str(exc)) from exc
+    try:
+        bad_hosts = load_bad_hosts()  # постоянный список плохих машин; ошибка формата — код 2 до аренды
+    except BadHostsError as exc:
         raise ABInputError(str(exc)) from exc
 
     template, ref_nodes = load_template()
@@ -680,74 +947,29 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
     }
     if hf_token:
         env["HF_TOKEN"] = hf_token  # пробрасывается как у генерации; в журнал не пишется
+    meta_base = {
+        "label": label, "worker_build": worker_build, "repo": repo, "run_id": run_id,
+        "image": image, "scenes": len(SCENE_CATALOG), "seed": TESTWF_SEED,
+    }
 
     budget = BudgetTracker(cfg.budget_limit_usd)
+    state = _RentState(bad_machines=set(bad_hosts))
     keepalive: Optional[_Keepalive] = None
-    ssh_host = ssh_port = None
-    instance_id: Optional[int] = None
     status_note = "не начато"
-    slot_rel = "cards/slot1_generation1"
     keepalive_pings = keepalive_failures = 0
     try:
-        # --- аренда ---
-        offers = vast.search_offers(_offer_filter(cfg))
-        if not offers:
-            raise ABRuntimeError("Нет подходящих предложений Vast по заданным фильтрам.")
-        offer = min(offers, key=lambda o: o.price_per_hr)
-        price = offer.dph_total if offer.dph_total > 0 else offer.price_per_hr
-        artifact.write_text(f"{slot_rel}/status.txt", "renting\n")
-        try:
-            instance_id = vast.create_instance(
-                offer.offer_id, image, cfg.disk_gb, env_vars=env, label=label, onstart=onstart,
-                bid_price=price if cfg.interruptible else None)
-        except VastError as exc:
-            raise ABRuntimeError(f"аренда карты не удалась: {type(exc).__name__}") from exc
-        rented_at = time.monotonic()
-        budget.track_instance_start(instance_id, price)
-        summary.instance_id = instance_id
-        log.info("Арендована карта %d, метка %s, цена %.3f USD/ч.", instance_id, label, price)
-        artifact.write_text(f"{slot_rel}/meta.json", json.dumps({
-            "label": label, "instance_id": instance_id, "offer_id": offer.offer_id,
-            "price_per_hr": price, "worker_build": worker_build, "repo": repo, "run_id": run_id,
-            "image": image, "scenes": len(SCENE_CATALOG), "seed": TESTWF_SEED,
-        }, ensure_ascii=False, indent=2) + "\n")
-        artifact.write_text(f"{slot_rel}/status.txt", "rented\n")
-
-        # --- ожидание: /health ok и (по правилу ComfyUI) comfy_alive в срок ---
-        url = None
-        while True:
-            if stop is not None and stop.is_set():
-                raise ABRuntimeError("остановлено сигналом")
-            elapsed = time.monotonic() - rented_at
-            info = vast.get_instance(instance_id)
-            if info.actual_status == "exited" or info.intended_status == "stopped":
-                raise ABRuntimeError("карта остановлена хостом")
-            if info.actual_status == "running" and info.public_ip and info.direct_port:
-                url = f"http://{info.public_ip}:{info.direct_port}"
-                health = _probe_health(url, token)
-                if health is not None and health.get("ok") is True:
-                    if health.get("comfy_alive") is True and info.ssh_host and info.ssh_port:
-                        ssh_host, ssh_port = info.ssh_host, info.ssh_port
-                        break
-                    if "comfy_alive" in health and health.get("comfy_alive") is not True and \
-                            elapsed >= COMFY_ANSWER_LIMIT_SEC:
-                        raise ABRuntimeError("ComfyUI на карте не ответил за 5 мин от аренды (правило A)")
-                if health is not None and health.get("reason") == "weights_failed":
-                    raise ABRuntimeError("воркер сообщил о сбое загрузки весов")
-            if elapsed >= (cfg.silent_host_timeout_min * 60):
-                raise ABRuntimeError(f"карта не ответила за {cfg.silent_host_timeout_min} мин")
-            time.sleep(POLL_SEC)
-
-        artifact.write_text(f"{slot_rel}/status.txt", "ready\n")
+        # --- аренда и ожидание готовности (с заменой плохих карт) ---
+        card = _acquire_ready_card(vast, cfg, state, budget, artifact, token=token, image=image, label=label,
+                                   onstart=onstart, env=env, meta_base=meta_base, summary=summary, stop=stop)
         log.info("Карта готова: /health ok, ComfyUI отвечает. Открываю SSH-туннель к порту %d.", COMFY_REMOTE_PORT)
 
         # --- keepalive до конца сцен ---
-        keepalive = _Keepalive(url, token)
+        keepalive = _Keepalive(card.url, token)
         keepalive.start()
 
         key = os.environ.get("VAST_SSH_KEY", "")
         try:
-            with ssh_probe.open_tunnel(ssh_host, ssh_port, key, COMFY_REMOTE_PORT,
+            with ssh_probe.open_tunnel(card.ssh_host, card.ssh_port, key, COMFY_REMOTE_PORT,
                                        ready_timeout_sec=TUNNEL_READY_SEC) as local_port:
                 base = f"http://127.0.0.1:{local_port}"
                 with httpx.Client(base_url=base, timeout=HTTP_TIMEOUT_SEC) as client:
@@ -772,23 +994,27 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
             keepalive.stop()
             keepalive_pings, keepalive_failures = keepalive.pings, keepalive.failures
         # --- уборка: журнал карты, instance.json (маскированный), учёт бюджета, уничтожение по метке ---
-        if ssh_host and ssh_port:
+        cur = state.current  # карта, которая ещё учитывается (снятые карты сюда уже не попадают)
+        if cur is not None and cur.ssh_host and cur.ssh_port:
             try:
-                res = ssh_probe.run_probe(ssh_host, ssh_port, os.environ.get("VAST_SSH_KEY", ""), "bootstrap_tail")
-                artifact.write_text("run/worker_bootstrap_tail.txt", res.output if res.ok else
-                                    f"не получен: {res.failure_class}\n")
+                res = ssh_probe.run_probe(cur.ssh_host, cur.ssh_port, os.environ.get("VAST_SSH_KEY", ""),
+                                          "bootstrap_tail")
+                if res.ok:
+                    artifact.write_text("run/worker_bootstrap_tail.txt", _mask_card_text(res.output, cur))
+                else:
+                    artifact.write_text("run/worker_bootstrap_tail.txt", f"не получен: {res.failure_class}\n")
             except Exception as exc:  # noqa: BLE001 - журнал карты не должен срывать уборку
                 log.warning("Журнал карты не снят: %s.", type(exc).__name__)
-        if instance_id is not None:
+        if cur is not None:
             try:
-                info = vast.get_instance(instance_id)
+                info = vast.get_instance(cur.instance_id)
                 artifact.write_text("run/instance.json",
                                     json.dumps(_masked_instance_json(info), ensure_ascii=False, indent=2) + "\n")
             except VastError as exc:
                 log.warning("instance.json не записан: %s.", type(exc).__name__)
             try:
-                budget.track_instance_stop(instance_id)
-            except Exception as exc:  # noqa: BLE001 - учёт не должен мешать уничтожению карты
+                budget.track_instance_stop(cur.instance_id)
+            except BudgetError as exc:  # учёт не должен мешать уничтожению карты
                 log.warning("Учёт бюджета при снятии карты: %s.", type(exc).__name__)
         try:
             destroyed = vast.destroy_by_label(label)
@@ -797,6 +1023,6 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
             log.error("Уничтожение по метке %s не удалось: %s. Проверьте kill-cards.", label, type(exc).__name__)
         _write_summary(artifact, summary, keepalive_pings=keepalive_pings,
                        keepalive_failures=keepalive_failures, finished_note=status_note)
-        artifact.write_text(f"{slot_rel}/status.txt", "finished\n")
+        artifact.write_text(f"{_slot_rel(max(state.generation, 1))}/status.txt", "finished\n")
 
     return summary

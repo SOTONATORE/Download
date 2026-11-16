@@ -1,19 +1,27 @@
 """Офлайн-тесты A/B-теста сценариев workflow (cartoon_photos).
 
 Проверяют сборку графов четырёх вариантов, каталог из 16 сцен, неизменность шаблона, разбор аргументов
-команды test-workflows и соответствие кодов завершения. Сети нет, Vast не вызывается: клиент и модуль
-теста подменяются заглушками. Тесты написаны, но в песочнице не запускались (по указанию задачи).
+команды test-workflows и соответствие кодов завершения. Прогон run_ab_test идёт офлайн: клиент Vast,
+SSH-туннель и HTTP (httpx.MockTransport) подменяются заглушками; сети нет. Проверяются переменные
+аренды, терпимость к сбоям опроса, замена плохой карты с учётом bad_hosts.txt и маскирование артефактов.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import json
 import types
+import uuid
 
+import httpx
 import pytest
 
 from Generate import cli
+from Generate.core import ssh_probe
 from Generate.core import workflow_ab_test as wab
+from Generate.core.bad_hosts import BadHostsError
+from Generate.core.vast_client import GpuOffer, InstanceInfo, VastInstanceNotFound, VastRuntimeError
 
 
 @pytest.fixture(scope="module")
@@ -293,3 +301,223 @@ def test_cmd_test_workflows_partial_result_is_runtime_exit(monkeypatch):
     _patch_cli(monkeypatch, lambda: _FakeSummary(ok=False))
     args = cli.build_parser().parse_args(["test-workflows"])
     assert cli.cmd_test_workflows(args) == cli.EXIT_RUNTIME
+
+
+# --- прогон run_ab_test без сети: заглушки Vast, SSH и HTTP (httpx.MockTransport) -----------------
+
+SSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAFAKEKEYMATERIAL0123456789\n-----END OPENSSH PRIVATE KEY-----"
+BUILD = "a" * 40
+
+
+def _cfg(**over):
+    values = dict(
+        rental_type="on-demand", interruptible=False, gpu_name="RTX 5090", min_price_per_hour=0.1,
+        max_price_per_hour=5.0, min_reliability=0.9, min_inet_mbps=100.0, max_inet_price_per_tb=4.1,
+        verified=False, disk_gb=100, min_cuda_max=12.0, min_disk_bw_mbps=0.0, exclude_countries=[],
+        worker_idle_timeout_min=60, budget_limit_usd=100.0, silent_host_timeout_min=15, bid_margin=0.03,
+        max_rent_tries=5, min_balance_usd=0.0)
+    values.update(over)
+    return types.SimpleNamespace(**values)
+
+
+def _offer(offer_id: int, machine_id: int, price: float) -> GpuOffer:
+    return GpuOffer(offer_id=offer_id, gpu_name="RTX 5090", num_gpus=1, vram_gb=32.0, price_per_hr=price,
+                    reliability=0.99, inet_down_mbps=1000.0, inet_up_mbps=1000.0, machine_id=machine_id,
+                    is_interruptible=False, dph_total=price, disk_gb=100.0)
+
+
+def _ready_info(ip: str, *, port: int = 40123, dph: float = 0.5) -> InstanceInfo:
+    raw = {
+        "id": 0, "actual_status": "running", "intended_status": "running", "public_ipaddr": ip,
+        "ssh_host": "ssh.example.net", "ssh_port": 2222, "direct_port_start": 40100,
+        "extra_env": [["WORKER_TOKEN", "t"]], "instance_api_key": "k-123456789",
+        "ports": {"8000/tcp": [{"HostIp": "0.0.0.0", "HostPort": str(port)}],
+                  "18188/tcp": [{"HostIp": "0.0.0.0", "HostPort": "40124"}],
+                  "22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "2222"}]},
+    }
+    return InstanceInfo(instance_id=0, actual_status="running", intended_status="running", public_ip=ip,
+                        direct_port=port, ssh_host="ssh.example.net", ssh_port=2222, dph=dph,
+                        disk_gb=100.0, raw=raw)
+
+
+class _RunVast:
+    """Заглушка VastClient: предложения, аренда, сценарии опроса по предложению. Сети нет."""
+
+    def __init__(self, offers, *, create_fails=(), polls=None):
+        self.offers = list(offers)
+        self.create_fails = set(create_fails)
+        self.polls = dict(polls or {})   # offer_id -> очередь ответов get_instance (InstanceInfo или исключение)
+        self.created: list = []          # все попытки create_instance по порядку
+        self.destroyed: list = []        # instance_id, снятые через destroy_instance
+        self.instances: dict = {}        # instance_id -> offer_id
+        self._seq = 1000
+
+    def search_offers(self, flt):
+        return list(self.offers)
+
+    def create_instance(self, offer_id, image, disk_gb, env_vars=None, label=None, onstart=None, bid_price=None):
+        self.created.append({"offer_id": offer_id, "env": dict(env_vars or {}), "bid": bid_price, "label": label})
+        if offer_id in self.create_fails:
+            raise VastRuntimeError("отказ аренды (тест)")
+        self._seq += 1
+        self.instances[self._seq] = offer_id
+        return self._seq
+
+    def get_instance(self, instance_id):
+        queue = self.polls[self.instances[instance_id]]
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def destroy_instance(self, instance_id):
+        self.destroyed.append(instance_id)
+        return True
+
+    def destroy_by_label(self, label):
+        return []  # страховка по метке; проверки идут через destroy_instance
+
+    def request_logs(self, instance_id, *, tail=2000, daemon_logs=False):
+        raise VastRuntimeError("логи недоступны (тест)")
+
+    def download_logs(self, url, dest):
+        return 404
+
+
+def _scene_handler(request):
+    """Заглушка ComfyUI: очередь, history с картинкой, /view с байтами."""
+    path = request.url.path
+    if request.method == "POST" and path == "/prompt":
+        return httpx.Response(200, json={"prompt_id": uuid.uuid4().hex}, request=request)
+    if path.startswith("/history/"):
+        pid = path.rsplit("/", 1)[1]
+        outputs = {"461": {"images": [{"filename": "out.png", "subfolder": "", "type": "output"}]}}
+        return httpx.Response(200, json={pid: {"status": {"status_str": "success"}, "outputs": outputs}},
+                              request=request)
+    if path == "/view":
+        return httpx.Response(200, content=b"\x89PNG-fake", request=request)
+    return httpx.Response(404, request=request)
+
+
+def _install_http(monkeypatch, health_by_ip: dict) -> None:
+    real_client = httpx.Client
+
+    def fake_client(**kwargs):
+        return real_client(transport=httpx.MockTransport(_scene_handler), **kwargs)
+
+    def fake_get(url, headers=None, timeout=None, params=None):
+        req = httpx.Request("GET", url)
+        ip = url.split("//", 1)[1].rsplit(":", 1)[0]
+        if url.endswith("/health"):
+            data = health_by_ip.get(ip, {"ok": True, "comfy_alive": True, "comfy_state": "alive"})
+            return httpx.Response(200, json=data, request=req)
+        return httpx.Response(404, request=req)
+
+    monkeypatch.setattr(httpx, "Client", fake_client)
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+
+def _install_ssh(monkeypatch, output: str) -> None:
+    @contextlib.contextmanager
+    def fake_tunnel(host, port, key_text, remote_port, ready_timeout_sec=None):
+        yield 45678
+
+    def fake_probe(host, port, key_text, command_name, *args, **kwargs):
+        return types.SimpleNamespace(ok=True, output=output, failure_class="ok")
+
+    monkeypatch.setattr(ssh_probe, "open_tunnel", fake_tunnel)
+    monkeypatch.setattr(ssh_probe, "run_probe", fake_probe)
+
+
+def _setup(monkeypatch, *, health_by_ip=None, output: str = "") -> None:
+    monkeypatch.setenv("VAST_SSH_KEY", SSH_KEY)
+    monkeypatch.setenv("HF_TOKEN", "")
+    monkeypatch.setattr(wab, "POLL_SEC", 0.0)
+    monkeypatch.setattr(wab, "load_bad_hosts", lambda path=None: frozenset())
+    _install_http(monkeypatch, health_by_ip or {})
+    _install_ssh(monkeypatch, output)
+
+
+def _run(vast, cfg, artifact_dir, **kwargs):
+    return wab.run_ab_test(vast, cfg, run_id="42", worker_build=BUILD, repo="owner/repo",
+                           artifact_dir=str(artifact_dir), **kwargs)
+
+
+def test_run_create_env_has_port_mapping_build_and_idle_timeout(monkeypatch, tmp_path):
+    _setup(monkeypatch)
+    vast = _RunVast([_offer(1, 11, 0.5)], polls={1: [_ready_info("203.0.113.1")]})
+    cfg = _cfg()
+    summary = _run(vast, cfg, tmp_path)
+    assert summary.ok
+    env = vast.created[0]["env"]
+    assert env["-p 8000:8000"] == "1"
+    assert env["WORKER_BUILD"] == BUILD
+    assert env["WORKER_IDLE_TIMEOUT_MIN"] == str(cfg.worker_idle_timeout_min)
+
+
+def test_run_tolerates_polling_errors_below_not_found_limit(monkeypatch, tmp_path):
+    _setup(monkeypatch)
+    polls = {1: [VastInstanceNotFound("нет в ответе (тест)"), VastInstanceNotFound("нет в ответе (тест)"),
+                 VastRuntimeError("сбой API (тест)"), _ready_info("203.0.113.1")]}
+    vast = _RunVast([_offer(1, 11, 0.5)], polls=polls)
+    summary = _run(vast, _cfg(), tmp_path)
+    assert summary.ok
+    assert len(vast.created) == 1          # одна аренда: короткие сбои опроса не сняли карту
+    assert vast.destroyed == []            # карта не снималась при сбоях опроса
+
+
+def test_run_skips_bad_hosts_and_replaces_failing_cards(monkeypatch, tmp_path):
+    _setup(monkeypatch, health_by_ip={"203.0.113.3": {"ok": False, "comfy_alive": False, "comfy_state": "dead"}})
+    monkeypatch.setattr(wab, "load_bad_hosts", lambda path=None: frozenset({101}))
+    offers = [_offer(1, 101, 0.5), _offer(2, 202, 0.6), _offer(3, 303, 0.7), _offer(4, 404, 0.8)]
+    polls = {3: [_ready_info("203.0.113.3")], 4: [_ready_info("203.0.113.4")]}
+    vast = _RunVast(offers, create_fails={2}, polls=polls)
+    summary = _run(vast, _cfg(), tmp_path)
+    assert summary.ok
+    # машина 101 из bad_hosts.txt не арендуется; предложение 2 не создалось и взято следующее (3);
+    # карта 3 снята из-за comfy_state dead, взята 4
+    assert [c["offer_id"] for c in vast.created] == [2, 3, 4]
+    dead_card = [iid for iid, oid in vast.instances.items() if oid == 3]
+    assert vast.destroyed == dead_card
+    retired = (tmp_path / "cards" / "slot1_generation1" / "status.txt").read_text(encoding="utf-8")
+    assert retired.startswith("снята:")   # поколение 1 (карта 3) помечено как снятое
+
+
+def test_run_artifacts_mask_addresses_and_keep_internal_ports(monkeypatch, tmp_path):
+    tail = ("boot step ok\n"
+            "connect 203.0.113.7:40123 via ssh.example.net:2222\n"
+            "key " + SSH_KEY + "\n"
+            "listen 0.0.0.0:8000\n"
+            "host ssh.example.net ready, external port 40123 open\n")  # голые значения без пары host:port
+    _setup(monkeypatch, output=tail)
+    vast = _RunVast([_offer(1, 11, 0.5)], polls={1: [_ready_info("203.0.113.7")]})
+    summary = _run(vast, _cfg(), tmp_path)
+    assert summary.ok
+
+    inst_text = (tmp_path / "run" / "instance.json").read_text(encoding="utf-8")
+    inst = json.loads(inst_text)
+    assert "ports" in inst
+    assert set(inst["ports"]) <= {"8000/tcp", "18188/tcp"}
+    assert set(inst["ports"].values()) == {"***"}
+    for key in ("public_ipaddr", "ssh_host", "ssh_port", "direct_port_start", "extra_env", "instance_api_key"):
+        assert key not in inst
+    for secret in ("203.0.113.7", "ssh.example.net", "k-123456789"):
+        assert secret not in inst_text
+
+    tail_text = (tmp_path / "run" / "worker_bootstrap_tail.txt").read_text(encoding="utf-8")
+    for secret in ("AAAAFAKEKEYMATERIAL0123456789", "203.0.113.7", "ssh.example.net", "40123", "2222"):
+        assert secret not in tail_text
+    assert "0.0.0.0:8000" in tail_text     # внутренний порт воркера сохраняется
+
+
+def test_run_bad_hosts_format_error_is_input_error_before_rent(monkeypatch, tmp_path):
+    _setup(monkeypatch)
+
+    def broken(path=None):
+        raise BadHostsError("неверный формат файла bad_hosts.txt (тест)")
+
+    monkeypatch.setattr(wab, "load_bad_hosts", broken)
+    vast = _RunVast([_offer(1, 11, 0.5)], polls={1: [_ready_info("203.0.113.1")]})
+    with pytest.raises(wab.ABInputError):
+        _run(vast, _cfg(), tmp_path)
+    assert vast.created == []              # до аренды ничего не потрачено
