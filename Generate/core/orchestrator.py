@@ -3370,7 +3370,8 @@ class Orchestrator:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:
             slot.net_fail += 1
-            self._queue_for_role(slot.role).appendleft(num)
+            with self._lock_state():
+                self._queue_for_role(slot.role).appendleft(num)
             self._warn_card(slot, f"post_task:{num}:{exc}", "Воркер %s не принял клип %d (сбой связи: %s).",
                             _card_name(slot), num, exc)
             return

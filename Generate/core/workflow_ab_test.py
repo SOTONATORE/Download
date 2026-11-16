@@ -34,19 +34,21 @@ try:
     from Generate.core import gemini_prompts as gp
     from Generate.core import ssh_probe
     from Generate.core.budget import BudgetTracker
-    from Generate.core.log_setup import mask_text, set_known_secrets
+    from Generate.core.log_setup import mask_text, secret_mask_values, set_known_secrets
     from Generate.core.orchestrator import (
-        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _valid_worker_build, _worker_onstart)
-    from Generate.core.vast_client import OfferFilter, VastError
+        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _internal_ports_view, _valid_worker_build,
+        _worker_onstart)
+    from Generate.core.vast_client import OfferFilter, VastError, remove_instance_fields
 except ImportError:  # pragma: no cover - плоский импорт из каталога core
     import httpx  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import ssh_probe  # type: ignore
     from budget import BudgetTracker  # type: ignore
-    from log_setup import mask_text, set_known_secrets  # type: ignore
+    from log_setup import mask_text, secret_mask_values, set_known_secrets  # type: ignore
     from orchestrator import (  # type: ignore
-        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _valid_worker_build, _worker_onstart)
-    from vast_client import OfferFilter, VastError  # type: ignore
+        COMFY_ANSWER_LIMIT_SEC, COMFYUI_ARGS, _internal_ports_view, _valid_worker_build,
+        _worker_onstart)
+    from vast_client import OfferFilter, VastError, remove_instance_fields  # type: ignore
 
 
 log = logging.getLogger("Generate.workflow_ab_test")
@@ -617,9 +619,15 @@ def _write_summary(artifact: _Artifact, summary: ABRunSummary, *, keepalive_ping
 
 
 def _masked_instance_json(info) -> dict:
-    """Срез ответа Vast для instance.json: без адресов SSH, IP и полей окружения; текст маскируется."""
-    drop = {"ssh_host", "ssh_port", "public_ip", "env", "jupyter_token", "direct_port"}
-    safe = {k: v for k, v in info.raw.items() if k not in drop}
+    """Срез ответа Vast для instance.json (как RunArtifact.card_instance в orchestrator).
+
+    Убираются публичный IP, внешние порты, direct_port_*, extra_env и instance_api_key
+    (remove_instance_fields + _internal_ports_view); текст дополнительно маскируется.
+    """
+    safe = remove_instance_fields(info.raw)
+    view = _internal_ports_view(info.raw)
+    if view is not None:
+        safe["internal_ports"] = view
     return json.loads(mask_text(json.dumps(safe, ensure_ascii=False, default=str)))
 
 
@@ -658,12 +666,17 @@ def run_ab_test(vast, cfg, *, run_id: str = "", worker_build: str = "", repo: st
 
     token = secrets.token_urlsafe(24)
     hf_token = os.environ.get("HF_TOKEN", "").strip()
-    set_known_secrets([token, hf_token])
+    # ключ SSH маскируется и целиком, и построчно (как в generate.yml через secret_mask_values)
+    set_known_secrets([token, hf_token, *secret_mask_values(os.environ.get("VAST_SSH_KEY", ""))])
     env = {
         "WORKER_TOKEN": token,
+        "WORKER_BUILD": worker_build,  # без него bootstrap.sh завершается с кодом 2 на шаге 1
+        "WORKER_IDLE_TIMEOUT_MIN": str(cfg.worker_idle_timeout_min),
         "MODEL_PROFILE": MODEL_PROFILE,
         "COMFYUI_ARGS": COMFYUI_ARGS,
         "GEN_LOG_LEVEL": os.environ.get("GEN_LOG_LEVEL", "INFO"),
+        # без проброса порта Vast не открывает 8000 наружу (как в orchestrator.py)
+        f"-p {WORKER_HTTP_PORT}:{WORKER_HTTP_PORT}": "1",
     }
     if hf_token:
         env["HF_TOKEN"] = hf_token  # пробрасывается как у генерации; в журнал не пишется

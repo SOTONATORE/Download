@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import deque
 import sys
 import types
@@ -67,6 +68,9 @@ class FakeClock:
 
     def sleep(self, sec: float) -> None:
         self.now += sec
+        # уступаем реальному фоновому потоку (release-uploader), иначе цикл крутит тысячи виртуальных
+        # шагов до его конца и ложно срабатывают job_deadline_min и drain_grace_sec
+        time.sleep(0.001)
 
 
 class FakeStore(orch.ReleaseStore):
@@ -402,7 +406,7 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
     # порядок этапов
     ev = rig.events
     assert ev.index("release_create") < ev.index("gemini") < ev.index("vast_create")
-    assert ev.index("vast_create") < ev.index("upload:1.mp4") < ev.index("ack:1")
+    assert ev.index("vast_create") < ev.index("ack:1") < ev.index("upload:1.mp4")
     assert ev.index("ack:2") < ev.index("destroy_by_label")
     assert rig.worker.bad_token == 0
     _no_secrets(caplog.text)

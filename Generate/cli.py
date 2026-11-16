@@ -1935,6 +1935,7 @@ def cmd_test_workflows(args: argparse.Namespace) -> int:
         return EXIT_OK if summary.ok else EXIT_RUNTIME
     finally:
         _restore_handlers(previous_handlers)
+        vast.close()
 
 
 def build_parser() -> argparse.ArgumentParser:

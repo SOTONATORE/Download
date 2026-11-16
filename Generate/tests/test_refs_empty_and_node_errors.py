@@ -263,6 +263,9 @@ def _dispatch(profile, entry, role="video", photo_profile=None, previews=None):
     fake._refs_enabled_for_role = lambda r: orch.Orchestrator._refs_enabled_for_role(fake, r)
     fake._clip_label = lambda n: f"клип {n}"
     fake._json = orch.Orchestrator._json  # статический метод
+    # блокировка состояния и счётчик попыток: настоящие методы, привязанные к заглушке
+    fake._lock_state = lambda: orch.Orchestrator._lock_state(fake)
+    fake._bump_attempts = lambda num: orch.Orchestrator._bump_attempts(fake, num)
     orch.Orchestrator._dispatch(fake, slot, 0.0)
     assert len(fake.sent) == 1
     return fake.sent[0]

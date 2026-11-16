@@ -241,11 +241,12 @@ def test_orchestrator_save_state_failure_names_path_and_reason(tmp_path, caplog,
     monkeypatch.setattr(go, "atomic_write_json", failing_write)
     path = tmp_path / "prompts.json"
 
-    class _Fake:
-        prompts_path = path
-        _state = {"prompts": {}}
+    # настоящий объект Orchestrator без __init__: нужны _lock_state (лениво создаётся) и поля состояния
+    fake = orch.Orchestrator.__new__(orch.Orchestrator)
+    fake.prompts_path = path
+    fake._state = {"prompts": {}}
 
-    orch.Orchestrator._save_state(_Fake())  # исключение гасится, как и раньше
+    orch.Orchestrator._save_state(fake)  # исключение гасится, как и раньше
 
     msgs = [r.getMessage() for r in caplog.records if r.name == "Generate.orchestrator"]
     assert msgs == [f"Не удалось сохранить файл промптов {path}: OSError: диск недоступен."]
