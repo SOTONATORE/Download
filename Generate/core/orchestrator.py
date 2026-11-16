@@ -3103,13 +3103,17 @@ class Orchestrator:
             raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
         if not self.prompts_file:
             raise previews.PreviewInputError("Превью запрошены, но файл промптов не задан (prompts_path пуст).")
-        prompts = previews.load_prompts(self.prompts_file)
-        items = previews.build_previews(prompts, count)
+        specs = previews.load_prompt_specs(self.prompts_file)
+        items = previews.build_previews(specs, count)
         self._previews = {item.num: item for item in items}
         self._preview_order = [item.num for item in items]
         log.info("Превью: промптов %d, вариантов на промпт %d, всего генераций %d (фото-модель, "
                  "в конце очереди фото, не входят в покрытие SRT).",
-                 len(prompts), count, len(items), extra=KEY_EVENT_EXTRA)
+                 len(specs), count, len(items), extra=KEY_EVENT_EXTRA)
+        with_refs = [x for x, (_text, refs) in enumerate(specs, 1) if refs is not None]
+        if with_refs:
+            log.info("Превью с референсами: промпты %s (refs передаются на воркер).",
+                     ", ".join(str(x) for x in with_refs), extra=KEY_EVENT_EXTRA)
 
     def _publish_previews_index(self) -> None:
         """previews_index.txt: в служебный релиз и в артефакт; со всеми деталями по каждому превью."""
@@ -3169,6 +3173,9 @@ class Orchestrator:
             preview.status = previews.STATUS_RUNNING
             payload = {"num": num, "prompt": preview.prompt,
                        "num_frames": PHOTO_NUM_FRAMES, "seed": preview.seed}
+            if preview.refs is not None:
+                # референсы блока: поле уходит только когда оно есть в файле промптов (старые блоки без изменений)
+                payload["refs"] = list(preview.refs)
             log.info("генерация превью: промпт %d, сид %d", preview.x, preview.y, extra=KEY_EVENT_EXTRA)
         else:
             entry = self._prompts.get(str(num))

@@ -140,6 +140,9 @@ def _apply_refs(graph: dict, bindings: dict, refs: tuple) -> None:
     for slot, n in enumerate(sorted(refs), start=1):
         _set_input(graph, bindings[f"ref_{n}"], f"ref_{n}", f"ref_{n}.png")
         inputs[f"images.image_{slot}"] = [ref_nodes[n], 0]
+    # журнал: какие референсы задачи легли в какие слоты ComfyUI (проверка «рефы доехали»)
+    log.info("Референсы задачи: %s; слоты: %s.", list(refs),
+             ", ".join(f"image_{slot}=ref_{n}" for slot, n in enumerate(sorted(refs), start=1)))
 
 
 def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frames: int,

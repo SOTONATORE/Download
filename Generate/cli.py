@@ -640,8 +640,20 @@ def _check_previews(prompts_count, prompts_file: str, photo_profile) -> Optional
             return None
         if not photo_profile:
             raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
-        previews.load_prompts(prompts_file)
-    except previews.PreviewInputError as exc:
+        specs = previews.load_prompt_specs(prompts_file)
+        if any(refs is not None for _text, refs in specs):
+            # блоки с refs: фото-профиль должен вести референсы; сочетания и метки — по профилю ниши
+            try:
+                lines = profile_dir(photo_profile).joinpath("profile.yaml").read_text(encoding="utf-8").splitlines()
+            except (OSError, GeminiInputError):
+                raise previews.PreviewInputError(
+                    f"Превью с refs: профиль фото-модели «{photo_profile}» не читается (profile.yaml).") from None
+            if _profile_flag(lines, "refs_enabled", photo_profile, default="false") != "true":
+                raise previews.PreviewInputError(
+                    f"Превью с refs: в блоках файла промптов, но фото-профиль «{photo_profile}» "
+                    f"не ведёт референсы (refs_enabled: true нужен в profile.yaml).")
+            previews.check_refs(specs, parse_allowed_refs(lines, photo_profile))
+    except (previews.PreviewInputError, GeminiInputError) as exc:
         _err(f"Ошибка входных данных: {exc}")
         return EXIT_INPUT
     return None
