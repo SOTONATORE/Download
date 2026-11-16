@@ -244,6 +244,9 @@ class _FakeVast:
     def __init__(self, debug_logs: bool = False) -> None:
         self.debug_logs = debug_logs
 
+    def close(self) -> None:
+        pass
+
 
 class _FakeSummary:
     def __init__(self, ok: bool) -> None:
