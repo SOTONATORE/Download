@@ -918,6 +918,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             transport,
             args.prompts_path,
             max_cards=cfg.max_cards,
+            # опрос задач карты каждую секунду; Vast и heartbeat остаются на 10 с (poll_interval по умолчанию)
+            task_poll_interval_sec=1.0,
             photo_profile=photo_profile,
             photo_prompt_cfg=photo_prompt_cfg,
             # список клипов из всех сегментов SRT (segments: all в profile.yaml ниши); по умолчанию — missing.txt

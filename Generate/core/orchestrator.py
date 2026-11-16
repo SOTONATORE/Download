@@ -31,7 +31,7 @@ import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from types import MappingProxyType
-from dataclasses import asdict, dataclass
+from dataclasses import InitVar, asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -113,6 +113,10 @@ HEARTBEAT_JOIN_TIMEOUT_SEC = 5.0
 WAIT_LOG_INTERVAL_SEC = 30.0  # строка состояния ожидания воркера на карту: не чаще раза в 30 с
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
 COMFY_ANSWER_LIMIT_SEC = 300.0  # Правило A: ComfyUI на карте не ответил за 5 мин от аренды → карта снимается
+# буфер задач на карту: 1 выполняющаяся и до MAX_CARD_QUEUE_DEPTH-1 в очереди воркера (стриминговая очередь, Part 1A)
+MAX_CARD_QUEUE_DEPTH = 4
+# опрос статусов задач карты (GET /task/{id}); Vast и heartbeat идут по poll_interval (10 с), задачи — чаще
+TASK_POLL_INTERVAL_SEC = 1.0
 SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
 CARD_WARN_REPEAT_SEC = 30.0  # повтор одного предупреждения карты в консоли: не чаще раза в 30 с (_warn_card)
 SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
@@ -294,6 +298,8 @@ class _Task:
     num: int
     id: str
     started: float
+    running_since: Optional[float] = None  # момент, когда воркер сообщил «running» (таймаут рендера)
+    state: str = "queued"                  # queued: в очереди воркера; running: рендерится на карте
 
 
 @dataclass
@@ -309,7 +315,9 @@ class _CardSlot:
     contacted: bool = False    # воркер хотя бы раз ответил
     net_fail: int = 0
     vast_status: str = ""      # последнее состояние Vast, для строк о переходах (не на каждый опрос)
-    task: Optional[_Task] = None
+    tasks: list = field(default_factory=list)  # буфер задач карты: 1 выполняющаяся и до MAX_CARD_QUEUE_DEPTH-1 в очереди воркера
+    task: InitVar[Optional[_Task]] = None      # совместимость: _CardSlot(..., task=...) кладёт задачу в буфер; свойство task — ниже
+    last_vast_poll: float = -1e9               # время последнего запроса статуса Vast по карте (throttle, см. _step_slot)
     log_next: Optional[int] = None    # курсор логов: номер последней строки, полученной с карты
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
     offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
@@ -359,6 +367,29 @@ class _CardSlot:
     def started(self) -> bool:
         """Старт карты начался: Vast показал «loading» или «created» (SPEC 8.2)."""
         return self.saw_loading or self.saw_created
+
+    def __post_init__(self, task: Optional[_Task]) -> None:
+        # совместимость: задача из аргумента конструктора попадает в буфер, если буфер пуст
+        if task is not None and not self.tasks:
+            self.tasks = [task]
+
+
+def _slot_task_get(self) -> Optional[_Task]:
+    """Текущая задача карты: выполняющаяся, иначе первая в буфере (прежнее поле task)."""
+    return next((t for t in self.tasks if t.state == "running"), self.tasks[0] if self.tasks else None)
+
+
+def _slot_task_set(self, value: Optional[_Task]) -> None:
+    """Прямое присваивание slot.task: None очищает буфер, задача становится единственной в буфере."""
+    if value is None:
+        self.tasks.clear()
+    else:
+        self.tasks = [value]
+
+
+# Свойство task добавляется после создания класса: объявленное в теле класса оно совпадало бы с InitVar,
+# и dataclass взял бы объект свойства как значение по умолчанию аргумента task.
+_CardSlot.task = property(_slot_task_get, _slot_task_set)
 
 
 def _has_start_marker(text: str) -> bool:
@@ -953,6 +984,8 @@ class Orchestrator:
         worker_token: Optional[str] = None,
         seed_base: int = 0,
         poll_interval_sec: float = 10.0,
+        max_card_queue_depth: int = MAX_CARD_QUEUE_DEPTH,      # задач на карту: активная и очередь воркера
+        task_poll_interval_sec: Optional[float] = None,         # опрос задач карты, с; None = poll_interval_sec
         rent_retry_sec: float = 30.0,
         max_rent_tries: int = 5,
         scan_sec: float = 0.0,
@@ -1089,6 +1122,19 @@ class Orchestrator:
         self.work_dir = work_dir
         self.seed_base = seed_base
         self.poll_interval = poll_interval_sec
+        # буфер задач на карту: не меньше одной задачи на карту (проверка значения до любых трат)
+        if int(max_card_queue_depth) < 1:
+            raise ValueError("max_card_queue_depth должен быть не меньше 1")
+        self.max_card_queue_depth = int(max_card_queue_depth)
+        # быстрый опрос задач отделён от опроса Vast и heartbeat: задачи — task_poll, Vast — poll_interval
+        if task_poll_interval_sec is None:
+            self._task_poll = self.poll_interval
+        else:
+            if float(task_poll_interval_sec) <= 0:
+                raise ValueError("task_poll_interval_sec должен быть больше 0")
+            self._task_poll = float(task_poll_interval_sec)
+        self._vast_poll = self.poll_interval  # статус Vast карты запрашивается с прежним интервалом (10 с в проде)
+        self._tick_429: set = set()           # карты, получившие 429 на этом обходе: до следующего обхода им не назначаем
         self.rent_retry = rent_retry_sec
         # лимит запросов аренды за запуск (9е-3): считается каждый запрос, успешный и неудачный
         self.max_rent_tries = int(max_rent_tries)
@@ -1939,7 +1985,8 @@ class Orchestrator:
 
     # --- основной цикл -------------------------------------------------------
     def _inflight(self) -> int:
-        return sum(1 for s in self._slots.values() if s.task is not None)
+        # незавершённые клипы на картах, включая задачи в буфере (не только выполняющиеся)
+        return sum(len(s.tasks) for s in self._slots.values())
 
     @property
     def _queue(self) -> deque:
@@ -2013,6 +2060,7 @@ class Orchestrator:
         self._photo_queue.extend(self._preview_order)
         drain_since: Optional[float] = None
         while True:
+            self._tick_429 = set()  # новый обход: карты с 429 на прошлом обходе снова доступны
             if self._stop.is_set():
                 # сигнал остановки: новых поисков и аренд нет, дозаливки нет; карты уничтожает _cleanup
                 # по метке запуска (как kill-cards) и закрывает их записи бюджета
@@ -2041,6 +2089,8 @@ class Orchestrator:
                 self._step_slot(slot, now, stopping)
             # нехватка видеопамяти на этом обходе: аренды и новые клипы в этом же обходе не нужны
             stopping = stopping or self._oom_stopped
+            # уровни 2..MAX буфера: после того как каждая готовая карта получила первую задачу
+            self._dispatch_levels(now, stopping)
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
             self._heartbeat(now)
@@ -2061,7 +2111,35 @@ class Orchestrator:
                 if self._budget_blocked and not self._slots:
                     log.error("Бюджет не позволяет арендовать карту, активных карт нет: завершаем.")
                     break
-            self._sleep(self.poll_interval)
+            self._sleep(self._loop_sleep())
+
+    def _loop_sleep(self) -> float:
+        """Пауза обхода: task_poll, пока у готовой карты есть задачи; иначе poll_interval (Vast, аренда, heartbeat)."""
+        task_poll = getattr(self, "_task_poll", self.poll_interval)
+        if any(s.tasks for s in self._slots.values() if s.state == "ready"):
+            return min(self.poll_interval, task_poll)
+        return self.poll_interval
+
+    def _dispatch_levels(self, now: float, stopping: bool) -> None:
+        """Уровни буфера 2..MAX по всем готовым картам: сначала каждая карта получает k-ю задачу, потом (k+1)-ю.
+
+        Уровень 1 (первая задача пустой карты) выполняет _step_slot. Карта с 429 на этом обходе пропускается.
+        """
+        if stopping:
+            return
+        blocked = getattr(self, "_tick_429", set())
+        depth_max = getattr(self, "max_card_queue_depth", MAX_CARD_QUEUE_DEPTH)
+        for depth in range(2, depth_max + 1):
+            if not self._video_queue and not self._photo_queue:
+                return
+            for slot in list(self._slots.values()):
+                if self._slots.get(slot.index) is not slot or slot.state != "ready":
+                    continue
+                if slot.index in blocked or len(slot.tasks) != depth - 1:
+                    continue
+                if not self._queue_for_role(slot.role):
+                    continue
+                self._dispatch(slot, now)
 
     # --- аренда --------------------------------------------------------------
     def _desired(self, now: float) -> int:
@@ -2151,6 +2229,9 @@ class Orchestrator:
                 return
             offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
+            # очередей клипов нет: карта не арендуется (буферные клипы уже у карт); окно цен выше не меняется
+            if len(self._video_queue) + len(self._photo_queue) == 0:
+                break
             role = self._next_role(now)
             vq_len, pq_len = len(self._video_queue), len(self._photo_queue)  # очереди на момент выбора роли
             res = self._rent_one(now, offers, role=role)
@@ -2321,15 +2402,16 @@ class Orchestrator:
         log.warning("%s снимается: %s.", _card_name(slot, cap=True), reason)
         self._card_status(slot, f"снята: {reason}")
         self._budget_blocked = False
-        task = slot.task
-        slot.task = None  # клип больше не назначен этой карте до возврата в очередь (SPEC 8.2)
-        if task is not None:
-            if bad:
-                # аварийно завершившаяся карта засчитывается как попытка (MAX_ATTEMPTS),
-                # иначе «отравленный» клип может зацикливать аренду карт
-                self._fail_clip(task.num, f"карта аварийно завершилась: {reason}")
-            else:
-                self._requeue_free(task.num)
+        tasks = list(slot.tasks)
+        # все задачи буфера больше не назначены карте до возврата в очередь (SPEC 8.2): буфер очищается до возврата
+        slot.tasks.clear()
+        # откат всего буфера без попытки (MAX_ATTEMPTS), и при аварии, и при обычном снятии: вина не в клипе.
+        # Обратный порядок сохраняет очерёдность клипов: самый ранний оказывается впереди очереди
+        for t in reversed(tasks):
+            self._requeue_free(t.num)
+        if tasks:
+            log.info("Задачи карты возвращены в очередь без попытки: клипы %s.",
+                     ", ".join(str(t.num) for t in tasks))
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
         try:
@@ -2607,8 +2689,13 @@ class Orchestrator:
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
         # статус у Vast запрашивается один раз на опрос в любом состоянии карты (9е-3). Перебитие ставки
-        # проверяется раньше любой логики состояний: перебитая карта не принимается за плохой хост
-        info, lookup_exc = self._lookup_status(slot)
+        # проверяется раньше любой логики состояний: перебитая карта не принимается за плохой хост.
+        # Запрос Vast идёт не чаще _vast_poll (10 с в проде), хотя обход задач может быть 1 с
+        if now - slot.last_vast_poll >= getattr(self, "_vast_poll", 0.0):
+            slot.last_vast_poll = now
+            info, lookup_exc = self._lookup_status(slot)
+        else:
+            info, lookup_exc = None, None
         if info is not None and self._is_outbid(info):
             self._retire_outbid(slot)
             return
@@ -2693,23 +2780,25 @@ class Orchestrator:
             return
         if slot.state != "ready":
             return
-        if slot.task is not None:
-            self._poll_task(slot, now)
-        if self._slots.get(slot.index) is not slot or slot.task is not None:
+        if slot.tasks:
+            self._poll_task(slot, now)  # опрос каждой задачи буфера
+        # карта с задачами в буфере не принимает первую задачу здесь и не переключается, не снимается
+        if self._slots.get(slot.index) is not slot or slot.tasks:
             return
         stopping = stopping or self._oom_stopped  # нехватка видеопамяти уже на этом шаге: новые клипы не берутся
         if not stopping and self._queue_for_role(slot.role):
             if not slot.accepted and self._accept_timed_out(slot, now):
                 return
-            self._dispatch(slot, now)
+            self._dispatch(slot, now)  # уровень 1 буфера; уровни 2..MAX — в _dispatch_levels
             return
-        # очередь своей роли пуста: карта простаивает и переключается на работу другой роли (если есть)
-        target = None if stopping else _switch_target(
-            slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
-        if target is not None:
-            self._start_switch(slot, target, now)
-            return
-        self._retire(slot, "работы для карты больше нет")
+        # очередь своей роли пуста и задач у карты нет: карта простаивает и переключается на работу другой роли
+        if len(slot.tasks) == 0:
+            target = None if stopping else _switch_target(
+                slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
+            if target is not None:
+                self._start_switch(slot, target, now)
+                return
+            self._retire(slot, "работы для карты больше нет")
 
     # --- воркер ----------------------------------------------------------------
     def _call(self, slot: _CardSlot, method: str, path: str, payload: Optional[dict] = None):
@@ -3016,7 +3105,7 @@ class Orchestrator:
     def _assigned_slot(self, num: int) -> Optional[_CardSlot]:
         """Слот, на котором сейчас назначен клип (состояние assigned, SPEC 8.2); None, если клип free."""
         for slot in self._slots.values():
-            if slot.task is not None and slot.task.num == num:
+            if any(t.num == num for t in slot.tasks):
                 return slot
         return None
 
@@ -3228,6 +3317,15 @@ class Orchestrator:
                             _card_name(slot), num, exc)
             return
         except _WorkerHttpError as exc:
+            if exc.status == 429:
+                # воркер занят (backpressure): клип возвращается в начало очереди без попытки и без сбоя карты
+                self._queue_for_role(slot.role).appendleft(num)
+                blocked = getattr(self, "_tick_429", None)
+                if blocked is not None:
+                    blocked.add(slot.index)  # до следующего обхода этой карте задачи не назначаем
+                log.debug("%s: воркер занят (429), клип %d возвращён в очередь без попытки.",
+                          _card_name(slot, cap=True), num)
+                return
             slot.net_fail += 1
             self._attempts[num] = self._attempts.get(num, 0) + 1
             self._fail_clip(num, f"воркер ответил {exc}")
@@ -3237,7 +3335,7 @@ class Orchestrator:
         self._attempts[num] = self._attempts.get(num, 0) + 1
         data = self._json(resp)
         tid = str(data.get("id") or data.get("task_id") or num)
-        slot.task = _Task(num, tid, now)
+        slot.tasks.append(_Task(num, tid, now))  # задача встаёт в буфер карты; состояние queued до статуса running
         slot.accepted = True
         # текст промпта не логируем: только длина и короткий SHA-256 (SPEC 0.1)
         prompt = str(payload["prompt"])
@@ -3246,35 +3344,64 @@ class Orchestrator:
                  num, _card_name(slot), self._attempts[num], len(prompt), digest)
         log.info("%s: начало", self._clip_label(num), extra=KEY_EVENT_EXTRA)
 
+    @staticmethod
+    def _drop_task(slot: _CardSlot, task: _Task) -> None:
+        """Снимает с карты одну задачу (по ссылке), остальные задачи буфера не трогает."""
+        slot.tasks[:] = [x for x in slot.tasks if x is not task]
+
+    def _task_timed_out(self, slot: _CardSlot, now: float) -> bool:
+        """Таймаут рендера (task_timeout_sec). Выполняющаяся задача — от её старта на карте (running_since).
+
+        Если выполняющихся задач нет, а самая давняя задача ждёт в очереди воркера дольше таймаута,
+        воркер считается зависшим; клип при этом не виноват и попытки не теряет. True — карта снята.
+        """
+        for t in list(slot.tasks):
+            if t.running_since is not None and now - t.running_since >= self.task_timeout:
+                self._drop_task(slot, t)
+                self._fail_clip(t.num, "таймаут рендера")
+                self._retire(slot, "воркер завис", bad=True)
+                return True
+        if slot.tasks and not any(t.running_since is not None for t in slot.tasks):
+            oldest = min(slot.tasks, key=lambda t: t.started)
+            if now - oldest.started >= self.task_timeout:
+                self._retire(slot, "воркер завис", bad=True)
+                return True
+        return False
+
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
-        task = slot.task
-        if now - task.started >= self.task_timeout:
-            slot.task = None
-            self._fail_clip(task.num, "таймаут рендера")
-            self._retire(slot, "воркер завис", bad=True)
+        """Опрос задач буфера карты (каждый обход, task_poll). Ошибка одной задачи не трогает остальные."""
+        if self._task_timed_out(slot, now):
             return
-        try:
-            resp = self._call(slot, "GET", f"/task/{task.id}")
-        except _WorkerNetError:
-            slot.net_fail += 1
-            return
-        except _WorkerHttpError as exc:
-            slot.task = None
-            self._fail_clip(task.num, f"статус задачи: {exc}")
-            return
-        slot.net_fail = 0
-        slot.contacted = True
-        data = self._json(resp)
-        status = str(data.get("status") or data.get("state") or "").lower()
-        if status in _DONE_STATUSES:
-            self._finish_clip(slot, now)
-        elif status in _FAILED_STATUSES:
-            slot.task = None
-            err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
-            if _is_out_of_memory(err):
-                self._stop_on_out_of_memory(slot, task.num, err)
-                return
-            self._fail_clip(task.num, f"воркер сообщил об ошибке: {err}")
+        for t in list(slot.tasks):
+            if not any(x is t for x in slot.tasks):
+                continue  # задача уже снята в этом обходе
+            try:
+                resp = self._call(slot, "GET", f"/task/{t.id}")
+            except _WorkerNetError:
+                slot.net_fail += 1
+                return  # связь с картой пропала: остальные задачи — на следующем обходе
+            except _WorkerHttpError as exc:
+                self._drop_task(slot, t)
+                self._fail_clip(t.num, f"статус задачи: {exc}")
+                continue
+            slot.net_fail = 0
+            slot.contacted = True
+            data = self._json(resp)
+            status = str(data.get("status") or data.get("state") or "").lower()
+            if status == "running" or status in _DONE_STATUSES:
+                t.state = "running"
+                if t.running_since is None:
+                    t.running_since = now  # старт на карте: отсюда таймаут рендера
+            if status in _DONE_STATUSES:
+                self._drop_task(slot, t)
+                self._finish_clip(slot, now, task=t)
+            elif status in _FAILED_STATUSES:
+                self._drop_task(slot, t)
+                err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
+                if _is_out_of_memory(err):
+                    self._stop_on_out_of_memory(slot, t.num, err)
+                else:
+                    self._fail_clip(t.num, f"воркер сообщил об ошибке: {err}")
 
     def _download(self, slot: _CardSlot, tid: str, path: str) -> None:
         try:
@@ -3288,8 +3415,9 @@ class Orchestrator:
         except httpx.HTTPError as exc:
             raise _WorkerNetError(type(exc).__name__) from None
 
-    def _finish_clip(self, slot: _CardSlot, now: float) -> None:
-        task = slot.task
+    def _finish_clip(self, slot: _CardSlot, now: float, task: Optional[_Task] = None) -> None:
+        # без аргумента task берётся текущая задача карты (прежний вызов); с task — конкретная задача буфера
+        task = task if task is not None else slot.task
         preview = self._previews.get(task.num)
         if preview is not None:
             name = preview.filename
@@ -3312,7 +3440,7 @@ class Orchestrator:
                 os.unlink(path)
             except OSError:
                 pass
-        slot.task = None
+        self._drop_task(slot, task)  # снимается только эта задача; буфер карты остаётся
         if reason:
             self._fail_clip(task.num, reason)
             return
@@ -3327,7 +3455,9 @@ class Orchestrator:
                 log.warning("Воркер не подтвердил удаление превью %s.", preview.filename)
             return
         self._done.add(task.num)
-        duration = max(0.0, now - task.started)
+        # время рендера от старта на карте (running_since), а не от постановки в буфер
+        started_at = task.running_since if task.running_since is not None else task.started
+        duration = max(0.0, now - started_at)
         self._durations.append(duration)
         self._mark(task.num, "done")
         log.info("Клип %d выдан в Release (рендер: %s, %.1f с).",
