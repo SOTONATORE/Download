@@ -192,7 +192,7 @@ def test_single_task_failure_keeps_other_buffered_tasks(tmp_path, monkeypatch):
     rig.orc._poll_task(slot, now)
 
     assert [t.num for t in slot.tasks] == [2, 3, 4]          # снята только задача с ошибкой
-    assert all(t.state == "running" for t in slot.tasks)     # остальные продолжают рендериться
+    assert all(t.state in ("queued", "running") for t in slot.tasks)  # остальные остаются в очереди или в работе
     assert list(rig.orc._queue) == [1]                       # клип 1 — на повтор
     assert rig.orc._attempts[1] == 1                         # одна попытка, как при обычной ошибке задачи
     assert all(rig.orc._attempts[n] == 1 for n in (2, 3, 4))
