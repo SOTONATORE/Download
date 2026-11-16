@@ -1,0 +1,155 @@
+name: Test cartoon workflows
+
+# Ручной A/B-тест сценариев workflow ниши cartoon_photos: 4 варианта × 4 сюжета = 16 PNG на одной карте.
+# Результат идёт только в артефакт Actions (retention 30 дней). Релизы (Release) не создаются и не меняются.
+# Только ручной запуск: никаких push и pull_request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_name:
+        description: "Модель GPU для поиска"
+        type: string
+        default: "RTX 5090"
+      min_price_per_hour:
+        description: "Нижняя граница цены, USD/час"
+        type: string
+        default: "0.35"
+      max_price_per_hour:
+        description: "Верхняя граница цены, USD/час"
+        type: string
+        default: "1.00"
+      min_reliability:
+        description: "Минимальная надёжность хоста, от 0 до 1"
+        type: string
+        default: "0.90"
+      min_inet_mbps:
+        description: "Минимальная скорость входящего канала, Мбит/с"
+        type: string
+        default: "500"
+      max_inet_price_per_tb:
+        description: "Потолок цены трафика карты, USD за ТБ"
+        type: string
+        default: "6.1"
+      rental_type:
+        description: "Режим аренды карты"
+        type: choice
+        options:
+          - "on-demand"
+          - "interruptible"
+        default: "on-demand"
+      verified:
+        description: "Только проверенные хосты Vast: 1 = да, 0 = нет"
+        type: choice
+        options:
+          - "1"
+          - "0"
+        default: "1"
+      disk_gb:
+        description: "Размер диска карты, ГБ"
+        type: number
+        default: 100
+      silent_host_timeout_min:
+        description: "Таймаут первого ответа хоста, минут"
+        type: number
+        default: 15
+      budget_limit_usd:
+        description: "Жёсткий потолок бюджета на тест (USD)"
+        type: string
+        default: "2.0"
+      min_balance_usd:
+        description: "Минимальный баланс Vast.ai для старта (USD); не меньше бюджета"
+        type: string
+        default: "2.0"
+
+# Отдельная очередь: два теста не арендуют карты одновременно; текущий прогон не отменяется.
+concurrency:
+  group: test-cartoon-workflows
+  cancel-in-progress: false
+
+# Только чтение репозитория и чтение статуса Actions.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test-workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUN_ID: ${{ github.run_id }}
+      ARTIFACT_DIR: ${{ runner.temp }}/test-cartoon-artifact
+      GPU_NAME: ${{ inputs.gpu_name }}
+      MIN_PRICE: ${{ inputs.min_price_per_hour }}
+      MAX_PRICE: ${{ inputs.max_price_per_hour }}
+      MIN_RELIABILITY: ${{ inputs.min_reliability }}
+      MIN_INET_MBPS: ${{ inputs.min_inet_mbps }}
+      MAX_INET_PRICE_PER_TB: ${{ inputs.max_inet_price_per_tb }}
+      RENTAL_TYPE: ${{ inputs.rental_type }}
+      VERIFIED: ${{ inputs.verified }}
+      DISK_GB: ${{ inputs.disk_gb }}
+      SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
+      BUDGET_LIMIT_USD: ${{ inputs.budget_limit_usd }}
+      MIN_BALANCE_USD: ${{ inputs.min_balance_usd }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev requirements
+        run: pip install -r Generate/requirements-dev.txt
+
+      - name: Run test-workflows
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          mkdir -p "$ARTIFACT_DIR"
+          python -m Generate.cli test-workflows \
+            --gpu-name "$GPU_NAME" \
+            --min-price-per-hour "$MIN_PRICE" \
+            --max-price-per-hour "$MAX_PRICE" \
+            --min-reliability "$MIN_RELIABILITY" \
+            --min-inet-mbps "$MIN_INET_MBPS" \
+            --max-inet-price-per-tb "$MAX_INET_PRICE_PER_TB" \
+            --rental-type "$RENTAL_TYPE" \
+            --verified "$VERIFIED" \
+            --disk-gb "$DISK_GB" \
+            --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN" \
+            --budget-limit "$BUDGET_LIMIT_USD" \
+            --min-balance-usd "$MIN_BALANCE_USD" \
+            --worker-build "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --debug-logs
+
+      - name: Kill cards
+        if: always()
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+        run: python -m Generate.cli kill-cards --label "testwf-$RUN_ID" --card-dir "$ARTIFACT_DIR"
+
+      - name: Collect test log
+        if: always()
+        run: |
+          echo "Содержимое артефакта:"
+          ls -la "$ARTIFACT_DIR" "$ARTIFACT_DIR/test_results" 2>/dev/null || true
+          if [ -f "$ARTIFACT_DIR/run/debug.log" ]; then
+            echo "Хвост журнала теста:"
+            tail -n 200 "$ARTIFACT_DIR/run/debug.log"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-cartoon-workflows-${{ github.run_id }}
+          path: ${{ runner.temp }}/test-cartoon-artifact
+          retention-days: 30
+          if-no-files-found: warn
