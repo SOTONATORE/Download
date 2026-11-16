@@ -78,7 +78,6 @@ jobs:
     timeout-minutes: 120
     env:
       RUN_ID: ${{ github.run_id }}
-      ARTIFACT_DIR: ${{ runner.temp }}/test-cartoon-artifact
       GPU_NAME: ${{ inputs.gpu_name }}
       MIN_PRICE: ${{ inputs.min_price_per_hour }}
       MAX_PRICE: ${{ inputs.max_price_per_hour }}
@@ -92,6 +91,10 @@ jobs:
       BUDGET_LIMIT_USD: ${{ inputs.budget_limit_usd }}
       MIN_BALANCE_USD: ${{ inputs.min_balance_usd }}
     steps:
+      # runner.* недоступен в job-level env; путь артефакта считаем в шаге и передаём через GITHUB_ENV
+      - name: Prepare artifact dir
+        run: echo "ARTIFACT_DIR=$RUNNER_TEMP/test-cartoon-artifact" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v4
 
