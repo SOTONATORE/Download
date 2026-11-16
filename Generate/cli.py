@@ -1873,6 +1873,70 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         failures=failures, problems=problems, report_md=report)
 
 
+def _wab():
+    """Модуль A/B-теста сценариев; импорт отложен, чтобы обычные команды его не загружали."""
+    try:
+        from Generate.core import workflow_ab_test as module
+    except ImportError:  # pragma: no cover - плоский импорт из каталога core
+        import workflow_ab_test as module  # type: ignore
+    return module
+
+
+def cmd_test_workflows(args: argparse.Namespace) -> int:
+    """A/B-тест сценариев workflow на одной карте: 16 PNG в каталог артефакта. Релизы не создаются.
+
+    Коды: 0 — все 16 сцен готовы; 2 — ошибка входа или предпроверки Vast (до аренды); 3 — ошибка выполнения.
+    """
+    wab = _wab()
+    overrides = {
+        # модель и режим ниши задаются модулем теста: cli не знает имени ниши
+        "model_profile": wab.MODEL_PROFILE,
+        "budget_limit_usd": args.budget_limit,
+        "min_balance_usd": args.min_balance_usd,
+        "gpu_name": args.gpu_name,
+        "min_price_per_hour": args.min_price_per_hour,
+        "max_price_per_hour": args.max_price_per_hour,
+        "min_reliability": args.min_reliability,
+        "min_inet_mbps": args.min_inet_mbps,
+        "max_inet_price_per_tb": args.max_inet_price_per_tb,
+        "disk_gb": args.disk_gb,
+        "silent_host_timeout_min": args.silent_host_timeout_min,
+        "verified": None if args.verified is None else int(args.verified),
+        "rental_type": args.rental_type,
+        # принимается для совместимости с generate.yml; на сценарии не влияет
+        "scan_sec": args.scan_sec,
+    }
+    cfg, code = _load_cfg(args.config, overrides)
+    if code is not None:
+        return code
+    try:
+        vast = VastClient(debug_logs=args.debug_logs)
+    except VastError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+    stop = threading.Event()
+    previous_handlers = _install_stop_handlers(stop)
+    try:
+        # предстартовая проверка Vast API и кредита: до поиска предложений и аренды
+        code = _vast_preflight(vast, cfg.min_balance_usd)
+        if code is not None:
+            return code
+        try:
+            summary = wab.run_ab_test(
+                vast, cfg, run_id=args.run_id, worker_build=args.worker_build, repo=args.repo,
+                artifact_dir=args.artifact_dir, docker_image=args.docker_image, stop=stop)
+        except wab.ABInputError as e:
+            _err(f"Ошибка входных данных: {e}")
+            return EXIT_INPUT
+        except (wab.ABRuntimeError, VastError) as e:
+            _err(f"Ошибка выполнения теста: {e}")
+            return EXIT_RUNTIME
+        print(f"Сценарии: готово {summary.ok_count} из {len(summary.results)}; метка {summary.label}.")
+        return EXIT_OK if summary.ok else EXIT_RUNTIME
+    finally:
+        _restore_handlers(previous_handlers)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--srt", default=DEFAULT_SRT,
@@ -1972,6 +2036,51 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
     run_p.set_defaults(func=lambda a: cmd_run(a))
+
+    # A/B-тест сценариев workflow (отдельная команда; генерацию и Release не трогает)
+    tw_p = sub.add_parser("test-workflows",
+                          help="A/B-тест сценариев workflow на одной карте: 16 PNG в артефакт, без Release")
+    tw_p.add_argument("--config", default=None,
+                      help="путь к файлу конфигурации (по умолчанию Generate/config.default.yaml)")
+    tw_p.add_argument("--budget-limit", type=float, default=None,
+                      help="жёсткий потолок расходов на тест, USD; по умолчанию из конфига")
+    tw_p.add_argument("--min-balance-usd", type=float, default=None,
+                      help="минимальный кредит Vast.ai для старта, USD; по умолчанию из конфига")
+    tw_p.add_argument("--gpu-name", default=None,
+                      help="модель GPU для поиска; пустая строка = любая; по умолчанию из конфига")
+    tw_p.add_argument("--min-price-per-hour", type=float, default=None,
+                      help="нижняя граница цены, USD/час; по умолчанию из конфига")
+    tw_p.add_argument("--max-price-per-hour", type=float, default=None,
+                      help="верхняя граница цены, USD/час; по умолчанию из конфига")
+    tw_p.add_argument("--min-reliability", type=float, default=None,
+                      help="минимальная надёжность хоста, от 0 до 1; по умолчанию из конфига")
+    tw_p.add_argument("--min-inet-mbps", type=float, default=None,
+                      help="минимальная скорость входящего канала, Мбит/с; по умолчанию из конфига")
+    tw_p.add_argument("--max-inet-price-per-tb", type=float, default=None,
+                      help="потолок цены трафика карты, USD за ТБ; по умолчанию из конфига")
+    tw_p.add_argument("--rental-type", type=_parse_rental_type, default=None,
+                      help="режим аренды карт: interruptible или on-demand (пусто = из конфига)")
+    tw_p.add_argument("--verified", type=_parse_verified, default=None,
+                      help="только проверенные хосты Vast: 1 = да, 0 = нет; без флага берётся из конфига")
+    tw_p.add_argument("--disk-gb", type=int, default=None,
+                      help="размер диска для карты Vast.ai, ГБ; по умолчанию из конфига")
+    tw_p.add_argument("--silent-host-timeout-min", type=int, default=None,
+                      help="таймаут первого ответа хоста, минут; по умолчанию из конфига")
+    tw_p.add_argument("--scan-sec", type=_parse_scan_sec, default=None,
+                      help="окно сбора цен, с (целое > 0); принимается для совместимости с generate.yml")
+    tw_p.add_argument("--docker-image", default=None,
+                      help="образ Docker для карты Vast.ai; не задано = образ теста по умолчанию")
+    tw_p.add_argument("--worker-build", default="",
+                      help="номер коммита сборки воркера (SHA) для onstart")
+    tw_p.add_argument("--repo", default="",
+                      help="репозиторий owner/name (передаётся явно)")
+    tw_p.add_argument("--run-id", default="",
+                      help="номер запуска из цифр (передаётся явно); метка карты testwf-<run-id>")
+    tw_p.add_argument("--artifact-dir", default="",
+                      help="каталог артефакта: PNG, index.txt, summary.md, карта и журнал; пусто = не вести")
+    tw_p.add_argument("--debug-logs", action="store_true", default=False,
+                      help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
+    tw_p.set_defaults(func=lambda a: cmd_test_workflows(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")
     kill_p.add_argument("--label", default=None, help="метка карт (по умолчанию gen-<run-id>)")
