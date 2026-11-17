@@ -62,7 +62,9 @@ DONE_RE = re.compile(_SETUP_PREFIX + r"Файл успешно загружен:
 # формы кода: «(код N)» (прежняя), «(код aria2 N)» и «(код curl N)» (так печатает setup.sh сейчас)
 ERROR_RE = re.compile(_SETUP_PREFIX + r"ОШИБКА: не удалось загрузить файл (?P<name>\S+) "
                       r"\(код (?:(?:aria2|curl) )?(?P<rc>\d+)\)\.\s*$")
-STAGE_DONE_RE = re.compile(r"\[setup\] Все файлы модели LTX-2\.5 на месте\.\s*$")
+# два варианта строки setup.sh: «Все файлы модели LTX-2.5 на месте.» (ltx25 и по умолчанию)
+# и «Все файлы модели на месте (профиль <имя>).» (остальные профили, например cartoon_photos)
+STAGE_DONE_RE = re.compile(r"\[setup\] Все файлы модели (?:LTX-2\.5 на месте\.|на месте \(профиль [^)]+\)\.?)\s*$")
 
 # --- префикс строк aria2c и curl из setup.sh: «[file=<имя файла>] » ---
 FILE_PREFIX_RE = re.compile(r"\[file=(?P<file>[^\]\s]+)\] ")

@@ -14,11 +14,11 @@ height: 1080
 allow_text: true
 text_model: nemotron-super-vl
 
-# референсы: метки <imageN> проверяются по списку refs сегмента
-refs_enabled: true
+# референсы отключены: граф чисто text-to-image (Variant A), узлы LoadImage удалены
+refs_enabled: false
 
-# разрешённые сочетания номеров refs (каждое — строка в кавычках, номера через запятую); иное сочетание — нарушение
-allowed_refs: ["1", "1,6", "1,2", "1,2,6", "2", "3", "4", "5"]
+# seed: run — новый seed на каждый прогон; привязка seed указывает на KSampler 488 (bindings.json)
+seed_mode: run
 
 # правила проверки, которые ниша отключает: art_medium, small_objects, emotion (эмоциональные слова в кадре разрешены
 # только в этой нише); текст в кадре разрешает allow_text;
