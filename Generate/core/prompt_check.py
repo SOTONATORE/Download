@@ -156,6 +156,8 @@ PROBLEM_OBJECT_SET = "object_set"
 PROBLEM_THICK_VECTOR = "thick_vector_style"
 # метки <imageN> и ref_N в промпте профиля без референсов (refs_enabled: false)
 PROBLEM_REF_TAG = "ref_tag_without_refs"
+# одинаковый текст промпта у разных клипов (нарушение очереди дубликатов, ниша с fail_on_duplicate_prompts)
+PROBLEM_DUPLICATE_PROMPT = "duplicate_prompt"
 # английская подсказка для повтора: что нарисовать вместо толстых контуров
 THICK_VECTOR_HINT_EN = ("thick or bold outlines, or a vector look; use thin slightly sketchy black ink pen outlines "
                         "and thin single-line pure-black stick-figure arms instead")
@@ -169,6 +171,7 @@ _PROBLEM_EN = {
     PROBLEM_CAMERA_MOTION: "camera motion",
     PROBLEM_THICK_VECTOR: THICK_VECTOR_HINT_EN,
     PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
+    PROBLEM_DUPLICATE_PROMPT: "the same prompt text as another clip",
 }
 _PROBLEM_RU = {
     PROBLEM_FORBIDDEN_SHOT_TYPE: "запрещённый тип кадра",
@@ -178,6 +181,7 @@ _PROBLEM_RU = {
     PROBLEM_CAMERA_MOTION: "движение камеры",
     PROBLEM_THICK_VECTOR: "толстые контуры или векторный стиль",
     PROBLEM_REF_TAG: "метка <imageN> или ref_N без референсов",
+    PROBLEM_DUPLICATE_PROMPT: "дубликат промпта",
 }
 
 # Причины для журнала и для повторного запроса (русские), подписи для Gemini (английские), подсказки для Gemini.

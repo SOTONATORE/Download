@@ -31,7 +31,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
-                           PROBLEM_REF_TAG, validate_allowed_shot_items)
+                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -42,7 +42,7 @@ except ImportError:  # pragma: no cover
                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
-                           PROBLEM_REF_TAG, validate_allowed_shot_items)
+                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -1034,8 +1034,21 @@ def _parse_hint_en(item: str) -> str:
     return "Fix the problem found when the previous version was checked; keep the rest of the prompt."
 
 
+# Английский текст повтора для клипа-дубликата. Текст модели: сцена должна стать заметно другой.
+DUPLICATE_REWORK_TEXT = (
+    "This prompt is the same as the prompt of another clip. Rewrite it so the scene is visibly different: "
+    "change the subject's pose, a prop, the location or the action. Keep the segment's meaning and the subject type. "
+    "Output only the rewritten prompt.")
+
+
 def _rework_text(problems: list) -> str:
     """Английский текст повтора для строк очереди: причины разбора — подсказкой, остальное как раньше."""
+    # Русский: дубликат промпта — свой текст повтора; прочие причины в той же строке идут обычным путём
+    dup = [p for p in problems if problem_code(p) == PROBLEM_DUPLICATE_PROMPT]
+    if dup:
+        others = [p for p in problems if problem_code(p) != PROBLEM_DUPLICATE_PROMPT]
+        head = _rework_text(others) if others else ""
+        return (head + " " if head else "") + DUPLICATE_REWORK_TEXT
     parse = [p for p in problems if p.startswith(_PARSE_PREFIX)]
     rest = [p for p in problems if not p.startswith(_PARSE_PREFIX)]
     base = ("Rewrite this prompt. Keep the subject, count, action and setting from the segment. "

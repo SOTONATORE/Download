@@ -19,9 +19,15 @@ from typing import Optional
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from . import gemini_orchestrator as go
     from . import gemini_prompts as gp
+    from . import config_loader as cl
+    from . import duplicate_check as dc
+    from . import prompt_check as pc
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
+    import config_loader as cl  # type: ignore
+    import duplicate_check as dc  # type: ignore
+    import prompt_check as pc  # type: ignore
 
 # тот же логгер, что у оркестратора: строки журнала не меняются
 log = logging.getLogger("Generate.orchestrator")
@@ -370,6 +376,90 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
     return state
 
 
+def _raw_prompt(styled: str, style_text: str) -> str:
+    """Сырой текст клипа без стиля: обратная операция attach_style (стиль дописан через «. »)."""
+    text = (styled or "").strip()
+    if style_text and text.endswith(style_text):
+        text = text[: -len(style_text)].rstrip()
+        if text.endswith("."):
+            text = text[:-1].rstrip()
+    return text
+
+
+def mark_duplicates_for_rework(prompts: dict, nums, style_text: str) -> list:
+    """Клипы из групп одинаковых промптов, кроме первого номера группы, ставятся в очередь исправлений.
+
+    Меняет записи prompts (словарь состояния; вызывать под замком). Первый номер группы (самый малый) не трогается.
+    Клип с непустой очередью не меняется: его нарушение уже исправляется, повтор дубликата проверит барьер.
+    Клип на пределе кругов (REPAIR_ROUNDS) не ставится: очередь его всё равно не возьмёт. Возвращает номера, поставленные в очередь.
+    """
+    texts = {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(nums))}
+    queued: list = []
+    for group in dc.find_duplicate_prompts(texts):
+        first = int(group[0])
+        for key in group[1:]:
+            entry = prompts.get(key)
+            if not isinstance(entry, dict) or entry.get("rework_pending"):
+                continue
+            rework_round = int(entry.get("rework_round", 0) or 0)
+            if rework_round >= gp.REPAIR_ROUNDS:
+                continue
+            entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
+            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(first))]
+            entry["rework_round"] = rework_round
+            queued.append(int(key))
+    return queued
+
+
+def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, profile: str,
+                      photo_profile: Optional[str], timing, watch, prompts_path, gemini_options: dict,
+                      errors: list, aborts: list, state, lock) -> dict:
+    """Ниши с ключом fail_on_duplicate_prompts: одинаковые промпты разных клипов идут в очередь исправлений.
+
+    Выполняется после обеих волн генерации и до итогового состояния. Для профилей без ключа ничего не делает
+    (ни чтения состояния, ни вызова модели). Исправление идёт тем же путём, что и очередь прошлого запуска:
+    шаги волн получают клипы через очередь (rework), круги и лимит REPAIR_ROUNDS прежние. Итоговую проверку
+    дубликатов делает verify_prompts после этого этапа.
+    """
+    if state is None:
+        state = read_state(prompts_path)
+    photo = [n for n in needed if n in photo_nums] if photo_profile is not None else []
+    photo_set = set(photo)
+    video = [n for n in needed if n not in photo_set]
+    dup_photo = bool(photo) and cl.load_profile_fail_on_duplicate_prompts(photo_profile)
+    dup_video = bool(video) and cl.load_profile_fail_on_duplicate_prompts(profile)
+    if not (dup_photo or dup_video):
+        return state
+    style_video = gp.preset_text(cfg.preset, cfg.niche_preset_file) if dup_video else ""
+    style_photo = gp.preset_text(photo_cfg.preset, photo_cfg.niche_preset_file) if dup_photo else ""
+    with lock:
+        prompts = state.setdefault("prompts", {})
+        queued_video = mark_duplicates_for_rework(prompts, video, style_video) if dup_video else []
+        queued_photo = mark_duplicates_for_rework(prompts, photo, style_photo) if dup_photo else []
+        if not queued_video and not queued_photo:
+            return state
+        state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+        go.atomic_write_json(prompts_path, state)
+    queued = sorted(queued_video + queued_photo)
+    log.info("Дубликаты промптов: в очередь исправлений поставлено клипов %d: %s.",
+             len(queued), gp._num_ranges(queued), extra=gp.KEY_EVENT_EXTRA)
+    if aborts:
+        return read_state(prompts_path)   # волна уже остановлена жёсткой ошибкой: исправления не запускаются
+    managed = go.ManagedTransport(
+        watch, gemini_options.get("models", go.DEFAULT_MODELS),
+        rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+        rpd_limit=gemini_options.get("rpd_limit", 500))
+    if queued_video:
+        state = _video_step(queued_video, segments=segments, cfg=cfg, watch=watch, prompts_path=prompts_path,
+                            profile=profile, timing=timing, gemini_options=gemini_options, errors=errors,
+                            aborts=aborts, managed=managed, state=state, lock=lock)
+    if queued_photo and not aborts:
+        _photo_step(queued_photo, segments=segments, photo_cfg=photo_cfg, watch=watch, prompts_path=prompts_path,
+                    gemini_options=gemini_options, errors=errors, aborts=aborts, managed=managed,
+                    state=state, lock=lock)
+    return read_state(prompts_path)
+
+
 def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str, timing,
                   photo_profile: Optional[str], photo_cfg, transport, gemini_options: dict,
                   prompts_path) -> PromptRun:
@@ -436,6 +526,11 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                             errors=errors, aborts=aborts, managed=managed, state=state, lock=lock,
                             pool=_photo_only_pool(watch, gemini_options))
         state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
+    # Русский: дубликаты промптов — только ниши с fail_on_duplicate_prompts; остальные профили этот этап не трогает
+    state = _duplicate_rework(needed, photo_nums=photo_nums, segments=segments, cfg=cfg, photo_cfg=photo_cfg,
+                              profile=profile, photo_profile=photo_profile, timing=timing, watch=watch,
+                              prompts_path=prompts_path, gemini_options=gemini_options, errors=errors,
+                              aborts=aborts, state=state, lock=lock)
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]
     if aborts:
