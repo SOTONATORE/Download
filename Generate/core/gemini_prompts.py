@@ -506,6 +506,14 @@ _MEDIUM_LINE_IMAGE = ("- Describe only the scene and its motion. Never name a me
 _MEDIUM_LINE_IMAGE_STILL = _MEDIUM_LINE_IMAGE.replace(" and its motion", "", 1)
 _PAPER_LINE = ("- No paper, papers, letters, passports, forms or documents of any kind in the frame, including stacks, "
                "sheets and folded paper. Show the place or the activity instead, without readable text.\n")
+# Нишы с разрешёнными бумажными типами кадра (rules.yaml allowed_shot_items): если разрешены все семь имён
+# набора ниже, запрет на бумагу, письма, документы и листы снимается. Запреты на паспорта, формы, флаги,
+# ID-карты, гербы, эмблемы и пергамент остаются. Без полного набора строка _PAPER_LINE не меняется.
+_PAPER_ALLOWED_ITEMS = frozenset({"paper", "sheet of paper", "blank sheet", "document", "newspaper", "letter",
+                                  "spreadsheet"})
+_PAPER_LINE_PAPER_ALLOWED = ("- No passports, forms, flags, ID cards, coats of arms, emblems or parchment of any kind "
+                             "in the frame. Paper items such as letters, documents or sheets show only the short text "
+                             "from the Text line. Show the place or the activity instead.\n")
 _CONTRAST_LINE = ("- When the text contrasts two things (\"not X, but Y\", \"not X, rather Y\"), show only Y, as a visible "
                   "action or scene. Never describe X and never use a negation to refer to it.\n")
 _ASPECT_LINE = ("- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or "
@@ -702,7 +710,9 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         medium = "" if "art_medium" in cfg.relaxed_rules else image_line
     else:
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
-    paper = "" if "frame_text" in cfg.relaxed_rules else _PAPER_LINE
+    # бумажные типы кадра: строка без запретов на бумагу только если разрешены все имена _PAPER_ALLOWED_ITEMS
+    paper_line = _PAPER_LINE_PAPER_ALLOWED if _PAPER_ALLOWED_ITEMS <= rules.allowed_shot_items else _PAPER_LINE
+    paper = "" if "frame_text" in cfg.relaxed_rules else paper_line
     aspect = _ASPECT_LINE_SHEETS_ALLOWED if _SHEETS_ALLOWED_ITEMS <= rules.allowed_shot_items else _ASPECT_LINE
     camera_rules = medium + _CONTRAST_LINE + paper + aspect + camera_end
     # subject_source text_only: объекты и текст в кадре только из строки Text; у text_and_context строки нет

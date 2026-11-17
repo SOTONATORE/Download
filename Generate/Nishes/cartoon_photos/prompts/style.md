@@ -1,65 +1,88 @@
 Style guide for the cartoon_photos niche.
 
-Each segment becomes one scene with one action, drawn in the flat cartoon style of reference 1. Every prompt uses at least one reference from the refs list of its segment. Reference 1 is the base style and is added to most segments. Reference 6 is the main character and is added after the base style whenever the character appears. Choose the reference that matches the content of the segment, and use only reference numbers that appear in the refs list.
+Each segment becomes one still frame that illustrates what the segment says, drawn in the sketch style below. Write one prompt per segment in English. The task names the frame language for on-frame text.
 
-Reference roles:
-- ref_1 (base style): a flat landscape with a bright sky, a green grass line, brown soil layers and grey rock below, with bold dark outlines and flat colour fills. Use it when the segment names a place or a natural object, such as a shore, soil, rock, sky or water. Otherwise use a diagram or on-frame text.
-- ref_2 (on-frame text): a white background with one short red handwritten phrase and a small hourglass icon. Use it only when the whole segment is one short statement, for example a timer or one number, and the frame holds only that statement on a plain background. Otherwise, leave the text out of the frame.
-- ref_3 (labelled diagram): a grey rock with a green top, rising blue bubbles and one handwritten label with an arrow. Use it for an explanatory diagram with one label. Use it when the segment explains how or why something works.
-- ref_4 (timeline): a horizontal black arrow with evenly spaced circles, a dot at the left end, a small label under each end and a red pin above the line. Use it for time spans or a sequence of periods. Use it when the segment names a span of time or a sequence of periods.
-- ref_5 (comparison): two panels side by side, divided by a dashed line, each with a title above it and a short label inside. Use it for comparing two situations. Use it when the segment compares two situations.
-- ref_6 (main character): a plain round white head with a simple expression, a blue short-sleeved shirt, blue jeans and white shoes, standing straight, full body, on a white background. Use it whenever the character appears.
+# Global Style
 
-Reference combinations: choose exactly one of the following combinations, and list its numbers in the refs list. Base style alone: ref_1. Base style with the character: ref_1 and ref_6. Base style with the on-frame text: ref_1 and ref_2. Base style with the character and the on-frame text: ref_1, ref_2 and ref_6. The on-frame text alone: ref_2. One diagram alone: ref_3, ref_4 or ref_5. A diagram is always used alone. The character always comes with the base style.
+Thin, slightly sketchy black ink pen outlines with light natural wobble. Muted flat 2D colors with minimal simple shading. Clean pure white #FFFFFF background for cards, diagrams and comparisons. Simple 2D backgrounds for scenes: a flat sky band, a flat ground line and a few simple shapes. Everything is flat and drawn in one layer, with no depth.
 
-Frame order, checked in this order for every segment: first, a diagram when the segment explains how or why something works (reference 3), names a span of time or a sequence of periods (reference 4), or compares two situations (reference 5). A diagram is used alone, and its label words are taken from the segment text. Second, a scene with a place, a natural object or a person's action, with reference 1 and reference 6 as described below. Third, on-frame text alone only when the whole segment is one short statement. Choose the first option that fits the segment.
+Instruction for the model writing prompts: avoid 3D, photorealism, bokeh and depth of field, random hourglasses and thick flash outlines. Keep every outline thin and sketchy, and keep every surface flat.
 
-Hero placement: the main character appears only in a scene with a place or a person's action. A frame that shows only on-frame text (reference 2 alone) and each diagram (reference 3, 4 or 5) leave the main character out. A scene with a place or a person's action adds the main character as the traveller, with the refs list [1, 6] for the scene alone, or [1, 2, 6] when on-frame text is also shown beside the scene. A segment that is only about a thing or a fact leaves the main character out as well. Whenever the main character appears, describe it only as the main character as in reference 6. In every scene with a place or a person's action, the main character is shown by default; text-only and diagram segments are the only exceptions. In the prompt the character is written with its tag: <image2> in the list [1, 6], and <image3> in the list [1, 2, 6].
+# Safety
 
-Hero poses and expressions: the model chooses the pose and the expression of the main character by segment, one pose per prompt. Poses to choose from: standing upright, walking, sitting, crouching, pointing with a hand, holding an object, looking up, looking to the side, raising one hand, lowering both arms, running, leaning forward. Expressions to choose from: neutral, thoughtful, happy, surprised, frightened, tired, determined, focused. The pose and the expression come from the segment text, and the same pose is used in at most two clips in a row.
+Children, babies and young people never appear. Weapons never appear. Characters never speak: the mouth is a simple line or oval and stays closed. Keep hands and fingers away from fire, flames, candles and lanterns. Faces stay small in the frame, with no close-ups of faces. Objects and on-frame text come from the Text line of the segment only. Each prompt shows at most 4 characters, and animals count as characters.
 
-Visual style: bold dark outlines around every shape, flat colour fills with at most one simple shadow, simple readable shapes, and a limited bright palette of sky blue, green, brown, grey and orange. Diagrams sit on a plain white or pale background. Keep surfaces flat, with simple lighting drawn as shapes only.
+# Character Canon
 
-Text on the frame: Text on the frame is the exception: most frames show only the scene. A text card always names one keyword from the segment text, 1 to 4 words, written exactly as in the subtitles, and the prompt states those words in the card. A text is either one short phrase of 1 to 4 words, or one object described with one word for each part, using at most 4 parts. When text is shown beside a scene, use 1 to 4 words that carry the main point of the segment, a keyword the segment itself stresses. Each shown text is one complete phrase taken whole from a single sentence of the segment. Use only one text phrase in each frame. Write the text in the on-frame language named in the task. Use handwritten capital letters, large enough to read at a glance. The default colour is black. On a dark background use white. Use red only for the most important word or number. Any other colour is allowed when it stays easy to read.
+Three character types. The head, the eyes and the outline stay the same within each type.
 
-Text on the frame norm: each batch of 25 clips holds at most 5 clips with text on the frame, that is at most 1 in 5. Text on the frame stays a keyword or a short phrase of 1 to 4 words that the segment stresses. The words of each text card are written as plain words, for example: the words TIME MACHINE in red handwritten capitals.
+a) Default hero, the traveler. Use him by default in every scene with a place or a person's action, unless the segment is purely about an object or a fact, is a text slide or a diagram, or names another character. Description: large smooth pure-white round head with a thin black outline, small black dot eyes, a simple line or oval mouth, very thin single-line pure-black stick arms with simple stroke fingers coming out of the sleeves, a bright blue t-shirt, medium blue straight jeans and simple white sneakers. Always refer to him uniformly as the main character. Change only the pose, the action, the prop and the emotion. Show emotion only through the eyebrows and the mouth line. For the hero, never use mouth open, laughing, shouting or screaming, because speech is forbidden.
 
-On-frame text uses the same words as the subtitle text, keeping every name, number and spelling unchanged, and it still follows the 4-word or one-object rule above.
+b) Abstract everyday figure. Phrase it as a plain solid-black stick-figure character: the same large round white head with small black dot eyes, plus a whole thin solid-black stick-figure body, with arms, legs and torso drawn as one black line. Use it for an unnamed bystander or a second person in a scene. Phrase it safely, and never describe it with words such as naked or black man.
 
-Crossing out: draw two red diagonal strokes over the scene, like brush strokes, to show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene, for example a person with equipment and two red diagonal strokes over the scene.
+c) Story characters, for example a caveman in a fur or a second conversational partner. The clothing and the hairstyle change to fit the segment, while the same white round head, the small black dot eyes, the thin sketchy outline and the thin black stick arms and legs stay the same.
 
-Prompt form: describe exactly what is visible in the frame. Every object visible in the frame is described in full, including its appearance, clothing, height, age, sex, pose and colour, in the style of this niche. The main hero is described only as the main character as in ref_6, and its full appearance is taken from ref_6 alone. Each tag sits inside a sentence that says what that image provides: take the style, keep the layout, or draw the character exactly as in it.
+# Marker Lettering and Text Rules
 
-Other people and animals are drawn in the base style of reference 1 alone: bold dark outlines, flat colour fills and simple shapes. Settings are described in the same style and in full detail.
+On-frame text is neat hand-drawn uppercase black marker lettering, as in the sketch screenshots. Accent colors: bright red for the key word or number, green, or white on a dark background. Faded pale grey is for inactive labels. The language of all on-frame text is frame_language, as named in the task.
 
-Each object, character and setting in a prompt comes from the segment text alone, and it is added only when the segment text names it.
+A text is either one short phrase of 1 to 4 words, taken whole from a single sentence of the segment and written exactly as in the subtitles, or labels for one object, with one word for each part, using at most 4 parts. Use only one text phrase in each frame. Text beside a scene uses 1 to 4 words that carry the main point of the segment. Separate text-only slides, with no scene, are at most 1 in 5 clips. Each prompt states its words in full, in the uppercase marker style above.
 
-Label rule: when a segment uses references, write one tag for each reference in its refs list. The refs list is sorted from the lowest number to the highest, and the tags follow its positions: <image1> is the first entry of the refs list, <image2> the second, <image3> the third, and so on. A tag names the position, not the reference number. Use each tag at least once, and only those tags. Each tag stands inside a sentence that says what that image provides, for example: Use the flat style of <image1> for the whole frame.
+Crossing out: two red diagonal brush strokes over the scene show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene.
 
-Reference examples (form only): each example shows the form of one combination. The objects, text, colours and layout of an example are form only, and the content of every prompt comes from its own segment.
+# Typical Layouts
 
-Example for refs [1]:
-Use the flat landscape of <image1> for the whole frame: a pale orange sky band at the top with a thin bold dark outline along its lower edge, a calm sky blue sea in the middle, and a flat dark grey rocky shore at the bottom. On the shore at the centre, three low lumpy mounds of grey rock sit side by side: the left mound is about 18 percent of the frame width and 9 percent of the frame height, the middle one about 12 percent wide and 6 percent tall, the right one about 10 percent wide and 5 percent tall. Each mound has a bold dark outline and a flat grey fill, and a flat bright green slime cap with three small rounded bumps on top. Bold outlines around every shape, flat colour fills, simple shapes only.
+Choose the one layout that matches the segment. Each layout comes from the sketch screenshots.
 
-Example for refs [2]:
-Take the handwritten black capital style of <image1> for the phrase YOU LASTED 2 MINUTES, written on a plain white background filling the whole frame, centred horizontally about 45 percent from the top, each letter about 6 percent of the frame height. To the left of the phrase, a small hourglass about 8 percent of the frame height, with a light tan frame at top and bottom, a clear glass middle and tan sand in the lower bulb, at the same height as the middle of the text line.
+a) Text slide with a mini icon: clean white background, uppercase marker text, a small mini icon on the left, and the text to the right of the icon or below it.
+b) Comparison A | B: exactly one vertical dashed black line in the center, no outer frames around the panels, and headings above the panels without badges. Optional: an equals sign on the axis with a red caption below it, or two open 2D scenes, one per side.
+c) Arrow timeline with N points: a thin black arrow pointing right, all N circles or dots placed exactly on the line, labels under the ends, and a highlight with a pin, a dashed arc or a red marker, or a simple arrow between two icons. N follows the segment.
+d) Ruler timeline: pale beige scale with small ticks, nodes sitting on the axis, and // breaks along the scale. Inactive past icons and dates in pale grey. Active node: full-color icon, red down arrow, red circle in a sketchy red ring, and an accent date.
+e) Simple map or diagram with arrows: white background, simplified colored continents or objects, thin arrows or dashed links, and short uppercase marker labels.
 
-Example for refs [3]:
-Use the diagram layout of <image1>: a plain white background with a single grey rock base at the bottom centre, about 35 percent of the frame width and 15 percent of the frame height, bold dark outline, flat grey fill. On top of the rock, a layer of brown soil about 40 percent of the frame width and 6 percent of the frame height, flat dark brown fill, with a thin flat bright green edge along its top. Three small dead leaves in flat orange-brown fill, each about 3 percent of the frame height, fall downward above the soil with a short dotted trail. On the right, one handwritten black label in capital letters, SOIL = DEAD PLANTS, about 5 percent of the frame height per letter, with a black arrow from the label to the middle of the soil layer.
+# Choosing the Frame
 
-Example for refs [4]:
-Use the timeline layout of <image1>: a plain white background, a horizontal black arrow across the centre, about 80 percent of the frame width, bold outline, arrowhead at the right end. Seven evenly spaced small hollow circles along the arrow, each about 2 percent of the frame width, bold black outline, white fill. A solid black filled dot at the left end of the arrow. A bright red map pin with a dark outline, about 6 percent of the frame height, sits above the line at the third circle. A red dotted arc runs from the left dot to the pin, with a small green mound of slime on the arc near its highest point. Above the arc, red handwritten capital letters, 2 AND 1/2 BILLION YEARS, each letter about 4 percent of the frame height.
+Check the segment in this order and use the first layout that fits.
+1. Two situations compared: layout b. A span of time or a sequence of periods: layout c or d. An explanation of how or why something works: layout e. The main character is left out of every diagram, comparison and timeline.
+2. A scene with a place, a natural object or a person's action: a simple 2D background with the main character or a story character, as in the character canon.
+3. A thing or a fact only: layout a with one object and its text.
+4. The whole segment is one short statement: layout a with the statement as the one text phrase.
 
-Example for refs [5]:
-Use the two-panel layout of <image1>: two panels side by side, each about 45 percent of the frame width and 75 percent of the frame height, separated by a vertical dashed black line in the centre, each with a plain pale fill and a bold thin dark outline. Above each panel, one handwritten title in capital letters, about 6 percent of the frame height: the left title MINUTES in red, the right title YEARS in green. Left panel: one small hourglass about 25 percent of the panel height, clear glass middle, most of its sand in the bottom bulb, centred on a flat tan base. Right panel: one large old tree about 60 percent of the panel height, thick brown trunk, rounded crown of flat dark green foliage with wide branches reaching both edges of the panel, standing on a flat green ground strip at the bottom. Each panel holds only the single object described above.
+Each object, character and setting in a prompt comes from the segment text alone, and it is added only when the segment names it.
 
-Example for refs [1, 2]:
-Use the flat style of <image1> for the whole frame: a pale orange sky band at the top with a thin bold dark outline along its lower edge, and a flat dark grey rocky shore at the bottom with a bold dark outline along its top edge. Take the handwritten black capital style of <image2> for the phrase YOU LASTED 2 MINUTES, centred in the upper sky about 5 percent of the frame height per letter, with a small tan hourglass about 6 percent of the frame height to its left, level with the middle of the text. On the shore at the centre, one low lumpy mound of grey rock, about 20 percent of the frame width and 8 percent of the frame height, bold dark outline, flat grey fill, with a flat bright green slime cap on its top.
+# Hero Poses and Expressions
 
-Example for refs [1, 6]:
-Use the flat style of <image1> for the whole frame: bold dark outlines and flat colour fills. Keep the landscape of <image1> as the background: a flat pale orange sky band at the top, a calm sky blue sea in the middle and a dark grey rock shelf at the bottom. Draw the main character exactly as in <image2>: a plain round white head, blue short-sleeved shirt, blue jeans and white shoes, standing on the rock shelf at the left third of the frame, facing the sea, arms raised out to the sides, about 45 percent of the frame height.
+The pose and the expression of the main character come from the segment, one pose per prompt. Poses: standing upright, walking, sitting, crouching, pointing with a hand, holding an object, looking up, looking to the side, raising one hand, lowering both arms, running, leaning forward. Expressions: neutral, thoughtful, happy, surprised, frightened, tired, determined, focused. The expression shows through the eyebrows and the mouth line. The same pose appears in at most two clips in a row.
 
-Example for refs [1, 2, 6]:
-Use the flat style of <image1> for the whole frame. Take the handwritten black capital style of <image2> for the phrase YOU LASTED 2 MINUTES, centred in the upper sky, with a small tan hourglass to its left. Keep the rock shelf and sea of <image1> as the background. Draw the main character exactly as in <image3>, lying on his back on the rocks at the centre-left, arms spread out loosely at the sides, about 45 percent of the frame width.
+# Prompt Structure
 
-Final check before each prompt is returned: one scene, the character count follows rules.yaml, each character fully described, plain props only, describing only the scene itself, quotation marks absent, and at least one reference used.
+Describe exactly what is visible in the frame, as one scene with one action, in full detail. Give each visible character and object its appearance, clothing, height, pose and color. Describe the single still frame as a finished state. Describe the scene itself, with no quotation marks, and keep the sketch style wording from the Global Style section in each prompt.
+
+# Example Prompts
+
+The objects, text, colors and layout in each example show the structure only. The content of every prompt comes from its own segment.
+
+Example for a hero scene:
+Flat 2D sketchy ink illustration of a small grassy hill under a pale blue sky with two simple white clouds, and a dark brown dirt path winding up to the top. The main character stands on the path at the left third of the frame, about 45 percent of the frame height, facing the top of the hill, one arm raised with a thin stroke hand and the other arm holding a small bundle. The main character has a large smooth pure-white round head with a thin black outline, small black dot eyes, a simple line mouth, a bright blue t-shirt, medium blue straight jeans and simple white sneakers. The eyebrows and the mouth line show a determined expression. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for an abstract stick figure:
+Flat 2D sketchy ink illustration on a clean pure white background. A plain solid-black stick-figure character with a large round white head, small black dot eyes and a thin solid-black stick body, with arms, legs and torso drawn as one black line, sits at the left end of a simple flat grey bench, about 40 percent of the frame height, with its arms resting on its knees. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for a comparison:
+Clean pure white background with a comparison of two panels side by side, split by exactly one vertical dashed black line in the center. Above the left panel, uppercase black marker lettering: SLOW. Above the right panel, uppercase bright red marker lettering: FAST. Left panel: a small snail with a pale brown shell and a muted green body, sitting on a flat grey ground line. Right panel: a small rabbit with a muted tan body and a short tail, running on a flat grey ground line. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for an arrow timeline with N points (here five):
+Clean pure white background with a thin black arrow pointing right across the center of the frame. Five evenly spaced small hollow circles sit exactly on the line, and the middle circle is filled in bright red. A small simple sun icon sits under the left end of the arrow and a small simple moon icon sits under the right end, both in muted colors. A bright red pin sits above the middle circle, with a dashed arc running from the first circle up to the pin. Above the pin, uppercase red marker lettering: 3 DAYS. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for a ruler timeline:
+Clean pure white background with a pale beige horizontal ruler scale across the frame, small ticks along its top edge, and a double slash break on the scale between the second and third nodes. Four round nodes sit on the axis of the scale. The first two nodes are plain pale grey icons of a tent and a cart. The third node is active: a full-color icon of a small house with a red down arrow above it, and a red circle in a sketchy red ring around it. Below the active node, uppercase bright red marker lettering: 1984. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for a map:
+Clean pure white background with a simplified flat 2D map: simplified colored landmass shapes in muted green and tan on the left and on the right, and a pale blue sea between them. A thin dashed red arrow runs across the sea from a small simple ship icon on the left coast to a small simple harbor icon on the right coast. Beside the ship, short uppercase black marker lettering: TRADE. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+Example for a text slide:
+Clean pure white background. A small mini icon of a simple clock with a muted blue face sits on the left third of the frame, drawn with thin black ink outlines. To the right of the icon, uppercase black marker lettering: TIME TO GO, with the word GO in bright red. Thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+
+# Final Check
+
+Before each prompt is returned, check it against this list and rewrite any prompt that fails it: one scene with one action; the character count follows the rules; each character is fully described with its canon type; objects and text come from the Text line; the text is one phrase of 1 to 4 words, or one object with one word for each part, at most 4 parts, and only one text phrase per frame; the sketch style wording from the Global Style section is present; and the prompt has no quotation marks.
