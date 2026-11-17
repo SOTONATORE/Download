@@ -85,10 +85,13 @@ def _segments() -> list:
 
 
 def _real_cfg() -> gp.PromptConfig:
-    # те же аргументы, что в prepare_prompts_only: профиль фото, размер батча, пресет «none», fail_fast выключен
+    """Конфиг, построенный из profile.yaml ниши cartoon_photos (как в prepare_prompts_only), затем refs_enabled
+    принудительно ставится в True намеренно: сценарий проверяет путь очереди с референсами (ответы с refs: [1],
+    метки <imageN>). Профиль cartoon_photos сам референсы не использует (refs_enabled: false), поэтому включение
+    здесь — синтетическое условие теста, а не настройка продакшн-профиля. Остальные поля берутся из профиля."""
+    # размер батча 25, пресет «none», fail_fast выключен — как в prepare_prompts_only
     cfg = cli._build_prompt_config(NICHE, 25, "none", fail_fast=False, raw_dir=None, srt_path=None)
     # язык текста в кадре: английский (без разбора SRT поле пустое)
-    # референсы включаются явно: сценарий теста построен на ответах с refs и метках <imageN>;
     # при refs_enabled: false каждая метка даёт нарушение PROBLEM_REF_TAG, и проверка «== []» ниже упала бы
     return dataclasses.replace(cfg, frame_language="English", refs_enabled=True)
 

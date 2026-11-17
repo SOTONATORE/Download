@@ -1,4 +1,4 @@
-"""Контракт refs в системной инструкции: ниша с allowed_refs (cartoon_photos) и профили без него.
+"""Контракт refs в системной инструкции: синтетический профиль с allowed_refs (tmp_path) и профили без него.
 
 Проверяют: сочетания в инструкции берутся из allowed_refs; пустой список и «сегмент без refs» не пишутся;
 профили без allowed_refs — байт в байт как раньше; файлы отладки при fail_fast пишутся только при проблеме
@@ -48,10 +48,18 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", boom)
 
 
-def _cartoon_instruction() -> str:
-    lines = (NICHE / "profile.yaml").read_text(encoding="utf-8").splitlines()
-    allowed = gp.parse_allowed_refs(lines, "cartoon_photos")
-    cfg = PromptConfig(style_file=str(NICHE / "prompts" / "style.md"), media="image", preset="none",
+def _allowed_instruction(tmp_path) -> str:
+    """Русский: системная инструкция для синтетического профиля в tmp_path (refs_enabled: true, свой allowed_refs).
+    Профиль cartoon_photos здесь не читается: в нём нет allowed_refs, и его текст дал бы ветку «без allowed_refs»."""
+    prof = tmp_path / "refs_allowed"
+    prof.mkdir()
+    (prof / "profile.yaml").write_text(
+        'refs_enabled: true\nallowed_refs: ["1", "1,2", "1,2,6", "1,6", "2", "3", "4", "5"]\n', encoding="utf-8")
+    lines = (prof / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    allowed = gp.parse_allowed_refs(lines, "refs_allowed")
+    style = tmp_path / "style.md"
+    style.write_text("# Style guide\nWrite one paragraph.\n", encoding="utf-8")
+    cfg = PromptConfig(style_file=str(style), media="image", preset="none",
                        refs_enabled=True, ref_max=6, allowed_refs=allowed)
     return gp.build_system_instruction(cfg)
 
@@ -65,32 +73,32 @@ def _model_cfg(folder: str, media: str, **kw) -> PromptConfig:
 
 # --- (a) ниша с allowed_refs ------------------------------------------------------------------------
 
-def test_cartoon_instruction_lists_each_allowed_combination_as_a_line():
-    lines = _cartoon_instruction().split("\n")
-    lines_expected = ["1", "1, 2", "1, 2, 6", "1, 6", "2", "3", "4", "5"]  # совпадает с profile.yaml
+def test_cartoon_instruction_lists_each_allowed_combination_as_a_line(tmp_path):
+    lines = _allowed_instruction(tmp_path).split("\n")
+    lines_expected = ["1", "1, 2", "1, 2, 6", "1, 6", "2", "3", "4", "5"]  # совпадает с allowed_refs синтетического профиля
     for line in lines_expected:
         assert line in lines
 
 
-def test_cartoon_instruction_has_no_old_empty_list_wording():
-    text = _cartoon_instruction()
+def test_cartoon_instruction_has_no_old_empty_list_wording(tmp_path):
+    text = _allowed_instruction(tmp_path)
     assert "an empty list if none" not in text
     assert "never an empty list" in text
 
 
-def test_cartoon_instruction_has_no_no_refs_tag_line():
-    text = _cartoon_instruction()
+def test_cartoon_instruction_has_no_no_refs_tag_line(tmp_path):
+    text = _allowed_instruction(tmp_path)
     assert "no refs has" not in text
     assert ("Every segment has at least one reference, so every segment has at least one <imageN> tag."
             in text)
 
 
-def test_cartoon_instruction_and_style_guide_use_reference_number_rule():
+def test_cartoon_instruction_and_style_guide_use_reference_number_rule(tmp_path):
     # Комментарий: инструкция называет правило «позиция в refs», а не K-th entry.
     # Русский: проверка фразы «the tags follow its positions» в style.md удалена: это текст ниши, которого
     # в style.md больше нет, и добавлять его туда не нужно. Механизм (метка -> позиция) проверяют
     # здесь же тексту инструкции из ядра и test_normaliser_maps_six_to_two_... ниже.
-    text = _cartoon_instruction()
+    text = _allowed_instruction(tmp_path)
     style = (NICHE / "prompts" / "style.md").read_text(encoding="utf-8")
     assert "written with the position of that image" in text
     assert "K-th entry" not in text

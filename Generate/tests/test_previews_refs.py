@@ -14,19 +14,16 @@ if str(_p) not in sys.path:
 
 try:
     from Generate import cli
+    from Generate.core import config_loader as cl
     from Generate.core import previews as pv
-    from Generate.core.gemini_prompts import parse_allowed_refs
 except ImportError:  # pragma: no cover
     import cli  # type: ignore
+    from core import config_loader as cl  # type: ignore
     from core import previews as pv  # type: ignore
-    from core.gemini_prompts import parse_allowed_refs  # type: ignore
 
-ROOT = Path(__file__).resolve().parents[2]
 # Русский: реальный prompts_cartoon_refs.txt удалён в Блоке 0 и больше не читается.
 # Файл с 8 блоками создаёт фикстура prompts_file в tmp_path; сочетания — из таблицы ниши.
 COMBOS = [(1,), (1, 2), (1, 2, 6), (1, 6), (2,), (3,), (4,), (5,)]
-CARTOON_LINES = (ROOT / "Generate" / "Nishes" / "cartoon_photos" / "profile.yaml").read_text(encoding="utf-8").splitlines()
-ALLOWED = parse_allowed_refs(CARTOON_LINES, "cartoon_photos")
 
 
 def _write(tmp_path, text):
@@ -60,8 +57,15 @@ def test_prompts_file_passes_refs_check_for_cartoon(prompts_file):
     pv.check_refs(pv.load_prompt_specs(prompts_file), frozenset(COMBOS))
 
 
-def test_prompts_file_passes_cli_check_for_cartoon(prompts_file):
-    assert cli._check_previews("1", prompts_file, "cartoon_photos") is None
+def test_prompts_file_passes_cli_check_for_cartoon(prompts_file, tmp_path, monkeypatch):
+    # Русский: профиль cartoon_photos имеет refs_enabled: false, поэтому проверка блоков с refs идёт
+    # на синтетической нише в tmp_path: refs_enabled: true и allowed_refs из COMBOS. Имя теста прежнее.
+    folder = tmp_path / "Nishes" / "refs_niche"
+    folder.mkdir(parents=True)
+    allowed = ", ".join('"' + ",".join(str(n) for n in refs) + '"' for refs in COMBOS)
+    (folder / "profile.yaml").write_text(f"refs_enabled: true\nallowed_refs: [{allowed}]\n", encoding="utf-8")
+    monkeypatch.setattr(cl, "NISHES_DIR", tmp_path / "Nishes")
+    assert cli._check_previews("1", prompts_file, "refs_niche") is None
 
 
 # --- разбор блоков ----------------------------------------------------------------------------

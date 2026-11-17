@@ -15,13 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     from worker import server as srv  # type: ignore
 
-NICHE_ROOT = Path(__file__).resolve().parents[1] / "Nishes"
-NICHE_DIR = NICHE_ROOT / "cartoon_photos"
 ALLOWED = {(1,), (1, 6), (1, 2), (1, 2, 6), (2,), (3,), (4,), (5,)}
-
-
-def _profile_lines():
-    return (NICHE_DIR / "profile.yaml").read_text(encoding="utf-8").splitlines()
 
 
 def _cfg(tmp_path, allowed=frozenset(ALLOWED)):
@@ -41,8 +35,11 @@ def _refs_reasons(refs, tmp_path, allowed=frozenset(ALLOWED)):
 
 # --- таблица сочетаний -----------------------------------------------------------------------------
 
-def test_allowed_list_parses_to_exactly_eight_combinations():
-    got = gp.parse_allowed_refs(_profile_lines(), "cartoon_photos")
+def test_allowed_list_parses_to_exactly_eight_combinations(tmp_path):
+    # Русский: файл профиля создаётся в tmp_path (восемь сочетаний); profile.yaml ниши cartoon_photos не читается
+    f = tmp_path / "profile.yaml"
+    f.write_text('allowed_refs: ["1", "1,2", "1,2,6", "1,6", "2", "3", "4", "5"]\n', encoding="utf-8")
+    got = gp.parse_allowed_refs(f.read_text(encoding="utf-8").splitlines(), "refs_allowed")
     assert got == frozenset(ALLOWED)
     assert len(got) == 8
 
