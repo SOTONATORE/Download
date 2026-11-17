@@ -22,8 +22,10 @@ ENGLISH_SRT = "1\n00:00:00,000 --> 00:00:02,000\nThe cat is on the table and it 
 
 def test_style_text_rule_has_the_four_word_and_one_word_per_part_rules():
     text = (NICHE_DIR / "prompts" / "style.md").read_text(encoding="utf-8")
+    # Точные фразы из style.md (абзац про текст на кадре, строка 29 и раздел Final Check).
     for phrase in ("1 to 4 words", "one word for each part", "at most 4 parts",
-                   "Use only one text phrase in each frame"):
+                   "exactly one text phrase per frame",  # режим текстовых кадров (a)
+                   "one main title plus the short labels or dates that the layout requires"):  # режим сравнения и таймлайна (b)
         assert phrase in text, phrase
 
 

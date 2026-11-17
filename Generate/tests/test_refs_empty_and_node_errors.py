@@ -291,6 +291,9 @@ class _DispatchSelf:
     def _assigned_slot(self, num):
         return None
 
+    def _seed_mode_run_for_role(self, role):  # Стаб для Блока 3: сценарии этих тестов работают в режиме per_clip, поэтому seed_base + num не меняется.
+        return False
+
     def _call(self, slot, method, path, payload=None):
         self.sent.append(payload)
         return _FakeResp()
