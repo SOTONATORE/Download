@@ -447,6 +447,11 @@ def attach_style(prompt: str, style_text: str) -> str:
     """Дописывает текст стиля в конец готового промпта через «. ». Пустой стиль — промпт без изменений."""
     if not style_text:
         return prompt
+    # модель уже дописала стиль в конец промпта: второй раз не добавляем (сравнение без точки на конце)
+    body = prompt.rstrip()
+    style_core = style_text.strip().rstrip(".")
+    if style_core and body.rstrip(".").endswith(style_core):
+        return body
     return prompt.rstrip().rstrip(".") + ". " + style_text
 
 
@@ -458,9 +463,10 @@ def attach_style(prompt: str, style_text: str) -> str:
 RULES_FILE_NAME = "rules.yaml"
 RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
               "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children",
-              "scene_motion_wording", "object_sets", "allowed_shot_items", "forbid_thick_vector", "sketch_style")
+              "scene_motion_wording", "object_sets", "allowed_shot_items", "forbid_thick_vector", "sketch_style",
+              "dangling_text_check")
 _RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
-_RULES_BOOL_KEYS = ("animals_count", "static_frame", "forbid_thick_vector", "sketch_style")
+_RULES_BOOL_KEYS = ("animals_count", "static_frame", "forbid_thick_vector", "sketch_style", "dangling_text_check")
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
                         "weapons": "weapons_allowed", "close_faces": "close_faces_allowed",
                         "object_sets": "object_sets_forbidden"}

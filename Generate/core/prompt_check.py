@@ -154,6 +154,10 @@ PROBLEM_ETHNICITY = "ethnicity_not_in_text"
 PROBLEM_OBJECT_SET = "object_set"
 # толстые контуры и векторный стиль: только при rules forbid_thick_vector: true (задаёт ниша в rules.yaml)
 PROBLEM_THICK_VECTOR = "thick_vector_style"
+# незаконченный текст в кадре (надпись обрывается на служебном слове): только при rules dangling_text_check: true
+PROBLEM_DANGLING_TEXT = "dangling_text_fragment"
+# английская подсказка для повтора: дописать текст в кадре до полной фразы
+DANGLING_TEXT_HINT_EN = "finish the in-frame text as a complete 1 to 4 word phrase"
 # метки <imageN> и ref_N в промпте профиля без референсов (refs_enabled: false)
 PROBLEM_REF_TAG = "ref_tag_without_refs"
 # одинаковый текст промпта у разных клипов (нарушение очереди дубликатов, ниша с fail_on_duplicate_prompts)
@@ -170,6 +174,7 @@ _PROBLEM_EN = {
     PROBLEM_LEFTOVER_MARKER: "unfilled marker",
     PROBLEM_CAMERA_MOTION: "camera motion",
     PROBLEM_THICK_VECTOR: THICK_VECTOR_HINT_EN,
+    PROBLEM_DANGLING_TEXT: DANGLING_TEXT_HINT_EN,
     PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
     PROBLEM_DUPLICATE_PROMPT: "the same prompt text as another clip",
 }
@@ -182,6 +187,7 @@ _PROBLEM_RU = {
     PROBLEM_THICK_VECTOR: "толстые контуры или векторный стиль",
     PROBLEM_REF_TAG: "метка <imageN> или ref_N без референсов",
     PROBLEM_DUPLICATE_PROMPT: "дубликат промпта",
+    PROBLEM_DANGLING_TEXT: "незаконченный текст в кадре",
 }
 
 # Причины для журнала и для повторного запроса (русские), подписи для Gemini (английские), подсказки для Gemini.
@@ -305,6 +311,7 @@ class RulesValues:
     allowed_shot_items: frozenset = frozenset()  # разрешённые типы кадра, имена из ALLOWED_SHOT_ITEM_TERMS (rules: allowed_shot_items)
     forbid_thick_vector: bool = False            # толстые контуры и векторный стиль запрещены (rules: forbid_thick_vector)
     sketch_style: bool = False                   # стиль эскиза (rules: sketch_style); отдельной проверки не включает
+    dangling_text_check: bool = False            # незаконченный текст в кадре запрещён (rules: dangling_text_check)
 
 
 def rule_skipped_codes(rules: RulesValues) -> frozenset:
@@ -568,6 +575,23 @@ _THICK_VECTOR_RX = re.compile(
 )
 
 
+# Надпись в кадре: текст после слова «lettering» и двоеточия до точки; берётся фрагмент до первой запятой
+_LETTERING_RX = re.compile(r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)", re.IGNORECASE)
+# служебные слова, на которых надпись не может закончиться
+DANGLING_TEXT_WORDS = frozenset({"a", "an", "the", "of", "to", "for", "by", "so", "and", "it's", "it"})
+
+
+def dangling_text_hits(text: str) -> list:
+    """Надписи в кадре, оборванные на служебном слове (только при rules dangling_text_check: true)."""
+    hits = []
+    for m in _LETTERING_RX.finditer(text):
+        phrase = m.group(1).split(",", 1)[0].strip()
+        words = phrase.split()
+        if words and words[-1].lower().strip(".") in DANGLING_TEXT_WORDS:
+            hits.append(phrase)
+    return hits
+
+
 def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
                   rules: Optional[RulesValues] = None) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
@@ -597,6 +621,9 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
     # толстые контуры и векторный стиль: только при forbid_thick_vector (ltx25, zimage_turbo — не включено)
     if rules.forbid_thick_vector:
         problems += [make_problem(PROBLEM_THICK_VECTOR, m.group(0)) for m in _THICK_VECTOR_RX.finditer(text)]
+    # незаконченный текст в кадре: только при dangling_text_check: true (ключ не задан — проверки нет)
+    if rules.dangling_text_check:
+        problems += [make_problem(PROBLEM_DANGLING_TEXT, hit) for hit in dangling_text_hits(text)]
     for code, fragment in content_hits(text, media, relaxed, max_characters, rules):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем

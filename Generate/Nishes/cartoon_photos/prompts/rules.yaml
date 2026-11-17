@@ -32,3 +32,5 @@ allowed_shot_items: letter, map, diagram, chart, infographic, calendar, spreadsh
 sketch_style: true
 # запрет толстых контуров и векторного стиля: bold/thick/heavy outlines, vector, tube arms, thick white arms
 forbid_thick_vector: true
+# незаконченный текст в кадре: надпись не может оборваться на служебном слове (A, THE, OF, TO и т. п.)
+dangling_text_check: true
