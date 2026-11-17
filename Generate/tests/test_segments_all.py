@@ -7,7 +7,6 @@ import pathlib
 import pytest
 
 from Generate import cli
-from Generate.core import gemini_prompts as gp
 from Generate.core import orchestrator as orch
 from Generate.core.gemini_prompts import GeminiInputError
 from Generate.core.missing import parse_missing
@@ -70,32 +69,27 @@ def test_generation_list_with_all_ignores_two_number_missing_file(tmp_path, monk
     assert orch.wanted_segment_numbers(segs, path, True) == [1, 2, 3, 4, 5, 6]
 
 
-def _hero_paragraph():
+def _default_hero_section():
+    # Блок 7A: в style.md нет заголовка «Default hero» и нет абзаца «Hero placement:».
+    # Ищем пункт «a) Default hero» внутри раздела «# Character Canon». Текст читается из style.md во время теста.
     text = CARTOON_STYLE.read_text(encoding="utf-8").replace("\r\n", "\n")
-    paras = [p for p in text.split("\n\n") if p.startswith("Hero placement:")]
-    assert len(paras) == 1
+    assert "# Character Canon" in text, "в style.md нет заголовка «# Character Canon»"
+    canon = text.split("# Character Canon", 1)[1].split("\n# ", 1)[0]
+    paras = [p for p in canon.split("\n\n") if p.startswith("a) Default hero")]
+    assert len(paras) == 1, "в разделе «# Character Canon» style.md нет пункта «a) Default hero»"
     return paras[0]
 
 
-def test_cartoon_hero_placement_paragraph_has_no_ref_tags():
-    # Блок 6B: в абзаце о месте героя нет меток референсов (ref_N и <imageN>): ниша без референсов.
-    # Абзац читается из style.md во время теста; текст файла здесь не зашит.
-    para = _hero_paragraph()
-    assert "ref_" not in para
-    assert "<image" not in para
+def test_cartoon_default_hero_has_no_ref_tags():
+    # Блок 7A: в описании героя нет меток референсов (ref_ и <image): ниша без референсов.
+    sec = _default_hero_section()
+    assert "ref_" not in sec, "в «Default hero» (style.md) найдена метка ref_"
+    assert "<image" not in sec, "в «Default hero» (style.md) найдена метка <image"
 
 
-def test_cartoon_style_has_hero_rules_and_no_negations():
-    para = _hero_paragraph()
-    # текст на кадре (reference 2 alone) и диаграммы: без героя
-    assert "reference 2 alone" in para
-    assert "reference 3, 4 or 5" in para
-    # сцена с местом или действием: [1, 6] или [1, 2, 6]
-    assert "[1, 6]" in para
-    assert "[1, 2, 6]" in para
-    # вещь или факт без места: без героя
-    assert "only about a thing or a fact" in para
-    # герой описывается только так
-    assert "as in reference 6" in para
-    for rx, _reason, _hint in gp._STYLE_RULES:
-        assert rx.search(para) is None, rx.pattern
+def test_cartoon_default_hero_names_main_character_with_thin_stick_arms():
+    # Блок 7A: герой назван «the main character», руки описаны как тонкие палочки (thin / stick) — как в style.md.
+    sec = _default_hero_section()
+    assert "the main character" in sec, "в «Default hero» (style.md) нет имени «the main character»"
+    assert "thin" in sec, "в «Default hero» (style.md) нет слова «thin» про руки"
+    assert "stick" in sec, "в «Default hero» (style.md) нет слова «stick» про руки"

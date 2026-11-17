@@ -86,11 +86,13 @@ def test_cartoon_instruction_has_no_no_refs_tag_line():
 
 
 def test_cartoon_instruction_and_style_guide_use_reference_number_rule():
-    # Комментарий: инструкция и style.md называют правило «номер референса», а не позицию в refs (K-th entry).
+    # Комментарий: инструкция называет правило «позиция в refs», а не K-th entry.
+    # Русский: проверка фразы «the tags follow its positions» в style.md удалена: это текст ниши, которого
+    # в style.md больше нет, и добавлять его туда не нужно. Механизм (метка -> позиция) проверяют
+    # здесь же тексту инструкции из ядра и test_normaliser_maps_six_to_two_... ниже.
     text = _cartoon_instruction()
     style = (NICHE / "prompts" / "style.md").read_text(encoding="utf-8")
     assert "written with the position of that image" in text
-    assert "the tags follow its positions" in style
     assert "K-th entry" not in text
     assert "K-th entry" not in style
 

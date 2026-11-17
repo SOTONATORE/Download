@@ -8,17 +8,32 @@
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). Правила читаются из tmp_path/rules.yaml
 через gp.load_rules; сеть не используется.
 """
+import pathlib
+
 import pytest
 
 from Generate.core import frame_rules as fr
 from Generate.core import gemini_prompts as gp
 from Generate.core import prompt_check as pc
 
-# набор разрешённых типов кадра из Nishes/cartoon_photos/prompts/rules.yaml, плюс lettering (тот же словарь)
-CARTOON_ALLOWED = ("letter, map, diagram, chart, infographic, calendar, spreadsheet, newspaper, document, "
-                   "paper, blank sheet, sheet of paper")
-ALL_ALLOWED = CARTOON_ALLOWED + ", lettering"
+# Блок 7A: набор разрешённых типов кадра читается из реального rules.yaml ниши cartoon_photos, а не из строки в тесте.
+CARTOON_RULES = pathlib.Path(__file__).resolve().parents[1] / "Nishes" / "cartoon_photos" / "prompts" / "rules.yaml"
+
+
+def _real_cartoon_rules():
+    # если файла ниши нет, тест падает с понятным текстом, а не с пустым набором
+    assert CARTOON_RULES.is_file(), f"нет файла правил ниши cartoon_photos: {CARTOON_RULES}"
+    return gp.load_rules(CARTOON_RULES)
+
+
+REAL_ALLOWED = _real_cartoon_rules().allowed_shot_items
+ALL_ALLOWED = ", ".join(sorted(REAL_ALLOWED))
 PAPER_SEVEN = "paper, document, newspaper, letter, spreadsheet, blank sheet, sheet of paper"
+
+
+def test_lettering_is_listed_in_real_cartoon_rules_yaml():
+    # Блок 7A: lettering обязан стоять в allowed_shot_items реального rules.yaml; без него тест падает
+    assert "lettering" in REAL_ALLOWED, "lettering нет в allowed_shot_items в rules.yaml ниши cartoon_photos"
 
 ALLOWED_CASES = [
     ("lettering", "the word HELLO drawn as hand lettering on a wall"),

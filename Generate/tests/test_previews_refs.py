@@ -22,7 +22,9 @@ except ImportError:  # pragma: no cover
     from core.gemini_prompts import parse_allowed_refs  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[2]
-PROMPTS = ROOT / "prompts_cartoon_refs.txt"
+# Русский: реальный prompts_cartoon_refs.txt удалён в Блоке 0 и больше не читается.
+# Файл с 8 блоками создаёт фикстура prompts_file в tmp_path; сочетания — из таблицы ниши.
+COMBOS = [(1,), (1, 2), (1, 2, 6), (1, 6), (2,), (3,), (4,), (5,)]
 CARTOON_LINES = (ROOT / "Generate" / "Nishes" / "cartoon_photos" / "profile.yaml").read_text(encoding="utf-8").splitlines()
 ALLOWED = parse_allowed_refs(CARTOON_LINES, "cartoon_photos")
 
@@ -35,19 +37,31 @@ def _write(tmp_path, text):
 
 # --- файл с 8 блоками по таблице --------------------------------------------------------------
 
-def test_repo_prompts_file_has_one_block_per_allowed_combination():
-    specs = pv.load_prompt_specs(str(PROMPTS))
+@pytest.fixture
+def prompts_file(tmp_path):
+    """Русский: файл промптов с 8 блоками, по одному на сочетание refs; создаётся в tmp_path."""
+    blocks = []
+    for refs in COMBOS:
+        labels = " ".join(f"<image{n}>" for n in range(1, len(refs) + 1))
+        blocks.append(f"refs: {','.join(str(n) for n in refs)}\nA flat scene with {labels}.")
+    f = tmp_path / "prompts.txt"
+    f.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    return str(f)
+
+
+def test_prompts_file_has_one_block_per_combination(prompts_file):
+    specs = pv.load_prompt_specs(prompts_file)
     got = sorted(refs for _t, refs in specs)
-    assert sorted(ALLOWED) == sorted(got)
+    assert sorted(COMBOS) == sorted(got)
     assert len(specs) == 8
 
 
-def test_repo_prompts_file_passes_refs_check_for_cartoon():
-    pv.check_refs(pv.load_prompt_specs(str(PROMPTS)), ALLOWED)
+def test_prompts_file_passes_refs_check_for_cartoon(prompts_file):
+    pv.check_refs(pv.load_prompt_specs(prompts_file), frozenset(COMBOS))
 
 
-def test_repo_prompts_file_passes_cli_check_for_cartoon():
-    assert cli._check_previews("1", str(PROMPTS), "cartoon_photos") is None
+def test_prompts_file_passes_cli_check_for_cartoon(prompts_file):
+    assert cli._check_previews("1", prompts_file, "cartoon_photos") is None
 
 
 # --- разбор блоков ----------------------------------------------------------------------------
