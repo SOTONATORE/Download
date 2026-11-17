@@ -52,7 +52,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
-        profile_refs_enabled)
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs)
     from Generate.core.gemini_prompts import (
         GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
         read_preset)
@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
-        profile_refs_enabled)
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs)
     from gemini_prompts import (  # type: ignore
         GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
         read_preset)
@@ -467,6 +467,7 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
               "relaxed_rules": relaxed_rules, "text_language": text_language, "frame_language": frame_language,
               "ref_max": ref_max, "allowed_refs": allowed_refs if refs_enabled else None,
               "niche_preset_file": niche_preset_file}
+    kwargs["rework_style_flag_without_refs"] = load_profile_rework_style_flag_without_refs(profile)  # ключ профиля: клип только с флагом стиля в очередь исправлений
     # передаём только заданные ключи: без них конфиг и фейки получают те же аргументы, что раньше
     kwargs["rules"] = rules
     if rules.max_characters is not None:
