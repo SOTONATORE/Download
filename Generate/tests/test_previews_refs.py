@@ -115,7 +115,7 @@ def test_refs_line_without_text_is_input_error(tmp_path):
 def test_check_refs_rejects_bad_combo_or_labels(tmp_path, text, refs, why):
     specs = [(text, tuple(int(x) for x in refs.split(",")))]
     with pytest.raises(pv.PreviewInputError, match=why):
-        pv.check_refs(specs, ALLOWED)
+        pv.check_refs(specs, frozenset(COMBOS))
 
 
 def test_check_refs_without_profile_list_checks_labels_only():
@@ -125,7 +125,7 @@ def test_check_refs_without_profile_list_checks_labels_only():
 
 
 def test_old_blocks_are_not_checked(tmp_path):
-    pv.check_refs([("Any text <image6>.", None)], ALLOWED)
+    pv.check_refs([("Any text <image6>.", None)], frozenset(COMBOS))
 
 
 # --- до аренды: cli ---------------------------------------------------------------------------

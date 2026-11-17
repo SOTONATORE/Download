@@ -3,8 +3,9 @@
 Путь реального прогона (cli.prepare_prompts_only -> prompt_pipeline.build_prompts -> _photo_step):
 - gp.generate_prompts(segments, pending, photo_cfg, managed, model, on_batch=on_batch) без pool, wave, rework
   и max_workers: одиночная волна, клипы попадают в очередь из главного батча, а не из сохранённого состояния;
-- photo_cfg собирает cli._build_prompt_config(<ниша>, batch_size, preset, fail_fast=False): refs_enabled,
-  relaxed_rules, rules.yaml, allowed_refs и on_unfixed берутся из profile.yaml ниши, а не из заглушки.
+- photo_cfg собирает cli._build_prompt_config(<ниша>, batch_size, preset, fail_fast=False): relaxed_rules,
+  rules.yaml и on_unfixed берутся из profile.yaml ниши, а не из заглушки. refs_enabled для этого сценария
+  включается в _real_cfg явно: профиль ниши без референсов (Блок 1).
 
 Существующий тест очереди (test_emotion_and_queue.py) идёт другим путём: общий пул, клип из rework=, PromptConfig
 без refs. Здесь путь тот же, что у реального прогона.
@@ -87,13 +88,15 @@ def _real_cfg() -> gp.PromptConfig:
     # те же аргументы, что в prepare_prompts_only: профиль фото, размер батча, пресет «none», fail_fast выключен
     cfg = cli._build_prompt_config(NICHE, 25, "none", fail_fast=False, raw_dir=None, srt_path=None)
     # язык текста в кадре: английский (без разбора SRT поле пустое)
-    return dataclasses.replace(cfg, frame_language="English")
+    # референсы включаются явно: сценарий теста построен на ответах с refs и метках <imageN>;
+    # при refs_enabled: false каждая метка даёт нарушение PROBLEM_REF_TAG, и проверка «== []» ниже упала бы
+    return dataclasses.replace(cfg, frame_language="English", refs_enabled=True)
 
 
 def test_parse_flagged_batch_clips_get_two_fix_rounds_without_pool(monkeypatch):
     cfg = _real_cfg()
     # предусловия: конфиг действительно из profile.yaml ниши, а тексты ответов дают именно причину разбора
-    assert cfg.refs_enabled is True and cfg.on_unfixed == "keep" and "emotion" in cfg.relaxed_rules
+    assert cfg.on_unfixed == "keep" and "emotion" in cfg.relaxed_rules
     style = lambda t: gp._style_reasons(t, "image", cfg.relaxed_rules, cfg.max_characters, cfg.rules)  # noqa: E731
     for bad in (BATCH_BAD, FIX1_BAD):
         assert SPAM_REASON in style(bad)
