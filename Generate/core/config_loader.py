@@ -542,6 +542,21 @@ def profile_refs_enabled(profile_name: str) -> bool:
         return False
 
 
+def load_profile_seed_mode(profile_name: str) -> str:
+    """Режим seed из profile.yaml (ключ seed_mode): «per_clip» (по умолчанию, если ключа нет) или «run».
+
+    Нет профиля (файла profile.yaml) — «per_clip», как при отсутствии ключа. Другое значение — ошибка входа (код 2).
+    Имена ниш в коде не сравниваются: решение принимает только значение из файла профиля.
+    """
+    if not profile_name or not profile_exists(profile_name):
+        return "per_clip"
+    value = _read_profile(profile_name).get("seed_mode", "per_clip")
+    if value not in ("per_clip", "run"):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «seed_mode» должен быть per_clip или run.")
+    return value
+
+
 def load_profile_type(profile_name: str) -> str:
     """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
     value = _read_profile(profile_name).get("type", "video")

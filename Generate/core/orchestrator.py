@@ -51,7 +51,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .segment_split import all_photo, select_video_segments, to_segments
     from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
     from .video_value import SCORE_BATCH_SIZE, score_segments, write_distribution
-    from .config_loader import DEFAULT_MODEL_PROFILE, profile_refs_enabled
+    from .config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled
     from .naming import clip_filename
     from . import previews
     from .card_roles import plan_card_roles
@@ -76,7 +76,7 @@ except ImportError:  # pragma: no cover
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
     from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
     from video_value import SCORE_BATCH_SIZE, score_segments, write_distribution  # type: ignore
-    from config_loader import DEFAULT_MODEL_PROFILE, profile_refs_enabled  # type: ignore
+    from config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled  # type: ignore
     from naming import clip_filename  # type: ignore
     import previews  # type: ignore
     import ssh_probe  # type: ignore
@@ -866,6 +866,15 @@ def _is_card_diagnostic(name: str) -> bool:
     return len(parts) >= 3 and parts[0] == "cards" and parts[-1] in CARD_DIAGNOSTIC_FILES
 
 
+def _read_json_dict(path) -> Optional[dict]:
+    """Содержимое JSON-файла, если это словарь; при ошибке чтения или формата — None (ошибку даст load_state)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 class RunPublisher:
     """Выдача служебных файлов запуска в релизы (SPEC 9.1, 9.4, 9.7; этап 6c, E1-E4).
 
@@ -1183,6 +1192,7 @@ class Orchestrator:
         self._uploader: Optional[ReleaseUploader] = None
         self._state: dict = {"prompts": {}}
         self._prompts: dict = self._state["prompts"]
+        self._run_seed: Optional[int] = None  # Блок 3: seed прогона для ниш с seed_mode: run; иначе None
         self._video_queue: deque = deque()
         self._photo_queue: deque = deque()   # очередь фото (пуста без photo_profile)
         self._photo_nums: set = set()        # номера фото из распределения (STEP 3b)
@@ -1639,6 +1649,8 @@ class Orchestrator:
                     log.error("Прогон остановлен до аренды карт: ошибка генерации промптов (%s). "
                               "Готовые промпты сохранены, карты не арендованы.", self._prompt_abort)
                 else:
+                    if needed:
+                        self._ensure_run_seed()  # Блок 3: run_seed после промптов и до аренды карт
                     self._work(ready)
             finally:
                 self._cleanup()  # F1 (1)-(2): логи и JSON с лимитом времени, затем уничтожение по метке
@@ -1646,6 +1658,51 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
         return summary
+
+    def _active_profile_names(self) -> list:
+        """Имена профилей прогона (видео и фото) без пустых значений."""
+        names = [getattr(self, "profile", None), getattr(self, "photo_profile", None)]
+        return [n for n in names if n]
+
+    def _run_seed_active(self) -> bool:
+        """Хотя бы один активный профиль имеет seed_mode: run. Значения читаются только через config_loader."""
+        return any(load_profile_seed_mode(n) == "run" for n in self._active_profile_names())
+
+    def _seed_mode_run_for_role(self, role: str) -> bool:
+        """Профиль роли карты имеет seed_mode: run."""
+        return load_profile_seed_mode(self._profile_for_role(role)) == "run"
+
+    def _run_seed_meta(self) -> dict:
+        """Поле run_seed для meta.json карты: только когда seed прогона задан."""
+        run_seed = getattr(self, "_run_seed", None)
+        return {} if run_seed is None else {"run_seed": run_seed}
+
+    def _profile_differs(self, data: dict) -> bool:
+        """Поле profile файла не совпадает с профилями прогона. Без поля проверки нет."""
+        if "profile" not in data:
+            return False
+        return data["profile"] not in self._active_profile_names()
+
+    def _ensure_run_seed(self) -> None:
+        """Блок 3: один run_seed на прогон для ниш с seed_mode: run.
+
+        Если в состоянии уже есть целое run_seed >= 0, он используется; иначе создаётся один раз,
+        записывается в состояние вместе с srt_hash и сохраняется в prompts.json до старта карт.
+        """
+        if not self._run_seed_active():
+            return
+        with self._lock_state():
+            value = self._state.get("run_seed")
+            source = "из prompts.json"
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                value = secrets.randbelow(2 ** 32 - 1) + 1
+                source = "создан"
+                self._state["run_seed"] = value
+                # srt_hash обязателен: без него load_state следующего запуска отвергнет файл
+                self._state.setdefault("srt_hash", go.srt_hash(self.segments))
+                self._save_state()
+            self._run_seed = value
+        log.info("Seed прогона (run_seed) %s: %d.", source, value, extra=KEY_EVENT_EXTRA)
 
     def _restore_prompts_from_release(self, uploader) -> None:
         """Блок 2: при перезапуске под тем же final.srt промпты берутся из ФИНАЛ · ГЕНЕРАЦИЯ, а не генерируются заново.
@@ -1655,6 +1712,8 @@ class Orchestrator:
         Иначе ничего не делается. Путь не удаляет и не перезаписывает локальный prompts.json при отмене или ошибке.
         Вызывается до publisher.start: служебный файл уходит в релиз уже восстановленным.
         """
+        if not self._run_seed_active():
+            return  # Блок 3: восстановление из релиза только для ниш с seed_mode: run
         path = Path(self.prompts_path)
         if not path.exists():
             self._restore_prompts_file(uploader, path)
@@ -1668,8 +1727,14 @@ class Orchestrator:
             tmp = os.path.join(tmpdir, PROMPTS_FILENAME)
             if not uploader.download_service_file(PROMPTS_FILENAME, tmp) or not os.path.isfile(tmp):
                 return
+            # поле profile читаем до load_state: он перезаписывает его текущим профилем
+            raw = _read_json_dict(tmp)
             # проверка та же, что у load_state: повреждённый JSON или чужой srt_hash -> GeminiInputError, без записи
             state = go.load_state(tmp, self.segments, self.profile)
+            if raw is not None and self._profile_differs(raw):
+                log.warning("Промпты в релизе %s созданы для другого профиля: файл не используется, "
+                            "промпты генерируются заново.", PROMPTS_FILENAME, extra=KEY_EVENT_EXTRA)
+                return
             try:
                 go.atomic_write_json(path, state)
             except OSError as exc:
@@ -1699,6 +1764,10 @@ class Orchestrator:
                 log.warning("Копия %s в релизе не читается: run_seed не восстановлен.", PROMPTS_FILENAME)
                 return
             if not isinstance(remote, dict) or "run_seed" not in remote or remote.get("srt_hash") != uploader.full_hash:
+                return
+            if self._profile_differs(remote):
+                log.warning("Копия %s в релизе создана для другого профиля: run_seed не восстановлен.",
+                            PROMPTS_FILENAME, extra=KEY_EVENT_EXTRA)
                 return
             # в локальный файл добавляется только run_seed; содержимое промптов не меняется
             local["run_seed"] = remote["run_seed"]
@@ -1760,6 +1829,9 @@ class Orchestrator:
             f"- потрачено, USD: {summary.spent_usd:.4f}",
             f"- код завершения (до загрузки отчёта): {summary.exit_code}",
         ]
+        run_seed = getattr(self, "_run_seed", None)
+        if run_seed is not None:  # Блок 3: seed прогона попадает в отчёт только для ниш с seed_mode: run
+            lines.append(f"- run_seed прогона: {run_seed}")
         if not summary.cleanup_ok:
             lines.append("- ВНИМАНИЕ: уничтожение карт не подтверждено, проверьте Vast.ai")
         return "\n".join(lines) + "\n"
@@ -2501,7 +2573,7 @@ class Orchestrator:
             self._artifact.card_meta(slot, {
                 "slot": slot.index, "generation": slot.generation, "instance_id": inst_id,
                 "machine_id": offer.machine_id, "offer_id": offer.offer_id,
-                "price_per_hr": price, "mode": mode, "created_utc": _utc_now()})
+                "price_per_hr": price, "mode": mode, "created_utc": _utc_now(), **self._run_seed_meta()})
         return "ok"
 
     def _rental_price(self, offer) -> float:
@@ -3418,8 +3490,16 @@ class Orchestrator:
                 self._attempts[num] = MAX_ATTEMPTS
                 self._fail_clip(num, "в prompts.json нет корректного num_frames")
                 return
+            seed = self.seed_base + num
+            if self._seed_mode_run_for_role(slot.role):  # Блок 3: профиль роли с seed_mode: run
+                run_seed = getattr(self, "_run_seed", None)
+                if run_seed is None:
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "не задан run_seed для профиля с seed_mode: run")
+                    return
+                seed = run_seed
             payload = {"num": num, "prompt": entry["prompt"],
-                       "num_frames": num_frames, "seed": self.seed_base + num}
+                       "num_frames": num_frames, "seed": seed}
             entry_refs = _entry_refs(entry)
             if entry_refs is not None:
                 # референсы задачи: поле уходит на воркер только когда оно есть в prompts.json (старые задачи без изменений)
