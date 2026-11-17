@@ -578,16 +578,29 @@ _THICK_VECTOR_RX = re.compile(
 # Надпись в кадре: текст после слова «lettering» и двоеточия до точки; берётся фрагмент до первой запятой
 _LETTERING_RX = re.compile(r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)", re.IGNORECASE)
 # служебные слова, на которых надпись не может закончиться
-DANGLING_TEXT_WORDS = frozenset({"a", "an", "the", "of", "to", "for", "by", "so", "and", "it's", "it"})
+# Служебные слова, на которых надпись в кадре не может закончиться (ключи в нижнем регистре, апостроф прямой).
+DANGLING_TEXT_WORDS = frozenset({
+    "a", "an", "and", "by", "for", "it", "it's", "of", "so", "the", "to",
+    "was", "were", "is", "are", "be", "am", "your", "my", "his", "her", "their", "its", "our", "like",
+    "aren't", "isn't", "wasn't", "weren't", "don't", "doesn't", "didn't", "can't", "won't",
+    "that", "this", "with", "from", "into", "about", "at", "on", "in", "as", "or", "if", "than", "then",
+    "which", "who",
+})
+# Типографский апостроф и хвостовая пунктуация последнего слова надписи
+_TYPO_APOSTROPHE = "\u2019"
+_TRAILING_PUNCT_RX = re.compile(r"[.,!?;:\u2026\"\u201d\u00bb)]+$")
 
 
 def dangling_text_hits(text: str) -> list:
     """Надписи в кадре, оборванные на служебном слове (только при rules dangling_text_check: true)."""
     hits = []
     for m in _LETTERING_RX.finditer(text):
-        phrase = m.group(1).split(",", 1)[0].strip()
+        phrase = m.group(1).split(",", 1)[0].strip().replace(_TYPO_APOSTROPHE, "'")
         words = phrase.split()
-        if words and words[-1].lower().strip(".") in DANGLING_TEXT_WORDS:
+        if not words:
+            continue
+        last = _TRAILING_PUNCT_RX.sub("", words[-1]).lower()
+        if last in DANGLING_TEXT_WORDS:
             hits.append(phrase)
     return hits
 

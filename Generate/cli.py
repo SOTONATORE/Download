@@ -1641,8 +1641,8 @@ def _failure_reason(num: int, entry, errors: list) -> str:
 def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool,
                  relaxed=frozenset(), max_characters=None, rules=None) -> tuple:
     """Для одного вида: готовые, нарушения слов и маркеров, нарушения содержания кадра, нарушения num_frames, не готовые."""
-    from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
-                                            find_problems, problem_code, problem_ru)
+    from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_DANGLING_TEXT, PROBLEM_FORBIDDEN_SHOT_TYPE,
+                                            PROBLEM_LEFTOVER_MARKER, find_problems, problem_code, problem_ru)
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
 
     ready = forbidden = leftover = content = frames_bad = 0
@@ -1666,6 +1666,10 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             elif code in CONTENT_CODES:
                 content += 1
                 problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code == PROBLEM_DANGLING_TEXT:
+                # незаконченный текст в кадре: отдельная строка отчёта (только при dangling_text_check)
+                fragment = p.partition(": ")[2]
+                problems.append(f"Незаконченный текст в кадре: {label} клип {n}, фрагмент «{fragment}»")
         want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
         if entry.get("num_frames") != want:
             frames_bad += 1
