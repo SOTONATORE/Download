@@ -688,6 +688,11 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
     text = ""
     if "frame_text" in cfg.relaxed_rules:
         text += "Text that appears inside the frame is written in the on-frame language named in the next rule. "
+    # незаконченный текст в кадре: одна фраза-инструкция модели только при rules dangling_text_check: true; иначе текст прежний
+    if cfg.rules.dangling_text_check:
+        text += ("Any text placed in the frame must be a complete phrase of 1 to 4 words taken in full from the current "
+                 "sentence or from the Before or After context; never end the text on a preposition, article, conjunction, "
+                 "auxiliary verb or the middle of a sentence. If no complete phrase fits, write no text for that frame. ")
     if cfg.text_language is None:
         return text + "Always write the output in English."
     if not cfg.frame_language:
