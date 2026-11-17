@@ -375,6 +375,50 @@ jobs:
           for line in report_md.splitlines():
               say(line)
 
+          # Ключи профилей проверки (по умолчанию выключены; ltx25 и zimage_turbo их не задают).
+          # Имена ниш в коде не сравниваются: читаются ключи профилей, активных в этом прогоне.
+          from Generate.core.config_loader import (
+              GeminiInputError, load_profile_fail_on_duplicate_prompts, load_profile_fail_on_needs_review)
+          from Generate.core.duplicate_check import find_duplicate_prompts
+          video_profile_env = os.environ["VIDEO_PROFILE"]
+          try:
+              fail_review_photo = load_profile_fail_on_needs_review(photo_profile_env)
+              fail_dup_photo = load_profile_fail_on_duplicate_prompts(photo_profile_env)
+              fail_review_video = video_model != "none" and load_profile_fail_on_needs_review(video_profile_env)
+              fail_dup_video = video_model != "none" and load_profile_fail_on_duplicate_prompts(video_profile_env)
+          except GeminiInputError as exc:  # ошибка входа в профиле: код выхода 2, как у прочих ошибок входа
+              say("ОШИБКА: " + mask(exc))
+              summary("## Проверка промптов: ОШИБКА\n\n" + mask(exc))
+              sys.exit(2)
+
+          if fail_review_photo or fail_review_video or fail_dup_photo or fail_dup_video:
+              prompts_file = os.environ["PROMPTS_PATH"]
+              if not os.path.isfile(prompts_file):
+                  fail("файл промптов не найден: " + prompts_file)
+              with open(prompts_file, encoding="utf-8") as fh:
+                  state_prompts = json.load(fh).get("prompts", {})
+
+              # клипы, оставшиеся на проверке, по профилям с ключом fail_on_needs_review
+              if fail_review_photo or fail_review_video:
+                  review_nums = []
+                  if fail_review_photo:
+                      review_nums += [n for n in prep.photo_nums if (state_prompts.get(str(n)) or {}).get("needs_review")]
+                  if fail_review_video:
+                      review_nums += [n for n in prep.video_nums if (state_prompts.get(str(n)) or {}).get("needs_review")]
+                  if review_nums:
+                      nums = sorted(set(review_nums))
+                      fail("промпт на проверке (needs_review) у клипов: " + ", ".join(str(n) for n in nums))
+
+              # одинаковые промпты у разных клипов, по профилям с ключом fail_on_duplicate_prompts
+              if fail_dup_photo or fail_dup_video:
+                  dup_nums = (list(prep.photo_nums) if fail_dup_photo else []) + \
+                             (list(prep.video_nums) if fail_dup_video else [])
+                  groups = find_duplicate_prompts(
+                      {str(n): (state_prompts.get(str(n)) or {}).get("prompt", "") for n in dup_nums})
+                  if groups:
+                      listed = "; ".join("клипы " + ", ".join(g) for g in groups)
+                      fail("одинаковые промпты у разных клипов: " + listed)
+
           if prep.problems or prep.failures:
               # «промпт не готов» печатаем одной сводкой (номера клипов диапазонами), а не строкой на клип;
               # остальные проблемы — по одной строке, как раньше
