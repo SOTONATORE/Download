@@ -116,6 +116,9 @@ class PromptConfig:
     preset: str = PRESET_NONE
     # refs_enabled: ответ с полем refs (номера референсов), метки <imageN> проверяются; по умолчанию выключено
     refs_enabled: bool = False
+    # rework_style_flag_without_refs: клип, у которого единственная причина — флаг стиля «отрицание», идёт в очередь
+    # исправлений и без refs; по умолчанию выключено (значение задаёт профиль через вызывающую сторону)
+    rework_style_flag_without_refs: bool = False
     # on_unfixed: «keep» — клип с нарушением остаётся на проверке (прежнее поведение); «fail» — прогон останавливается
     on_unfixed: str = "keep"
     # fail_fast: первая проблема батча останавливает прогон сразу: без повтора и без исправлений; по умолчанию выключено
@@ -1417,6 +1420,24 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
     return r is not None and not r.needs_review and not any(p.num == num for p in problems)
 
 
+def _only_negation_flag(review_reason: str) -> bool:
+    """Единственная причина разбора — флаг стиля «отрицание» (причины разделены «; »)."""
+    parts = {x for x in review_reason.split("; ") if x}
+    return parts == {_NEGATION_REASON}
+
+
+def _rework_gate_open(cfg: PromptConfig, r: PromptResult) -> bool:
+    """Открыт ли путь в очередь исправлений для клипа с текстом, флагом разбора и без находок по содержанию.
+
+    Прежнее условие: refs_enabled и не fail_fast (без изменений). Новое — только при rework_style_flag_without_refs:
+    клип, у которого единственная причина — флаг стиля «отрицание», идёт в очередь и без refs."""
+    if cfg.fail_fast or not r.needs_review or not r.review_reason:
+        return False
+    if cfg.refs_enabled:
+        return True
+    return bool(cfg.rework_style_flag_without_refs) and _only_negation_flag(r.review_reason)
+
+
 def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
@@ -1668,12 +1689,12 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"))
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
-            if not found and r.needs_review and r.review_reason and builder.cfg.refs_enabled \
-                    and not builder.cfg.fail_fast:
+            if not found and _rework_gate_open(builder.cfg, r):
                 # Клип с текстом и флагом разбора (стиль, длина, этнос), но без находок по содержанию: раньше он не
                 # попадал в очередь и оставался на проверке без единого исправления. Теперь идёт в очередь с причинами
                 # разбора, как клип из ответа исправления (process_fix). Только профили с refs_enabled; прочие
-                # профили (ltx25, zimage_turbo) ведут себя как раньше.
+                # профили (ltx25, zimage_turbo) ведут себя как раньше. Исключение — ключ rework_style_flag_without_refs
+                # (_rework_gate_open): клип только с флагом стиля «отрицание» тоже идёт в очередь.
                 found = [_PARSE_PREFIX + x for x in dict.fromkeys(r.review_reason.split("; ")) if x]
             if found:
                 if builder.cfg.fail_fast:

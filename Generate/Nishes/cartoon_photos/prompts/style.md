@@ -4,21 +4,21 @@ Each segment becomes one still frame that illustrates what the segment says, dra
 
 # Global Style
 
-Thin, slightly sketchy black ink pen outlines with light natural wobble. Muted flat 2D colors with minimal simple shading. Clean pure white #FFFFFF background for cards, diagrams and comparisons. Simple 2D backgrounds for scenes: a flat sky band, a flat ground line and a few simple shapes. Everything is flat and drawn in one layer, with no depth.
+Thin, slightly sketchy black ink pen outlines with light natural wobble. Muted flat 2D colors with minimal simple shading. Clean pure white #FFFFFF background for cards, diagrams and comparisons. Simple 2D backgrounds for scenes: a flat sky band, a flat ground line and a few simple shapes. Everything is flat and drawn in one layer, on a single plane.
 
-Instruction for the model writing prompts: avoid 3D, photorealism, bokeh and depth of field, random hourglasses and thick flash outlines. Keep every outline thin and sketchy, and keep every surface flat.
+Instruction for the model writing prompts: write only flat 2D sketch wording, and use thin outlines, flat surfaces and simple shapes instead of 3D, photorealism, bokeh, depth of field, random hourglasses and thick flash outlines. Keep every outline thin and sketchy, and keep every surface flat.
 
 # Safety
 
-Children, babies and young people never appear. Weapons never appear. Characters never speak: the mouth is a simple line or oval and stays closed. Keep hands and fingers away from fire, flames, candles and lanterns. Faces stay small in the frame, with no close-ups of faces. Objects and on-frame text come from the Text line of the segment only. Each prompt shows at most 4 characters, and animals count as characters.
+Children, babies and young people are excluded from every frame. Weapons are excluded from every frame. Characters stay silent: the mouth is a simple line or oval and stays closed. Keep hands and fingers away from fire, flames, candles and lanterns. Faces stay small in the frame, and every shot is wide. Objects and on-frame text come from the Text line of the segment only. Each prompt shows at most 4 characters, and animals count as characters.
 
 # Character Canon
 
 Three character types. The head, the eyes and the outline stay the same within each type.
 
-a) Default hero, the traveler. Use him by default in every scene with a place or a person's action, unless the segment is purely about an object or a fact, is a text slide or a diagram, or names another character. Description: large smooth pure-white round head with a thin black outline, small black dot eyes, a simple line or oval mouth, very thin single-line pure-black stick arms with simple stroke fingers coming out of the sleeves, a bright blue t-shirt, medium blue straight jeans and simple white sneakers. Always refer to him uniformly as the main character. Change only the pose, the action, the prop and the emotion. Show emotion only through the eyebrows and the mouth line. For the hero, never use mouth open, laughing, shouting or screaming, because speech is forbidden.
+a) Default hero, the traveler. Use him by default in every scene with a place or a person's action, except when the segment is purely about an object or a fact, is a text slide or a diagram, or names another character. Description: large smooth pure-white round head with a thin black outline, small black dot eyes, a simple line or oval mouth, very thin single-line pure-black stick arms with simple stroke fingers coming out of the sleeves, a bright blue t-shirt, medium blue straight jeans and simple white sneakers. Always refer to him uniformly as the main character. Change only the pose, the action, the prop and the emotion. Show emotion only through the eyebrows and the mouth line. For the hero, the mouth stays a simple closed line in every expression: mouth open, laughing, shouting and screaming are excluded, because speech is forbidden.
 
-b) Abstract everyday figure. Phrase it as a plain solid-black stick-figure character: the same large round white head with small black dot eyes, plus a whole thin solid-black stick-figure body, with arms, legs and torso drawn as one black line. Use it for an unnamed bystander or a second person in a scene. Phrase it safely, and never describe it with words such as naked or black man.
+b) Abstract everyday figure. Phrase it as a plain solid-black stick-figure character: the same large round white head with small black dot eyes, plus a whole thin solid-black stick-figure body, with arms, legs and torso drawn as one black line. Use it for an unnamed bystander or a second person in a scene. Phrase it safely, with neutral wording only.
 
 c) Story characters, for example a caveman in a fur or a second conversational partner. The clothing and the hairstyle change to fit the segment, while the same white round head, the small black dot eyes, the thin sketchy outline and the thin black stick arms and legs stay the same.
 
@@ -26,7 +26,7 @@ c) Story characters, for example a caveman in a fur or a second conversational p
 
 On-frame text is neat hand-drawn uppercase black marker lettering, as in the sketch screenshots. Accent colors: bright red for the key word or number, green, or white on a dark background. Faded pale grey is for inactive labels. The language of all on-frame text is frame_language, as named in the task.
 
-A text is either one short phrase of 1 to 4 words, taken whole from a single sentence of the segment and written exactly as in the subtitles, or labels for one object, with one word for each part, using at most 4 parts. Two modes apply. a) Text-only frames, such as a text slide with a mini icon or a card: exactly one text phrase per frame. b) Comparison and timeline frames, layouts b, c and d: one main title plus the short labels or dates that the layout requires, and no other text. Text beside a scene uses 1 to 4 words that carry the main point of the segment. Separate text-only slides, with no scene, are at most 1 in 5 clips. Each prompt states its words in full, in the uppercase marker style above.
+A text is either one short phrase of 1 to 4 words, taken whole from a single sentence of the segment and written exactly as in the subtitles, or labels for one object, with one word for each part, using at most 4 parts. Two modes apply. a) Text-only frames, such as a text slide with a mini icon or a card: exactly one text phrase per frame. b) Comparison and timeline frames, layouts b, c and d: one main title plus the short labels or dates that the layout requires, and only that text. Text beside a scene uses 1 to 4 words that carry the main point of the segment. Separate text-only slides, showing just the text and an icon, are at most 1 in 5 clips. Each prompt states its words in full, in the uppercase marker style above.
 
 Crossing out: two red diagonal brush strokes over the scene show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene.
 
@@ -35,7 +35,7 @@ Crossing out: two red diagonal brush strokes over the scene show that something 
 Choose the one layout that matches the segment. Each layout comes from the sketch screenshots.
 
 a) Text slide with a mini icon: clean white background, uppercase marker text, a small mini icon on the left, and the text to the right of the icon or below it.
-b) Comparison A | B: exactly one vertical dashed black line in the center, no outer frames around the panels, and headings above the panels without badges. Optional: an equals sign on the axis with a red caption below it, or two open 2D scenes, one per side.
+b) Comparison A | B: exactly one vertical dashed black line in the center, open panel edges, and plain-text headings above the panels. Optional: an equals sign on the axis with a red caption below it, or two open 2D scenes, one per side.
 c) Arrow timeline with N points: a thin black arrow pointing right, all N circles or dots placed exactly on the line, labels under the ends, and a highlight with a pin, a dashed arc or a red marker, or a simple arrow between two icons. N follows the segment.
 d) Ruler timeline: pale beige scale with small ticks, nodes sitting on the axis, and // breaks along the scale. Inactive past icons and dates in pale grey. Active node: full-color icon, red down arrow, red circle in a sketchy red ring, and an accent date.
 e) Simple map or diagram with arrows: white background, simplified colored continents or objects, thin arrows or dashed links, and short uppercase marker labels.
@@ -56,7 +56,7 @@ The pose and the expression of the main character come from the segment, one pos
 
 # Prompt Structure
 
-Describe exactly what is visible in the frame, as one scene with one action, in full detail. Give each visible character and object its appearance, clothing, height, pose and color. Describe the single still frame as a finished state. Describe the scene itself, with no quotation marks, and keep the sketch style wording from the Global Style section in each prompt.
+Describe exactly what is visible in the frame, as one scene with one action, in full detail. Give each visible character and object its appearance, clothing, height, pose and color. Describe the single still frame as a finished state. Describe the scene itself as plain wording, free of quotation marks, and keep the sketch style wording from the Global Style section in each prompt.
 
 # Example Prompts
 
@@ -85,4 +85,4 @@ Clean pure white background. A small mini icon of a simple clock with a muted bl
 
 # Final Check
 
-Before each prompt is returned, check it against this list and rewrite any prompt that fails it: one scene with one action; the character count follows the rules; each character is fully described with its canon type; objects and text come from the Text line; the text is one phrase of 1 to 4 words, or one object with one word for each part, at most 4 parts, and by frame type: in a text-only frame, such as a text slide with a mini icon or a card, only one text phrase per frame; in a comparison or timeline frame, one main title plus the short labels or dates that the layout requires; the sketch style wording from the Global Style section is present; and the prompt has no quotation marks.
+Before each prompt is returned, check it against this list and rewrite any prompt that fails it: one scene with one action; the character count follows the rules; each character is fully described with its canon type; objects and text come from the Text line; the text is one phrase of 1 to 4 words, or one object with one word for each part, at most 4 parts, and by frame type: in a text-only frame, such as a text slide with a mini icon or a card, only one text phrase per frame; in a comparison or timeline frame, one main title plus the short labels or dates that the layout requires; the sketch style wording from the Global Style section is present; and the prompt is plain wording, free of quotation marks.

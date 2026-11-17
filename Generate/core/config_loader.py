@@ -564,3 +564,37 @@ def load_profile_type(profile_name: str) -> str:
         raise GeminiInputError(
             f"В профиле {profile_name}/profile.yaml тип «type» должен быть video или image.")
     return value
+
+
+# Булевы ключи профиля ниши для проверки промптов (verify_prompts). По умолчанию выключены: профили ltx25 и
+# zimage_turbo их не задают и ведут себя как раньше. Разбор строгий: значение должно быть true или false;
+# другое значение — ошибка входа (код 2). Имена ниш в коде не сравниваются: решает значение из profile.yaml.
+
+
+def _load_profile_bool(profile_name: str, key: str) -> bool:
+    """Булевый ключ верхнего уровня из profile.yaml. Нет профиля или ключа — False; не true/false — ошибка входа."""
+    if not profile_name or not profile_exists(profile_name):
+        return False
+    data = _read_profile(profile_name)
+    if key not in data:
+        return False
+    value = data[key]
+    if not isinstance(value, bool):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «{key}» должен быть true или false.")
+    return value
+
+
+def load_profile_rework_style_flag_without_refs(profile_name: str) -> bool:
+    """Ключ rework_style_flag_without_refs: клип только с флагом стиля «отрицание» идёт в очередь исправлений и без refs."""
+    return _load_profile_bool(profile_name, "rework_style_flag_without_refs")
+
+
+def load_profile_fail_on_needs_review(profile_name: str) -> bool:
+    """Ключ fail_on_needs_review: клип, оставшийся на проверке (needs_review), проваливает прогон verify_prompts."""
+    return _load_profile_bool(profile_name, "fail_on_needs_review")
+
+
+def load_profile_fail_on_duplicate_prompts(profile_name: str) -> bool:
+    """Ключ fail_on_duplicate_prompts: одинаковые промпты у разных клипов проваливают прогон verify_prompts."""
+    return _load_profile_bool(profile_name, "fail_on_duplicate_prompts")
