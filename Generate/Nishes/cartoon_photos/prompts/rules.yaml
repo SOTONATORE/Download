@@ -25,3 +25,10 @@ horses_vehicles_animals_max: 3
 children: forbidden
 # наборы предметов: стопки, кучи, ряды и линии предметов запрещены (allowed | forbidden)
 object_sets: forbidden
+# разрешённые типы кадра (через запятую): снимают запрет на эти слова и фразы; паспорт, флаг, герб, эмблема,
+# пергамент, форма остаются запрещёнными; имена проверяются по словарю ALLOWED_SHOT_ITEM_TERMS (prompt_check.py)
+allowed_shot_items: letter, map, diagram, chart, infographic, calendar, spreadsheet, newspaper, document, paper, blank sheet, sheet of paper
+# эскиз: линии тонкие, без толстых контуров (стиль фиксирован в style.md; проверка — forbid_thick_vector)
+sketch_style: true
+# запрет толстых контуров и векторного стиля: bold/thick/heavy outlines, vector, tube arms, thick white arms
+forbid_thick_vector: true

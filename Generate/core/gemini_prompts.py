@@ -30,7 +30,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
                            CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
-                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count)
+                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
+                           PROBLEM_REF_TAG, validate_allowed_shot_items)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -40,7 +41,8 @@ except ImportError:  # pragma: no cover
                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
-                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count)
+                           PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
+                           PROBLEM_REF_TAG, validate_allowed_shot_items)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -306,9 +308,10 @@ def _collect_context_sentences(sentences: list, start: int, step: int, window_wo
     return out
 
 
-def _format_segment_block(seg: Segment, sentences: list, by_segment: dict) -> str:
+def _format_segment_block(seg: Segment, sentences: list, by_segment: dict, allowed_items=frozenset()) -> str:
     """Блок одного сегмента для пользовательского запроса. Номер идёт только как служебное
-    поле segment_index (его модель вернёт в ответе), в смысловой текст он не входит."""
+    поле segment_index (его модель вернёт в ответе), в смысловой текст он не входит.
+    allowed_items: разрешённые типы кадра ниши (rules.yaml allowed_shot_items) для правила перефразирования."""
     sen = by_segment[seg.num]
     lines = [f"segment_index: {seg.num}"]
     text = " ".join((seg.text or "").split())
@@ -334,7 +337,7 @@ def _format_segment_block(seg: Segment, sentences: list, by_segment: dict) -> st
     if after:
         lines.append("After (context only): " + " ".join(x.text for x in after))
     # Правило перефразирования добавляется к блоку сегмента, только если нужно (шаг 4).
-    note = rephrase_note(text)
+    note = rephrase_note(text, allowed_items)
     if note:
         lines.append(note)
     return "\n".join(lines)
@@ -452,9 +455,9 @@ def attach_style(prompt: str, style_text: str) -> str:
 RULES_FILE_NAME = "rules.yaml"
 RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
               "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children",
-              "scene_motion_wording", "object_sets")
+              "scene_motion_wording", "object_sets", "allowed_shot_items", "forbid_thick_vector", "sketch_style")
 _RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
-_RULES_BOOL_KEYS = ("animals_count", "static_frame")
+_RULES_BOOL_KEYS = ("animals_count", "static_frame", "forbid_thick_vector", "sketch_style")
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
                         "weapons": "weapons_allowed", "close_faces": "close_faces_allowed",
                         "object_sets": "object_sets_forbidden"}
@@ -507,6 +510,11 @@ _CONTRAST_LINE = ("- When the text contrasts two things (\"not X, but Y\", \"not
                   "action or scene. Never describe X and never use a negation to refer to it.\n")
 _ASPECT_LINE = ("- No aspect ratios, frame sizes, widescreen or framing terms, and no blank sheets, sheets of paper or "
                 "sheets of parchment. Describe the visible scene only, without any format or sheet of writing material.\n")
+# Нишы с разрешёнными листами (blank sheet и sheet of paper в rules.yaml allowed_shot_items): запрет на эти листы снят,
+# запрет на 16:9/widescreen и на пергамент остаётся. Без обоих имён строка _ASPECT_LINE не меняется.
+_SHEETS_ALLOWED_ITEMS = frozenset({"blank sheet", "sheet of paper"})
+_ASPECT_LINE_SHEETS_ALLOWED = ("- No aspect ratios, frame sizes, widescreen or framing terms, and no sheets of parchment. "
+                               "Describe the visible scene only, without any format or parchment.\n")
 _ONE_CAMERA_MOVE_LINE = ("- Exactly one camera move. Finish the camera sentence with how the frame looks when "
                          "the move ends (for a static camera: what the frame holds on).\n")
 _NO_CAMERA_MOVE_LINE = ("- Never describe camera movement: no pans, zooms, tracks, dolly, tilts, pushes, pulls, "
@@ -536,6 +544,13 @@ def _rule_scalar(key: str, value: str, source: str):
         if value not in ("true", "false"):
             raise rules_error(source, f"ключ {key} должен быть true или false, получено «{value}».")
         return value == "true"
+    if key == "allowed_shot_items":
+        # разрешённые типы кадра через запятую; неизвестное имя — ошибка с перечнем допустимых
+        names = [x.strip() for x in value.split(",") if x.strip()]
+        try:
+            return validate_allowed_shot_items(names)
+        except ValueError as exc:
+            raise rules_error(source, f"ключ allowed_shot_items: {exc}.") from exc
     if key == "object_sets":
         # обратная полярность: forbidden включает проверку наборов предметов (поле object_sets_forbidden)
         if value not in ("allowed", "forbidden"):
@@ -688,7 +703,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
     else:
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
     paper = "" if "frame_text" in cfg.relaxed_rules else _PAPER_LINE
-    camera_rules = medium + _CONTRAST_LINE + paper + _ASPECT_LINE + camera_end
+    aspect = _ASPECT_LINE_SHEETS_ALLOWED if _SHEETS_ALLOWED_ITEMS <= rules.allowed_shot_items else _ASPECT_LINE
+    camera_rules = medium + _CONTRAST_LINE + paper + aspect + camera_end
     # subject_source text_only: объекты и текст в кадре только из строки Text; у text_and_context строки нет
     subject_line = ("\n" + _SUBJECT_TEXT_ONLY_LINE) if rules.subject_source == "text_only" else ""
     parts = [
@@ -788,7 +804,8 @@ class _Builder:
         out = []
         for i in range(0, len(nums), size):
             chunk = nums[i:i + size]
-            blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment)
+            blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment,
+                                            self.cfg.rules.allowed_shot_items)
                       for n in chunk]
             user = ("Write prompts for the following segments. Return only the JSON array.\n\n"
                     + "\n\n".join(blocks))
@@ -907,6 +924,14 @@ def _range_reason(limit: int) -> str:
 
 # подсказка для повтора при любом числе референсов профиля (1…REF_MAX); для REF_MAX текст тот же, что выше
 _STYLE_HINTS.update({_range_reason(k): f"Each refs number must be between 1 and {k}." for k in range(1, REF_MAX + 1)})
+
+# Метки <imageN> и ref_N без референсов (refs_enabled: false): причина для повтора и барьер перед выдачей.
+# Для профилей с референсами эти проверки не выполняются.
+_REF_TAG_RX = re.compile(r"<image\d+>|\bref_\d+\b")
+_IMAGE_TAG_RX = re.compile(r"<image\d+>")
+REF_TAG_REASON = "метки <imageN> или ref_N при выключенных референсах"
+_STYLE_HINTS.update({REF_TAG_REASON: "Do not write <imageN> or ref_N tags; this niche has no reference images. "
+                                     "Describe the scene in words only."})
 
 
 def _check_refs(value: Any, limit: int = REF_MAX) -> tuple:
@@ -1345,6 +1370,8 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
         g = _garbage_reason(prompt)
         if g:
             reasons.append(g)
+        if not cfg.refs_enabled and _REF_TAG_RX.search(prompt):
+            reasons.append(REF_TAG_REASON)
         reasons.extend(_style_reasons(prompt, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules))
         if texts is not None and n in texts:
             # Русский: корень этнического признака ищем в тексте сегмента и соседних (n-1, n+1); нет соседа — пусто
@@ -1386,11 +1413,32 @@ def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
     problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
+    if not cfg.refs_enabled:
+        # метки без референсов — нарушение (очередь исправлений); барьер перед выдачей их удалит, если повтор не помог
+        problems += [make_problem(PROBLEM_REF_TAG, m.group(0)) for m in _REF_TAG_RX.finditer(text)]
     if cfg.refs_enabled and refs is not None:
         problems += _ref_fix_problems(text, refs, [])
         if _combo_bad(refs, cfg):
             problems.append(f"{REF_CODE_INVALID}: «{REF_COMBO_HINT}»")
     return list(dict.fromkeys(problems))
+
+
+def _strip_image_tags_without_refs(results: list, cfg: PromptConfig) -> int:
+    """Барьер перед выдачей: при refs_enabled: false убирает все метки <imageN> из текста промптов.
+    Выполняется после кругов исправления; для профилей с референсами ничего не делает. Возвращает число меток."""
+    if cfg.refs_enabled:
+        return 0
+    removed = 0
+    for r in results:
+        new, n = _IMAGE_TAG_RX.subn("", r.prompt or "")
+        if n:
+            r.prompt = " ".join(new.split())
+            removed += n
+        if r.prompt_raw:
+            r.prompt_raw = " ".join(_IMAGE_TAG_RX.sub("", r.prompt_raw).split())
+    if removed:
+        log.warning("Удалено меток <imageN> из промптов без референсов: %d.", removed)
+    return removed
 
 
 def _num_ranges(nums: list) -> str:
@@ -2401,6 +2449,8 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
         out = job.out
 
     results = [out[n] for n in builder.wanted]
+    # барьер после кругов исправления: без референсов метки <imageN> не уходят в рендер (для refs_enabled не выполняется)
+    _strip_image_tags_without_refs(results, cfg)
     if cfg.on_unfixed == "fail":
         _fail_unfixed(results, cfg)
     flagged = sum(1 for r in results if r.needs_review)

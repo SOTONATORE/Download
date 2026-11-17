@@ -70,6 +70,55 @@ FORBIDDEN_IMAGE_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Разрешённые типы кадра (rules.yaml: allowed_shot_items). Ключ — имя из rules.yaml, значение — запрещённые слова
+# или фразы выше, которые это имя снимает. Соответствие записано явно, не через проверку ниши.
+#   letter → letter; lettering → ничего (надпись без отдельного запрещённого слова); map → map;
+#   map pin → map (булавка на карте: слово map разрешено, как у карты); diagram → diagram; chart → chart;
+#   infographic → infographic; calendar → calendar; spreadsheet → spreadsheet; newspaper → newspaper;
+#   document → document; paper → paper; blank sheet → фраза «blank sheet»;
+#   sheet of paper → фраза «sheet of paper» (слово paper внутри неё снимается вместе с фразой).
+# Паспорт, флаг, герб, эмблема, пергамент, бланк, форма и «sheet of parchment» сюда не входят: остаются запрещёнными.
+ALLOWED_SHOT_ITEM_TERMS = {
+    "letter": ("letter",),
+    "lettering": (),
+    "map": ("map",),
+    "map pin": ("map",),
+    "diagram": ("diagram",),
+    "chart": ("chart",),
+    "infographic": ("infographic",),
+    "calendar": ("calendar",),
+    "spreadsheet": ("spreadsheet",),
+    "newspaper": ("newspaper",),
+    "document": ("document",),
+    "paper": ("paper",),
+    "blank sheet": ("blank sheet",),
+    "sheet of paper": ("sheet of paper",),
+}
+# Проверка при загрузке модуля: каждое слово и фраза словаря должны быть в списках запрещённых типов кадра.
+for _terms in ALLOWED_SHOT_ITEM_TERMS.values():
+    for _term in _terms:
+        if _term not in FORBIDDEN_IMAGE_WORDS_EN and _term not in FORBIDDEN_IMAGE_PHRASES_EN:
+            raise RuntimeError(f"ALLOWED_SHOT_ITEM_TERMS: «{_term}» нет в списках запрещённых типов кадра")
+
+
+def validate_allowed_shot_items(names) -> frozenset:
+    """Имена allowed_shot_items из rules.yaml. Неизвестное имя — ValueError с перечнем допустимых."""
+    items = frozenset(names)
+    unknown = sorted(name for name in items if name not in ALLOWED_SHOT_ITEM_TERMS)
+    if unknown:
+        raise ValueError(f"неизвестный тип кадра «{', '.join(unknown)}»; "
+                         f"допустимые: {', '.join(sorted(ALLOWED_SHOT_ITEM_TERMS))}")
+    return items
+
+
+def released_terms(allowed_items) -> frozenset:
+    """Запрещённые слова и фразы, которые сняты разрешёнными типами кадра (пусто, если ничего не разрешено)."""
+    out = set()
+    for name in allowed_items:
+        out.update(ALLOWED_SHOT_ITEM_TERMS[name])
+    return frozenset(out)
+
+
 # форматы кадра и соотношения сторон.
 FORBIDDEN_FORMAT_PATTERNS_EN = re.compile(
     r"\b\d{1,2}:\d{1,2}\b|\bwidescreen\b|\baspect ratio\b|\bletterbox\b|\bpillarbox\b|\bframing\b",
@@ -103,6 +152,13 @@ PROBLEM_CLOSE_FACE = "close_face"
 PROBLEM_ETHNICITY = "ethnicity_not_in_text"
 # наборы предметов (стопки, кучи, ряды, линии): только при rules object_sets: forbidden
 PROBLEM_OBJECT_SET = "object_set"
+# толстые контуры и векторный стиль: только при rules forbid_thick_vector: true (задаёт ниша в rules.yaml)
+PROBLEM_THICK_VECTOR = "thick_vector_style"
+# метки <imageN> и ref_N в промпте профиля без референсов (refs_enabled: false)
+PROBLEM_REF_TAG = "ref_tag_without_refs"
+# английская подсказка для повтора: что нарисовать вместо толстых контуров
+THICK_VECTOR_HINT_EN = ("thick or bold outlines, or a vector look; use thin slightly sketchy black ink pen outlines "
+                        "and thin single-line pure-black stick-figure arms instead")
 
 # Подписи на английском для промпта Gemini и на русском для журнала, отчёта и текста ошибки.
 _PROBLEM_EN = {
@@ -111,6 +167,8 @@ _PROBLEM_EN = {
     PROBLEM_FORBIDDEN_FORMAT: "forbidden frame format",
     PROBLEM_LEFTOVER_MARKER: "unfilled marker",
     PROBLEM_CAMERA_MOTION: "camera motion",
+    PROBLEM_THICK_VECTOR: THICK_VECTOR_HINT_EN,
+    PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
 }
 _PROBLEM_RU = {
     PROBLEM_FORBIDDEN_SHOT_TYPE: "запрещённый тип кадра",
@@ -118,6 +176,8 @@ _PROBLEM_RU = {
     PROBLEM_FORBIDDEN_FORMAT: "запрещённый формат кадра",
     PROBLEM_LEFTOVER_MARKER: "незаполненный маркер",
     PROBLEM_CAMERA_MOTION: "движение камеры",
+    PROBLEM_THICK_VECTOR: "толстые контуры или векторный стиль",
+    PROBLEM_REF_TAG: "метка <imageN> или ref_N без референсов",
 }
 
 # Причины для журнала и для повторного запроса (русские), подписи для Gemini (английские), подсказки для Gemini.
@@ -238,6 +298,9 @@ class RulesValues:
     horses_vehicles_animals_max: int = 2         # лимит лошадей, машин и животных в группе (текст для модели)
     scene_motion_wording: str = "keep"           # keep | drop: слова «and its motion» в строке медиа для изображений (rules: scene_motion_wording)
     object_sets_forbidden: bool = False          # стопки, кучи, ряды и линии предметов запрещены (rules: object_sets: forbidden)
+    allowed_shot_items: frozenset = frozenset()  # разрешённые типы кадра, имена из ALLOWED_SHOT_ITEM_TERMS (rules: allowed_shot_items)
+    forbid_thick_vector: bool = False            # толстые контуры и векторный стиль запрещены (rules: forbid_thick_vector)
+    sketch_style: bool = False                   # стиль эскиза (rules: sketch_style); отдельной проверки не включает
 
 
 def rule_skipped_codes(rules: RulesValues) -> frozenset:
@@ -316,6 +379,11 @@ _CONTENT_RX = (
         r"faces? up close)\b", re.IGNORECASE)),
 )
 _IMAGE_ONLY = frozenset({PROBLEM_CLOSE_FACE})
+# При max_characters слова, которые описывают не людей (figures, several, many, multiple, lines of), из проверки
+# людей убраны: «stick-figures» и «several circles» не считаются толпой. Толпа, группы, ряды людей и люди остаются.
+_PEOPLE_COUNT_CHARS_RX = re.compile(
+    r"\b(?:people|men|women|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|"
+    r"guards|warriors|fighters|travell?ers|persons|crowds?|groups?|troops?|dozens|rows? of)\b", re.IGNORECASE)
 # наборы предметов: отдельный шаблон, включается только правилом object_sets: forbidden (см. content_hits)
 _OBJECT_SET_RX = re.compile(r"\b(?:stacks?|piles?|rows?|lines?) of\b", re.IGNORECASE)
 # шаблон людей берём из _CONTENT_RX: «rows of» и «lines of» уже отмечены как PROBLEM_PEOPLE_COUNT
@@ -369,14 +437,21 @@ _PLURAL_PERSON_RX = re.compile(
     r"\b(?:men|women|people|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|guards|"
     r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters|figures)\b", re.IGNORECASE)
 _CROWD_RX = re.compile(r"\b(?:crowds?|groups?|troops?|several|many|dozens|multiple)\b", re.IGNORECASE)
+# варианты для подсчёта персонажей при max_characters: без figures, several, many, multiple (не люди)
+_PLURAL_PERSON_HUMAN_RX = re.compile(
+    r"\b(?:men|women|people|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|guards|"
+    r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters)\b", re.IGNORECASE)
+_CROWD_HUMAN_RX = re.compile(r"\b(?:crowds?|groups?|troops?|dozens)\b", re.IGNORECASE)
 
 
-def count_people(text: str) -> int:
+def count_people(text: str, human_only: bool = False) -> int:
     """Оценка числа людей в тексте: введения («One man», «a woman») по одному; множественное число — не меньше двух;
-    толпа и группа — не меньше трёх. Повторные упоминания одного человека не считаются."""
+    толпа и группа — не меньше трёх. Повторные упоминания одного человека не считаются.
+    human_only: только слова про людей (figures, several, many, multiple не считаются), для max_characters."""
     t = text or ""
+    plural_rx, crowd_rx = (_PLURAL_PERSON_HUMAN_RX, _CROWD_HUMAN_RX) if human_only else (_PLURAL_PERSON_RX, _CROWD_RX)
     singular = sum(1 for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
-    return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
+    return singular + 2 * len(plural_rx.findall(t)) + 3 * len(crowd_rx.findall(t))
 
 
 # Животные для подсчёта персонажей (нужны только при max_characters): одиночное и множественное число
@@ -410,7 +485,7 @@ def count_characters(text: str, animals_count: bool = True) -> int:
     единственное — 1) и герой (1, если назван). animals_count False (rules.yaml): животные не входят в подсчёт."""
     t = text or ""
     animals = sum(_animal_count(t, m) for m in _animal_matches(t)) if animals_count else 0
-    return count_people(t) + animals + (1 if _HERO_RX.search(t) else 0)
+    return count_people(t, human_only=True) + animals + (1 if _HERO_RX.search(t) else 0)
 
 
 def people_hint(max_characters: Optional[int], animals_count: bool = True) -> str:
@@ -440,6 +515,8 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
             continue
         if code == PROBLEM_MANY_OF_ONE:
             rx = many_rx
+        if code == PROBLEM_PEOPLE_COUNT and max_characters is not None:
+            rx = _PEOPLE_COUNT_CHARS_RX
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
@@ -479,19 +556,43 @@ def ethnicity_reasons(prompt: str, segment_text: str) -> list:
     return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
 
 
+# Толстые контуры и векторный стиль (проверка при rules forbid_thick_vector: true)
+_THICK_VECTOR_RX = re.compile(
+    r"\b(?:bold (?:dark |black )?outlines?|thick (?:dark |black )?outlines?|heavy (?:dark |black )?outlines?|"
+    r"vector|tube arms|thick white arms)\b",
+    re.IGNORECASE,
+)
+
+
 def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
                   rules: Optional[RulesValues] = None) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
+    rules = rules or RulesValues()
     problems = []
+    # разрешённые типы кадра снимают только свои слова и фразы; без allowed_shot_items — прежнее поведение
+    released = released_terms(rules.allowed_shot_items)
+    released_phrases = frozenset(t for t in released if t in FORBIDDEN_IMAGE_PHRASES_EN)
+    released_words = released - released_phrases
+    # слово внутри разрешённой фразы («paper» в «sheet of paper») снимается вместе с фразой
+    released_spans = [m.span() for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text)
+                      if m.group(0).lower() in released_phrases]
     for m in FORBIDDEN_IMAGE_RE.finditer(text):
+        word = m.group(0).lower()
+        inside = any(start <= m.start() and m.end() <= end for start, end in released_spans)
+        if inside or any(word.startswith(w) for w in released_words):
+            continue
         problems.append(make_problem(PROBLEM_FORBIDDEN_SHOT_TYPE, m.group(0)))
     for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text):
-        problems.append(make_problem(PROBLEM_FORBIDDEN_COMBINATION, m.group(0)))
+        if m.group(0).lower() not in released_phrases:
+            problems.append(make_problem(PROBLEM_FORBIDDEN_COMBINATION, m.group(0)))
     for m in FORBIDDEN_FORMAT_PATTERNS_EN.finditer(text):
         problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
         problems.append(make_problem(PROBLEM_LEFTOVER_MARKER, m.group(0)))
+    # толстые контуры и векторный стиль: только при forbid_thick_vector (ltx25, zimage_turbo — не включено)
+    if rules.forbid_thick_vector:
+        problems += [make_problem(PROBLEM_THICK_VECTOR, m.group(0)) for m in _THICK_VECTOR_RX.finditer(text)]
     for code, fragment in content_hits(text, media, relaxed, max_characters, rules):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем
