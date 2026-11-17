@@ -1614,6 +1614,7 @@ class Orchestrator:
             raise ReleaseStartError(
                 f"Не удалось открыть релиз запуска: {self._mask_remote(str(exc))}. "
                 "Запуск остановлен до трат.") from None
+        self._restore_prompts_from_release(uploader)  # Блок 2: при перезапуске промпты берутся из релиза, а не генерируются заново
         self._uploader = uploader
         self._publisher = RunPublisher(uploader, self.repo, self._tmp, artifact=self._artifact,
                                        mask=self._mask_remote)
@@ -1645,6 +1646,70 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
         return summary
+
+    def _restore_prompts_from_release(self, uploader) -> None:
+        """Блок 2: при перезапуске под тем же final.srt промпты берутся из ФИНАЛ · ГЕНЕРАЦИЯ, а не генерируются заново.
+
+        Случай A: локального prompts.json нет, в релизе есть prompts.json -> скачать и проверить тем же load_state.
+        Случай B: локальный файл есть, но без run_seed, а в релизе есть run_seed -> скопировать только run_seed.
+        Иначе ничего не делается. Путь не удаляет и не перезаписывает локальный prompts.json при отмене или ошибке.
+        Вызывается до publisher.start: служебный файл уходит в релиз уже восстановленным.
+        """
+        path = Path(self.prompts_path)
+        if not path.exists():
+            self._restore_prompts_file(uploader, path)
+        else:
+            self._restore_run_seed(uploader, path)
+
+    def _restore_prompts_file(self, uploader, path: Path) -> None:
+        """Случай A: скачивание во временный каталог, проверка через go.load_state, затем атомарная запись."""
+        tmpdir = tempfile.mkdtemp(prefix="prompts-restore-")
+        try:
+            tmp = os.path.join(tmpdir, PROMPTS_FILENAME)
+            if not uploader.download_service_file(PROMPTS_FILENAME, tmp) or not os.path.isfile(tmp):
+                return
+            # проверка та же, что у load_state: повреждённый JSON или чужой srt_hash -> GeminiInputError, без записи
+            state = go.load_state(tmp, self.segments, self.profile)
+            try:
+                go.atomic_write_json(path, state)
+            except OSError as exc:
+                log.warning("Не удалось записать восстановленный %s: %s: %s.", path.name, type(exc).__name__, exc)
+                return
+            log.info("Промпты восстановлены из релиза %s: повторная генерация не нужна.", uploader.final_tag)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _restore_run_seed(self, uploader, path: Path) -> None:
+        """Случай B: в локальном файле нет run_seed, в релизе есть — копируется только это поле."""
+        try:
+            local = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log.warning("Файл %s не читается: run_seed из релиза не восстановлен.", path.name)
+            return
+        if not isinstance(local, dict) or "run_seed" in local or local.get("srt_hash") != uploader.full_hash:
+            return
+        tmpdir = tempfile.mkdtemp(prefix="prompts-seed-")
+        try:
+            tmp = os.path.join(tmpdir, PROMPTS_FILENAME)
+            if not uploader.download_service_file(PROMPTS_FILENAME, tmp):
+                return
+            try:
+                remote = json.loads(Path(tmp).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                log.warning("Копия %s в релизе не читается: run_seed не восстановлен.", PROMPTS_FILENAME)
+                return
+            if not isinstance(remote, dict) or "run_seed" not in remote or remote.get("srt_hash") != uploader.full_hash:
+                return
+            # в локальный файл добавляется только run_seed; содержимое промптов не меняется
+            local["run_seed"] = remote["run_seed"]
+            try:
+                go.atomic_write_json(path, local)
+            except OSError as exc:
+                log.warning("Не удалось записать run_seed в %s: %s: %s.", path.name, type(exc).__name__, exc)
+                return
+            log.info("Из релиза %s восстановлен run_seed; локальные промпты не изменены.", uploader.final_tag)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _apply_run_split(self, needed: list) -> None:
         """Исправления P1, P2: распределение видео и фото строится только по нужным клипам запуска.
