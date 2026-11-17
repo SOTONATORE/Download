@@ -1,7 +1,6 @@
 """Офлайн-тесты: поле refs из extra, явный refs=[] для профиля с референсами, латент 1920x1088, node_errors.
 
-Сети нет: ComfyUI подменяется объектом с методом request; граф берётся из реальных файлов ниши
-cartoon_photos (только чтение), профили ltx25 и zimage_turbo в тестах не меняются.
+Сети нет: ComfyUI подменяется объектом с методом request; граф и профиль ниши создаются в tmp_path (реальная ниша cartoon_photos не читается), профили ltx25 и zimage_turbo в тестах не меняются.
 Сообщения на русском (SPEC 0.5). Тексты промптов и секреты в тестах не используются.
 """
 from __future__ import annotations
@@ -26,16 +25,61 @@ def _orch():
         from core import orchestrator as orch  # type: ignore
     return orch
 
-_REPO = Path(__file__).resolve().parents[2]
-_NICHE = _REPO / "Generate" / "Nishes" / "cartoon_photos"
+# Минимальный граф ниши для тестов refs: только узлы, на которые опирается механика refs.
+# ref_N -> узел LoadImage с id 50N (ref_7 -> "507"); узел промпта 491 (TextEncodeQwenImage21) с входами
+# images.image_1…10; KSampler 488 берёт латент из 491; ImageScale 511 задаёт кадр 1920x1080.
+_REF_LOAD_IDS = {n: str(500 + n) for n in range(1, 11)}
 
 
-def _real_graph() -> dict:
-    return json.loads((_NICHE / "workflow.json").read_text(encoding="utf-8"))
+def _minimal_graph() -> dict:
+    graph = {
+        "461": {"class_type": "SaveImageAdvanced",
+                "inputs": {"filename_prefix": "cartoon_photos", "images": ["511", 0]}},
+        "488": {"class_type": "KSampler",
+                "inputs": {"seed": 1, "latent_image": ["491", 2], "positive": ["491", 0], "negative": ["491", 1]}},
+        "491": {"class_type": "TextEncodeQwenImage21", "inputs": {"prompt": "x"}},
+        "511": {"class_type": "ImageScale",
+                "inputs": {"upscale_method": "lanczos", "width": 1920, "height": 1080, "crop": "center",
+                           "image": ["488", 0]}},
+    }
+    for n in range(1, 11):
+        graph["491"]["inputs"][f"images.image_{n}"] = [_REF_LOAD_IDS[n], 0]
+        graph[_REF_LOAD_IDS[n]] = {"class_type": "LoadImage", "inputs": {"image": "placeholder.png"}}
+    return graph
 
 
-def _real_bindings() -> dict:
-    return json.loads((_NICHE / "bindings.json").read_text(encoding="utf-8"))
+def _minimal_bindings() -> dict:
+    bindings = {"prompt": {"node_id": "491", "field": "prompt"},
+                "seed": {"node_id": "488", "field": "seed"},
+                "filename_prefix": {"node_id": "461", "field": "filename_prefix"}}
+    for n in range(1, 11):
+        bindings[f"ref_{n}"] = {"node_id": _REF_LOAD_IDS[n], "field": "image"}
+    return bindings
+
+
+@pytest.fixture
+def niche(tmp_path, monkeypatch):
+    """Изолированная ниша refs (профиль refs_niche) в tmp_path: profile.yaml с refs_enabled: true,
+    ref_1.png…ref_6.png, minimal workflow.json и bindings.json. Поиск профилей ниш направлен в tmp_path."""
+    from Generate.core import config_loader as cl
+    nishes = tmp_path / "Nishes"
+    folder = nishes / "refs_niche"
+    (folder / "refs").mkdir(parents=True)
+    (folder / "profile.yaml").write_text("refs_enabled: true\n", encoding="utf-8")
+    for n in range(1, 7):
+        (folder / "refs" / f"ref_{n}.png").write_bytes(b"x" * n)
+    (folder / "workflow.json").write_text(json.dumps(_minimal_graph()), encoding="utf-8")
+    (folder / "bindings.json").write_text(json.dumps(_minimal_bindings()), encoding="utf-8")
+    monkeypatch.setattr(cl, "NISHES_DIR", nishes)
+    return folder
+
+
+def _graph(niche) -> dict:
+    return json.loads((niche / "workflow.json").read_text(encoding="utf-8"))
+
+
+def _bindings(niche) -> dict:
+    return json.loads((niche / "bindings.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(autouse=True)
@@ -44,9 +88,9 @@ def _reset_profile_type():
     cc.set_profile_type(None)
 
 
-def _inject(refs, image=True):
+def _inject(niche, refs, image=True):
     cc.set_profile_type("image" if image else "video")
-    return cc.inject_workflow(_real_graph(), _real_bindings(), "промпт", 1, 7, "clip", refs=refs)
+    return cc.inject_workflow(_graph(niche), _bindings(niche), "промпт", 1, 7, "clip", refs=refs)
 
 
 # ---------------------------------------------------------------- 1.1 _entry_refs
@@ -76,16 +120,16 @@ def test_entry_refs_empty_list_is_kept():
 
 # ---------------------------------------------------------------- 1.2 / 1.3: латент для refs=()
 
-def test_zero_refs_strips_all_loadimage_nodes():
-    out = _inject(())
+def test_zero_refs_strips_all_loadimage_nodes(niche):
+    out = _inject(niche, ())
     loads = [k for k, n in out.items() if n.get("class_type") == "LoadImage"]
     assert loads == []
     prompt_inputs = out["491"]["inputs"]
     assert not [k for k in prompt_inputs if k.startswith("images.image_")]
 
 
-def test_zero_refs_replaces_ksampler_latent_with_1920x1088():
-    out = _inject(())
+def test_zero_refs_replaces_ksampler_latent_with_1920x1088(niche):
+    out = _inject(niche, ())
     link = out["488"]["inputs"]["latent_image"]
     assert link[0] != "491"  # больше не латент узла промпта
     node = out[link[0]]
@@ -93,56 +137,56 @@ def test_zero_refs_replaces_ksampler_latent_with_1920x1088():
     assert node["inputs"] == {"width": 1920, "height": 1088, "batch_size": 1}
 
 
-def test_zero_refs_new_node_id_does_not_collide():
-    out = _inject(())
-    original = set(_real_graph())
+def test_zero_refs_new_node_id_does_not_collide(niche):
+    out = _inject(niche, ())
+    original = set(_graph(niche))
     new_ids = set(out) - original
     assert len(new_ids) == 1
 
 
-def test_zero_refs_keeps_future_ref_slots_in_bindings():
+def test_zero_refs_keeps_future_ref_slots_in_bindings(niche):
     # refs=[] не удаляет привязки ref_7..10 (они нужны задачам с этими номерами) и не меняет словарь привязок
-    bindings = _real_bindings()
+    bindings = _bindings(niche)
     snapshot = copy.deepcopy(bindings)
     cc.set_profile_type("image")
-    cc.inject_workflow(_real_graph(), bindings, "промпт", 1, 7, "clip", refs=())
+    cc.inject_workflow(_graph(niche), bindings, "промпт", 1, 7, "clip", refs=())
     assert bindings == snapshot
     assert all(f"ref_{n}" in bindings for n in range(1, 11))
     assert bindings["ref_7"]["node_id"] == "507"
 
 
-def test_refs_none_leaves_latent_link_unchanged():
-    out = _inject(None)
+def test_refs_none_leaves_latent_link_unchanged(niche):
+    out = _inject(niche, None)
     assert out["488"]["inputs"]["latent_image"] == ["491", 2]
 
 
-def test_refs_one_leaves_latent_link_unchanged():
-    out = _inject((1,))
+def test_refs_one_leaves_latent_link_unchanged(niche):
+    out = _inject(niche, (1,))
     assert out["488"]["inputs"]["latent_image"] == ["491", 2]
 
 
-def test_zero_refs_video_profile_does_not_replace_latent():
+def test_zero_refs_video_profile_does_not_replace_latent(niche):
     # профиль видео (ltx25 и прочие): латент не трогаем, даже при refs=()
     # у видео обязательна привязка num_frames; в image-нише её нет, поэтому в тесте она добавляется
     # на безвредное поле узла 488 (значение не проверяется, важен только латент)
     cc.set_profile_type("video")
-    bindings = _real_bindings()
+    bindings = _bindings(niche)
     bindings["num_frames"] = {"node_id": "488", "field": "denoise"}
-    out = cc.inject_workflow(_real_graph(), bindings, "промпт", 1, 7, "clip", refs=())
+    out = cc.inject_workflow(_graph(niche), bindings, "промпт", 1, 7, "clip", refs=())
     assert out["488"]["inputs"]["latent_image"] == ["491", 2]
 
 
-def test_zero_refs_non_qwen_latent_source_untouched():
-    graph = _real_graph()
+def test_zero_refs_non_qwen_latent_source_untouched(niche):
+    graph = _graph(niche)
     graph["488"]["inputs"]["latent_image"] = ["5", 0]
     graph["5"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}}
     cc.set_profile_type("image")
-    out = cc.inject_workflow(graph, _real_bindings(), "p", 1, 7, "clip", refs=())
+    out = cc.inject_workflow(graph, _bindings(niche), "p", 1, 7, "clip", refs=())
     assert out["488"]["inputs"]["latent_image"] == ["5", 0]
 
 
-def test_target_size_rounds_height_up_to_32():
-    assert cc._target_size(_real_graph()) == (1920, 1088)
+def test_target_size_rounds_height_up_to_32(niche):
+    assert cc._target_size(_graph(niche)) == (1920, 1088)
 
 
 def test_target_size_without_imagescale_is_error():
@@ -274,18 +318,18 @@ def _dispatch(profile, entry, role="video", photo_profile=None, previews=None):
 _ENTRY = {"prompt": "текст", "num_frames": 1}
 
 
-def test_dispatch_generated_refs_from_extra_are_sent():
-    payload = _dispatch("cartoon_photos", {**_ENTRY, "extra": {"refs": [2]}})
+def test_dispatch_generated_refs_from_extra_are_sent(niche):
+    payload = _dispatch("refs_niche", {**_ENTRY, "extra": {"refs": [2]}})
     assert payload["refs"] == [2]
 
 
-def test_dispatch_top_level_refs_still_sent():
-    payload = _dispatch("cartoon_photos", {**_ENTRY, "refs": [1, 6]})
+def test_dispatch_top_level_refs_still_sent(niche):
+    payload = _dispatch("refs_niche", {**_ENTRY, "refs": [1, 6]})
     assert payload["refs"] == [1, 6]
 
 
-def test_dispatch_no_refs_on_refs_profile_sends_empty_list():
-    payload = _dispatch("cartoon_photos", dict(_ENTRY))
+def test_dispatch_no_refs_on_refs_profile_sends_empty_list(niche):
+    payload = _dispatch("refs_niche", dict(_ENTRY))
     assert payload["refs"] == []
 
 
@@ -299,17 +343,17 @@ def test_dispatch_no_refs_on_zimage_omits_field():
     assert "refs" not in payload
 
 
-def test_dispatch_preview_without_refs_on_refs_profile_sends_empty_list():
+def test_dispatch_preview_without_refs_on_refs_profile_sends_empty_list(niche):
     from types import SimpleNamespace
     preview = SimpleNamespace(x=1, y=1, prompt="p", seed=3, refs=None, card="", status="", filename="preview_1_1.png")
-    payload = _dispatch("cartoon_photos", dict(_ENTRY), role="photo", photo_profile="cartoon_photos",
+    payload = _dispatch("refs_niche", dict(_ENTRY), role="photo", photo_profile="refs_niche",
                         previews={5: preview})
     assert payload["refs"] == []
 
 
-def test_profile_refs_enabled_reads_profile_yaml_generically():
+def test_profile_refs_enabled_reads_profile_yaml_generically(niche):
     from Generate.core import config_loader as cl
-    assert cl.profile_refs_enabled("cartoon_photos") is True
+    assert cl.profile_refs_enabled("refs_niche") is True
     assert cl.profile_refs_enabled("ltx25") is False
     assert cl.profile_refs_enabled("zimage_turbo") is False
     assert cl.profile_refs_enabled("") is False

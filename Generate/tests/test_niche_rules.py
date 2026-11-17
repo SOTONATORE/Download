@@ -207,8 +207,10 @@ def test_cartoon_profile_reports_relaxed_rules_and_text_language():
     assert text_language == "srt"
 
 
-def test_cartoon_refs_folder_counts_six():
-    assert gp.count_ref_files(NICHE_DIR / "refs", "cartoon_photos") == 6
+def test_six_refs_folder_counts_six(tmp_path):
+    # Папка refs создаётся в tmp_path (реальная папка ниши не читается)
+    _make_refs(tmp_path / "refs", 6)
+    assert gp.count_ref_files(tmp_path / "refs", "niche") == 6
 
 
 def test_profile_without_new_keys_behaves_as_before():

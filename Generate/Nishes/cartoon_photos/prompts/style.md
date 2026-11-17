@@ -26,7 +26,7 @@ c) Story characters, for example a caveman in a fur or a second conversational p
 
 On-frame text is neat hand-drawn uppercase black marker lettering, as in the sketch screenshots. Accent colors: bright red for the key word or number, green, or white on a dark background. Faded pale grey is for inactive labels. The language of all on-frame text is frame_language, as named in the task.
 
-A text is either one short phrase of 1 to 4 words, taken whole from a single sentence of the segment and written exactly as in the subtitles, or labels for one object, with one word for each part, using at most 4 parts. Use only one text phrase in each frame. Text beside a scene uses 1 to 4 words that carry the main point of the segment. Separate text-only slides, with no scene, are at most 1 in 5 clips. Each prompt states its words in full, in the uppercase marker style above.
+A text is either one short phrase of 1 to 4 words, taken whole from a single sentence of the segment and written exactly as in the subtitles, or labels for one object, with one word for each part, using at most 4 parts. Two modes apply. a) Text-only frames, such as a text slide with a mini icon or a card: exactly one text phrase per frame. b) Comparison and timeline frames, layouts b, c and d: one main title plus the short labels or dates that the layout requires, and no other text. Text beside a scene uses 1 to 4 words that carry the main point of the segment. Separate text-only slides, with no scene, are at most 1 in 5 clips. Each prompt states its words in full, in the uppercase marker style above.
 
 Crossing out: two red diagonal brush strokes over the scene show that something is missing, wrong or a myth. Name the crossed-out element in the prompt and place it in the scene.
 

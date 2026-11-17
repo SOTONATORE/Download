@@ -77,6 +77,14 @@ def _hero_paragraph():
     return paras[0]
 
 
+def test_cartoon_hero_placement_paragraph_has_no_ref_tags():
+    # Блок 6B: в абзаце о месте героя нет меток референсов (ref_N и <imageN>): ниша без референсов.
+    # Абзац читается из style.md во время теста; текст файла здесь не зашит.
+    para = _hero_paragraph()
+    assert "ref_" not in para
+    assert "<image" not in para
+
+
 def test_cartoon_style_has_hero_rules_and_no_negations():
     para = _hero_paragraph()
     # текст на кадре (reference 2 alone) и диаграммы: без героя

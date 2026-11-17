@@ -111,12 +111,19 @@ def test_copy_refuses_missing_source(tmp_path):
         srv.copy_niche_refs(refs, tmp_path / "input")
 
 
-def test_copy_of_real_cartoon_refs_matches_sizes(tmp_path):
+def test_copy_of_niche_refs_matches_sizes(tmp_path):
+    # Изолированная ниша в tmp_path: refs_enabled: true, ref_1.png…ref_6.png разного размера
+    nishes = tmp_path / "Nishes"
+    profile_dir = nishes / "refs_niche"
+    (profile_dir / "refs").mkdir(parents=True)
+    (profile_dir / "profile.yaml").write_text("refs_enabled: true\n", encoding="utf-8")
+    for i in range(1, 7):
+        (profile_dir / "refs" / f"ref_{i}.png").write_bytes(b"x" * (i * 100))
     inp = tmp_path / "input"
-    names = srv.prepare_niche_refs(NICHE_DIR, NICHE_ROOT, inp)
+    names = srv.prepare_niche_refs(profile_dir, nishes, inp)
     assert names == [f"ref_{i}.png" for i in range(1, 7)]
     for name in names:
-        assert (inp / name).stat().st_size == (NICHE_DIR / "refs" / name).stat().st_size
+        assert (inp / name).stat().st_size == (profile_dir / "refs" / name).stat().st_size
 
 
 def test_non_niche_profile_is_not_copied(tmp_path):
