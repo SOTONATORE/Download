@@ -372,8 +372,9 @@ _CONTENT_RX = (
         r"pillows?|bundles?|cloths?|rags?|ropes?|strings?|stitch\w*|sew\w*|sewing|stacking|stacks? of|"
         r"tuck\w*|knots?|knotting|folding|dung|cakes?|buckets?|shovels?|scythes?|sickles?|jugs?|bottles?|"
         r"spindles?|skeins?|twigs?|pebbles?|pick(?:s|ing)? up|picked up)\b", re.IGNORECASE)),
+    # «yell\w*» давал ложное срабатывание на цвет «yellow»: формы «yell», «yells», «yelling», «yelled» перечисляем явно
     (PROBLEM_SPEECH, re.compile(
-        r"\b(?:says?|said|speaks?|speaking|spoke|talks?|talking|talked|shout\w*|yell\w*|cry|cries|crying|cried|"
+        r"\b(?:says?|said|speaks?|speaking|spoke|talks?|talking|talked|shout\w*|yells?|yelling|yelled|cry|cries|crying|cried|"
         r"laugh\w*|whisper\w*|asks?|asking|asked|answers?|answering|answered|repl(?:y|ies|ied)|sings?|singing|"
         r"sang|lips? (?:move|moves|moving|part|parts|open|opens|tremble|trembles|quiver|quivers)|moving lips|"
         r"mouth (?:moves|opens|is open|open)|dialogue|conversation|gestures?|gesturing|"
