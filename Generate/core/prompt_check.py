@@ -156,6 +156,9 @@ PROBLEM_OBJECT_SET = "object_set"
 PROBLEM_THICK_VECTOR = "thick_vector_style"
 # незаконченный текст в кадре (надпись обрывается на служебном слове): только при rules dangling_text_check: true
 PROBLEM_DANGLING_TEXT = "dangling_text_fragment"
+# надпись в кадре не из реплики текущего сегмента: только при dangling_text_check: true и переданном segment_text
+PROBLEM_LETTERING_NOT_IN_SEGMENT = "lettering_not_in_segment"
+LETTERING_SEGMENT_HINT_EN = "copy the on-frame text exactly from the current subtitle line only"
 # английская подсказка для повтора: дописать текст в кадре до полной фразы
 DANGLING_TEXT_HINT_EN = "finish the in-frame text as a complete 1 to 4 word phrase"
 # метки <imageN> и ref_N в промпте профиля без референсов (refs_enabled: false)
@@ -175,6 +178,7 @@ _PROBLEM_EN = {
     PROBLEM_CAMERA_MOTION: "camera motion",
     PROBLEM_THICK_VECTOR: THICK_VECTOR_HINT_EN,
     PROBLEM_DANGLING_TEXT: DANGLING_TEXT_HINT_EN,
+    PROBLEM_LETTERING_NOT_IN_SEGMENT: LETTERING_SEGMENT_HINT_EN,
     PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
     PROBLEM_DUPLICATE_PROMPT: "the same prompt text as another clip",
 }
@@ -188,6 +192,7 @@ _PROBLEM_RU = {
     PROBLEM_REF_TAG: "метка <imageN> или ref_N без референсов",
     PROBLEM_DUPLICATE_PROMPT: "дубликат промпта",
     PROBLEM_DANGLING_TEXT: "незаконченный текст в кадре",
+    PROBLEM_LETTERING_NOT_IN_SEGMENT: "надпись не из реплики этого сегмента",
 }
 
 # Причины для журнала и для повторного запроса (русские), подписи для Gemini (английские), подсказки для Gemini.
@@ -605,8 +610,24 @@ def dangling_text_hits(text: str) -> list:
     return hits
 
 
+def _norm_lettering(text: str) -> str:
+    """Нормализация для сравнения надписи с репликой: нижний регистр, прямой апостроф, одиночные пробелы."""
+    return " ".join(text.replace(_TYPO_APOSTROPHE, "'").lower().split())
+
+
+def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
+    """Надписи в кадре, которых нет в реплике текущего сегмента (целая фраза как подстрока). Чистая функция."""
+    segment = _norm_lettering(segment_text or "")
+    out = []
+    for m in _LETTERING_RX.finditer(prompt or ""):
+        phrase = m.group(1).split(",", 1)[0].strip()
+        if phrase and _norm_lettering(phrase) not in segment:
+            out.append(phrase)
+    return out
+
+
 def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
-                  rules: Optional[RulesValues] = None) -> list:
+                  rules: Optional[RulesValues] = None, segment_text: Optional[str] = None) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     rules = rules or RulesValues()
@@ -637,6 +658,10 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
     # незаконченный текст в кадре: только при dangling_text_check: true (ключ не задан — проверки нет)
     if rules.dangling_text_check:
         problems += [make_problem(PROBLEM_DANGLING_TEXT, hit) for hit in dangling_text_hits(text)]
+    # надпись только из реплики текущего сегмента: без segment_text проверки нет
+    if rules.dangling_text_check and segment_text is not None:
+        problems += [make_problem(PROBLEM_LETTERING_NOT_IN_SEGMENT, hit)
+                     for hit in segment_lettering_mismatch(text, segment_text)]
     for code, fragment in content_hits(text, media, relaxed, max_characters, rules):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем

@@ -690,9 +690,11 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
         text += "Text that appears inside the frame is written in the on-frame language named in the next rule. "
     # незаконченный текст в кадре: одна фраза-инструкция модели только при rules dangling_text_check: true; иначе текст прежний
     if cfg.rules.dangling_text_check:
-        text += ("Any text placed in the frame must be a complete phrase of 1 to 4 words taken in full from the current "
-                 "sentence or from the Before or After context; never end the text on a preposition, article, conjunction, "
-                 "auxiliary verb or the middle of a sentence. If no complete phrase fits, write no text for that frame. ")
+        text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the subtitle line of the "
+                 "current segment only. The Before and After context is for understanding the meaning only; never copy "
+                 "words from it into on-frame text. Never end the text on a preposition, article, conjunction, "
+                 "auxiliary verb or the middle of a sentence. If the current segment has no complete phrase to copy, "
+                 "write no on-frame text for that frame. ")
     if cfg.text_language is None:
         return text + "Always write the output in English."
     if not cfg.frame_language:
@@ -1462,10 +1464,11 @@ def _rework_gate_open(cfg: PromptConfig, r: PromptResult) -> bool:
     return bool(cfg.rework_style_flag_without_refs) and _only_negation_flag(r.review_reason)
 
 
-def _find_all_problems(text: str, cfg: PromptConfig, refs=None) -> list:
+def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
-    refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним."""
-    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules)
+    refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним.
+    segment_text: реплика текущего сегмента; надпись в кадре проверяется по ней (только при dangling_text_check)."""
+    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules, segment_text)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if not cfg.refs_enabled:
@@ -1710,7 +1713,7 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     for n in list(final):
         r = final[n]
         if r.prompt.strip():
-            found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"))
+            found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"), builder.texts.get(n))
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
             if not found and _rework_gate_open(builder.cfg, r):
@@ -2055,7 +2058,8 @@ class _WaveJob:
             if builder.cfg.refs_enabled and rr_fix is not None and rr_fix.extra.get("refs") is not None:
                 c.extra["refs"] = rr_fix.extra["refs"]   # новый валидный refs ответа заменяет старый
             ref_bad = [p.reason for p in fix_problems if p.num == c.num and p.reason.startswith("refs:")]
-            found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"))  # проверка по сырому тексту, до стиля
+            found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"),
+                                       builder.texts.get(c.num))  # проверка по сырому тексту, до стиля
             if ref_bad:
                 found = list(dict.fromkeys(found + _ref_fix_problems(c.prompt_raw, None, ref_bad)))
             # Флаг разбора ответа на исправление (стиль, длина, формат): клип без находок по сырому тексту, но с флагом,
