@@ -586,11 +586,6 @@ _THICK_VECTOR_RX = re.compile(
 
 # Надпись в кадре: текст после слова «lettering» и двоеточия до точки; берётся фрагмент до первой запятой
 _LETTERING_RX = re.compile(r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)", re.IGNORECASE)
-
-
-def frame_has_lettering(prompt) -> bool:
-    """Есть ли в промпте надпись в кадре (то же правило, что у проверки надписи): True при любом совпадении."""
-    return _LETTERING_RX.search(prompt or "") is not None
 # служебные слова, на которых надпись не может закончиться
 # Служебные слова, на которых надпись в кадре не может закончиться (ключи в нижнем регистре, апостроф прямой).
 DANGLING_TEXT_WORDS = frozenset({
@@ -603,6 +598,11 @@ DANGLING_TEXT_WORDS = frozenset({
 # Типографский апостроф и хвостовая пунктуация последнего слова надписи
 _TYPO_APOSTROPHE = "\u2019"
 _TRAILING_PUNCT_RX = re.compile(r"[.,!?;:\u2026\"\u201d\u00bb)]+$")
+
+
+def frame_has_lettering(prompt) -> bool:
+    """Есть ли в промпте надпись в кадре (то же правило, что у проверки надписи): True при любом совпадении."""
+    return _LETTERING_RX.search(prompt or "") is not None
 
 
 def dangling_text_hits(text: str) -> list:
