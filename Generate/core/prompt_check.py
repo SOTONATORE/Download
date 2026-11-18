@@ -615,13 +615,31 @@ def _norm_lettering(text: str) -> str:
     return " ".join(text.replace(_TYPO_APOSTROPHE, "'").lower().split())
 
 
+# Слова-отрицания перед фразой надписи (нижний регистр, прямой апостроф); токен слова — \w с апострофом
+_NEGATION_WORDS = frozenset({
+    "can't", "cannot", "don't", "not", "never", "no", "won't", "isn't", "aren't",
+    "doesn't", "didn't", "without",
+})
+_WORD_TOKEN_RX = re.compile(r"[\w']+")
+
+
 def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
     """Надписи в кадре, которых нет в реплике текущего сегмента (целая фраза как подстрока). Чистая функция."""
     segment = _norm_lettering(segment_text or "")
     out = []
     for m in _LETTERING_RX.finditer(prompt or ""):
         phrase = m.group(1).split(",", 1)[0].strip()
-        if phrase and _norm_lettering(phrase) not in segment:
+        if not phrase:
+            continue
+        norm = _norm_lettering(phrase)
+        if norm not in segment:
+            out.append(phrase)
+            continue
+        # Русский комментарий: фраза есть в реплике, но если перед её первым вхождением
+        # в трёх словах стоит отрицание («can't start a fire»), надпись всё равно считается ошибочной
+        idx = segment.find(norm)
+        before = _WORD_TOKEN_RX.findall(segment[:idx])[-3:]
+        if any(w in _NEGATION_WORDS for w in before):
             out.append(phrase)
     return out
 
