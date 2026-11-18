@@ -31,7 +31,8 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
-                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items)
+                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
+                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -42,7 +43,8 @@ except ImportError:  # pragma: no cover
                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
-                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items)
+                           PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
+                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -1464,11 +1466,26 @@ def _rework_gate_open(cfg: PromptConfig, r: PromptResult) -> bool:
     return bool(cfg.rework_style_flag_without_refs) and _only_negation_flag(r.review_reason)
 
 
-def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None) -> list:
+# Повтор 4 и далее для клипа, у которого все находки — надписи: кадр без текста (только при dangling_text_check)
+TEXTLESS_FROM_ROUND = 4
+_LETTERING_CODES = frozenset({PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT})
+TEXTLESS_REWORK_TEXT = ("Rewrite this still frame with NO on-frame text at all. Keep the subject of the segment as a scene, "
+                        "a diagram or a character, and describe the action or object in plain words. Do not quote any phrase.")
+
+
+def _textless_round(cfg: PromptConfig, pending: list, req_round: int) -> bool:
+    """Клип на запросе req_round (с 1): все находки pending — только надписи. Без dangling_text_check или до 4-го круга — False."""
+    if not cfg.rules.dangling_text_check or req_round < TEXTLESS_FROM_ROUND or not pending:
+        return False
+    return {problem_code(p) for p in pending} <= _LETTERING_CODES
+
+
+def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None, textless: bool = False) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним.
     segment_text: реплика текущего сегмента; надпись в кадре проверяется по ней (только при dangling_text_check)."""
-    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules, segment_text)
+    problems = find_problems(text, cfg.media, cfg.relaxed_rules, cfg.max_characters, cfg.rules, segment_text,
+                             textless=textless)
     if cfg.media == "image":
         problems += [make_problem(PROBLEM_CAMERA_MOTION, m) for m in find_camera_motion(text)]
     if not cfg.refs_enabled:
@@ -2022,6 +2039,9 @@ class _WaveJob:
         log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
                  self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
+                 # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
+                 + (" " + TEXTLESS_REWORK_TEXT
+                    if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
                  + (f" Refs for segment_index {c.num}: "
                     f"{json.dumps(c.extra['refs']) if 'refs' in c.extra else 'missing or invalid, return a valid refs list'}."
                     if builder.cfg.refs_enabled else "")
@@ -2059,7 +2079,8 @@ class _WaveJob:
                 c.extra["refs"] = rr_fix.extra["refs"]   # новый валидный refs ответа заменяет старый
             ref_bad = [p.reason for p in fix_problems if p.num == c.num and p.reason.startswith("refs:")]
             found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"),
-                                       builder.texts.get(c.num))  # проверка по сырому тексту, до стиля
+                                       builder.texts.get(c.num),  # проверка по сырому тексту, до стиля
+                                       textless=_textless_round(builder.cfg, c.rework_pending, c.rework_round))
             if ref_bad:
                 found = list(dict.fromkeys(found + _ref_fix_problems(c.prompt_raw, None, ref_bad)))
             # Флаг разбора ответа на исправление (стиль, длина, формат): клип без находок по сырому тексту, но с флагом,

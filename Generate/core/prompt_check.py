@@ -158,6 +158,8 @@ PROBLEM_THICK_VECTOR = "thick_vector_style"
 PROBLEM_DANGLING_TEXT = "dangling_text_fragment"
 # надпись в кадре не из реплики текущего сегмента: только при dangling_text_check: true и переданном segment_text
 PROBLEM_LETTERING_NOT_IN_SEGMENT = "lettering_not_in_segment"
+# текст в кадре у клипа, которому после 3 кругов нужен кадр без текста: только при textless=True и dangling_text_check: true
+PROBLEM_TEXT_IN_TEXTLESS_FRAME = "text_in_textless_frame"
 LETTERING_SEGMENT_HINT_EN = "copy the on-frame text exactly from the current subtitle line only"
 # английская подсказка для повтора: дописать текст в кадре до полной фразы
 DANGLING_TEXT_HINT_EN = "finish the in-frame text as a complete 1 to 4 word phrase"
@@ -179,6 +181,7 @@ _PROBLEM_EN = {
     PROBLEM_THICK_VECTOR: THICK_VECTOR_HINT_EN,
     PROBLEM_DANGLING_TEXT: DANGLING_TEXT_HINT_EN,
     PROBLEM_LETTERING_NOT_IN_SEGMENT: LETTERING_SEGMENT_HINT_EN,
+    PROBLEM_TEXT_IN_TEXTLESS_FRAME: "this frame must contain no on-frame text; remove all lettering",
     PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
     PROBLEM_DUPLICATE_PROMPT: "the same prompt text as another clip",
 }
@@ -193,6 +196,7 @@ _PROBLEM_RU = {
     PROBLEM_DUPLICATE_PROMPT: "дубликат промпта",
     PROBLEM_DANGLING_TEXT: "незаконченный текст в кадре",
     PROBLEM_LETTERING_NOT_IN_SEGMENT: "надпись не из реплики этого сегмента",
+    PROBLEM_TEXT_IN_TEXTLESS_FRAME: "текст в кадре, который должен быть без текста",
 }
 
 # Причины для журнала и для повторного запроса (русские), подписи для Gemini (английские), подсказки для Gemini.
@@ -582,6 +586,11 @@ _THICK_VECTOR_RX = re.compile(
 
 # Надпись в кадре: текст после слова «lettering» и двоеточия до точки; берётся фрагмент до первой запятой
 _LETTERING_RX = re.compile(r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)", re.IGNORECASE)
+
+
+def frame_has_lettering(prompt) -> bool:
+    """Есть ли в промпте надпись в кадре (то же правило, что у проверки надписи): True при любом совпадении."""
+    return _LETTERING_RX.search(prompt or "") is not None
 # служебные слова, на которых надпись не может закончиться
 # Служебные слова, на которых надпись в кадре не может закончиться (ключи в нижнем регистре, апостроф прямой).
 DANGLING_TEXT_WORDS = frozenset({
@@ -645,7 +654,8 @@ def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
 
 
 def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
-                  rules: Optional[RulesValues] = None, segment_text: Optional[str] = None) -> list:
+                  rules: Optional[RulesValues] = None, segment_text: Optional[str] = None,
+                  textless: bool = False) -> list:
     """Список сообщений вида «код: «фрагмент»», по одному на нарушение. Пусто, если нарушений нет."""
     text = prompt or ""
     rules = rules or RulesValues()
@@ -680,6 +690,9 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
     if rules.dangling_text_check and segment_text is not None:
         problems += [make_problem(PROBLEM_LETTERING_NOT_IN_SEGMENT, hit)
                      for hit in segment_lettering_mismatch(text, segment_text)]
+    # кадр без текста (повтор 4 и далее): надпись в кадре остаётся — нарушение; только при textless=True и dangling_text_check
+    if textless and rules.dangling_text_check and frame_has_lettering(text):
+        problems += [make_problem(PROBLEM_TEXT_IN_TEXTLESS_FRAME, m.group(0)) for m in _LETTERING_RX.finditer(text)]
     for code, fragment in content_hits(text, media, relaxed, max_characters, rules):
         problems.append(make_problem(code, fragment))
     # одинаковые сообщения (например, «map» дважды) не повторяем
