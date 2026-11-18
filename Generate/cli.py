@@ -477,6 +477,14 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
+    # диагностика сырых ответов: блок debug в profile.yaml; без блока или false — ключи не передаются, как раньше
+    dump_raw = _profile_nested_flag(profile_lines, "debug", "dump_raw_responses", profile, default="false")
+    if dump_raw not in ("true", "false"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml debug.dump_raw_responses должен быть true или false.")
+    if dump_raw == "true":
+        kwargs["dump_raw_responses"] = True
+        kwargs["niche"] = profile
     return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset, **kwargs)
 
 
@@ -485,6 +493,24 @@ def _profile_flag(lines: list, key: str, profile: str, default: str) -> str:
     for ln in lines:
         if ln.startswith(key + ":"):
             return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
+    return default
+
+
+def _profile_nested_flag(lines: list, section: str, key: str, profile: str, default: str) -> str:
+    """Поле второго уровня (key внутри блока section:) из profile.yaml строкой, без PyYAML. Нет блока или поля — default.
+
+    Блок — строка без отступа «section:»; поле — строка с отступом «key: значение» внутри него. Пустые строки и
+    строки-комментарии пропускаются; значение без комментария, в нижнем регистре."""
+    inside = False
+    for ln in lines:
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if not ln[0].isspace():
+            # Русский: новая строка верхнего уровня закрывает прошлый блок
+            inside = ln.split("#", 1)[0].strip() == section + ":"
+            continue
+        if inside and ln.strip().startswith(key + ":"):
+            return ln.strip().split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
     return default
 
 
@@ -856,10 +882,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     stage = "таймингов и промптов"
     try:
         timing = _build_timing(cfg, cfg.model_profile)
+        # сырой ответ (диагностика, только при debug.dump_raw_responses в профиле): <артефакт>/raw; без fail_fast
+        # каталог больше ни для чего не используется, поэтому прочие ниши не меняются
+        raw_dir = str(Path(args.artifact_dir) / "raw") if getattr(args, "artifact_dir", "") else None
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset,
-                                          **_srt_kwargs(cfg.model_profile, args.srt))
+                                          raw_dir=raw_dir, **_srt_kwargs(cfg.model_profile, args.srt))
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
-                                                 **_srt_kwargs(photo_profile, args.srt))
+                                                 raw_dir=raw_dir, **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"

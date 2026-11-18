@@ -141,6 +141,11 @@ class PromptConfig:
     niche_preset_file: Optional[str] = None
     # rules: значения prompts/rules.yaml папки ниши или модели; по умолчанию — значения прежнего поведения
     rules: RulesValues = field(default_factory=RulesValues)
+    # niche: имя ниши (папка профиля) для имён файлов сырых ответов; задаёт профиль; пусто — файлы не пишутся
+    niche: str = ""
+    # dump_raw_responses: диагностика — сырой ответ каждого запроса (батч, повтор формата, исправление) в raw_dir;
+    # по умолчанию выключено; разбор и тексты запросов от флага не зависят
+    dump_raw_responses: bool = False
 
     def __post_init__(self) -> None:
         # max_characters задаётся в rules.yaml; поле cfg.max_characters — то же значение (сверяется)
@@ -1627,6 +1632,23 @@ def _dump_debug(cfg: PromptConfig, system, user) -> None:
         log.warning("Не удалось записать отладочные файлы промпта в папку %s.", folder)
 
 
+def _dump_response(cfg: PromptConfig, wave: str, rnd: int, batch: str, raw: str) -> None:
+    """Диагностика: сырой текст ответа модели пишется в <raw_dir>/<ниша>_<волна>_<круг>_<батч>.txt.
+
+    Круг 0 — главные батчи (первый ответ), круг N — исправления раунда N; батч — метка батча или номер пакета
+    исправления; повтор формата — метка с суффиксом r<k>. Только при dump_raw_responses и заданном raw_dir.
+    Сбой записи не поднимается: предупреждение с путём, без текста ответа. Файлы не удаляются."""
+    if not getattr(cfg, "dump_raw_responses", False) or not getattr(cfg, "raw_dir", None):
+        return
+    path = Path(cfg.raw_dir) / f"{cfg.niche}_{wave}_{rnd}_{batch}.txt"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(raw if isinstance(raw, str) else "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не удалось записать сырой ответ модели в файл %s (%s).", path, type(exc).__name__)
+
+
 def _fail_fast_stop(cfg: PromptConfig, batch_nums: list, bad_nums: list, slug: str, raw: str,
                     rule_label: Optional[str] = None, system: Optional[str] = None,
                     user: Optional[str] = None) -> None:
@@ -1665,12 +1687,16 @@ _DUP_REASON = "номер повторяется в ответе"   # причи
 
 
 def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch: BatchRequest,
-               tag: str = "") -> dict:
+               tag: str = "", dump: Optional[Callable[[str, str], None]] = None) -> dict:
     """Запрос батча + один retry для номеров с нарушениями. Возвращает num -> PromptResult.
 
-    tag: префикс строк журнала батча (имя волны в пуле, например «[видео] »); без пула пустой."""
+    tag: префикс строк журнала батча (имя волны в пуле, например «[видео] »); без пула пустой.
+    dump: необязательный приёмник сырого ответа (диагностика): dump(суффикс, текст); «» — первый ответ,
+    «r<k>» — повтор формата. Без него поведение прежнее."""
     expected = list(batch.nums)
     raw = transport.generate_json(model, batch.system, batch.user, batch.schema)
+    if dump is not None:
+        dump("", raw)   # Русский: сырой ответ до разбора; разбор и повтор ниже не меняются
     results, problems = parse_and_validate(raw, expected, builder.cfg, builder.texts)
     final: dict = {n: results[n] for n in expected if _is_clean(results, n, problems)}
     bad = [n for n in expected if n not in final]
@@ -1702,11 +1728,13 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
         log.warning("%sБатч %s..%s: нет пригодного ответа по %d из %d записей, повторный запрос.",
                     tag, expected[0], expected[-1], len(fmt_bad), len(expected))
         retry = builder.batches(fmt_bad)  # fmt_bad <= batch_size: ровно один батч
-        for rb in retry:
+        for k, rb in enumerate(retry, 1):
             note = _retry_note(rb.nums, problems, builder.cfg.max_characters, builder.cfg.rules.animals_count)
             if note:
                 rb = replace(rb, user=rb.user + note)
             raw2 = transport.generate_json(model, rb.system, rb.user, rb.schema)
+            if dump is not None:
+                dump(f"r{k}", raw2)   # Русский: сырой ответ повтора формата (диагностика)
             res2, prob2 = parse_and_validate(raw2, list(rb.nums), builder.cfg, builder.texts)
             for n in rb.nums:
                 if _is_clean(res2, n, prob2):
@@ -1887,8 +1915,12 @@ class _WaveJob:
         log.info("%sБатч %s из %d: начало, клипов в батче: %d.", self.tag, label, self.base_count,
                  len(batch.nums), extra=KEY_EVENT_EXTRA)
         t_batch = time.monotonic()
+        def dump(suffix: str, text: str) -> None:
+            # Русский: сырой ответ батча (круг 0); имя — волна, круг 0, метка батча и суффикс повтора
+            _dump_response(self.builder.cfg, self.wave, 0, label + suffix, text)
+
         try:
-            batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag)
+            batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag, dump=dump)
         except GeminiRuntimeError as exc:
             if getattr(exc, "code", "") != EMPTY_LENGTH_CODE:
                 raise  # прочие ошибки: как раньше, волна останавливается
@@ -2050,6 +2082,8 @@ class _WaveJob:
         try:
             t_req = time.monotonic()
             raw = logged.generate_json(self.model, builder.system, user, builder.schema)
+            # Русский: сырой ответ исправления — до разбора (диагностика); круг rnd, номер пакета fix_no
+            _dump_response(builder.cfg, self.wave, rnd, str(fix_no), raw)
             results, fix_problems = parse_and_validate(raw, nums, builder.cfg, builder.texts)
         except BaseException as exc:
             # пакет не выполнен (запрос или разбор): каждый клип пакета помечается на проверку с причиной.
