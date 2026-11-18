@@ -885,10 +885,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         # сырой ответ (диагностика, только при debug.dump_raw_responses в профиле): <артефакт>/raw; без fail_fast
         # каталог больше ни для чего не используется, поэтому прочие ниши не меняются
         raw_dir = str(Path(args.artifact_dir) / "raw") if getattr(args, "artifact_dir", "") else None
+        # raw_dir — только при заданном --artifact-dir: без него вызов прежний, без лишнего именованного аргумента
+        raw_kw = {"raw_dir": raw_dir} if raw_dir else {}
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset,
-                                          raw_dir=raw_dir, **_srt_kwargs(cfg.model_profile, args.srt))
+                                          **raw_kw, **_srt_kwargs(cfg.model_profile, args.srt))
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
-                                                 raw_dir=raw_dir, **_srt_kwargs(photo_profile, args.srt))
+                                                 **raw_kw, **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"

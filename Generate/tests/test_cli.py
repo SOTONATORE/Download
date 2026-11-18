@@ -180,7 +180,7 @@ def run_env(monkeypatch):
     FakeVast.credit_error = None
     monkeypatch.setattr(cli, "_build_timing", lambda cfg, profile: "TIMING")
     monkeypatch.setattr(cli, "_build_prompt_config",
-                        lambda profile, batch_size, preset="none": ("CFG", profile, batch_size))
+                        lambda profile, batch_size, preset="none", **kw: ("CFG", profile, batch_size))
     monkeypatch.setattr(cli, "_make_transport", lambda cfg, family: "TRANSPORT")
     monkeypatch.setattr(cli, "_make_release_store", lambda repo: ("STORE", repo))
     monkeypatch.setattr(cli, "VastClient", FakeVast)
@@ -1284,7 +1284,7 @@ def test_preset_reaches_prompt_config(capsys, run_env, missing_file, monkeypatch
     (tmp_profiles.presets / "pz.md").write_text("текст пресета", encoding="utf-8")
     seen = []
 
-    def fake_build(profile, batch_size, preset="none"):
+    def fake_build(profile, batch_size, preset="none", **kw):
         seen.append(preset)
         return ("CFG",)
 

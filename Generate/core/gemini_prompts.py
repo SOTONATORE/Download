@@ -1917,7 +1917,7 @@ class _WaveJob:
         t_batch = time.monotonic()
         def dump(suffix: str, text: str) -> None:
             # Русский: сырой ответ батча (круг 0); имя — волна, круг 0, метка батча и суффикс повтора
-            _dump_response(self.builder.cfg, self.wave, 0, label + suffix, text)
+            _dump_response(self.builder.cfg, getattr(self, "wave", ""), 0, label + suffix, text)
 
         try:
             batch_res = _run_batch(logged, self.model, self.builder, batch, self.tag, dump=dump)
@@ -2083,7 +2083,7 @@ class _WaveJob:
             t_req = time.monotonic()
             raw = logged.generate_json(self.model, builder.system, user, builder.schema)
             # Русский: сырой ответ исправления — до разбора (диагностика); круг rnd, номер пакета fix_no
-            _dump_response(builder.cfg, self.wave, rnd, str(fix_no), raw)
+            _dump_response(builder.cfg, getattr(self, "wave", ""), rnd, str(fix_no), raw)
             results, fix_problems = parse_and_validate(raw, nums, builder.cfg, builder.texts)
         except BaseException as exc:
             # пакет не выполнен (запрос или разбор): каждый клип пакета помечается на проверку с причиной.
