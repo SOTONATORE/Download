@@ -32,6 +32,7 @@ Safe replacements for common concepts:
 - write head angled up, leaning forward or mid-step instead of tilting or moving;
 - write around, bordering or enclosing instead of framing;
 - describe the exact limb pose instead of gesture.
+- write round glass disc or magnifier instead of lens for a magnifying glass.
 
 # Character Canon
 

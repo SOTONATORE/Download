@@ -990,7 +990,8 @@ _STYLE_RULES = [
                 r"lens|shot\s+on\s+(?:a\s+|an\s+)?(?:camera|film)|aperture|focal\s+length)\b", re.I),
      "стиль: кино и камера",
      "Remove film and lens terms such as film grain, anamorphic, bokeh, depth of field, 35mm, lens, "
-     "aperture, focal length, shot on. Describe only the scene and its one camera move."),
+     "aperture, focal length, shot on. For a magnifying glass write round glass disc or magnifier, never lens. "
+     "Describe only the scene and its one camera move."),
     (re.compile(r"\b(?:illustrations?|cartoons?|anime|watercolou?r|oil\s+painting|sketch(?:es)?|"
                 r"stickmen?|pixel\s+art)\b", re.I),
      _ART_MEDIUM_REASON,
