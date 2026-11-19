@@ -17,3 +17,5 @@ sketch_style: false
 # Disabled so clean comic ink and rounded white callout or title borders do not trigger false-positive rework.
 forbid_thick_vector: false
 dangling_text_check: true
+# Disabled so campfire, stove and flame scenes do not trigger false-positive rework or hands-away-from-fire loops.
+fire_hands: allowed

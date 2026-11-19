@@ -321,12 +321,14 @@ class RulesValues:
     forbid_thick_vector: bool = False            # толстые контуры и векторный стиль запрещены (rules: forbid_thick_vector)
     sketch_style: bool = False                   # стиль эскиза (rules: sketch_style); отдельной проверки не включает
     dangling_text_check: bool = False            # незаконченный текст в кадре запрещён (rules: dangling_text_check)
+    fire_hands_allowed: bool = False             # руки рядом с огнём разрешены (rules: fire_hands; по умолчанию запрещены)
 
 
 def rule_skipped_codes(rules: RulesValues) -> frozenset:
     """Коды нарушений, которые правила ниши отключают (значение allowed). Правила безопасности сюда не входят."""
     pairs = ((rules.small_objects_allowed, PROBLEM_SMALL_OBJECT), (rules.speech_allowed, PROBLEM_SPEECH),
-             (rules.weapons_allowed, PROBLEM_WEAPON), (rules.close_faces_allowed, PROBLEM_CLOSE_FACE))
+             (rules.weapons_allowed, PROBLEM_WEAPON), (rules.close_faces_allowed, PROBLEM_CLOSE_FACE),
+             (rules.fire_hands_allowed, PROBLEM_FIRE_HANDS))
     return frozenset(code for allowed, code in pairs if allowed)
 
 
@@ -585,8 +587,21 @@ _THICK_VECTOR_RX = re.compile(
 )
 
 
-# Надпись в кадре: текст после слова «lettering» и двоеточия до точки; берётся фрагмент до первой запятой
-_LETTERING_RX = re.compile(r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)", re.IGNORECASE)
+# Разделитель фразы от пояснения после запятой (числа с запятой вроде 300,000 не режутся)
+_LETTERING_COMMA_RE = re.compile(r"(?<!\d),(?!\d)")
+# Слова описания шрифта между «in» и «lettering» в шаблонах style.md («in bold black uppercase lettering»)
+_LETTERING_FONT_WORDS = (
+    r"(?:bold|black|dark[- ]red|dark|red|gold|golden|muted|uppercase|lowercase|"
+    r"capital|block|hand|handwritten|clean|crisp|white|thin|thick|heavy|medium|"
+    r"simple|solid|ink|colou?red|style|print|printed|[a-z]+-[a-z]+)"
+)
+# Надпись в кадре: «lettering ... : <текст>», «reading <текст> in ... lettering» и «lettering ... reading <текст>»
+_LETTERING_RX = re.compile(
+    r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)"
+    r"|\bread(?:s|ing)\s+([^.\n;]+?)\s+in\s+(?:" + _LETTERING_FONT_WORDS + r"\s+){0,10}lettering\b"
+    r"|\blettering\b[^:.,;\n]{0,60}\bread(?:s|ing)\s+(?!:)([^.\n;]+)",
+    re.IGNORECASE,
+)
 # служебные слова, на которых надпись не может закончиться
 # Служебные слова, на которых надпись в кадре не может закончиться (ключи в нижнем регистре, апостроф прямой).
 DANGLING_TEXT_WORDS = frozenset({
@@ -601,6 +616,12 @@ _TYPO_APOSTROPHE = "\u2019"
 _TRAILING_PUNCT_RX = re.compile(r"[.,!?;:\u2026\"\u201d\u00bb)]+$")
 
 
+def _lettering_phrase(match) -> str:
+    """Текст надписи из совпадения _LETTERING_RX (первая непустая группа альтернативы)."""
+    raw = next((g for g in match.groups() if g is not None), "")
+    return _LETTERING_COMMA_RE.split(raw, maxsplit=1)[0].strip()
+
+
 def frame_has_lettering(prompt) -> bool:
     """Есть ли в промпте надпись в кадре (то же правило, что у проверки надписи): True при любом совпадении."""
     return _LETTERING_RX.search(prompt or "") is not None
@@ -610,7 +631,7 @@ def dangling_text_hits(text: str) -> list:
     """Надписи в кадре, оборванные на служебном слове (только при rules dangling_text_check: true)."""
     hits = []
     for m in _LETTERING_RX.finditer(text):
-        phrase = m.group(1).split(",", 1)[0].strip().replace(_TYPO_APOSTROPHE, "'")
+        phrase = _lettering_phrase(m).replace(_TYPO_APOSTROPHE, "'")
         words = phrase.split()
         if not words:
             continue
@@ -638,7 +659,7 @@ def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
     segment = _norm_lettering(segment_text or "")
     out = []
     for m in _LETTERING_RX.finditer(prompt or ""):
-        phrase = m.group(1).split(",", 1)[0].strip()
+        phrase = _lettering_phrase(m)
         if not phrase:
             continue
         norm = _norm_lettering(phrase)
@@ -732,6 +753,9 @@ def find_camera_motion(text: str) -> list:
     found = []
     for i, (word, _, _) in enumerate(words):
         if word not in CAMERA_ANCHOR_WORDS:
+            continue
+        # «frame height» / «frame width» задают размер объекта, а не движение рамки камеры
+        if word == "frame" and i + 1 < len(words) and words[i + 1][0] in ("height", "width"):
             continue
         lo = max(0, i - CAMERA_MOTION_WINDOW)
         hi = min(len(words), i + CAMERA_MOTION_WINDOW + 1)

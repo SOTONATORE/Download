@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +35,7 @@ log = logging.getLogger("Generate.orchestrator")
 PHOTO_NUM_FRAMES = 1        # фото: один промпт = один кадр; задаётся кодом, не из тайминга
 VIDEO_WAVE = "видео"        # имя волны видео в общем пуле батчей
 PHOTO_WAVE = "фото"         # имя волны фото в общем пуле батчей
+DUP_REWORK_MAX_PASSES = 3   # сколько проходов дедупликации делается, если переписанный клип совпал с другим
 
 
 @dataclass
@@ -386,12 +387,24 @@ def _raw_prompt(styled: str, style_text: str) -> str:
     return text
 
 
-def mark_duplicates_for_rework(prompts: dict, nums, style_text: str) -> list:
+def _with_dup_niche(cfg, dup_pass: int):
+    """Отдельный суффикс niche на время прохода дедупликации, чтобы дампы не перезаписывали основной раунд."""
+    if cfg is None or not getattr(cfg, "niche", ""):
+        return cfg
+    if is_dataclass(cfg):
+        return replace(cfg, niche=f"{cfg.niche}_dup{dup_pass}")
+    return cfg
+
+
+def mark_duplicates_for_rework(prompts: dict, nums, style_text: str, *,
+                               allow_extra_round: bool = False) -> list:
     """Клипы из групп одинаковых промптов, кроме первого номера группы, ставятся в очередь исправлений.
 
     Меняет записи prompts (словарь состояния; вызывать под замком). Первый номер группы (самый малый) не трогается.
     Клип с непустой очередью не меняется: его нарушение уже исправляется, повтор дубликата проверит барьер.
-    Клип на пределе кругов (REPAIR_ROUNDS) не ставится: очередь его всё равно не возьмёт. Возвращает номера, поставленные в очередь.
+    При allow_extra_round=False (по умолчанию) клип на пределе кругов (REPAIR_ROUNDS) не ставится; при
+    allow_extra_round=True (цикл _duplicate_rework) ему выделяется чистый счётчик кругов, чтобы он не остался
+    дубликатом после прошлых исправлений содержания. Возвращает номера, поставленные в очередь.
     """
     texts = {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(nums))}
     queued: list = []
@@ -402,8 +415,10 @@ def mark_duplicates_for_rework(prompts: dict, nums, style_text: str) -> list:
             if not isinstance(entry, dict) or entry.get("rework_pending"):
                 continue
             rework_round = int(entry.get("rework_round", 0) or 0)
-            if rework_round >= gp.REPAIR_ROUNDS:
+            if rework_round >= gp.REPAIR_ROUNDS and not allow_extra_round:
                 continue
+            if allow_extra_round:
+                rework_round = 0
             entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
             entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(first))]
             entry["rework_round"] = rework_round
@@ -417,9 +432,9 @@ def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, pro
     """Ниши с ключом fail_on_duplicate_prompts: одинаковые промпты разных клипов идут в очередь исправлений.
 
     Выполняется после обеих волн генерации и до итогового состояния. Для профилей без ключа ничего не делает
-    (ни чтения состояния, ни вызова модели). Исправление идёт тем же путём, что и очередь прошлого запуска:
-    шаги волн получают клипы через очередь (rework), круги и лимит REPAIR_ROUNDS прежние. Итоговую проверку
-    дубликатов делает verify_prompts после этого этапа.
+    (ни чтения состояния, ни вызова модели). Исправление повторяется до DUP_REWORK_MAX_PASSES проходов, чтобы
+    переписанный клип, совпавший с другим клипом прогона, тоже был переписан. Итоговую проверку дубликатов
+    делает verify_prompts после этого этапа.
     """
     if state is None:
         state = read_state(prompts_path)
@@ -432,32 +447,58 @@ def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, pro
         return state
     style_video = gp.preset_text(cfg.preset, cfg.niche_preset_file) if dup_video else ""
     style_photo = gp.preset_text(photo_cfg.preset, photo_cfg.niche_preset_file) if dup_photo else ""
-    with lock:
-        prompts = state.setdefault("prompts", {})
-        queued_video = mark_duplicates_for_rework(prompts, video, style_video) if dup_video else []
-        queued_photo = mark_duplicates_for_rework(prompts, photo, style_photo) if dup_photo else []
-        if not queued_video and not queued_photo:
+    managed = None
+    for dup_pass in range(1, DUP_REWORK_MAX_PASSES + 1):
+        with lock:
+            prompts = state.setdefault("prompts", {})
+            queued_video = mark_duplicates_for_rework(
+                prompts, video, style_video, allow_extra_round=True) if dup_video else []
+            queued_photo = mark_duplicates_for_rework(
+                prompts, photo, style_photo, allow_extra_round=True) if dup_photo else []
+            if not queued_video and not queued_photo:
+                return state
+            state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+            go.atomic_write_json(prompts_path, state)
+        queued = sorted(queued_video + queued_photo)
+        log.info("Дубликаты промптов (проход %d из %d): в очередь исправлений поставлено клипов %d: %s.",
+                 dup_pass, DUP_REWORK_MAX_PASSES, len(queued), gp._num_ranges(queued), extra=gp.KEY_EVENT_EXTRA)
+        if aborts:
+            loaded = read_state(prompts_path)
+            return loaded if loaded.get("prompts") else state
+        if managed is None:
+            managed = go.ManagedTransport(
+                watch, gemini_options.get("models", go.DEFAULT_MODELS),
+                rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+                rpd_limit=gemini_options.get("rpd_limit", 500))
+        dup_cfg = _with_dup_niche(cfg, dup_pass)
+        dup_photo_cfg = _with_dup_niche(photo_cfg, dup_pass)
+        if queued_video:
+            state = _video_step(queued_video, segments=segments, cfg=dup_cfg, watch=watch, prompts_path=prompts_path,
+                                profile=profile, timing=timing, gemini_options=gemini_options, errors=errors,
+                                aborts=aborts, managed=managed, state=state, lock=lock)
+        if queued_photo and not aborts:
+            _photo_step(queued_photo, segments=segments, photo_cfg=dup_photo_cfg, watch=watch, prompts_path=prompts_path,
+                        gemini_options=gemini_options, errors=errors, aborts=aborts, managed=managed,
+                        state=state, lock=lock)
+        loaded = read_state(prompts_path)
+        if loaded.get("prompts"):
+            state = loaded
+        if aborts:
             return state
-        state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
-        go.atomic_write_json(prompts_path, state)
-    queued = sorted(queued_video + queued_photo)
-    log.info("Дубликаты промптов: в очередь исправлений поставлено клипов %d: %s.",
-             len(queued), gp._num_ranges(queued), extra=gp.KEY_EVENT_EXTRA)
-    if aborts:
-        return read_state(prompts_path)   # волна уже остановлена жёсткой ошибкой: исправления не запускаются
-    managed = go.ManagedTransport(
-        watch, gemini_options.get("models", go.DEFAULT_MODELS),
-        rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
-        rpd_limit=gemini_options.get("rpd_limit", 500))
-    if queued_video:
-        state = _video_step(queued_video, segments=segments, cfg=cfg, watch=watch, prompts_path=prompts_path,
-                            profile=profile, timing=timing, gemini_options=gemini_options, errors=errors,
-                            aborts=aborts, managed=managed, state=state, lock=lock)
-    if queued_photo and not aborts:
-        _photo_step(queued_photo, segments=segments, photo_cfg=photo_cfg, watch=watch, prompts_path=prompts_path,
-                    gemini_options=gemini_options, errors=errors, aborts=aborts, managed=managed,
-                    state=state, lock=lock)
-    return read_state(prompts_path)
+    with lock:
+        prompts = state.get("prompts", {})
+        leftover = []
+        if dup_video:
+            leftover.extend(dc.find_duplicate_prompts(
+                {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(video))}))
+        if dup_photo:
+            leftover.extend(dc.find_duplicate_prompts(
+                {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(photo))}))
+    if leftover:
+        groups_text = "; ".join(", ".join(str(x) for x in g) for g in leftover)
+        log.warning("Дубликаты промптов: после %d проходов остались совпадающие группы: %s.",
+                    DUP_REWORK_MAX_PASSES, groups_text)
+    return state
 
 
 def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str, timing,

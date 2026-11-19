@@ -471,12 +471,12 @@ RULES_FILE_NAME = "rules.yaml"
 RULES_KEYS = ("max_characters", "animals_count", "max_people_per_image", "small_objects", "speech", "weapons",
               "close_faces", "static_frame", "emotion", "subject_source", "horses_vehicles_animals_max", "children",
               "scene_motion_wording", "object_sets", "allowed_shot_items", "forbid_thick_vector", "sketch_style",
-              "dangling_text_check")
+              "dangling_text_check", "fire_hands")
 _RULES_INT_KEYS = ("max_characters", "max_people_per_image", "horses_vehicles_animals_max")
 _RULES_BOOL_KEYS = ("animals_count", "static_frame", "forbid_thick_vector", "sketch_style", "dangling_text_check")
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
                         "weapons": "weapons_allowed", "close_faces": "close_faces_allowed",
-                        "object_sets": "object_sets_forbidden"}
+                        "object_sets": "object_sets_forbidden", "fire_hands": "fire_hands_allowed"}
 SCENE_MOTION_VALUES = ("keep", "drop")
 _NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
                  9: "nine", 10: "ten"}
@@ -675,7 +675,7 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
         + ("" if rv.small_objects_allowed else _SMALL_OBJECTS_LINE)
         + (_OBJECT_SET_LINE if rv.object_sets_forbidden else "")
         + _speech_line(rv)
-        + _FIRE_LINE
+        + ("" if rv.fire_hands_allowed else _FIRE_LINE)
         + _CHAOS_LINE
         + ("" if rv.weapons_allowed else _WEAPONS_LINE)
         + _ABSENT_LINE
@@ -850,8 +850,6 @@ def build_requests(segments: list, wanted_nums: list, cfg: PromptConfig) -> list
     """Список батчей (BatchRequest) для нужных номеров. Все проверки входа здесь, до транспорта."""
     b = _Builder(segments, wanted_nums, cfg)
     return b.batches(b.wanted)
-
-
 # ---------------------------------------------------------------------------
 # Разбор и проверка ответа
 # ---------------------------------------------------------------------------
@@ -1057,8 +1055,9 @@ def _parse_hint_en(item: str) -> str:
 # Английский текст повтора для клипа-дубликата. Текст модели: сцена должна стать заметно другой.
 DUPLICATE_REWORK_TEXT = (
     "This prompt is the same as the prompt of another clip. Rewrite it so the scene is visibly different: "
-    "change the subject's pose, a prop, the location or the action. Keep the segment's meaning and the subject type. "
-    "Output only the rewritten prompt.")
+    "change the layout, the main focal object, the setting or the character's pose and action. "
+    "Do not merely swap left and right, cloud placement, or grass and dirt colours. "
+    "Keep the segment's meaning and the subject type. Output only the rewritten prompt.")
 
 
 def _rework_text(problems: list) -> str:
@@ -1865,6 +1864,14 @@ def _nums_ranges(nums) -> str:
     return ", ".join(parts)
 
 
+def _dup_subtitle_note(c: PromptResult, texts: dict) -> str:
+    """Текст субтитра текущего сегмента для переписывания дубликата (только при PROBLEM_DUPLICATE_PROMPT)."""
+    if not any(problem_code(p) == PROBLEM_DUPLICATE_PROMPT for p in c.rework_pending):
+        return ""
+    seg_text = " ".join(str(texts.get(c.num) or "").split())
+    return f" Subtitle text for segment_index {c.num}: {seg_text}." if seg_text else ""
+
+
 class _WaveJob:
     """Батчи одной волны и всё, нужное для их выполнения: построитель, модель, стиль, колбэк, свои out и out_lock.
 
@@ -2071,6 +2078,7 @@ class _WaveJob:
         log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
                  self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
+                 + _dup_subtitle_note(c, builder.texts)
                  # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
                  + (" " + TEXTLESS_REWORK_TEXT
                     if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
@@ -2179,8 +2187,6 @@ class _WaveJob:
                              rnd, st["in"], st["fixed"], st["returned"], st["review"],
                              time.monotonic() - st["t0"])
         self.enqueue(requeue)
-
-
 class SharedBatchPool:
     """Общий пул батчей двух волн (видео и фото): поток берёт батч из своей волны, иначе из чужой.
 
