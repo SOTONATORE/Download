@@ -1042,6 +1042,11 @@ _ZERO_PHRASE_REASON = "стиль: «zero» вместо позитивного 
 _TYPE_B_ON_HERO_REASON = "персонаж: одежда типа B на главном герое типа A"
 _MOUTH_REASON = "персонаж: рот противоречит себе или вынесен над головой"
 _LONG_LABEL_REASON = "надпись: слишком длинная надпись (больше 4 слов или 26 символов)"
+# внутренние метки типов персонажей («type A», «type C mascot») и служебное слово «situational» не должны попадать в кадр
+_TYPE_LABEL_REASON = "персонаж: внутренняя метка типа (type A / type B / type C)"
+_SITUATIONAL_REASON = "стиль: служебное слово «situational» в описании предмета"
+_TYPE_LABEL_RX = re.compile(r"\btype\s+[abc]\b(?:\s+(?:mascot|character|cartoon|figure))?", re.IGNORECASE)
+_SITUATIONAL_RX = re.compile(r"\bsituational\b", re.IGNORECASE)
 _CARD_WORDS_RX = re.compile(r"\b(?:label card|title plaque|accent plaque|framed plaque|header band|nameplate)s?\b", re.I)
 _READ_WORDS_RX = re.compile(r"\b(?:read|reads|reading)\b|:", re.I)
 _ORDINARY_MODES = frozenset({"wide", "medium", "macro", "overhead", "spotlight", "podium", "neat"})
@@ -1258,6 +1263,12 @@ def _parse_hint_en(item: str) -> str:
     if reason == _MOUTH_REASON:
         return ("Give the single character one consistent mouth expression placed directly on its face; "
                 "do not place a mouth above the head.")
+    if reason == _TYPE_LABEL_REASON:
+        return ("Remove internal character-type labels such as type A, type B, type C mascot or type C character; "
+                "keep only the natural visual description of the character.")
+    if reason == _SITUATIONAL_REASON:
+        return ("Remove the word situational and name the item naturally, for example farmer hat instead of "
+                "situational farmer hat.")
     if reason == _LONG_LABEL_REASON:
         return ("Shorten the label to 1 or 2 words, at most 26 characters, or remove it.")
     if reason in CONTENT_HINT_BY_REASON:
@@ -1274,6 +1285,16 @@ def _parse_hint_en(item: str) -> str:
     return "Fix the problem found when the previous version was checked; keep the rest of the prompt."
 
 
+# Маркер вида кадра в фрагменте причины «дубликат промпта» от mark_monotony_for_rework: «N mode=<вид>»
+_VISUAL_MODE_MARKER_RX = re.compile(r"\bmode=([a-z][a-z \-]{0,30})")
+
+# Английский текст повтора для клипа, повторившего недавний вид кадра этого батча (без списка мест)
+VISUAL_MODE_REWORK_TEXT = (
+    "This frame repeats a recent {mode} scene of this batch. Rewrite it so the scene is visibly different: "
+    "change the setting or location, the background, the props or the composition. "
+    "Do not keep the same arrangement with only a few words swapped. "
+    "Keep the segment's meaning and the character canon. Output only the rewritten prompt.")
+
 # Английский текст повтора для клипа-дубликата. Текст модели: сцена должна стать заметно другой.
 DUPLICATE_REWORK_TEXT = (
     "This prompt is the same as the prompt of another clip. Rewrite it so the scene is visibly different: "
@@ -1289,7 +1310,14 @@ def _rework_text(problems: list) -> str:
     if dup:
         others = [p for p in problems if problem_code(p) != PROBLEM_DUPLICATE_PROMPT]
         head = _rework_text(others) if others else ""
-        return (head + " " if head else "") + DUPLICATE_REWORK_TEXT
+        # Русский: повтор вида кадра из batch_passage — своя подсказка; точный дубликат — прежний текст
+        tail = DUPLICATE_REWORK_TEXT
+        for p in dup:
+            m = _VISUAL_MODE_MARKER_RX.search(p)
+            if m and m.group(1).strip():
+                tail = VISUAL_MODE_REWORK_TEXT.format(mode=" ".join(m.group(1).split()))
+                break
+        return (head + " " if head else "") + tail
     parse = [p for p in problems if p.startswith(_PARSE_PREFIX)]
     rest = [p for p in problems if not p.startswith(_PARSE_PREFIX)]
     base = ("Rewrite this prompt. Keep the subject, count, action and setting from the segment. "
@@ -1781,6 +1809,10 @@ def _batch_style_reasons(text: str, setting: str = "") -> list:
         reasons.append(_MOUTH_REASON)
     if _label_too_long(text):
         reasons.append(_LONG_LABEL_REASON)
+    if _TYPE_LABEL_RX.search(text):
+        reasons.append(_TYPE_LABEL_REASON)
+    if _SITUATIONAL_RX.search(text):
+        reasons.append(_SITUATIONAL_REASON)
     return reasons
 
 

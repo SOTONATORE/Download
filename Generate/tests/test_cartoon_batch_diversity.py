@@ -543,3 +543,134 @@ def test_three_consecutive_same_mode_clips_with_overlap_are_queued():
 def test_two_same_mode_clips_or_different_mode_are_not_run_queued():
     prompts = _run_prompts(["macro: pears one", "macro: pears two", "wide: pears three"])
     assert pp.mark_monotony_for_rework(prompts, [1, 2, 3], STYLE) == []
+
+
+# --- внутренние метки типов и служебное слово «situational» (batch_passage) ------------------
+
+@pytest.mark.parametrize("text", [
+    "A wide scene with a stick figure, type A, by a fossil.",
+    "A wide scene with a Type B cartoon adult by a fossil.",
+    "A wide scene with the TYPE C mascot near a fossil.",
+    "A wide scene with the type c character near a fossil.",
+])
+def test_internal_character_type_labels_are_flagged_case_insensitive(text):
+    assert gp._TYPE_LABEL_REASON in _reasons(text, "wide: fossil")
+
+
+def test_situational_leak_is_flagged_and_natural_item_name_is_not():
+    leak = "A macro shot of a situational farmer hat on a wooden board."
+    assert gp._SITUATIONAL_REASON in _reasons(leak, "macro: board")
+    natural = "A macro shot of a farmer hat on a wooden board beside a cream table."
+    assert gp._SITUATIONAL_REASON not in _reasons(natural, "macro: board")
+    assert gp._TYPE_LABEL_REASON not in _reasons(natural, "macro: board")
+
+
+def test_type_word_without_label_letter_is_not_flagged():
+    clean = "A wide scene of a type of potato in a field with a farmer in a farmer hat."
+    assert gp._TYPE_LABEL_REASON not in _reasons(clean, "wide: field")
+
+
+def test_type_label_and_situational_hints_are_english_and_name_the_fix():
+    label = gp._parse_hint_en(gp._PARSE_PREFIX + gp._TYPE_LABEL_REASON)
+    assert "type A" in label and "type C mascot" in label and label.isascii()
+    situational = gp._parse_hint_en(gp._PARSE_PREFIX + gp._SITUATIONAL_REASON)
+    assert "farmer hat" in situational and "situational" in situational and situational.isascii()
+
+
+# --- анти-клон между пакетами: вид кадра, окно 100 клипов, маркер в очереди -----------------
+
+CLONE_TEXT = ("A wide view of a green potato field under a bright sky, a small red barn in the distance and a "
+              "farmer with a wooden digging fork lifting tubers from the soil")
+CLONE_HERO = " The main character has a smooth pure-white round head, small black dot eyes and a plain solid-black stick body."
+
+
+def _clone(extra=""):
+    return _entry(CLONE_TEXT + extra + CLONE_HERO, "wide: potato field")
+
+
+def _spread(total, clones):
+    """total клипов: клипы из clones — одного вида wide, остальные — каждый со своим видом кадра (без сравнения)."""
+    prompts = {}
+    for n in range(1, total + 1):
+        if n in clones:
+            prompts[str(n)] = clones[n]
+        else:
+            prompts[str(n)] = _entry(f"Unique view {n} of isolated object number {n}", f"v{n}: object {n}")
+        prompts[str(n)]["num"] = n
+    return prompts
+
+
+@pytest.mark.parametrize("gap", [50, 92, 100])
+def test_cross_batch_clone_wide_scene_within_window_is_queued(gap):
+    prompts = _spread(gap + 1, {1: _clone(), gap + 1: _clone(", a crow on a fence")})
+    queued = pp.mark_monotony_for_rework(prompts, list(range(1, gap + 2)), STYLE)
+    assert queued == [gap + 1]
+    rework = prompts[str(gap + 1)]["rework_pending"]
+    assert pc.problem_code(rework[0]) == pc.PROBLEM_DUPLICATE_PROMPT
+    assert "mode=wide" in rework[0]
+    assert prompts["1"].get("rework_pending") is None
+
+
+def test_cross_batch_clone_beyond_hundred_clips_is_not_queued():
+    prompts = _spread(102, {1: _clone(), 102: _clone(", a crow on a fence")})
+    assert pp.mark_monotony_for_rework(prompts, list(range(1, 103)), STYLE) == []
+
+
+def test_cross_batch_clone_is_ignored_when_earlier_clip_is_already_queued():
+    prompts = _spread(60, {1: _clone(), 60: _clone(", a crow on a fence")})
+    prompts["1"]["rework_pending"] = ["other: «x»"]
+    assert pp.mark_monotony_for_rework(prompts, list(range(1, 61)), STYLE) == []
+
+
+def test_cross_batch_clone_needs_same_visual_mode():
+    prompts = _spread(60, {1: _clone(), 60: _clone(", a crow on a fence")})
+    prompts["60"]["extra"]["setting"] = "macro: potato field"
+    assert pp.mark_monotony_for_rework(prompts, list(range(1, 61)), STYLE) == []
+
+
+def test_distinct_macro_and_overhead_shots_sharing_board_wording_are_not_clones():
+    macro_a = _entry("A macro shot of hands peeling a warm potato on a wooden board beside a cream table and a "
+                     "crate of tubers", "macro: hands peeling tuber")
+    macro_b = _entry("A macro shot of a wooden board with peeled potato slices on a cream table and a small knife",
+                     "macro: potato slices board")
+    overhead_a = _entry("An overhead view of a wooden board on a cream table with sliced potato pieces, a knife "
+                        "and a small crate of tubers", "overhead: sliced potato board")
+    overhead_b = _entry("An overhead view of a wooden board with a bowl of peeled tubers, a cream table edge and "
+                        "a folded cloth", "overhead: tuber bowl")
+    prompts = _spread(30, {})
+    prompts.update({"1": macro_a, "20": macro_b, "21": overhead_a, "30": overhead_b})
+    assert pp.mark_monotony_for_rework(prompts, list(range(1, 31)), STYLE) == []
+
+
+def test_cross_batch_marker_gets_targeted_english_rework_without_hardcoded_places():
+    prompts = _spread(60, {1: _clone(), 60: _clone(", a crow on a fence")})
+    pp.mark_monotony_for_rework(prompts, list(range(1, 61)), STYLE)
+    text = gp._rework_text(prompts["60"]["rework_pending"])
+    assert "repeats a recent wide scene" in text
+    assert "setting or location" in text and "background" in text and "props" in text
+    assert "Keep the segment's meaning and the character canon" in text
+    assert text.isascii()
+    assert "barn" not in text and "field" not in text and "beach" not in text
+
+
+def test_plain_duplicate_keeps_exact_duplicate_rework_text():
+    assert gp._rework_text([pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, "7")]) == gp.DUPLICATE_REWORK_TEXT
+
+
+def test_three_consecutive_same_mode_check_still_queues_plain_duplicate_marker():
+    prompts = _run_prompts(["macro: pears one", "macro: pears two", "macro: pears three"])
+    pp.mark_monotony_for_rework(prompts, [1, 2, 3], STYLE)
+    assert prompts["3"]["rework_pending"] == [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, "2")]
+
+
+def test_scene_words_keep_concrete_props_and_drop_surface_filler():
+    entry = _entry("A wide field with a red barn, a farmer with a wooden digging fork, a table, a board, a crate, "
+                   "a potato and a tuber. Warm cream pale flat matte crisp closed outline outlines fills cel shading "
+                   "clean 2d hand-drawn single layer soft shadow strip underside backdrop surface.", "wide: field")
+    words = pp._scene_words(entry, STYLE)
+    for keep in ["red", "barn", "wooden", "digging", "fork", "field", "table", "board", "crate", "potato", "tuber"]:
+        assert keep in words
+    for drop in ["warm", "cream", "pale", "flat", "matte", "crisp", "closed", "outline", "outlines", "fills", "cel",
+                 "shading", "clean", "2d", "hand", "drawn", "single", "layer", "soft", "shadow", "strip",
+                 "underside", "backdrop", "surface"]:
+        assert drop not in words

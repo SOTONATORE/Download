@@ -50,10 +50,19 @@ _STEM_EXCLUDE = {
     "letter": ("lettering",),
 }
 
+# Глагол «forms» («chain forms a curved bridge», «forms into a ring») описывает форму, как «forming» и «formed».
+# Слово «forms» во множественном числе бывает и бланком («stack of forms»), поэтому оно не добавляется в
+# _STEM_EXCLUDE целиком: исключение только при глагольном окружении — перед a / an / the / into.
+# Регулярное выражение задаётся здесь целиком (без экранирования), как просмотр вперёд.
+_STEM_EXCLUDE_VERB_RE = {
+    "form": (r"forms(?=\s+(?:a|an|the|into)\b)",),
+}
+
 
 def _stem_alternative(stem: str) -> str:
     """Регулярное выражение для одной основы с учётом исключений (как _stem_alternative в frame_rules.py)."""
     negatives = "".join(f"(?!{re.escape(e)})" for e in _STEM_EXCLUDE.get(stem, ()))
+    negatives += "".join(f"(?!{pattern})" for pattern in _STEM_EXCLUDE_VERB_RE.get(stem, ()))
     return f"{negatives}{re.escape(stem)}\\w*"
 
 

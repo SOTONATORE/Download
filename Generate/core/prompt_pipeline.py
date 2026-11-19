@@ -48,6 +48,15 @@ _BOILERPLATE_RX = re.compile(r"has warm natural skin tones[^.]*\.|has proportion
 MONOTONY_RUN = 3
 MONOTONY_RUN_JACCARD = 0.65
 _WORD_RX = re.compile(r"[a-z0-9']+")
+# Русский: анти-клон сцены (batch_passage) — сравнение с последними CLONE_WINDOW клипами того же вида кадра
+CLONE_WINDOW = 100
+CLONE_JACCARD = 0.65
+# Русский: общие слова стиля и поверхности — не признак сцены; предметы, здания, инструменты и культуры остаются
+_FILLER_WORDS = frozenset({
+    "warm", "cream", "pale", "flat", "matte", "crisp", "closed", "outline", "outlines", "fills", "cel",
+    "shading", "clean", "2d", "single", "layer", "soft", "shadow", "strip", "underside", "backdrop", "surface",
+})
+_HAND_DRAWN_RX = re.compile(r"hand-drawn", re.IGNORECASE)
 
 
 @dataclass
@@ -448,7 +457,8 @@ def _scene_words(entry: dict, style_text: str) -> frozenset:
     """Слова сцены клипа без стиля, без повторяемой фразы о внешности героя и без типового текста персонажей."""
     raw = _raw_prompt(str(entry.get("prompt", "")), style_text)
     cleaned = _BOILERPLATE_RX.sub(" ", _APPEARANCE_RX.sub(" ", raw))
-    return frozenset(_WORD_RX.findall(cleaned.lower()))
+    cleaned = _HAND_DRAWN_RX.sub(" ", cleaned)   # «hand-drawn» — один стилевой термин, а не два слова
+    return frozenset(_WORD_RX.findall(cleaned.lower())) - _FILLER_WORDS
 
 
 def _visual_mode(entry: dict) -> str:
@@ -468,7 +478,13 @@ def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
     Окно: клип сравнивается с двумя предыдущими номерами волны (в числовом порядке). Монотонность — одинаковый
     непустой setting или сцена с долей общих слов не ниже MONOTONY_JACCARD. Клип с очередью или на пределе кругов
     (REPAIR_ROUNDS) пропускается, поэтому цикл не бесконечен. Текст повтора — DUPLICATE_REWORK_TEXT (через код
-    дубликата, без новых кодов). Меняет prompts под замком вызывающего. Возвращает номера, поставленные в очередь.
+    дубликата, без новых кодов).
+
+    Русский: после окна и серии — анти-клон между пакетами: клип с тем же видом кадра (setting до «:») и сценой
+    с долей общих слов не ниже CLONE_JACCARD среди последних CLONE_WINDOW клипов (уже принятых, без очереди)
+    ставится в очередь с маркером «mode=<вид>»; _rework_text даёт для него свою английскую подсказку.
+    Соседи из локального окна MONOTONY_WINDOW в анти-клон не входят: для них действуют прежние правила.
+    Меняет prompts под замком вызывающего. Возвращает номера, поставленные в очередь.
     """
     ordered = sorted(set(int(n) for n in nums))
     queued: list = []
@@ -479,6 +495,7 @@ def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
         if int(entry.get("rework_round", 0) or 0) >= gp.REPAIR_ROUNDS:
             continue
         setting = _clip_setting(entry)
+        mode = _visual_mode(entry)
         words = _scene_words(entry, style_text)
         hit = None
         for earlier in ordered[max(0, idx - (MONOTONY_WINDOW - 1)):idx]:
@@ -499,9 +516,21 @@ def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
                            for k in range(len(run_words) - 1))
             if len(modes) == 1 and "" not in modes and pairs_ok:
                 hit = run[-2]
+        marker = ""
+        if hit is None and mode and words:
+            # Русский: анти-клон — тот же вид кадра и почти та же сцена в последних CLONE_WINDOW клипах, кроме соседей
+            # из локального окна (их проверяют правила выше, прежний порог); поэтому срез до idx - (MONOTONY_WINDOW - 1)
+            for earlier in ordered[max(0, idx - CLONE_WINDOW):max(0, idx - (MONOTONY_WINDOW - 1))]:
+                other = prompts.get(str(earlier))
+                if not isinstance(other, dict) or other.get("rework_pending") or _visual_mode(other) != mode:
+                    continue
+                if _jaccard(words, _scene_words(other, style_text)) >= CLONE_JACCARD:
+                    hit, marker = earlier, mode
+                    break
         if hit is not None:
+            fragment = f"{hit} mode={marker}" if marker else str(hit)
             entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
-            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(hit))]
+            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, fragment)]
             queued.append(n)
     return queued
 

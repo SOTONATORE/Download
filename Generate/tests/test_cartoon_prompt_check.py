@@ -342,6 +342,28 @@ def test_plain_form_is_still_forbidden():
     assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE in _codes("a form lies on the table")
 
 
+# Глагол «forms» (форма, а не бланк) не запрещён; существительное во множественном числе и «fill out a form» — запрещены.
+@pytest.mark.parametrize("text", [
+    "a chain forms a curved bridge over the ground",
+    "the stem forms into a ring above the soil",
+])
+def test_forms_as_verb_is_not_forbidden_shot_type(text):
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE not in _codes(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "a stack of forms on the desk",
+    "fill out a form at the counter",
+])
+def test_forms_as_paper_is_still_forbidden(text):
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE in _codes(text), text
+
+
+def test_uniform_is_not_forbidden_shot_type():
+    # «uniform» не входит в список запрещённых типов кадра prompt_check (это слово сохраняется как есть)
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE not in _codes("a farmer in a clean uniform stands by the field")
+
+
 def test_lettering_word_is_not_forbidden_letter():
     assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE not in _codes("a hand lettering on a wall")
 
