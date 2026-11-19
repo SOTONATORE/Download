@@ -6,26 +6,75 @@ Each segment becomes one still frame that illustrates what the segment says, dra
 
 Clean, even 2D comic ink outlines in medium-fine black with smooth closed lines. Warm muted earthy palette: pale dusty blue sky, sandy and ochre earth, olive and sage greens, warm medium wood, muted terracotta and mustard accents. Flat fills with at most one simple darker cel shade along the lower edge and rare tiny curved highlight ticks on glass or liquid.
 
-Cards, comparisons, charts and diagrams sit on a warm pale cream backdrop rather than pure #FFFFFF, reserving pure white solely for small foreground title plaques, paper label cards, callout bubbles and the white head of type A.
+Charts, maps, diagrams and cards sit on a warm pale cream backdrop. Pure white is reserved for small title plaques, paper label cards and the white head of the main character. Indoor scenes use a flat warm cream wall, a simple counter or wooden table and clean furniture outlines. Keep each scene on one flat plane.
 
-Indoor 2D scenes use a flat warm cream wall, simple counter or wooden table, and clean furniture outlines. Everything sits on a flat single plane.
-
-Prompt writers describe smooth closed ink outlines, flat matte surfaces and simple shapes, avoiding rough wobbly pen lines, cross-hatching, 3D CGI looks, soft airbrush gradients, bokeh, depth of field and realistic photos.
+Describe smooth closed ink outlines, flat matte surfaces and simple shapes. Avoid rough wobbly pen lines, cross-hatching, 3D CGI looks, soft airbrush gradients, bokeh, depth of field and realistic photos.
 
 Do not write any closing style summary sentence at the end of a prompt (no sentence that restates the outlines, palette, finish or art style). The style sentence from preset.md is appended automatically after generation, so every prompt ends on its last scene or plaque description.
 
-# Safety and Content Rules
+# Subject and Context
 
-Show adults only; children, babies and young people are forbidden. Weapons are forbidden in every frame: use a vegetable peeler, wooden spoon, spatula or garden trowel instead of blades. Speech is forbidden: characters stay silent with closed-line mouths; exclude open mouths, laughing, shouting, screaming, speech verbs such as says, shouts, talks or yells, and the word gesture (describe the exact arm, hand or head position directly instead). Frame every shot wide or medium-wide; exclude close-up faces. Include at most 4 characters total per frame, counting humans and animals together. When two to four adult humans appear, describe each adult individually one by one (for example, one adult scientist ... and a second adult scientist ...), or write two adult characters or three adult characters; avoid plural group nouns such as people, men, women, farmers, workers, villagers, crowds or groups.
+Draw the scene, setting, props and concept from the whole Sentence line, using the Before and After lines to follow the story. The >>marked<< fragment is the primary beat: the frame must show what that fragment says, while the rest of the sentence supplies the setting and objects. A short subtitle fragment rarely shows enough alone, so build the picture from the full sentence.
 
-Crowds, piles, rows, shelves and stacks are forbidden: show at most 4 separate objects, described individually one by one. The words group, groups, row of and rows of are forbidden for ANY objects, including trees, rocks and towers: write cluster, clump, grove, stand or pair, or list each item individually. Exclude @handles, watermarks, video player UI, random ducks or ponds unless the segment names them, and mixed-language garbage text.
+On-frame text is different: take it only from the Text line of the current segment, never from Before or After. Write it in clean uppercase dictionary form (nominative singular for inflected languages such as Russian).
 
-Every frame must show at least one concrete foreground focal object, diagram, cutaway or character; bare empty sky-and-ground landscapes containing only dirt, grass or generic hills, and ground shadows beneath empty space, are forbidden. When a segment describes absence, desolation or an abstract concept (such as empty land lacking grass or soil, heat, extinction, an era or a transition), show a concrete object, cross-section, thermometer, fossil, clock, compass or icon with an explicit visual marker, or keep the main character examining a concrete object from the segment. When a segment names a body part (arm, shoulder, hand, stomach or head), show the whole character in a wide or medium-wide shot pointing at or touching that part; isolated body parts are forbidden.
+# Visual Diversity and Shot Scale
 
-When consecutive segments share the same subject, vary at least two elements from frame to frame: the layout (scene, cutaway, diagram or concept card), the focal object or prop, the character pose or action, and the setting, avoiding repeated identical cards or repeated identical backdrops.
+Vary the camera distance, the angle and the subject from segment to segment. Pick the shot that best shows the segment's idea:
+- Wide scene: a field, farm, factory floor, market or supermarket aisle, with a figure at about 20 percent of image height.
+- Medium interaction: a figure at 40 to 60 percent of image height, leaning in from the left or right, seated, walking or handling an object.
+- Macro view of hands or objects: two hands peeling a potato, a hand holding a tuber, tuber skins compared side by side. Hands and objects may fill most of the frame; a human face never does.
+- Overhead flat view: dishes on a table, sorted tubers in a tray, tools on a workbench, seen from directly above.
+- Cross-section or cutaway: a vertical soil cross-section, an enlarged biological vessel, a cut-open tuber with its roots.
+- Illustrated flat map: olive and sage landmasses, crisp coastlines, a dashed terracotta route arrow, short uppercase labels.
+- Split comparison: the frame divided vertically into two panels, A on one side and B on the other.
+- Visual metaphor: a brass balance scale, a winner's podium, a chained padlock, circular process arrows, a spotlight cone over an object, a magnifying glass circle enlarging a detail.
+- Neat arrangement: lined-up crops, shelves stocked with jars, a crate of produce or a small heap on a conveyor belt, kept clean and readable with few tiny items.
 
-Describe the finished still frame in plain positive English wording free of quotation marks, taking objects, characters, settings and on-frame text from the Text line of the segment alone.
-Forbidden prompt words to exclude from every prompt: parchment, flag, passport, form, forms, forming, formed, framing, frame height, uniform, emblem, crest, knife, saber, saber-toothed, gesture, gestures, tilting, moving, pan, zoom, track, vector, bold outline, thick outline, heavy outline, sketch, sketchy, 16:9, widescreen, no, not, never, none, render, rendered, rendering, 4k, 8k, uhd, photorealistic, hyperrealistic, masterpiece, trending, octane, unreal engine, lens, 35mm, anamorphic, aperture, focal length, film grain, film still, without, nothing, nobody, cannot, group, groups, crowd, crowds, row of, rows of.
+About half or more of all frames work best with zero characters: pure objects, macro comparisons, cutaways, maps, charts and metaphors. Add a character only when human action, scale, tasting, confusion, farming, factory or lab work, or a clear emotion adds value to the segment.
+
+Never reuse one fixed shot order or sentence opener. Do not start every prompt with the same phrase, and do not place the character at the center every time. Open each prompt with its subject or camera view, for example "Macro view of two hands ...", "Overhead flat view of ...", "Vertical soil cross-section ...", "Brass balance scale on a warm cream backdrop ...", "Split vertically down the center ...". Vary hero position and scale: tiny in a landscape, leaning in from the left or right, seated, walking. When consecutive segments share one sentence, give each segment a different facet of the same idea.
+
+Human faces are never a close-up subject: show whole figures at normal scale instead. Macro views of hands, feet, food, tools and tuber skin are encouraged; write macro view or tight view for them.
+
+# Character Canon
+
+Select the character type with the first matching rule:
+1. No characters: maps, charts, balance scales, soil or botanical cross-sections, molecular diagrams, standalone object facts, macro and overhead object views.
+2. Type C mascot: gut microbes and personified crops, organs or objects in a metaphor (competition, cooperation, thirst, mechanical resistance).
+3. Type B cartoon adult: a named profession, workplace, laboratory, farm, kitchen, market, history, culture or family.
+4. Type A main character: second-person you, a lone traveller, an unnamed observer, a single person at home, solo cooking or tasting, digestive discomfort, confusion, survival or a human-height scale.
+5. Otherwise: no characters, a plain 2D concept visual or card.
+
+Keep one human type in a frame and never mix human and mascot types in one frame. Plain 2D animals may appear with type A or type B and count toward the 4-character total. Draw ingredients, tools and surroundings as plain inanimate items. Use the same character canon for the whole video.
+
+Type A, the main character: a large smooth pure-white round head with a crisp medium-fine black ink outline, small solid black dot eyes, expressive thin curved eyebrows, a closed-line mouth by default, and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs. It may carry one simple situational item: a backpack, a chef hat and apron, a farmer hat, a hard hat, a shopping basket or a magnifying glass. Repeat this complete description in every prompt where the main character appears, because each frame is generated independently.
+
+Type B, the cartoon adult: a proportional 2D figure (head about one fifth of body height) with warm natural skin tones, simple solid-colour hair, small black dot eyes, a small curved-line nose, expressive eyebrows, a closed-line mouth and proportional clothed limbs. Keep one fixed outfit per role across the whole video: white lab coat and eyeglasses for a scientist; muted rust plaid flannel shirt, medium-blue denim overalls and brown boots for a farmer; muted brown work shirt, tan trousers, brown boots and a tan hard hat for a miner; white jacket and tall white cap for a chef; period tunic and trousers for a historical figure; muted sage sweater and medium-brown trousers for a neutral family member. Repeat the complete face, skin, hair, limb and outfit description of each type B figure in every prompt where it appears.
+
+Type C, the mascot: an active crop, plant, organ part or microbe with small black dot eyes, expressive eyebrows, a closed-line mouth, thin black stick arms and legs, and at most one tiny prop when it enacts a metaphor. Draw every microbe as a type C character rather than plain slime. Keep non-agent tools plain, with no eyes or mouths. Draw real and extinct animals (fish, trilobites, dinosaurs, prehistoric cats, insects, birds, mammals, burrowing animals) as plain 2D animals with neutral animal features.
+
+Show emotion through posture, action and simple comic signs: a closed-line smile, squinting happy arc eyes, a surprised open O-shaped mouth, a worried wavy mouth, tiny sweat drops at the temple, or a small question mark or exclamation mark above the head. Characters stay silent: no speech bubbles, no dialogue quotes, no microphones, and nobody talks to the camera.
+
+# On-Frame Text and Lettering
+
+Most frames carry no on-frame text: describe only the image. Add text only for five cases: numbers, dates and measurements (for example 255 MILLION YEARS or 9 M LONG); proper names, eras and places (for example PANGAEA or CARBONIFEROUS); direct two-item comparisons (A | B); map labels; and chart labels.
+
+Each text item is written in frame_language, is 1 to 4 words long, is copied whole from the current segment's Text line and ends on a content word. Labels for one object use one word for each part, at most 4 parts. Standalone number, era or concept cards carry exactly one text phrase per frame; comparison, map and chart layouts carry one main title plus the short labels or dates that the layout requires. Verbs, pronouns, prepositions, casual subtitle fragments, bare units such as YEARS AGO, unitless numbers (except four-digit calendar years) and split number-and-unit fragments never appear as text. When a number and its unit are split across adjacent segments, omit the text for that frame. Standalone text-only slides are at most 1 in 5 clips.
+
+Vary the text carrier across the video:
+1. Direct bold lettering on the sky or cream backdrop: bold black uppercase lettering centered at the top reading <TEXT>.
+2. Full-width header band: a full-width pale cream top header band separated by a thin horizontal black line reading <TEXT> in bold black uppercase lettering.
+3. Pointer-arrow label: a curved black ink pointer arrow with clean black uppercase lettering reading <TEXT>.
+4. Label card: a white or beige framed label card, or a muted red or gold accent plaque with a crisp black border, reading <TEXT> in bold black uppercase lettering.
+
+Place location words before the word reading, so that they never become part of the text. Empty plaques and blank label cards are forbidden.
+
+Emphasis markers: two crossed bold red ink strokes making a red X over a rejected object; a red warning triangle with an exclamation mark for a hazard; a clean green checkmark for a working choice.
+
+# Positive Phrasing
+
+Describe only what is visible, as a finished positive scene. When something must look absent, describe the visible state instead: a blank dark screen, clean clear air, a bare black stick torso, neutral animal features. Never write a negative phrase that names the unwanted thing, such as one beginning with the word free or lacking, because the image model draws the named object.
 
 Safe replacements for common concepts:
 - write image height instead of frame height;
@@ -34,85 +83,66 @@ Safe replacements for common concepts:
 - write head angled up, leaning forward or mid-step instead of tilting or moving;
 - write around, bordering or enclosing instead of framing;
 - describe the exact limb pose instead of gesture;
-- write cluster, clump, grove, stand or pair instead of group, groups, row of or rows of, for trees, rocks, towers and other objects;
-- write free of or lacking in place of the negation words, and state only what is present.
-- write round glass disc or magnifier instead of lens for a magnifying glass.
+- write cluster, clump, grove, stand or pair instead of group, groups, row of or rows of for trees, rocks, towers and other objects, and write lined-up for crops;
+- write two lines meeting at a corner instead of axes;
+- write round glass disc or magnifier instead of lens.
 
-# Character Canon
+Forbidden prompt words to exclude from every prompt: parchment, flag, passport, form, forms, forming, formed, framing, frame height, uniform, emblem, crest, knife, saber, saber-toothed, gesture, gestures, tilting, moving, pan, zoom, track, vector, bold outline, thick outline, heavy outline, sketch, sketchy, 16:9, widescreen, no, not, never, none, render, rendered, rendering, 4k, 8k, uhd, photorealistic, hyperrealistic, masterpiece, trending, octane, unreal engine, lens, 35mm, anamorphic, aperture, focal length, film grain, film still, without, nothing, nobody, cannot, group, groups, crowd, crowds, row of, rows of, close-up, portrait, axes.
 
-a) Default hero — type A, the white-head black stickman. Refer to this character consistently as the main character when type A applies. Description: the main character has a large smooth pure-white round head with a crisp medium-fine black ink outline, small solid black dot eyes (or straight closed-line eyes when asleep or unconscious), expressive thin curved eyebrows, a simple closed-line mouth, and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs, completely free of clothing or headwear. Add one named role garment only when the current segment explicitly names cooking or farming, and include only that named item. Always repeat this complete visual description of the main character (head, outline, eyes, eyebrows, mouth, stick body, arms, hands and legs) in EVERY prompt where type A appears, because each frame is generated independently; never abbreviate or skip appearance details across consecutive segments.
+# Safety and Content Rules
 
-b) Full 2D cartoon human — type B. Proportional adult comic figure (head about one fifth of body height) with warm natural skin tones, simple solid-color hair, small black dot eyes, a small curved-line nose, expressive eyebrows, a closed-line mouth and proportional clothed limbs. Keep the exact same face design and one fixed outfit per role across the whole video: white lab coat and eyeglasses for a scientist; muted rust plaid flannel shirt, medium-blue denim overalls and brown boots for a farmer; muted brown work shirt, tan trousers, brown boots and tan hard hat for a miner; muted rust vest, tan trousers and hard hat for a factory or quarry worker; white jacket and tall white cap for a chef; period tunic and trousers for a historical figure. When a family needs a neutral outfit, describe two or three adult figures one by one using one fixed colour set: muted sage sweater and medium-brown trousers. Always repeat the complete face, skin, hair, limb and outfit description of every type B figure in EVERY prompt where type B appears.
+Show adults only; children, babies and young people are forbidden. Weapons are forbidden in every frame: use a vegetable peeler, wooden spoon, spatula or garden trowel instead of blades. Speech is silent: write the expression itself (smile, squint, O-shaped mouth, worried mouth) and never a speech verb, shouted word, or a talking mouth.
 
-c) Anthropomorphic mascot — type C. Active crop, plant, organ part or microbe drawn with small black dot eyes, expressive eyebrows, a closed-line mouth and thin black stick arms and legs, plus an optional tiny prop when enacting a metaphor. Draw every microbe as a type C character with dot eyes and a closed-line mouth rather than plain slime. Keep non-agent objects such as a small digger tool as plain inanimate items free of eyes or mouths. Draw all real and extinct animals (fish, trilobites, Anomalocaris, sea scorpions, insects, dinosaurs, prehistoric cats, apes, birds, lizards, mammals and small burrowing animals) as plain 2D animals in the flat comic style, free of anthropomorphic mascot smiles, human eyebrows or stick limbs.
+Include at most 4 characters in total per frame, counting humans and animals together. When two to four adults appear, describe each adult one by one, or write two adult characters or three adult characters. Avoid plural group nouns such as people, men, women, farmers, workers, villagers, crowds or groups.
 
-Character selection order (first match wins):
-1. Zero characters: geography, maps, charts, balance scales, factor grids, definitions, botanical or soil cross-sections, molecular diagrams, standalone object facts.
-2. Mascot (type C): gut microbes and active personified plant or object metaphors (competition, cooperation, thirst, mechanical resistance).
-3. Full 2D cartoon human (type B): a named or implied profession (scientist, farmer, miner, worker, chef), workplace, laboratory, farm, restaurant, history, culture, family or set of more than one person.
-4. White-head stickman (type A): second-person you, a lone traveller, an unnamed observer, and any single person in home life, solo cooking, tasting, solo shopping, digestive discomfort, confusion, survival or human-height scale.
-5. Otherwise: zero characters, plain 2D concept visual or card.
+Object arrangements are allowed when they are neat and readable: lined-up crops, shelves stocked with jars, a crate of produce, a small heap on a conveyor belt. Keep each kind of object to one clear grouping and avoid clutter of tiny items.
 
-Sticky rule: if the previous frame was a human type (A or B) and the current segment's first-match type is also human, keep the previous type. Change human type only on a clear change of role (for example home cooking to a factory). Keep A or B fixed throughout the same scene and the same home episode.
+Every frame shows at least one concrete foreground focal object, diagram, cutaway or character; bare empty sky-and-ground landscapes are forbidden. When a segment names absence or an abstract concept (empty land, heat, extinction, an era, a transition), show a concrete object, cross-section, thermometer, fossil, clock, compass or icon with a clear visual marker, or keep the main character examining a concrete object from the segment. When a segment names a body part, show the whole character pointing or touching that part; hands alone appear only in a macro view of handling an object.
 
-Single type per frame: keep exactly one character mode per frame; leave mixed human/mascot types out of every frame. Plain 2D animals (free of mascot faces or stick limbs) may appear alongside type A or type B and count toward the 4-character total. Draw all surrounding crops, ingredients and objects as plain inanimate 2D items whenever type A or type B appears. Use the same character canon for the whole video.
+Exclude @handles, watermarks, video player UI, random ducks or ponds unless the segment names them, and mixed-language garbage text.
 
-Reaction signals: show reaction and emotion through posture, action, angled eyebrows, a closed curve or wavy line mouth, tiny sweat drops near the temple, or a small question or exclamation mark above the head.
-
-# On-Frame Text, Banners and Visual Markers
-
-Keep most frames completely free of text, plaques and labels. Add text inside the frame solely for these five cases: numbers, dates and measurements (for example 255 MILLION YEARS or 9 M LONG); proper names, eras and places (for example PANGAEA or CARBONIFEROUS); direct two-item comparisons (A | B); map labels; and chart labels. The language of all on-frame text is frame_language.
-
-Take every on-frame text item strictly from the Text line of the current segment alone, never from Before or After context. Subtitle fragments, verbs, pronouns, prepositions, casual sentence snippets, bare time/measurement units lacking a leading number (such as YEARS AGO, MILLION YEARS AGO, MILLION YEARS OLD, ON EARTH, IN TIME, OF THE PIT, FIRE IS EASIER HERE, BURN HOTTER, EXTRA OXYGEN JUST FINE, ABOUT A MONTH, COMMENT), and bare numbers lacking a unit (such as 50 or 3) except four-digit calendar years (such as 1924 or 2018) are forbidden. When a number and its unit are split across adjacent segments, omit all on-frame text for that frame. Ordinary actions, clauses and casual subtitle fragments are never put on plaques, banners or labels, not even when they look like captions (for example COOK YOUR FOOD or GRABS YOUR ARM); only the five allowed categories above and phrases taken from the Text line may appear as on-frame text. When a plaque or label carries text, write the phrase as reading <TEXT> in bold black uppercase lettering, placed directly after the plaque noun; add location words (centered, docked at the top, left, above the panel) only after that phrase, so location words never become part of the lettering. Empty plaques and blank floating label cards are forbidden: every plaque or banner sits docked at the top center and holds real uppercase text inside it.
-
-Every on-frame text item is a real complete phrase of 1 to 4 words taken whole from the current segment's subtitle, ending on a content word, or labels for one object using one word for each part, at most 4 parts. Two text modes apply: a) standalone number, era or concept cards carry exactly one text phrase per frame; b) comparison, map and chart layouts carry one main title plus the short labels or dates that the layout requires. Infographic labels count as text and must be real words from the segment, leaving invented labels and mixed-language text out. Separate text-only slides are at most 1 in 5 clips.
-
-Visual text carriers matching the reference style: bold uppercase black hand lettering centered on the top sky or cream backdrop, white rectangular title plaques or banners framed in thin black ink, small beige or white label cards on maps and charts, and thin curved black ink pointer arrows. Accent numbers or headings may use muted red or gold with a crisp black border.
-
-Emphasis markers: two crossed bold red ink strokes making a red X over a rejected object or over an equals sign; a red warning triangle with an exclamation mark for hazards; a clean green checkmark for working choices.
-
-# Typical Layouts
-
-Choose the one layout that fits the segment:
-
-a) Narrative 2D scene: four-layer outdoor landscape or simple indoor room with type A, type B or type C in one clear action, kept free of text unless a specific number, proper name or era requires one top banner.
-b) Soil or biological cross-section: flat upper ground with plants above a clean horizon line and a warm brown earth cutaway below showing roots and separate tubers, or an enlarged cutaway of a vessel or organ.
-c) Comparison A | B: warm cream backdrop split vertically down the center by one solid or dashed black line, with white framed title plaques above each side and two contrasting scenes or objects.
-d) Contrast with symbol or scale: warm cream card or outdoor strip with two separate objects or mascots facing an equals sign, a crossed red X over an equals sign, opposing arrows or a brass balance scale.
-e) Process flow, cycle or crossroads: two to four separate mini-illustrations linked left-to-right or in a cycle by clean black ink arrows, or a dirt path forking left and right toward two different destinations.
-f) Cartoon chart or checklist card: warm cream card with hand-drawn black X and Y axes showing two to three colored bars or two curve lines with short labels, or an illustrated clipboard checklist with green checkmarks.
-g) Illustrated flat map: olive-tan and sage landmasses with crisp dark coastlines over a pale dusty-blue sea, a dashed terracotta route arrow, small icons and short uppercase labels.
-h) Concept, number or era card: warm cream backdrop with one prominent central object or landscape on a soft ground shadow and one bold uppercase title at the top.
-i) Arrow or ruler timeline: warm cream backdrop with a clean horizontal arrow or pale tan ruler ticks highlighting one active date or step in muted red.
+When consecutive segments share the same subject, vary at least two elements from frame to frame: the layout, the focal object or prop, the character pose or action, and the setting. Avoid repeated identical cards or repeated identical backdrops.
 
 # Choosing the Frame
 
-Check the segment in this order and use the first layout that fits:
-1. Direct two-item comparison or contrast: layout c or d.
-2. Process, sequence, cycle, cause and effect or choice of paths: layout e.
-3. Quantitative chart, factor breakdown or criteria list: layout f.
-4. Geography, origin or trade route: layout g.
-5. Underground growth, roots, composition or internal biology: layout b.
-6. Dates, numbers, eras or time span: layout h or i.
-7. Narrative action, survival, cooking, farming, lab work, market scene or personified crop or microbe metaphor: layout a, applying the Character Canon order and sticky rule.
-8. Standalone concept or transition: layout a or h with a concrete visible focal object or characteristic landscape with a foreground subject from the segment.
+Pick the layout by the segment's main idea, checking in this order:
+1. Direct comparison or contrast: split panels, a balance scale or an equals sign with a red X.
+2. Process, sequence, cycle or a choice of paths: two to four linked mini-illustrations with clean black arrows.
+3. Quantities, a chart or a criteria list: a warm cream chart card with bars or curve lines and short labels, or a checklist with green checkmarks.
+4. Geography, origin or a trade route: an illustrated flat map.
+5. Underground growth, roots or internal biology: a cross-section or cutaway.
+6. Dates, numbers, eras or a time span: a number card, or a clean horizontal timeline with one active step in muted red.
+7. Daily life, survival, cooking, farming, lab work, a market or a personified metaphor: a wide or medium scene with a character, following the character canon.
+8. Standalone concept: a concrete focal object or characteristic landscape on a soft ground shadow.
 
 # Example Prompts
 
-The examples below show only figures, objects, linework, fills, shading and plaques. Do not write any closing style summary sentence after these examples: the style sentence from preset.md is appended automatically after generation.
+The examples show figures, objects, linework, fills and plaques only. Do not write any closing style summary sentence after these examples: the style sentence from preset.md is appended automatically after generation.
 
-Example 1 — type A stickman examining a fossil (text-free):
-A wide scene with one small grey fossil rock resting on a flat tan rock slab at the lower center. At the center crouches the main character, about 45 percent of the image height, leaning forward to examine the fossil rock. The main character has a smooth pure-white round head with a crisp black outline, small black dot eyes, thin curved eyebrows, a closed-line mouth and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs.
+Example 1 — macro view of hands peeling (text-free):
+Macro view of two hands holding a golden potato over a warm wooden board, the right hand guiding a vegetable peeler along the skin so one thin curled peel drops onto the board. The hands have warm natural skin tones, simple rounded fingers and smooth closed outlines, with a few pale peel curls scattered beside the tuber.
 
-Example 2 — type B scientist with lab objects (text-free):
-A wide scene with two glass flasks and one metal magnifying glass spaced apart. At the center stands an adult scientist, about 55 percent of the image height, wearing a white lab coat, eyeglasses and dark trousers, holding one tan fossil bone in both hands. The adult scientist has proportional cartoon limbs, warm light-tan skin, short brown hair, small black dot eyes, a small curved nose, raised eyebrows and a closed-line smile.
+Example 2 — overhead flat view of sorted tubers (text-free):
+Overhead flat view of a pale cream table where a wooden tray holds five separate potatoes in a tidy line, a dark brown bowl of sliced tubers sits at the upper left and a wooden spatula rests beside the bowl. Each object has crisp closed outlines and simple flat fills on the warm cream surface.
 
-Example 3 — type C microbe inside biological vessel (text-free):
-A wide enlarged biological cutaway showing curved warm dusty-pink vessel walls around a pale cream interior channel. Floating inside the channel are two pale blue beaded sugar chains spaced apart. At the center floats one small round sage-green microbe character reaching toward the left sugar chain with two thin black stick arms and two short thin black stick legs. The microbe character has small black dot eyes, raised curved eyebrows and a happy closed-line smile.
+Example 3 — field at mid-morning with a farmer (text-free):
+Sunlit field at mid-morning with lined-up olive-green potato plants curving toward a small red barn at the upper right. A farmer stands at about 20 percent of image height on the left, holding a wooden digging fork and wearing a muted rust plaid flannel shirt, medium-blue denim overalls and brown boots. The farmer has proportional cartoon limbs, warm natural skin tones, simple brown hair, small black dot eyes, a small curved-line nose, raised eyebrows and a closed-line smile.
 
-Example 4 — comparison A | B with plaques (carries text):
-A dashed black ink line divides the composition vertically down the center into two open panels. A white rectangular plaque with a thin black border, docked at the top center of the left panel, reads STARCH in bold black uppercase lettering; a matching plaque docked at the top center of the right panel reads INULIN in bold black uppercase lettering. Left panel: one smooth oval golden potato halved cleanly. Right panel: one bumpy tan tuber halved to reveal a pale blue interior with a curved black pointer arrow.
+Example 4 — biological cutaway with a microbe (text-free):
+Enlarged biological cutaway of a curved warm dusty-pink intestine wall around a pale cream channel. Two pale blue beaded sugar chains float apart inside the channel. A small round sage-green microbe character, a type C mascot with small black dot eyes, raised curved eyebrows, a closed-line smile, thin black stick arms and two short thin black stick legs, reaches toward the left sugar chain.
+
+Example 5 — balance scale metaphor with label cards (carries text):
+Brass balance scale on a warm cream backdrop, one round tray holding a smooth golden potato and the other tray holding a bumpy tan tuber, the beam sloping toward the tuber. A white framed label card above the scale reads STARCH in bold black uppercase lettering, and a muted red plaque beside the tuber reads INULIN in bold black uppercase lettering.
+
+Example 6 — split comparison with pointer labels (carries text):
+Split vertically down the center by a dashed black line on a warm cream backdrop. The left panel shows one smooth oval golden potato halved cleanly, with a curved black ink pointer arrow and clean black uppercase lettering reading STARCH. The right panel shows one bumpy tan tuber halved to reveal a pale blue interior, with a curved black ink pointer arrow and clean black uppercase lettering reading INULIN.
+
+Example 7 — main character with a prop and question mark (text-free):
+Medium scene in a plain cream kitchen corner with a small wooden counter holding one open cookbook and a single sage-green pepper. The main character stands at about 40 percent of image height on the right, wearing a chef hat and apron, one hand scratching the head while a small question mark floats above. The main character has a large smooth pure-white round head with a crisp medium-fine black ink outline, small solid black dot eyes, expressive thin curved eyebrows, a wavy worried mouth and tiny sweat drops at the temple, and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs.
+
+Example 8 — illustrated flat map (carries text):
+Illustrated flat map of olive and sage landmasses bordered by crisp dark coastlines over a pale dusty-blue sea, with a dashed terracotta route arrow curving from the left coast toward a mustard-marked island on the right. A small beige label card near the island reads ANDES in bold black uppercase lettering.
 
 # Final Check
 
-Before returning each prompt, verify every item: one finished static wide or medium-wide scene with at least one concrete visible foreground object, diagram, cutaway or character (bare empty sky-and-ground landscapes excluded); single character type following the canon order and sticky rule; complete visual description of every type A or type B character written in full inside this frame (using closed-line eyes only when sleeping); plain stick body for type A unless cooking or farming is named; fixed role outfit for type B; microbes drawn as type C and real/extinct animals and non-agent tools kept plain; whole figure shown when naming body parts; varied layout, pose and prop across consecutive segments; at most 4 characters total (adults only, closed-line mouths, zero speech verbs or gesture words); at most 4 separate objects described one by one; on-frame text solely for numbers, dates, measurements, proper names, comparisons, maps or charts, copied strictly from the current segment's Text line (free of split units, bare numbers except calendar years, verbs or prepositional fragments), in frame_language, 1 to 4 uppercase words per text item, matching text-mode limits; warm cream or layered 2D background; no closing style summary sentence is written; and the prompt text is pure positive wording free of quotation marks and all forbidden words.
+Before returning each prompt, verify every item: one finished scene with a concrete visible focal object, diagram, cutaway or character; the shot scale and opener differ from the previous prompt; a character appears only when the character canon selects it, with at most 4 characters in total; the complete visual description of every main character, type B figure and type C mascot is written in full inside this prompt; text appears only in the five allowed cases, copied from the current segment's Text line, in frame_language, in uppercase, 1 to 4 words per item; the prompt uses positive wording and contains no forbidden words and no quotation marks; no closing style summary sentence is written at the end.

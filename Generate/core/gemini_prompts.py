@@ -555,8 +555,18 @@ _SUBJECT_TEXT_ONLY_LINE = ("Objects and on-frame text come from the Text line on
 
 
 # cartoon_photos (batch_passage): правило разнообразия сеттингов внутри батча; заменяет финальную самопроверку
-_SETTING_VARIETY_LINE = ("- Neighbouring clips in the same batch must use different settings, so no two adjacent "
-                         "segments share one.")
+# Фраза «must use different settings» сохранена (её проверяет тест); добавлены визуальный режим и композиция.
+_SETTING_VARIETY_LINE = ("- Neighbouring clips in the same batch must use different settings, and must also differ in visual "
+                         "mode, shot framing, focal subject and composition: alternate wide scenes, close-ups of hands or "
+                         "objects, overhead views, cutaways, balance scales or diagrams, split comparisons and character "
+                         "reactions. Never repeat the same visual setup or a centred stickman pose on adjacent segments, "
+                         "even with a renamed place.")
+# Подсказка батча: соседние сегменты одного предложения показывают разные стороны одной темы
+_SAME_SENTENCE_NOTE = ("Several segments of this batch come from the same sentence: give each of them a different visual "
+                       "facet of that sentence (for example scale, an interior cutaway, a close-up of hands, a comparison, "
+                       "a diagram or a consequence), never one layout with renamed backdrops.")
+# фрагмент без визуального контекста: до стольких слов или без конечного знака препинания — нужно целое предложение
+_FRAGMENT_NOTE_MAX_WORDS = 5
 
 
 def rules_error(source: str, text: str) -> GeminiInputError:
@@ -733,7 +743,8 @@ def _contract_object(cfg: PromptConfig) -> str:
     """Описание одного объекта ответа в системной инструкции. У batch_passage есть поле setting (перед prompt)."""
     if cfg.batch_passage:
         return ("{\"segment_index\": <the integer given for that segment>, \"setting\": <a short English "
-                "phrase naming the place of the frame>, \"prompt\": <string>}. ")
+                "phrase in the form <visual mode>: <place or subject>, for example macro: hands peeling tuber, "
+                "cutaway: soil roots, scale: mass vs calories or wide: potato rows>, \"prompt\": <string>}. ")
     return "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
 
 
@@ -841,6 +852,17 @@ def _passage_context(sentences: list, first: int, last: int) -> tuple:
     return before, after
 
 
+def _needs_full_sentence(text: str) -> bool:
+    """Фрагмент без визуального контекста: короткий (до _FRAGMENT_NOTE_MAX_WORDS слов) или без конечного знака."""
+    return len(text.split()) <= _FRAGMENT_NOTE_MAX_WORDS or text[-1] not in ".!?\u2026"
+
+
+def _shares_sentence(chunk: list, by_segment: dict) -> bool:
+    """Есть ли два соседних по номеру сегмента батча из одного предложения."""
+    nums = sorted(chunk)
+    return any(by_segment[a].number == by_segment[b].number for a, b in zip(nums, nums[1:]))
+
+
 def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict, allowed_items=frozenset()) -> str:
     """Батч одним текстом для cartoon_photos: контекст до и после (только смысл, целые предложения),
     затем по одной строке на сегмент: segment_index, Text и Sentence с маркером >>...<<.
@@ -860,8 +882,8 @@ def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict
             a, b = sen.spans[n]
             marked = f"{sen.text[:a]}>>{sen.text[a:b]}<<{sen.text[b:]}"
             line = f"segment_index: {n} | Text (what this segment says): {text} | Sentence: {marked}"
-            if len(text.split()) <= SHORT_SEGMENT_MAX_WORDS:
-                line += (" | Note: this is a very short fragment; base the visual on the whole sentence, "
+            if _needs_full_sentence(text):
+                line += (" | Note: this is an incomplete fragment; base the visual on the whole Sentence, "
                          "not on these words alone.")
         else:
             line = f"segment_index: {n} | Text (what this segment says): (silence / no text)"
@@ -873,6 +895,8 @@ def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict
             notes.append(note)
     if after:
         lines.append("After (context only): " + " ".join(x.text for x in after))
+    if _shares_sentence(chunk, by_segment):
+        notes.append(_SAME_SENTENCE_NOTE)   # Русский: одна подсказка на батч, после строк сегментов
     lines.extend(notes)
     return "\n".join(lines)
 
@@ -966,6 +990,14 @@ _EMOTION_REASON = "стиль: эмоциональная метка"
 _NEGATION_REASON = "стиль: отрицание"
 # префикс причины, пришедшей с разбора ответа на исправление: такие причины не проходят через таблицы кодов нарушений
 _PARSE_PREFIX = "разбор: "
+# cartoon_photos (batch_passage): канон главного героя и позитивная формулировка вместо «free of X»
+_HERO_CANON_REASON = "персонаж: неполное описание главного героя"
+_FREE_OF_REASON = "стиль: «free of» вместо позитивного описания"
+_HERO_NAME_RX = re.compile(r"\bmain character\b", re.I)
+_HERO_CANON_PARTS = ("round head", "stick")
+# «free of» и следом (до двух слов) визуальное существительное; «free of quotation marks» не ловится
+_FREE_OF_RX = re.compile(r"\bfree of\s+(?:[\w-]+\s+){0,2}?(?:words?|text|labels?|smoke|fire|wood|clothing|headwear|"
+                         r"expressions?|smiling|smile|stick limbs?|crowds?)\b", re.I)
 _STYLE_RULES = [
     (re.compile(r"\b(?:no|not|without|never|nothing|nobody|none|"
                 r"(?:don|doesn|isn|aren|can|won)['\u2019]?t|cannot)\b", re.I),
@@ -1136,6 +1168,14 @@ def _parse_hint_en(item: str) -> str:
     for _rx, label, hint in _STYLE_RULES:
         if label == reason:
             return hint
+    if reason == _HERO_CANON_REASON:
+        return ("Describe the main character in full: a smooth pure-white round head with a crisp black outline, "
+                "small solid black dot eyes, curved eyebrows, and a plain solid-black stick body with stick arms, "
+                "hands and legs.")
+    if reason == _FREE_OF_REASON:
+        return ("Replace each phrase of the form free of X with a positive description of what IS visible instead, "
+                "for example a blank dark screen, a bare stick body, clear air or neutral animal features; "
+                "never name the excluded item.")
     if reason in CONTENT_HINT_BY_REASON:
         return CONTENT_HINT_BY_REASON[reason]
     if reason.startswith("длина "):
@@ -1585,6 +1625,17 @@ def _textless_round(cfg: PromptConfig, pending: list, req_round: int) -> bool:
     return {problem_code(p) for p in pending} <= _LETTERING_CODES
 
 
+def _batch_style_reasons(text: str) -> list:
+    """cartoon_photos (batch_passage): причины разбора для неполного канона героя и для «free of X». Пусто — всё в порядке."""
+    reasons: list = []
+    low = text.lower()
+    if _HERO_NAME_RX.search(text) and not all(part in low for part in _HERO_CANON_PARTS):
+        reasons.append(_HERO_CANON_REASON)
+    if _FREE_OF_RX.search(text):
+        reasons.append(_FREE_OF_REASON)
+    return reasons
+
+
 def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None, textless: bool = False) -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним.
@@ -1600,6 +1651,9 @@ def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=Non
         problems += _ref_fix_problems(text, refs, [])
         if _combo_bad(refs, cfg):
             problems.append(f"{REF_CODE_INVALID}: «{REF_COMBO_HINT}»")
+    if cfg.batch_passage:
+        # Русский: причины разбора — как у прочих флагов стиля, чтобы повтор получил английскую подсказку
+        problems += [_PARSE_PREFIX + r for r in _batch_style_reasons(text)]
     return list(dict.fromkeys(problems))
 
 

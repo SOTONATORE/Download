@@ -36,6 +36,11 @@ PHOTO_NUM_FRAMES = 1        # фото: один промпт = один кад�
 VIDEO_WAVE = "видео"        # имя волны видео в общем пуле батчей
 PHOTO_WAVE = "фото"         # имя волны фото в общем пуле батчей
 DUP_REWORK_MAX_PASSES = 3   # сколько проходов дедупликации делается, если переписанный клип совпал с другим
+# cartoon_photos (batch_passage): монотонность соседних клипов — окно из стольких номеров и порог сходства сцены
+MONOTONY_WINDOW = 3
+MONOTONY_JACCARD = 0.85
+_APPEARANCE_RX = re.compile(r"the main character has[^.]*\.", re.I)   # повторяемое описание героя — не сцена
+_WORD_RX = re.compile(r"[a-z0-9']+")
 
 
 @dataclass
@@ -426,6 +431,49 @@ def mark_duplicates_for_rework(prompts: dict, nums, style_text: str, *,
     return queued
 
 
+def _clip_setting(entry: dict) -> str:
+    """Setting клипа batch_passage в нижнем регистре, без лишних пробелов; пусто, если его нет."""
+    extra = entry.get("extra") if isinstance(entry.get("extra"), dict) else {}
+    return " ".join(str(extra.get("setting") or "").split()).lower()
+
+
+def _scene_words(entry: dict, style_text: str) -> frozenset:
+    """Слова сцены клипа без стиля и без повторяемой фразы о внешности героя."""
+    raw = _raw_prompt(str(entry.get("prompt", "")), style_text)
+    return frozenset(_WORD_RX.findall(_APPEARANCE_RX.sub(" ", raw).lower()))
+
+
+def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
+    """cartoon_photos (batch_passage): соседние клипы монотонны — ставятся в очередь исправлений.
+
+    Окно: клип сравнивается с двумя предыдущими номерами волны (в числовом порядке). Монотонность — одинаковый
+    непустой setting или сцена с долей общих слов не ниже MONOTONY_JACCARD. Клип с очередью или на пределе кругов
+    (REPAIR_ROUNDS) пропускается, поэтому цикл не бесконечен. Текст повтора — DUPLICATE_REWORK_TEXT (через код
+    дубликата, без новых кодов). Меняет prompts под замком вызывающего. Возвращает номера, поставленные в очередь.
+    """
+    ordered = sorted(set(int(n) for n in nums))
+    queued: list = []
+    for idx, n in enumerate(ordered):
+        entry = prompts.get(str(n))
+        if not isinstance(entry, dict) or entry.get("rework_pending"):
+            continue
+        if int(entry.get("rework_round", 0) or 0) >= gp.REPAIR_ROUNDS:
+            continue
+        setting = _clip_setting(entry)
+        words = _scene_words(entry, style_text)
+        for earlier in ordered[max(0, idx - (MONOTONY_WINDOW - 1)):idx]:
+            other = prompts.get(str(earlier)) or {}
+            same_setting = bool(setting) and setting == _clip_setting(other)
+            other_words = _scene_words(other, style_text)
+            similar = bool(words and other_words) and len(words & other_words) / len(words | other_words) >= MONOTONY_JACCARD
+            if same_setting or similar:
+                entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
+                entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(earlier))]
+                queued.append(n)
+                break
+    return queued
+
+
 def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, profile: str,
                       photo_profile: Optional[str], timing, watch, prompts_path, gemini_options: dict,
                       errors: list, aborts: list, state, lock) -> dict:
@@ -455,6 +503,11 @@ def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, pro
                 prompts, video, style_video, allow_extra_round=True) if dup_video else []
             queued_photo = mark_duplicates_for_rework(
                 prompts, photo, style_photo, allow_extra_round=True) if dup_photo else []
+            # Русский: монотонность только для batch_passage; точные дубликаты уже поставлены выше и пропускаются
+            if dup_video and getattr(cfg, "batch_passage", False):
+                queued_video = sorted(set(queued_video) | set(mark_monotony_for_rework(prompts, video, style_video)))
+            if dup_photo and getattr(photo_cfg, "batch_passage", False):
+                queued_photo = sorted(set(queued_photo) | set(mark_monotony_for_rework(prompts, photo, style_photo)))
             if not queued_video and not queued_photo:
                 return state
             state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}

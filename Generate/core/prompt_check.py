@@ -402,11 +402,28 @@ _CONTENT_RX = (
         r"faces? up close)\b", re.IGNORECASE)),
 )
 _IMAGE_ONLY = frozenset({PROBLEM_CLOSE_FACE})
-# При max_characters слова, которые описывают не людей (figures, several, many, multiple, lines of), из проверки
-# людей убраны: «stick-figures» и «several circles» не считаются толпой. Толпа, группы, ряды людей и люди остаются.
+# При max_characters в проверку толпы попадают только слова толпы и групп людей. Отдельные люди («two farmers»,
+# «five workers») проверяет подсчёт персонажей (count_characters), а не слово; «rows of» и группы предметов
+# («a group of tubers») людьми не считаются: ряды предметов проверяются только шаблоном _OBJECT_SET_RX.
 _PEOPLE_COUNT_CHARS_RX = re.compile(
-    r"\b(?:people|men|women|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|"
-    r"guards|warriors|fighters|travell?ers|persons|crowds?|groups?|troops?|dozens|rows? of)\b", re.IGNORECASE)
+    r"\b(?:crowds?|troops?|dozens|hundreds|thousands|"
+    r"several (?:people|men|women|farmers|workers|villagers|persons|figures)|"
+    r"groups? of (?:people|men|women|farmers|workers|villagers|persons|figures))\b", re.IGNORECASE)
+# крупные планы лиц при max_characters (rules: close_faces: forbidden): крупный план руки или предмета разрешён,
+# лица, головы, глаза, портреты и люди — нет
+_CLOSE_FACE_CHARS_RX = re.compile(
+    r"\b(?:portraits?|face fills? the frame|fills? the frame with (?:a |the |his |her )?(?:face|head)|"
+    r"face in (?:sharp )?focus|sharp eyes|faces? up close)\b"
+    r"|\b(?:extreme )?close-?ups?\b[^.;\n]{0,40}?\b(?:faces?|heads?|eyes?|portraits?|persons?|people|"
+    r"man|men|woman|women|characters?)\b"
+    r"|\b(?:faces?|heads?|eyes?|portraits?|persons?|man|men|woman|women|characters?)\b[^.;\n]{0,25}?"
+    r"\bclose-?ups?\b", re.IGNORECASE)
+# ряды и флоты машин без ограничения числа (при max_characters и без object_sets: forbidden): «fleet of ...», «rows of parked cars»
+_VEHICLE_FLEET_RX = re.compile(
+    r"\b(?:fleets?|convoys?)\s+of\b|"
+    r"\b(?:rows?|lines?|columns?)\s+of\s+(?:[\w-]+\s+){0,2}?"
+    r"(?:vehicles?|cars?|trucks?|carts?|machines?|tractors?|tanks?|motorcycles?|bikes?|wagons?|carriages?)\b",
+    re.IGNORECASE)
 # наборы предметов: отдельный шаблон, включается только правилом object_sets: forbidden (см. content_hits)
 _OBJECT_SET_RX = re.compile(r"\b(?:stacks?|piles?|rows?|lines?) of\b", re.IGNORECASE)
 # шаблон людей берём из _CONTENT_RX: «rows of» и «lines of» уже отмечены как PROBLEM_PEOPLE_COUNT
@@ -460,21 +477,53 @@ _PLURAL_PERSON_RX = re.compile(
     r"\b(?:men|women|people|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|guards|"
     r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters|figures)\b", re.IGNORECASE)
 _CROWD_RX = re.compile(r"\b(?:crowds?|groups?|troops?|several|many|dozens|multiple)\b", re.IGNORECASE)
-# варианты для подсчёта персонажей при max_characters: без figures, several, many, multiple (не люди)
+# варианты для подсчёта персонажей при max_characters: без figures, several, many, multiple (не люди).
+# shoppers, customers, cooks, chefs, scientists добавлены только сюда: подсчёт без max_characters не меняется
 _PLURAL_PERSON_HUMAN_RX = re.compile(
     r"\b(?:men|women|people|soldiers|officers|riders|horsemen|villagers|farmers|herders|elders|workers|guards|"
-    r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters)\b", re.IGNORECASE)
-_CROWD_HUMAN_RX = re.compile(r"\b(?:crowds?|groups?|troops?|dozens)\b", re.IGNORECASE)
+    r"warriors|fighters|travell?ers|persons|children|boys|girls|kids|sons|daughters|"
+    r"shoppers|customers|cooks|chefs|scientists)\b", re.IGNORECASE)
+_PERSON_HUMAN_RX = re.compile(
+    r"\b(?:man|woman|person|boy|girl|child|soldier|officer|rider|horseman|villager|farmer|herder|elder|"
+    r"worker|guard|warrior|fighter|traveller|traveler|lady|gentleman|mother|father|wife|husband|"
+    r"son|daughter|kid|baby|infant|teenager|shopper|customer|cook|chef|scientist)\b", re.IGNORECASE)
+# группы предметов («group of tubers») людьми не считаются: только группы людей
+_CROWD_HUMAN_RX = re.compile(
+    r"\b(?:crowds?|troops?|dozens|hundreds|thousands|"
+    r"groups? of (?:people|men|women|farmers|workers|villagers|persons|figures))\b", re.IGNORECASE)
+# явное число перед существительным: слова до twenty и цифры («two farmers», «4 workers»)
+_NUMERAL_VALUE = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                  "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "twenty": 20}
+# слова, которые обрывают поиск числа: «two of the men» — число не относится к men
+_NUMERAL_STOP_WORDS = frozenset({"and", "or", "of", "with", "the", "a", "an", "his", "her", "their", "its",
+                                 "my", "our", "your", "in", "on", "at", "by", "near"})
+
+
+def _numeral_before(text: str, start: int) -> Optional[int]:
+    """Явное число в пределах трёх слов перед позицией «start» («two adult women» → 2, «four shoppers» → 4), иначе None."""
+    words = re.findall(r"[a-z]+|\d+", text[max(0, start - 40):start].lower())[-3:]
+    for w in reversed(words):
+        if w in _NUMERAL_VALUE:
+            return _NUMERAL_VALUE[w]
+        if w.isdigit():
+            return int(w)
+        if w in _NUMERAL_STOP_WORDS:
+            return None
+    return None
 
 
 def count_people(text: str, human_only: bool = False) -> int:
     """Оценка числа людей в тексте: введения («One man», «a woman») по одному; множественное число — не меньше двух;
     толпа и группа — не меньше трёх. Повторные упоминания одного человека не считаются.
-    human_only: только слова про людей (figures, several, many, multiple не считаются), для max_characters."""
+    human_only (для max_characters): только слова про людей (figures, several, many, multiple и группы предметов
+    не считаются); явное число перед существительным во множественном числе считается точно («two farmers» — 2)."""
     t = text or ""
-    plural_rx, crowd_rx = (_PLURAL_PERSON_HUMAN_RX, _CROWD_HUMAN_RX) if human_only else (_PLURAL_PERSON_RX, _CROWD_RX)
+    if human_only:
+        singular = sum(1 for m in _PERSON_HUMAN_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
+        plural = sum(_numeral_before(t, m.start()) or 2 for m in _PLURAL_PERSON_HUMAN_RX.finditer(t))
+        return singular + plural + 3 * len(_CROWD_HUMAN_RX.findall(t))
     singular = sum(1 for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
-    return singular + 2 * len(plural_rx.findall(t)) + 3 * len(crowd_rx.findall(t))
+    return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
 
 
 # Животные для подсчёта персонажей (нужны только при max_characters): одиночное и множественное число
@@ -521,31 +570,58 @@ def people_hint(max_characters: Optional[int], animals_count: bool = True) -> st
             "or the animal's colour and size). No crowds, groups, rows or plural people.")
 
 
+# Машины и механизмы во множественном числе (для проверки по числу при max_characters)
+_MANY_OF_ONE_VEHICLE_SET = frozenset(w.lower() for w in _MANY_OF_ONE_VEHICLE_WORDS)
+
+
+def _bounded_vehicle_hits(text: str, rx, limit: int) -> list:
+    """Машины и механизмы при max_characters без object_sets: forbidden. Явное число или два (множественное без числа)
+    не выше rules.horses_vehicles_animals_max проходят; большее число нарушает. Животные, не машины, — как прежде."""
+    hits = []
+    for m in rx.finditer(text):
+        if m.group(0).lower() in _MANY_OF_ONE_VEHICLE_SET and (_numeral_before(text, m.start()) or 2) <= limit:
+            continue
+        hits.append((PROBLEM_MANY_OF_ONE, m.group(0)))
+    return hits
+
+
 def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
                  rules: Optional[RulesValues] = None) -> list:
     """Нарушения содержания: список пар (код, фрагмент). Текст не меняется.
     relaxed: отключённые профилем правила из RELAXABLE_RULES; правила безопасности отключить нельзя.
     max_characters: лимит персонажей профиля (герой и остальные); None — прежний PEOPLE_LIMIT.
+    При max_characters крупный план проверяется только для лиц, толпа — только для слов толпы и групп людей,
+    машины — по числу (если нет object_sets: forbidden). Без max_characters всё работает как раньше.
     rules: значения rules.yaml; None — значения по умолчанию (прежнее поведение)."""
     t = text or ""
     rules = rules or RulesValues()
     hits = []
     skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE) | rule_skipped_codes(rules)
+    chars_mode = max_characters is not None
     # гейт: животные во множественном числе считает лимит персонажей; список машин проверяется всегда
     many_rx = _MANY_OF_ONE_VEHICLES_RX if animal_plurals_by_count(max_characters, rules.animals_count) else _MANY_OF_ONE_ALL_RX
+    # при max_characters и без object_sets: forbidden машины проверяются по числу, а не запретом любого упоминания
+    bounded_vehicles = chars_mode and not rules.object_sets_forbidden
     for code, rx in _CONTENT_RX:
         if code in skipped:
             continue
+        if code == PROBLEM_MANY_OF_ONE and bounded_vehicles:
+            hits.extend(_bounded_vehicle_hits(t, many_rx, rules.horses_vehicles_animals_max))
+            hits.extend((code, m.group(0)) for m in _VEHICLE_FLEET_RX.finditer(t))
+            continue
         if code == PROBLEM_MANY_OF_ONE:
             rx = many_rx
-        if code == PROBLEM_PEOPLE_COUNT and max_characters is not None:
+        if code == PROBLEM_PEOPLE_COUNT and chars_mode:
             rx = _PEOPLE_COUNT_CHARS_RX
+        if code == PROBLEM_CLOSE_FACE and chars_mode:
+            rx = _CLOSE_FACE_CHARS_RX
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
     # наборы предметов: не зависят от relaxed и от rule_skipped_codes; совпадение с людьми (тот же фрагмент) не дублируем
     if rules.object_sets_forbidden:
-        people_spans = {m.span() for m in _PEOPLE_COUNT_RX.finditer(t)}
+        # шаблон людей тот же, что проверка людей выше: при max_characters «rows of» людьми не считается
+        people_spans = {m.span() for m in (_PEOPLE_COUNT_CHARS_RX if chars_mode else _PEOPLE_COUNT_RX).finditer(t)}
         hits.extend((PROBLEM_OBJECT_SET, m.group(0)) for m in _OBJECT_SET_RX.finditer(t)
                     if m.span() not in people_spans)
     if max_characters is None:
@@ -593,13 +669,14 @@ _LETTERING_COMMA_RE = re.compile(r"(?<!\d),(?!\d)")
 _LETTERING_FONT_WORDS = (
     r"(?:bold|black|dark[- ]red|dark|red|gold|golden|muted|uppercase|lowercase|"
     r"capital|block|hand|handwritten|clean|crisp|white|thin|thick|heavy|medium|"
-    r"simple|solid|ink|colou?red|style|print|printed|[a-z]+-[a-z]+)"
+    r"simple|solid|ink|colou?red|style|print|printed|large|small|tiny|sans-serif|hand-lettered|header|banner|"
+    r"title|label|centered|off-white|top|[a-z]+-[a-z]+)"
 )
-# Надпись в кадре: «lettering ... : <текст>», «reading <текст> in ... lettering» и «lettering ... reading <текст>»
+# Надпись в кадре: «lettering ... : <текст>», «reading <текст> in ... lettering» и «lettering[,] ... reading <текст>»
 _LETTERING_RX = re.compile(
     r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)"
     r"|\bread(?:s|ing)\s+([^.\n;]+?)\s+in\s+(?:" + _LETTERING_FONT_WORDS + r"\s+){0,10}lettering\b"
-    r"|\blettering\b[^:.,;\n]{0,60}\bread(?:s|ing)\s+(?!:)([^.\n;]+)",
+    r"|\blettering\b[^:.,;\n]{0,60},?\s*\bread(?:s|ing)\s+(?!:)([^.\n;]+)",
     re.IGNORECASE,
 )
 # служебные слова, на которых надпись не может закончиться
@@ -650,12 +727,66 @@ def _norm_lettering(text: str) -> str:
 _NEGATION_WORDS = frozenset({
     "can't", "cannot", "don't", "not", "never", "no", "won't", "isn't", "aren't",
     "doesn't", "didn't", "without",
+    "не", "нет", "ни", "без",  # русские отрицания: «не является», «нет», «ни», «без»
 })
 _WORD_TOKEN_RX = re.compile(r"[\w']+")
 
+# Русские окончания для сравнения основ слов надписи и реплики (длинные первыми)
+_RU_ENDINGS = tuple(sorted({
+    "ого", "его", "ому", "ему", "ыми", "ими", "ая", "яя", "ое", "ее", "ые", "ие", "ый", "ий", "ой", "ую", "юю",
+    "ом", "ем", "ам", "ям", "ах", "ях", "ою", "ею", "ей", "ов", "ев", "ых", "их", "ы", "и", "а", "я", "у", "ю",
+    "е", "о", "ь",
+}, key=len, reverse=True))
+_CYRILLIC_RX = re.compile(r"[а-яё]")
+
+
+def _ru_stem(word: str) -> str:
+    """Основа русского слова: срезано самое длинное окончание, если останется не меньше трёх букв."""
+    for ending in _RU_ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            return word[:-len(ending)]
+    return word
+
+
+def _ru_word_matches(a: str, b: str) -> bool:
+    """Слово надписи и слово реплики совпадают: точно, либо как одна основа в другом падеже.
+    Падежная форма — только для кириллицы и слов от четырёх букв; короткие слова и английские — только точно."""
+    if a == b:
+        return True
+    if len(a) < 4 or len(b) < 4 or not (_CYRILLIC_RX.search(a) and _CYRILLIC_RX.search(b)):
+        return False
+    # общее начало не короче половины слова (минус два), но не меньше четырёх букв: «земляная» и «земляной»
+    prefix = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        prefix += 1
+    if prefix >= max(4, min(len(a), len(b)) - 2):
+        return True
+    stem_a, stem_b = _ru_stem(a), _ru_stem(b)
+    return len(stem_a) >= 3 and stem_a == stem_b
+
+
+def _lettering_word_positions(norm: str, segment: str):
+    """Для каждого слова надписи — позиция слова реплики, которым оно закрыто; None, если хоть одно слово не нашлось."""
+    words = [w.replace("ё", "е") for w in _WORD_TOKEN_RX.findall(norm)]
+    seg_tokens = [w.replace("ё", "е") for w in _WORD_TOKEN_RX.findall(segment)]
+    if not words:
+        return None
+    positions = []
+    for word in words:
+        idx = next((i for i, tok in enumerate(seg_tokens) if _ru_word_matches(word, tok)), None)
+        if idx is None:
+            return None
+        positions.append(idx)
+    return positions
+
 
 def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
-    """Надписи в кадре, которых нет в реплике текущего сегмента (целая фраза как подстрока). Чистая функция."""
+    """Надписи в кадре, которых нет в реплике текущего сегмента. Чистая функция.
+    Сначала точная подстрока (как раньше). Если её нет, каждое слово надписи должно совпасть со словом реплики
+    точно или как русская основа в другом падеже («ЗЕМЛЯНАЯ ГРУША» — «земляной грушей»). Отрицание в трёх словах
+    перед совпавшим словом («не является земляной грушей») делает надпись ошибочной."""
     segment = _norm_lettering(segment_text or "")
     out = []
     for m in _LETTERING_RX.finditer(prompt or ""):
@@ -664,7 +795,11 @@ def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
             continue
         norm = _norm_lettering(phrase)
         if norm not in segment:
-            out.append(phrase)
+            positions = _lettering_word_positions(norm, segment)
+            seg_tokens = _WORD_TOKEN_RX.findall(segment)
+            if positions is None or any(any(w in _NEGATION_WORDS for w in seg_tokens[max(0, p - 3):p])
+                                        for p in positions):
+                out.append(phrase)
             continue
         # Русский комментарий: фраза есть в реплике, но если перед её первым вхождением
         # в трёх словах стоит отрицание («can't start a fire»), надпись всё равно считается ошибочной

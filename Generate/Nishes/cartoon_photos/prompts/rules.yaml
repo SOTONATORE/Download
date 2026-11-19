@@ -1,7 +1,8 @@
 max_characters: 4
 animals_count: true
 small_objects: allowed
-speech: forbidden
+# Немые комические выражения лиц (смех, удивлённый рот): речь и ответы в кадре по-прежнему запрещены в style.md
+speech: allowed
 weapons: forbidden
 scene_motion_wording: drop
 close_faces: forbidden
@@ -11,7 +12,8 @@ emotion: posture_and_action
 subject_source: text_and_context
 horses_vehicles_animals_max: 3
 children: forbidden
-object_sets: forbidden
+# Аккуратные линии, полки, кучи и ленты с культурами разрешены; стиль ведёт к чистым композициям
+object_sets: allowed
 allowed_shot_items: letter, map, diagram, chart, infographic, calendar, spreadsheet, newspaper, document, paper, blank sheet, sheet of paper, lettering
 # Disabled so the system prompt does not force sketchy wobbly pen strokes instead of clean 2D comic outlines.
 sketch_style: false
