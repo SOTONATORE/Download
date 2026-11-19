@@ -90,7 +90,7 @@ def test_duplicate_rework_text_is_english_and_asks_for_visible_change():
     text = gp._rework_text([pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, "1")])
     assert text == gp.DUPLICATE_REWORK_TEXT
     assert "visibly different" in text
-    assert "pose" in text and "prop" in text and "location" in text and "action" in text
+    assert "layout" in text and "focal object" in text and "setting" in text and "pose" in text and "action" in text
 
 
 def test_duplicate_reason_label_is_russian():
