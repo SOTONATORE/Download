@@ -70,8 +70,16 @@ def test_three_dogs_goat_and_cat_fail_character_count_with_limit_four():
 # (c) «two horses» без max_characters по-прежнему нарушает правило «много одинаковых» (другие профили)
 def test_two_horses_without_max_characters_still_fail_many_of_one():
     assert pc.PROBLEM_MANY_OF_ONE in _codes("two horses", max_characters=None, rules=RulesValues())
-    # машины проверяются и при гейте животных
-    assert pc.PROBLEM_MANY_OF_ONE in _codes("two cars", 4, RulesValues(max_characters=4, animals_count=True))
+    # машины проверяются и при гейте животных; при object_sets: forbidden «two cars» нарушает запрет наборов
+    assert pc.PROBLEM_MANY_OF_ONE in _codes(
+        "two cars", 4, RulesValues(max_characters=4, animals_count=True, object_sets_forbidden=True))
+
+
+def test_bounded_cars_pass_at_two_and_fail_above_horses_vehicles_animals_max():
+    # object_sets: allowed (object_sets_forbidden False): машины ограничены числом horses_vehicles_animals_max
+    rules = RulesValues(max_characters=4, animals_count=True, horses_vehicles_animals_max=3)
+    assert pc.PROBLEM_MANY_OF_ONE not in _codes("two cars", 4, rules)
+    assert pc.PROBLEM_MANY_OF_ONE in _codes("four cars", 4, rules)
 
 
 class _Log:

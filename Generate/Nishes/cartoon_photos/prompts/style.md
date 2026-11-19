@@ -35,7 +35,7 @@ About half or more of all frames work best with zero characters: pure objects, m
 
 Never reuse one fixed shot order or sentence opener. Do not start every prompt with the same phrase, and do not place the character at the center every time. Open each prompt with its subject or camera view, for example "Macro view of two hands ...", "Overhead flat view of ...", "Vertical soil cross-section ...", "Brass balance scale on a warm cream backdrop ...", "Split vertically down the center ...". Vary hero position and scale: tiny in a landscape, leaning in from the left or right, seated, walking. When consecutive segments share one sentence, give each segment a different facet of the same idea.
 
-Human faces are never a close-up subject: show whole figures at normal scale instead. Macro views of hands, feet, food, tools and tuber skin are encouraged; write macro view or tight view for them.
+Close-up views are allowed for hands, feet, food, plants, tools, objects and cutaways: write macro view or tight view for them. Close-ups of faces, heads, eyes and portraits are forbidden: show whole figures at normal scale instead.
 
 # Character Canon
 
@@ -48,7 +48,7 @@ Select the character type with the first matching rule:
 
 Keep one human type in a frame and never mix human and mascot types in one frame. Plain 2D animals may appear with type A or type B and count toward the 4-character total. Draw ingredients, tools and surroundings as plain inanimate items. Use the same character canon for the whole video.
 
-Type A, the main character: a large smooth pure-white round head with a crisp medium-fine black ink outline, small solid black dot eyes, expressive thin curved eyebrows, a closed-line mouth by default, and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs. It may carry one simple situational item: a backpack, a chef hat and apron, a farmer hat, a hard hat, a shopping basket or a magnifying glass. Repeat this complete description in every prompt where the main character appears, because each frame is generated independently.
+a) Default hero, Type A, the main character: a large smooth pure-white round head with a crisp medium-fine black ink outline, small solid black dot eyes, expressive thin curved eyebrows, a closed-line mouth by default, and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs. It may carry one simple situational item: a backpack, a chef hat and apron, a farmer hat, a hard hat, a shopping basket or a magnifying glass. Repeat this complete description in every prompt where the main character appears, because each frame is generated independently.
 
 Type B, the cartoon adult: a proportional 2D figure (head about one fifth of body height) with warm natural skin tones, simple solid-colour hair, small black dot eyes, a small curved-line nose, expressive eyebrows, a closed-line mouth and proportional clothed limbs. Keep one fixed outfit per role across the whole video: white lab coat and eyeglasses for a scientist; muted rust plaid flannel shirt, medium-blue denim overalls and brown boots for a farmer; muted brown work shirt, tan trousers, brown boots and a tan hard hat for a miner; white jacket and tall white cap for a chef; period tunic and trousers for a historical figure; muted sage sweater and medium-brown trousers for a neutral family member. Repeat the complete face, skin, hair, limb and outfit description of each type B figure in every prompt where it appears.
 
@@ -84,10 +84,10 @@ Safe replacements for common concepts:
 - write around, bordering or enclosing instead of framing;
 - describe the exact limb pose instead of gesture;
 - write cluster, clump, grove, stand or pair instead of group, groups, row of or rows of for trees, rocks, towers and other objects, and write lined-up for crops;
-- write two lines meeting at a corner instead of axes;
+- write two lines meeting at a corner instead of axes, or write X and Y axes only on a labeled chart card;
 - write round glass disc or magnifier instead of lens.
 
-Forbidden prompt words to exclude from every prompt: parchment, flag, passport, form, forms, forming, formed, framing, frame height, uniform, emblem, crest, knife, saber, saber-toothed, gesture, gestures, tilting, moving, pan, zoom, track, vector, bold outline, thick outline, heavy outline, sketch, sketchy, 16:9, widescreen, no, not, never, none, render, rendered, rendering, 4k, 8k, uhd, photorealistic, hyperrealistic, masterpiece, trending, octane, unreal engine, lens, 35mm, anamorphic, aperture, focal length, film grain, film still, without, nothing, nobody, cannot, group, groups, crowd, crowds, row of, rows of, close-up, portrait, axes.
+Forbidden prompt words to exclude from every prompt: parchment, flag, passport, form, forms, forming, formed, framing, frame height, uniform, emblem, crest, knife, saber, saber-toothed, gesture, gestures, tilting, moving, pan, zoom, track, vector, bold outline, thick outline, heavy outline, sketch, sketchy, 16:9, widescreen, no, not, never, none, render, rendered, rendering, 4k, 8k, uhd, photorealistic, hyperrealistic, masterpiece, trending, octane, unreal engine, lens, 35mm, anamorphic, aperture, focal length, film grain, film still, without, nothing, nobody, cannot, group, groups, crowd, crowds, row of, rows of, portrait.
 
 # Safety and Content Rules
 

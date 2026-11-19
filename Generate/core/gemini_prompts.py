@@ -720,10 +720,17 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
     frame_source = "Text line" if cfg.batch_passage else "subtitle line"
     if cfg.rules.dangling_text_check:
         text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the " + frame_source + " of the "
-                 "current segment only. The Before and After context is for understanding the meaning only; never copy "
-                 "words from it into on-frame text. Never end the text on a preposition, article, conjunction, "
-                 "auxiliary verb or the middle of a sentence. If the current segment has no complete phrase to copy, "
-                 "write no on-frame text for that frame. ")
+                 "current segment only, except for the nominative rule below. The Before and After context is for "
+                 "understanding the meaning only; never copy words from it into on-frame text. Never end the text on a "
+                 "preposition, article, conjunction, auxiliary verb or the middle of a sentence. If the current segment "
+                 "has no complete phrase to copy, write no on-frame text for that frame. "
+                 # Русский комментарий: для флективных языков (русский и др.) надпись — в именительном падеже словаря;
+                 # слова берутся только из реплики текущего сегмента, Before и After не используются
+                 "For inflected on-frame languages (such as Russian), write each on-frame phrase in its clean nominative "
+                 "singular or dictionary form, built only from words that appear in the " + frame_source + " of the "
+                 "current segment (for example, write ЗЕМЛЯНАЯ ГРУША for the segment words земляной грушей). Change only "
+                 "the grammatical case or number; never invent, translate or add words, and never take words from the "
+                 "Before or After lines. ")
     if cfg.text_language is None:
         return text + "Always write the output in English."
     if not cfg.frame_language:

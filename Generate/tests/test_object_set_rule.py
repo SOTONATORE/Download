@@ -66,13 +66,13 @@ def test_two_pens_are_not_flagged_by_object_set_rule():
     assert pc.PROBLEM_SMALL_OBJECT in codes
 
 
-# (d) системная инструкция: cartoon — строка ровно один раз; ltx25 и zimage_turbo — строки нет, байты как прежде
-def test_cartoon_system_instruction_has_object_set_line_exactly_once():
+# (d) системная инструкция: cartoon — object_sets: allowed (намеренно), строки запрета наборов нет; ltx25 и zimage_turbo — строки нет, байты как прежде
+def test_cartoon_system_instruction_has_no_object_set_line_because_sets_are_allowed():
     rules = gp.load_rules(NICHE_DIR / "prompts" / "rules.yaml")
-    assert rules.object_sets_forbidden is True
+    assert rules.object_sets_forbidden is False
     cfg = PromptConfig(style_file=str(NICHE_DIR / "prompts" / "style.md"), media="image", preset="none",
                        relaxed_rules=frozenset({"art_medium", "small_objects"}), rules=rules)
-    assert gp.build_system_instruction(cfg).count(OBJECT_SET_LINE) == 1
+    assert OBJECT_SET_LINE not in gp.build_system_instruction(cfg)
 
 
 @pytest.mark.parametrize("profile, media, sha, size", [

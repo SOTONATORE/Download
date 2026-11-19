@@ -49,8 +49,9 @@ def test_cartoon_system_instruction_drops_removed_sentences_and_uses_animal_limi
     assert "Show at most 4 characters in total, people and animals together" in text
     # small_objects allowed: строки о мелких предметах нет
     assert "Show only large, clearly visible objects" not in text
-    # speech, weapons, close_faces forbidden: строки запрета остаются
-    assert "No speech of any kind" in text
+    # weapons, close_faces forbidden: строки запрета остаются
+    # speech: allowed (намеренно): строка запрета речи не выводится, немые выражения лиц остаются
+    assert "No speech of any kind" not in text
     assert "No weapons in the frame" in text
     assert "Never show close-ups" in text
     assert "Show emotion only through posture and visible actions." in text

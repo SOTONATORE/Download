@@ -121,8 +121,8 @@ def test_plaque_lettering_phrase_is_specified():
 # ------------------------------------------------------------------ примеры и preset
 
 def test_examples_are_present():
-    """В разделе примеров найдены все четыре примера."""
-    assert len(_examples()) == 4
+    """В разделе примеров найдены все восемь примеров (style.md: Example 1–8)."""
+    assert len(_examples()) == 8
 
 
 def test_examples_pass_prompt_check_and_style_reasons():

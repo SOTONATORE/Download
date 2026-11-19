@@ -222,3 +222,59 @@ def test_english_negation_window_unchanged():
     # точная подстрока с отрицанием в трёх словах перед ней: надпись ошибочна (как раньше)
     prompt = "Hand-lettered sign reading FIRE in bold black uppercase lettering."
     assert pc.segment_lettering_mismatch(prompt, "can't start a fire") == ["FIRE"]
+
+
+# ---------------------------------------------------------------------------
+# Оси диаграммы не оружие: «axes» проверяется как оружие только без слов диаграммы рядом
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prompt", [
+    "A warm cream chart card with X and Y axes and short labels.",
+    "Graph paper with labeled axes on a warm cream backdrop.",
+    "Plot axes on a cream card marked with dates.",
+    "Diagram of two coordinate axes in clean black ink.",
+])
+def test_chart_axes_are_not_weapons(prompt):
+    assert pc.PROBLEM_WEAPON not in _codes(prompt), prompt
+
+
+@pytest.mark.parametrize("prompt", [
+    "A man holding axes near the fence.",
+    "Two battle axes leaning against a wall.",
+    "A pile of axes on the ground beside a wooden block.",
+    "A warrior with a pair of axes.",
+])
+def test_standalone_axes_still_flagged_as_weapon(prompt):
+    assert pc.PROBLEM_WEAPON in _codes(prompt), prompt
+
+
+def test_weapons_allowed_skips_axes_too():
+    # weapons: allowed снимает проверку оружия целиком, и «axes» тоже
+    rules = RulesValues(weapons_allowed=True)
+    assert pc.PROBLEM_WEAPON not in _codes("A man holding axes near the fence.", rules=rules)
+
+
+# ---------------------------------------------------------------------------
+# «cooks» как глагол после единственного подлежащего не считается множественным числом людей
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "the woman cooks soup",
+    "he cooks at home",
+    "she cooks eggs",
+    "the cook cooks rice",
+    "a farmer cooks beans",
+])
+def test_singular_subject_with_cooks_verb_is_not_plural_people(text):
+    # одна женщина или один человек, глагол «cooks»: не больше одного персонажа с учётом героя
+    assert pc.count_people(text, human_only=True) <= 1, text
+
+
+def test_plural_cooks_still_counted_as_people():
+    assert pc.count_people("two cooks at the stove", human_only=True) == 2
+    assert pc.count_people("the cooks prepare soup", human_only=True) == 2
+
+
+def test_woman_cooks_verb_does_not_fail_person_limit_with_limit_one():
+    one = RulesValues(max_characters=1, animals_count=True)
+    assert pc.PROBLEM_PEOPLE_COUNT not in _codes("the woman cooks soup", one, max_characters=1)

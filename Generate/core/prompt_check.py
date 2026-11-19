@@ -394,7 +394,7 @@ _CONTENT_RX = (
         r"rush\w*|stampede\w*|riot\w*|fight\w*|blood\w*|wounded)\b", re.IGNORECASE)),
     (PROBLEM_WEAPON, re.compile(
         r"\b(?:rifles?|guns?|machine ?guns?|automatics?|submachine guns?|pistols?|sabres?|sabers?|swords?|"
-        r"bayonets?|muskets?|carbines?|knives|knife|daggers?|spears?|lances?|axes|whips?)\b", re.IGNORECASE)),
+        r"bayonets?|muskets?|carbines?|knives|knife|daggers?|spears?|lances?|whips?)\b", re.IGNORECASE)),
     # крупные планы лиц: только для фото (см. _content_hits)
     (PROBLEM_CLOSE_FACE, re.compile(
         r"\b(?:close-?ups?|extreme close-?ups?|portraits?|face fills? the frame|"
@@ -428,6 +428,27 @@ _VEHICLE_FLEET_RX = re.compile(
 _OBJECT_SET_RX = re.compile(r"\b(?:stacks?|piles?|rows?|lines?) of\b", re.IGNORECASE)
 # шаблон людей берём из _CONTENT_RX: «rows of» и «lines of» уже отмечены как PROBLEM_PEOPLE_COUNT
 _PEOPLE_COUNT_RX = dict(_CONTENT_RX)[PROBLEM_PEOPLE_COUNT]
+# «axes» отдельно от шаблона оружия: оси диаграммы («X and Y axes») не оружие. Ось считается осью, если рядом
+# (в трёх словах) есть слово диаграммы и нет слова оружия; «two» и «black» не используются: «two battle axes» и
+# «black axes» тогда прошли бы как оси
+_AXE_RX = re.compile(r"\baxes?\b", re.IGNORECASE)
+_CHART_AXIS_WORDS = frozenset({"x", "y", "chart", "graph", "plot", "diagram", "coordinate", "labeled"})
+_AXE_WEAPON_WORDS = frozenset({"battle", "war", "warrior", "viking", "wielding", "swinging", "chopping",
+                               "holding", "carrying"})
+# «cooks» после единственного подлежащего — глагол («the woman cooks»), а не множественное число людей
+_SINGULAR_SUBJECT_BEFORE_RX = re.compile(r"\b(?:he|she|woman|man|person|character|scientist|farmer|cook)\s+\Z",
+                                         re.IGNORECASE)
+
+
+def _is_chart_axes(text: str, m) -> bool:
+    """«axes» рядом со словом диаграммы и без слова оружия в трёх словах до или после — ось, не оружие."""
+    near = re.findall(r"[a-z]+", text[:m.start()].lower())[-3:] + re.findall(r"[a-z]+", text[m.end():].lower())[:3]
+    return any(w in _CHART_AXIS_WORDS for w in near) and not any(w in _AXE_WEAPON_WORDS for w in near)
+
+
+def _is_singular_verb_cooks(text: str, m) -> bool:
+    """«cooks» сразу после слова единственного числа («the woman cooks») — глагол, людей не считает."""
+    return m.group(0).lower() == "cooks" and _SINGULAR_SUBJECT_BEFORE_RX.search(text[:m.start()]) is not None
 
 # Правила, которые профиль может отключить (relaxed_rules). Только эти четыре id; правила безопасности сюда не входят.
 RELAXABLE_RULES = frozenset({"art_medium", "small_objects", "frame_text", "emotion"})
@@ -520,7 +541,8 @@ def count_people(text: str, human_only: bool = False) -> int:
     t = text or ""
     if human_only:
         singular = sum(1 for m in _PERSON_HUMAN_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
-        plural = sum(_numeral_before(t, m.start()) or 2 for m in _PLURAL_PERSON_HUMAN_RX.finditer(t))
+        plural = sum(_numeral_before(t, m.start()) or 2 for m in _PLURAL_PERSON_HUMAN_RX.finditer(t)
+                     if not _is_singular_verb_cooks(t, m))
         return singular + plural + 3 * len(_CROWD_HUMAN_RX.findall(t))
     singular = sum(1 for m in _PERSON_RX.finditer(t) if not _is_repeat_mention(t, m.start()))
     return singular + 2 * len(_PLURAL_PERSON_RX.findall(t)) + 3 * len(_CROWD_RX.findall(t))
@@ -618,6 +640,9 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
         if code in _IMAGE_ONLY and media != "image":
             continue
         hits.extend((code, m.group(0)) for m in rx.finditer(t))
+    # оружие «axes»: оси диаграммы не считаются оружием (см. _is_chart_axes); отключается правилом weapons: allowed
+    if PROBLEM_WEAPON not in skipped:
+        hits.extend((PROBLEM_WEAPON, m.group(0)) for m in _AXE_RX.finditer(t) if not _is_chart_axes(t, m))
     # наборы предметов: не зависят от relaxed и от rule_skipped_codes; совпадение с людьми (тот же фрагмент) не дублируем
     if rules.object_sets_forbidden:
         # шаблон людей тот же, что проверка людей выше: при max_characters «rows of» людьми не считается
