@@ -39,9 +39,10 @@ def test_style_only_flag_without_refs_not_queued_when_flag_off():
     assert gp._rework_gate_open(_cfg(), _result(NEG)) is False
 
 
-def test_other_reason_not_queued_without_refs_even_with_flag_on():
+def test_other_reason_queued_without_refs_with_flag_on():
+    # Русский: флаг rework_style_flag_without_refs ведёт в очередь любой флаг разбора, не только «отрицание»
     reason = NEG + "; стиль: кавычки"
-    assert gp._rework_gate_open(_cfg(rework_style_flag_without_refs=True), _result(reason)) is False
+    assert gp._rework_gate_open(_cfg(rework_style_flag_without_refs=True), _result(reason)) is True
 
 
 def test_refs_enabled_path_unchanged():

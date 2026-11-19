@@ -586,7 +586,8 @@ def _load_profile_bool(profile_name: str, key: str) -> bool:
 
 
 def load_profile_rework_style_flag_without_refs(profile_name: str) -> bool:
-    """Ключ rework_style_flag_without_refs: клип только с флагом стиля «отрицание» идёт в очередь исправлений и без refs."""
+    """Ключ rework_style_flag_without_refs: клип с любым флагом разбора (стиль, длина, мусор, этнос, метки) идёт в очередь
+    исправлений и без refs при refs_enabled: false. Без ключа или при false клип с флагом без refs остаётся на проверке."""
     return _load_profile_bool(profile_name, "rework_style_flag_without_refs")
 
 

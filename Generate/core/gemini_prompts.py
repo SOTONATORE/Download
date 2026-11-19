@@ -28,7 +28,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark,
                            CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
-                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
+                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, PROBLEM_ETHNICITY, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
                            PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark,
                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
-                          CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, people_hint, problem_code, problem_label,
+                          CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, PROBLEM_ETHNICITY, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
                            PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
@@ -120,7 +120,7 @@ class PromptConfig:
     preset: str = PRESET_NONE
     # refs_enabled: ответ с полем refs (номера референсов), метки <imageN> проверяются; по умолчанию выключено
     refs_enabled: bool = False
-    # rework_style_flag_without_refs: клип, у которого единственная причина — флаг стиля «отрицание», идёт в очередь
+    # rework_style_flag_without_refs: клип с любым флагом разбора (стиль, длина, мусор, этнос, метки) идёт в очередь
     # исправлений и без refs; по умолчанию выключено (значение задаёт профиль через вызывающую сторону)
     rework_style_flag_without_refs: bool = False
     # on_unfixed: «keep» — клип с нарушением остаётся на проверке (прежнее поведение); «fail» — прогон останавливается
@@ -978,7 +978,7 @@ _STYLE_RULES = [
                 r"photorealistic|hyperrealistic|render\s+(?:engine|farm)|rendered|octane|unreal[ -]engine)\b", re.I),
      "стиль: keyword spam",
      "Remove photo and render terms such as 4k, 8k, UHD, photorealistic, masterpiece, trending, "
-     "render, octane, unreal engine."),
+     "rendered, rendering, render, octane, unreal engine."),
     (re.compile(r"\b(?:thoughtful|pensive|contemplative|melancholy|melancholic|wistful|"
                 r"nostalgic|solemn|somber|sombre|serene|peaceful|tense|anxious|mysterious|"
                 r"eerie|haunting|majestic|epic|cinematic|sad|lonely|hopeless|hopeful|"
@@ -1126,12 +1126,27 @@ def _is_ref_problem(problem: str) -> bool:
     return problem.partition(": ")[0] in (REF_CODE_LABELS, REF_CODE_INVALID)
 
 
+_LENGTH_REASON_RX = re.compile(r"^длина \d+ больше лимита (\d+)")
+
+
 def _parse_hint_en(item: str) -> str:
-    """Английская подсказка для причины разбора: текст правила стиля или общий (причина по-русски в запрос не идёт)."""
+    """Английская подсказка для причины разбора: текст правила стиля, подсказка содержания (этнос), английские
+    подсказки длины и служебного мусора; иначе общая (причина по-русски в запрос не идёт)."""
     reason = item[len(_PARSE_PREFIX):]
     for _rx, label, hint in _STYLE_RULES:
         if label == reason:
             return hint
+    if reason in CONTENT_HINT_BY_REASON:
+        return CONTENT_HINT_BY_REASON[reason]
+    if reason.startswith("длина "):
+        m = _LENGTH_REASON_RX.match(reason)
+        if m:
+            return (f"Shorten the prompt to at most {m.group(1)} characters; "
+                    "keep the subject, count, action and setting.")
+        return "Shorten the prompt; keep the subject, count, action and setting."
+    if reason.startswith("служебный мусор:"):
+        return ("Remove service text, markup, placeholders or code-like fragments; "
+                "write plain descriptive prose only.")
     return "Fix the problem found when the previous version was checked; keep the rest of the prompt."
 
 
@@ -1539,21 +1554,21 @@ def _is_clean(results: dict, num: int, problems: list) -> bool:
 
 
 def _only_negation_flag(review_reason: str) -> bool:
-    """Единственная причина разбора — флаг стиля «отрицание» (причины разделены «; »)."""
+    """Единственная причина разбора — флаг стиля «отрицание» (причины разделены «; »).
+    Очередь исправлений эту функцию больше не использует (любой флаг разбора идёт в очередь); оставлена для проверок."""
     parts = {x for x in review_reason.split("; ") if x}
     return parts == {_NEGATION_REASON}
 
 
 def _rework_gate_open(cfg: PromptConfig, r: PromptResult) -> bool:
-    """Открыт ли путь в очередь исправлений для клипа с текстом, флагом разбора и без находок по содержанию.
+    """Открыт ли путь в очередь исправлений для клипа с текстом и флагом разбора.
 
-    Прежнее условие: refs_enabled и не fail_fast (без изменений). Новое — только при rework_style_flag_without_refs:
-    клип, у которого единственная причина — флаг стиля «отрицание», идёт в очередь и без refs."""
+    Закрыт при fail_fast, без needs_review и без причины. Открыт при refs_enabled (прежнее условие) или при
+    rework_style_flag_without_refs: тогда любой флаг разбора (стиль, длина, мусор, этнос, метки) ведёт в очередь
+    и без refs. Профиль без refs и без этого ключа — прежнее поведение: клип остаётся на проверке."""
     if cfg.fail_fast or not r.needs_review or not r.review_reason:
         return False
-    if cfg.refs_enabled:
-        return True
-    return bool(cfg.rework_style_flag_without_refs) and _only_negation_flag(r.review_reason)
+    return bool(cfg.refs_enabled or cfg.rework_style_flag_without_refs)
 
 
 # Повтор 4 и далее для клипа, у которого все находки — надписи: кадр без текста (только при dangling_text_check)
@@ -1768,6 +1783,32 @@ def _content_rule_label(found: list, max_characters: Optional[int] = None) -> Op
     return problem_label(problem_code(found[0]))
 
 
+_CONTENT_CODE_BY_REASON = {reason: code for code, reason in CONTENT_REASON_RU.items()}
+
+
+def _merge_parse_reasons(found: list, reasons) -> list:
+    """Добавляет к находкам find_problems причины разбора («разбор: причина») и не дублирует уже покрытое.
+
+    Причина пропускается, если находка с тем же смыслом уже есть: содержание с тем же кодом; тег <imageN> без
+    референсов при PROBLEM_REF_TAG; refs и метки при коде refs_invalid или label_mismatch. Этнос не пропускается:
+    find_problems его не проверяет. Порядок: сначала находки, затем причины разбора по порядку появления."""
+    codes = {problem_code(p) for p in found}
+    out = list(found)
+    for reason in dict.fromkeys(x.strip() for x in reasons):
+        if not reason:
+            continue
+        code = _CONTENT_CODE_BY_REASON.get(reason)
+        if code is not None and code in codes:
+            continue
+        if reason == REF_TAG_REASON and PROBLEM_REF_TAG in codes:
+            continue
+        if (reason.startswith("refs:") or reason in (LABEL_REASON, REF_REASON_COMBO)) \
+                and codes & {REF_CODE_INVALID, REF_CODE_LABELS}:
+            continue
+        out.append(_PARSE_PREFIX + reason)
+    return list(dict.fromkeys(out))
+
+
 _DUP_REASON = "номер повторяется в ответе"   # причина дубликата номера: относится к формату ответа
 
 
@@ -1846,13 +1887,10 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"), builder.texts.get(n))
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
-            if not found and _rework_gate_open(builder.cfg, r):
-                # Клип с текстом и флагом разбора (стиль, длина, этнос), но без находок по содержанию: раньше он не
-                # попадал в очередь и оставался на проверке без единого исправления. Теперь идёт в очередь с причинами
-                # разбора, как клип из ответа исправления (process_fix). Только профили с refs_enabled; прочие
-                # профили (ltx25, zimage_turbo) ведут себя как раньше. Исключение — ключ rework_style_flag_without_refs
-                # (_rework_gate_open): клип только с флагом стиля «отрицание» тоже идёт в очередь.
-                found = [_PARSE_PREFIX + x for x in dict.fromkeys(r.review_reason.split("; ")) if x]
+            if _rework_gate_open(builder.cfg, r):
+                # Русский: клип с флагом разбора (стиль, длина, мусор, этнос) идёт в очередь, даже если find_problems
+                # нашёл свою находку; причины разбора, не покрытые ею, добавляются (_merge_parse_reasons).
+                found = _merge_parse_reasons(found, r.review_reason.split("; "))
             if found:
                 if builder.cfg.fail_fast:
                     # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
@@ -1950,12 +1988,22 @@ def _nums_ranges(nums) -> str:
     return ", ".join(parts)
 
 
-def _dup_subtitle_note(c: PromptResult, texts: dict) -> str:
-    """Текст субтитра текущего сегмента для переписывания дубликата (только при PROBLEM_DUPLICATE_PROMPT)."""
-    if not any(problem_code(p) == PROBLEM_DUPLICATE_PROMPT for p in c.rework_pending):
+_SUBTITLE_NOTE_CODES = frozenset({PROBLEM_DUPLICATE_PROMPT, PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT})
+
+
+def _rework_subtitle_note(c: PromptResult, texts: dict) -> str:
+    """Текст субтитра текущего сегмента для повтора: при дубликате, надписи не из реплики, незаконченном тексте
+    и при этносе из очереди (причина разбора с префиксом тоже учитывается)."""
+    reasons = {p[len(_PARSE_PREFIX):] if p.startswith(_PARSE_PREFIX) else p for p in c.rework_pending}
+    need = any(problem_code(p) in _SUBTITLE_NOTE_CODES for p in c.rework_pending) \
+        or CONTENT_REASON_RU[PROBLEM_ETHNICITY] in reasons
+    if not need:
         return ""
     seg_text = " ".join(str(texts.get(c.num) or "").split())
     return f" Subtitle text for segment_index {c.num}: {seg_text}." if seg_text else ""
+
+
+_dup_subtitle_note = _rework_subtitle_note   # прежнее имя: совместимость
 
 
 class _WaveJob:
@@ -2164,7 +2212,7 @@ class _WaveJob:
         log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
                  self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
-                 + _dup_subtitle_note(c, builder.texts)
+                 + _rework_subtitle_note(c, builder.texts)
                  # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
                  + (" " + TEXTLESS_REWORK_TEXT
                     if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
@@ -2199,12 +2247,15 @@ class _WaveJob:
         requeue: list = []
         for c in clips:
             new_text = results[c.num].prompt if c.num in results else ""
+            empty_fix = not new_text.strip()
             if new_text.strip():
                 c.prompt_raw = new_text   # пустой ответ: прежний сырой текст остаётся
             c.rework_round = (c.rework_round or 0) + 1
             rr_fix = results.get(c.num)
             if builder.cfg.refs_enabled and rr_fix is not None and rr_fix.extra.get("refs") is not None:
                 c.extra["refs"] = rr_fix.extra["refs"]   # новый валидный refs ответа заменяет старый
+            if rr_fix is not None and rr_fix.extra.get("setting"):
+                c.extra["setting"] = rr_fix.extra["setting"]   # Русский: setting из ответа исправления обновляет запись
             ref_bad = [p.reason for p in fix_problems if p.num == c.num and p.reason.startswith("refs:")]
             found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"),
                                        builder.texts.get(c.num),  # проверка по сырому тексту, до стиля
@@ -2216,9 +2267,13 @@ class _WaveJob:
             rr_now = results.get(c.num)
             parse_reasons = [p.reason for p in fix_problems if p.num == c.num]
             if not parse_reasons and rr_now is not None and rr_now.needs_review:
-                parse_reasons = [rr_now.review_reason or "ответ помечен на проверку"]
-            if not found and parse_reasons:
-                found = [_PARSE_PREFIX + r for r in dict.fromkeys(parse_reasons)]
+                parse_reasons = [x for x in (rr_now.review_reason or "ответ помечен на проверку").split("; ") if x]
+            if empty_fix and c.rework_pending:
+                # Русский: модель не вернула текст сегмента — прежняя очередь остаётся, причина «номер отсутствует»
+                # или «пустой prompt» не пишется; prompt_raw не менялся, поэтому очередь прежняя
+                found = list(c.rework_pending)
+                parse_reasons = []
+            found = _merge_parse_reasons(found, parse_reasons)
             c.prompt = attach_style(c.prompt_raw, self.style_text)  # в записи — текст со стилем, как у клипов вне очереди
             if not found:
                 c.rework_pending = []

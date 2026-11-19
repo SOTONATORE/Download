@@ -1722,6 +1722,24 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
     return ready, forbidden, leftover, content, frames_bad, not_ready, problems
 
 
+def _review_reasons(prompts: dict, nums) -> dict:
+    """Причины отправки на проверку: {причина: [номера клипов]} по полю error записей клипов nums.
+
+    error делится по «; »: каждая причина считается один раз на клип. Пустой error — «причина не указана».
+    Записи, которые не словари, пропускаются. Номера по возрастанию, причины по убыванию числа клипов.
+    """
+    found: dict = {}
+    for n in sorted(set(nums)):
+        entry = prompts.get(str(n)) if isinstance(prompts, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        parts = [x.strip() for x in str(entry.get("error") or "").split("; ")]
+        reasons = [x for x in dict.fromkeys(parts) if x] or ["причина не указана"]
+        for reason in reasons:
+            found.setdefault(reason, []).append(n)
+    return dict(sorted(found.items(), key=lambda item: (-len(item[1]), item[0])))
+
+
 def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
     v, ph = counts["video"], counts["photo"]
     lines = [
@@ -1751,6 +1769,14 @@ def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
         f"- Видео: несовпадений с правилом кадров профиля {v['frames_bad']}",
         f"- Фото: несовпадений с num_frames = {ph['frames_rule']}: {ph['frames_bad']}",
     ]
+    if "review_reasons" in counts:
+        # причины из prompts.json (error): без них отчёт не показывает, почему клипы на проверке
+        lines += ["", "### Причины отправки на проверку (needs_review)"]
+        reasons = counts["review_reasons"]
+        if not reasons:
+            lines.append("- клипов на проверке нет")
+        for reason, nums in reasons.items():
+            lines.append(f"- {reason}: клипов {len(nums)}, номера: {', '.join(str(n) for n in nums)}")
     if failures:
         lines += ["", "### Не готовые промпты", "", "| Клип | Тип | Причина |", "|---|---|---|"]
         lines += [f"| {n} | {kind} | {reason} |" for n, kind, reason in failures]
@@ -1918,6 +1944,7 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
                   "content": p["content"], "frames_bad": p["frames_bad"], "rework": rework_photo,
                   "frames_rule": PHOTO_NUM_FRAMES, "flagged": flag_photo},
+        "review_reasons": _review_reasons(prompts, flag_video + flag_photo),
     }
     prep_args = {"video_model": video_model, "video_profile": args.video_profile,
                  "photo_profile": photo_profile, "missing": missing}

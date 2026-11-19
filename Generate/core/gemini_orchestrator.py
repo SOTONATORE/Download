@@ -373,7 +373,49 @@ def missing_segments(prompts: dict, wanted: list) -> list:
     return [n for n in sorted(set(wanted)) if not _has_prompt(prompts.get(str(n)))]
 
 
-def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None) -> list:
+def _strip_style(styled: str, style_text: str) -> str:
+    """Сырой текст клипа без стиля: та же операция, что prompt_pipeline._raw_prompt.
+
+    Копия, а не импорт: prompt_pipeline импортирует этот модуль, импорт назад дал бы цикл.
+    """
+    text = (styled or "").strip()
+    if style_text and text.endswith(style_text):
+        text = text[: -len(style_text)].rstrip()
+        if text.endswith("."):
+            text = text[:-1].rstrip()
+    return text
+
+
+def _recovered_pending(e: dict) -> list:
+    """Очередь исправлений для клипа «на проверку» без очереди: причины из поля error, по одной на строку разбора."""
+    reasons = [x for x in dict.fromkeys(str(e.get("error") or "").split("; ")) if x]
+    if not reasons:
+        reasons = ["ответ помечен на проверку"]
+    return [gp._PARSE_PREFIX + x for x in reasons]
+
+
+def rework_needs_review_for(cfg) -> bool:
+    """Включено ли восстановление клипов «на проверку» без очереди (см. _rework_seeds).
+
+    Только явное True у флагов: заглушки конфига с «истинными» атрибутами восстановление не включают.
+    fail_fast выключает восстановление, как и очередь исправлений.
+    """
+    flagged = (getattr(cfg, "refs_enabled", False) is True
+               or getattr(cfg, "rework_style_flag_without_refs", False) is True)
+    return bool(flagged and getattr(cfg, "fail_fast", False) is not True)
+
+
+def rework_kwargs(cfg) -> dict:
+    """Именованные аргументы для _rework_seeds по конфигу волны. Стиль читается только при включённом восстановлении."""
+    on = rework_needs_review_for(cfg)
+    style = ""
+    if on and isinstance(getattr(cfg, "preset", None), str):
+        style = gp.preset_text(cfg.preset, getattr(cfg, "niche_preset_file", None))
+    return {"rework_needs_review": on, "style_text": style}
+
+
+def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None, *,
+                  rework_needs_review: bool = False, style_text: str = "") -> list:
     """Клипы из сохранённого состояния: нарушения ещё не исправлены, круги не кончились.
 
     photo=False: клипы видео (узнаются по start_ms, его пишет только этот путь); photo=True: клипы фото
@@ -381,6 +423,10 @@ def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None
     Записи, которые не словари, пропускаются. Вызывать под замком состояния: словарь пишут обе волны.
     only: набор номеров клипов или None. Задан — берутся только клипы из набора (нужные в этом прогоне);
     None — все клипы, как раньше.
+    rework_needs_review: True — клип «на проверку» (needs_review=True) без очереди исправлений тоже берётся
+    (прошлые запуски с флагом стиля оставляли такие записи: очереди нет, статус «готово»). Причины берутся из error.
+    style_text: текст стиля, который дописан к промпту; из него восстанавливается сырой текст клипа.
+    Оба аргумента по умолчанию дают прежнее поведение.
     """
     seeds = []
     for key, e in prompts.items():
@@ -389,11 +435,20 @@ def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None
         is_video = "start_ms" in e
         if is_video == photo:
             continue   # клип другой волны
-        pending_fix = e.get("rework_pending") or []
         rnd = int(e.get("rework_round", 0) or 0)
-        if not pending_fix or rnd >= gp.REPAIR_ROUNDS:
+        if rnd >= gp.REPAIR_ROUNDS:
             continue
-        raw = str(e.get("prompt_raw") or e.get("prompt") or "")
+        pending_fix = list(e.get("rework_pending") or [])
+        prompt_text = str(e.get("prompt", "") or "")
+        recover = (rework_needs_review and not pending_fix and e.get("needs_review") is True
+                   and prompt_text.strip() != "")
+        if not pending_fix and not recover:
+            continue
+        if recover:
+            pending_fix = _recovered_pending(e)
+            raw = str(e.get("prompt_raw") or _strip_style(prompt_text, style_text))
+        else:
+            raw = str(e.get("prompt_raw") or e.get("prompt") or "")
         if not raw.strip():
             continue
         if only is not None and int(key) not in only:
@@ -401,7 +456,7 @@ def _rework_seeds(prompts: dict, photo: bool = False, only: Optional[set] = None
         seeds.append(gp.PromptResult(
             num=int(key), prompt=str(e.get("prompt", "")), needs_review=bool(e.get("needs_review", False)),
             review_reason=str(e.get("error", "")), extra=dict(e.get("extra") or {}),
-            rework_pending=list(pending_fix), rework_round=rnd, prompt_raw=raw))
+            rework_pending=pending_fix, rework_round=rnd, prompt_raw=raw))
     return seeds
 
 
@@ -447,7 +502,7 @@ def generate_and_store(segments: list, wanted_nums: list, cfg: gp.PromptConfig, 
     pending = missing_segments(prompts, wanted)  # B2: только номера без готового промпта
     # очередь исправлений из сохранённого состояния (под замком: словарь пишут обе волны)
     with guard:
-        seeds = _rework_seeds(prompts, only=set(wanted_nums))
+        seeds = _rework_seeds(prompts, only=set(wanted_nums), **rework_kwargs(cfg))
     if not pending and not seeds:
         log.info("Все %d запрошенных промптов уже готовы, Gemini не вызывается.", len(wanted))
         return state
