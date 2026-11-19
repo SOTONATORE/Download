@@ -468,6 +468,14 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
               "ref_max": ref_max, "allowed_refs": allowed_refs if refs_enabled else None,
               "niche_preset_file": niche_preset_file}
     kwargs["rework_style_flag_without_refs"] = load_profile_rework_style_flag_without_refs(profile)  # ключ профиля: клип только с флагом стиля в очередь исправлений
+    # батч одним текстом и поле setting: ключ prompt_batch_form профиля (cartoon_photos); без ключа — blocks, как раньше
+    batch_form = _profile_flag(profile_lines, "prompt_batch_form", profile, default="blocks")
+    if batch_form not in ("blocks", "passage"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml prompt_batch_form должен быть blocks или passage.")
+    batch_passage = batch_form == "passage"
+    if batch_passage:
+        kwargs["batch_passage"] = True
     # передаём только заданные ключи: без них конфиг и фейки получают те же аргументы, что раньше
     kwargs["rules"] = rules
     if rules.max_characters is not None:
@@ -477,6 +485,12 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if refs_enabled:
         # ответ с номерами референсов: список целых на каждый сегмент
         kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
+    if batch_passage:
+        # ответ cartoon_photos: setting перед prompt; refs добавляется только у профиля с референсами
+        item = {"segment_index": int, "setting": str, "prompt": str}
+        if refs_enabled:
+            item["refs"] = [int]
+        kwargs["response_format"] = [item]
     # диагностика сырых ответов: блок debug в profile.yaml; без блока или false — ключи не передаются, как раньше
     dump_raw = _profile_nested_flag(profile_lines, "debug", "dump_raw_responses", profile, default="false")
     if dump_raw not in ("true", "false"):

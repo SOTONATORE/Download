@@ -63,6 +63,8 @@ API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 CONTEXT_BEFORE_WORDS = 40
 CONTEXT_AFTER_WORDS = 25
 SHORT_SEGMENT_MAX_WORDS = 3
+# cartoon_photos (batch_passage): сколько целых предложений контекста даётся до и после батча (только смысл)
+PASSAGE_CONTEXT_SENTENCES = 2
 
 # ---------------------------------------------------------------------------
 # Исключения
@@ -146,6 +148,9 @@ class PromptConfig:
     # dump_raw_responses: диагностика — сырой ответ каждого запроса (батч, повтор формата, исправление) в raw_dir;
     # по умолчанию выключено; разбор и тексты запросов от флага не зависят
     dump_raw_responses: bool = False
+    # batch_passage: батч одним текстом (целые предложения контекста, строка на сегмент) и поле setting;
+    # только cartoon_photos (profile.yaml prompt_batch_form: passage); по умолчанию выключено
+    batch_passage: bool = False
 
     def __post_init__(self) -> None:
         # max_characters задаётся в rules.yaml; поле cfg.max_characters — то же значение (сверяется)
@@ -549,6 +554,11 @@ _SUBJECT_TEXT_ONLY_LINE = ("Objects and on-frame text come from the Text line on
                            "are for understanding the meaning.")
 
 
+# cartoon_photos (batch_passage): правило разнообразия сеттингов внутри батча; заменяет финальную самопроверку
+_SETTING_VARIETY_LINE = ("- Neighbouring clips in the same batch must use different settings, so no two adjacent "
+                         "segments share one.")
+
+
 def rules_error(source: str, text: str) -> GeminiInputError:
     """Ошибка rules.yaml по-русски: название файла и текст про ключ."""
     return GeminiInputError(f"Ошибка входных данных: в {source} {text}")
@@ -696,8 +706,10 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
     if "frame_text" in cfg.relaxed_rules:
         text += "Text that appears inside the frame is written in the on-frame language named in the next rule. "
     # незаконченный текст в кадре: одна фраза-инструкция модели только при rules dangling_text_check: true; иначе текст прежний
+    # cartoon_photos (batch_passage): текст в кадре только из строки Text; у прочих профилей фраза прежняя
+    frame_source = "Text line" if cfg.batch_passage else "subtitle line"
     if cfg.rules.dangling_text_check:
-        text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the subtitle line of the "
+        text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the " + frame_source + " of the "
                  "current segment only. The Before and After context is for understanding the meaning only; never copy "
                  "words from it into on-frame text. Never end the text on a preposition, article, conjunction, "
                  "auxiliary verb or the middle of a sentence. If the current segment has no complete phrase to copy, "
@@ -715,6 +727,14 @@ def _allowed_combo_lines(allowed) -> str:
     """Строки разрешённых сочетаний для системной инструкции: по одному на строку, номера через «, ».
     Берутся из тех же кортежей, что проверяет _combo_bad (cfg.allowed_refs); порядок — по возрастанию кортежей."""
     return "\n".join(", ".join(str(n) for n in combo) for combo in sorted(allowed))
+
+
+def _contract_object(cfg: PromptConfig) -> str:
+    """Описание одного объекта ответа в системной инструкции. У batch_passage есть поле setting (перед prompt)."""
+    if cfg.batch_passage:
+        return ("{\"segment_index\": <the integer given for that segment>, \"setting\": <a short English "
+                "phrase naming the place of the frame>, \"prompt\": <string>}. ")
+    return "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
 
 
 def build_system_instruction(cfg: PromptConfig) -> str:
@@ -749,8 +769,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + _output_language_sentence(cfg) + subject_line + "\n\n"
         "# Output contract\n"
         "Return a JSON array with exactly one object per requested segment: "
-        "{\"segment_index\": <the integer given for that segment>, \"prompt\": <string>}. "
-        "No other segments, no duplicates, no markdown, no code fences. "
+        + _contract_object(cfg)
+        + "No other segments, no duplicates, no markdown, no code fences. "
         "Never write the segment number, the word \"segment\" or any numbering into the prompt text. "
         f"Each prompt must be at most {cfg.max_prompt_chars} characters.\n\n"
         "# Hard rules for every prompt\n"
@@ -760,7 +780,8 @@ def build_system_instruction(cfg: PromptConfig) -> str:
         + camera_rules
         + _OUTFIT_LINE
         + _content_rules(cfg.media, cfg.max_characters, rules)
-        + _FINAL_CHECK_LINE,
+        # cartoon_photos (batch_passage): строка разнообразия сеттингов вместо финальной самопроверки
+        + (_SETTING_VARIETY_LINE if cfg.batch_passage else _FINAL_CHECK_LINE),
         "# Style guide\n" + style,
     ]
     if cfg.refs_enabled:
@@ -800,6 +821,62 @@ def build_system_instruction(cfg: PromptConfig) -> str:
 # Построение запросов
 # ---------------------------------------------------------------------------
 
+def _passage_context(sentences: list, first: int, last: int) -> tuple:
+    """Два целых предложения до батча и два после. first и last — номера предложений первого и последнего
+    сегмента батча; сами предложения батча сюда не попадают (их номера лежат внутри [first, last]).
+    Пустые предложения пропускаются."""
+    before: list = []
+    i = first - 2                      # индекс предложения с номером first-1
+    while i >= 0 and len(before) < PASSAGE_CONTEXT_SENTENCES:
+        if sentences[i].text:
+            before.append(sentences[i])
+        i -= 1
+    before.reverse()
+    after: list = []
+    i = last                           # индекс предложения с номером last+1
+    while i < len(sentences) and len(after) < PASSAGE_CONTEXT_SENTENCES:
+        if sentences[i].text:
+            after.append(sentences[i])
+        i += 1
+    return before, after
+
+
+def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict, allowed_items=frozenset()) -> str:
+    """Батч одним текстом для cartoon_photos: контекст до и после (только смысл, целые предложения),
+    затем по одной строке на сегмент: segment_index, Text и Sentence с маркером >>...<<.
+    Контекст не повторяется внутри батча. Правило перефразирования добавляется один раз, если нужно."""
+    first = min(by_segment[n].number for n in chunk)
+    last = max(by_segment[n].number for n in chunk)
+    before, after = _passage_context(sentences, first, last)
+    lines: list = []
+    if before:
+        lines.append("Before (context only): " + " ".join(x.text for x in before))
+    notes: list = []
+    for n in chunk:
+        seg = by_num[n]
+        sen = by_segment[n]
+        text = " ".join((seg.text or "").split())
+        if text:
+            a, b = sen.spans[n]
+            marked = f"{sen.text[:a]}>>{sen.text[a:b]}<<{sen.text[b:]}"
+            line = f"segment_index: {n} | Text (what this segment says): {text} | Sentence: {marked}"
+            if len(text.split()) <= SHORT_SEGMENT_MAX_WORDS:
+                line += (" | Note: this is a very short fragment; base the visual on the whole sentence, "
+                         "not on these words alone.")
+        else:
+            line = f"segment_index: {n} | Text (what this segment says): (silence / no text)"
+            if sen.text:
+                line += f" | Sentence: {sen.text}"
+        lines.append(line)
+        note = rephrase_note(text, allowed_items)
+        if note and note not in notes:
+            notes.append(note)
+    if after:
+        lines.append("After (context only): " + " ".join(x.text for x in after))
+    lines.extend(notes)
+    return "\n".join(lines)
+
+
 def _check_config(cfg: PromptConfig) -> None:
     if cfg.media not in ("video", "image"):
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
@@ -837,11 +914,16 @@ class _Builder:
         out = []
         for i in range(0, len(nums), size):
             chunk = nums[i:i + size]
-            blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment,
-                                            self.cfg.rules.allowed_shot_items)
-                      for n in chunk]
-            user = ("Write prompts for the following segments. Return only the JSON array.\n\n"
-                    + "\n\n".join(blocks))
+            if self.cfg.batch_passage:
+                # cartoon_photos: батч одним текстом, строка на сегмент (см. _format_passage)
+                body = _format_passage(chunk, self.by_num, self.sentences, self.by_segment,
+                                       self.cfg.rules.allowed_shot_items)
+            else:
+                blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment,
+                                                self.cfg.rules.allowed_shot_items)
+                          for n in chunk]
+                body = "\n\n".join(blocks)
+            user = ("Write prompts for the following segments. Return only the JSON array.\n\n" + body)
             out.append(BatchRequest(tuple(chunk), self.system, user, self.schema))
         return out
 
@@ -1435,6 +1517,9 @@ def parse_and_validate(raw: str, expected_nums, cfg: PromptConfig, texts: Option
                 extra.pop("refs", None)   # невалидный refs в запись не попадает
             else:
                 extra["refs"] = refs      # валидный — отсортирован; пишется в prompts.json через extra
+        if "setting" in extra:
+            # cartoon_photos: setting — одна строка без переводов строк; пустой остаётся пустой строкой
+            extra["setting"] = " ".join(str(extra["setting"] or "").split())
         res = PromptResult(n, prompt, bool(reasons), "; ".join(reasons), extra)
         results[n] = res
         for r in reasons:

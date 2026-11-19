@@ -24,6 +24,10 @@ seed_mode: run
 # core safety rules (children, nudity, character count, weapons, etc.) remain enforced
 relaxed_rules: [art_medium, small_objects, emotion]
 
+# Form of one request batch: passage — one text per batch with a setting field per segment (only this niche);
+# blocks (or no key) — the earlier block form, one block per segment
+prompt_batch_form: passage
+
 # Language of on-frame text: srt — detected from the current run SRT in code
 text_language: "srt"
 

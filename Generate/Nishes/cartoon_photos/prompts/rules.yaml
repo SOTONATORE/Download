@@ -7,7 +7,8 @@ scene_motion_wording: drop
 close_faces: forbidden
 static_frame: true
 emotion: posture_and_action
-subject_source: text_only
+# Сцена и объекты из строки Sentence; текст в кадре — только из строки Text (правило dangling_text_check)
+subject_source: text_and_context
 horses_vehicles_animals_max: 3
 children: forbidden
 object_sets: forbidden

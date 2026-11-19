@@ -408,7 +408,11 @@ def mark_duplicates_for_rework(prompts: dict, nums, style_text: str, *,
     """
     texts = {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(nums))}
     queued: list = []
-    for group in dc.find_duplicate_prompts(texts):
+    # Русский: дубликаты и серии одинакового фона идут в одну очередь; фон смотрим по тексту без стиля
+    groups = [(g, pc.PROBLEM_DUPLICATE_PROMPT) for g in dc.find_duplicate_prompts(texts)]
+    groups += [(g, pc.PROBLEM_BACKDROP_RUN)
+               for g in dc.find_backdrop_groups({k: _raw_prompt(v, style_text) for k, v in texts.items()})]
+    for group, code in groups:
         first = int(group[0])
         for key in group[1:]:
             entry = prompts.get(key)
@@ -420,7 +424,7 @@ def mark_duplicates_for_rework(prompts: dict, nums, style_text: str, *,
             if allow_extra_round:
                 rework_round = 0
             entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
-            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(first))]
+            entry["rework_pending"] = [pc.make_problem(code, str(first))]
             entry["rework_round"] = rework_round
             queued.append(int(key))
     return queued

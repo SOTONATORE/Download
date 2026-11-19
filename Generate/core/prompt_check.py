@@ -167,6 +167,8 @@ DANGLING_TEXT_HINT_EN = "finish the in-frame text as a complete 1 to 4 word phra
 PROBLEM_REF_TAG = "ref_tag_without_refs"
 # одинаковый текст промпта у разных клипов (нарушение очереди дубликатов, ниша с fail_on_duplicate_prompts)
 PROBLEM_DUPLICATE_PROMPT = "duplicate_prompt"
+# серия соседних клипов с одинаковым фоном (ниша с fail_on_duplicate_prompts, см. backdrop.py)
+PROBLEM_BACKDROP_RUN = "backdrop_run"
 # английская подсказка для повтора: что нарисовать вместо толстых контуров
 THICK_VECTOR_HINT_EN = ("thick or bold outlines, or a vector look; use thin slightly sketchy black ink pen outlines "
                         "and thin single-line pure-black stick-figure arms instead")
@@ -184,6 +186,7 @@ _PROBLEM_EN = {
     PROBLEM_TEXT_IN_TEXTLESS_FRAME: "this frame must contain no on-frame text; remove all lettering",
     PROBLEM_REF_TAG: "image tag <imageN> or ref_N in a niche without reference images; write no tags",
     PROBLEM_DUPLICATE_PROMPT: "the same prompt text as another clip",
+    PROBLEM_BACKDROP_RUN: "same backdrop as the neighbouring clips; choose a different background setting",
 }
 _PROBLEM_RU = {
     PROBLEM_FORBIDDEN_SHOT_TYPE: "запрещённый тип кадра",
@@ -194,6 +197,7 @@ _PROBLEM_RU = {
     PROBLEM_THICK_VECTOR: "толстые контуры или векторный стиль",
     PROBLEM_REF_TAG: "метка <imageN> или ref_N без референсов",
     PROBLEM_DUPLICATE_PROMPT: "дубликат промпта",
+    PROBLEM_BACKDROP_RUN: "одинаковый фон у соседних клипов",
     PROBLEM_DANGLING_TEXT: "незаконченный текст в кадре",
     PROBLEM_LETTERING_NOT_IN_SEGMENT: "надпись не из реплики этого сегмента",
     PROBLEM_TEXT_IN_TEXTLESS_FRAME: "текст в кадре, который должен быть без текста",

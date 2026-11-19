@@ -8,7 +8,7 @@ Clean, even 2D comic ink outlines in medium-fine black with smooth closed lines.
 
 Cards, comparisons, charts and diagrams sit on a warm pale cream backdrop rather than pure #FFFFFF, reserving pure white solely for small foreground title plaques, paper label cards, callout bubbles and the white head of type A.
 
-Outdoor 2D scenes use four clean flat layers: pale dusty blue sky with two to three puffy white clouds, distant muted olive-sage hills, flat tan dirt or olive grass with sparse tiny grass tufts, and an optional horizontal brown soil cross-section at the bottom dotted with tiny tan pebbles and thin roots. Indoor 2D scenes use a flat warm cream wall, simple counter or wooden table, and clean furniture outlines. Everything sits on a flat single plane.
+Indoor 2D scenes use a flat warm cream wall, simple counter or wooden table, and clean furniture outlines. Everything sits on a flat single plane.
 
 Prompt writers describe smooth closed ink outlines, flat matte surfaces and simple shapes, avoiding rough wobbly pen lines, cross-hatching, 3D rendering, soft airbrush gradients, bokeh, depth of field and photorealism.
 
@@ -94,32 +94,19 @@ Check the segment in this order and use the first layout that fits:
 
 # Example Prompts
 
-Every example ends with this exact closing sentence so it pairs cleanly with preset.md and avoids repeating its words:
-Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
+The examples below show only figures, objects, linework, fills, shading and plaques. The closing style sentence is kept in preset.md and is not repeated here.
 
-Example 1 — type A stickman on rocky shore (text-free):
-A wide outdoor shore scene under a pale dusty blue sky with two puffy white clouds and distant muted olive hills. Flat tan rock meets a strip of pale blue shallow water at the right edge. At the center crouches the main character, about 45 percent of the image height, leaning forward to examine one small grey fossil rock on the shore. The main character has a smooth pure-white round head with a crisp black outline, small black dot eyes, thin curved eyebrows, a closed-line mouth and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
+Example 1 — type A stickman examining a fossil (text-free):
+A wide scene with one small grey fossil rock resting on a flat tan rock slab at the lower center. At the center crouches the main character, about 45 percent of the image height, leaning forward to examine the fossil rock. The main character has a smooth pure-white round head with a crisp black outline, small black dot eyes, thin curved eyebrows, a closed-line mouth and a plain thin solid-black stick body with thin black stick arms, simple black stick hands and thin black stick legs.
 
-Example 2 — type B scientist in laboratory (text-free):
-A wide indoor laboratory scene against a flat warm cream wall and a flat tan wooden table. On the table sit two glass flasks and one metal magnifying glass spaced apart. Behind the table at the center stands an adult scientist, about 55 percent of the image height, wearing a white lab coat, eyeglasses and dark trousers, holding one tan fossil bone in both hands. The adult scientist has proportional cartoon limbs, warm light-tan skin, short brown hair, small black dot eyes, a small curved nose, raised eyebrows and a closed-line smile. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
+Example 2 — type B scientist with lab objects (text-free):
+A wide scene with two glass flasks and one metal magnifying glass spaced apart. At the center stands an adult scientist, about 55 percent of the image height, wearing a white lab coat, eyeglasses and dark trousers, holding one tan fossil bone in both hands. The adult scientist has proportional cartoon limbs, warm light-tan skin, short brown hair, small black dot eyes, a small curved nose, raised eyebrows and a closed-line smile.
 
 Example 3 — type C microbe inside biological vessel (text-free):
-A wide enlarged biological cutaway showing curved warm dusty-pink vessel walls around a pale cream interior channel. Floating inside the channel are two pale blue beaded sugar chains spaced apart. At the center floats one small round sage-green microbe character reaching toward the left sugar chain with two thin black stick arms and two short thin black stick legs. The microbe character has small black dot eyes, raised curved eyebrows and a happy closed-line smile. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
+A wide enlarged biological cutaway showing curved warm dusty-pink vessel walls around a pale cream interior channel. Floating inside the channel are two pale blue beaded sugar chains spaced apart. At the center floats one small round sage-green microbe character reaching toward the left sugar chain with two thin black stick arms and two short thin black stick legs. The microbe character has small black dot eyes, raised curved eyebrows and a happy closed-line smile.
 
-Example 4 — zero characters in soil cross-section outdoor field (text-free):
-A wide outdoor field scene under a pale dusty blue sky with two puffy white clouds and distant muted sage hills. The upper half shows three separate green leafy plants spaced along flat olive grass on a clean horizontal ground line. The lower half shows a flat warm brown soil cross-section dotted with tiny tan pebbles, thin branching dark roots and four golden-tan tubers spaced apart beneath the plants. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
-
-Example 5 — process cycle diagram (zero characters, text-free):
-A warm pale cream card background showing three small round illustrated islands arranged in a wide triangle and linked clockwise by three curved dark ink arrows. The top island shows one grey rain cloud with three thin blue raindrops above a flat blue stream; the bottom right island shows one small green seedling sprouting from brown soil; the top left island shows one tall leafy plant with two yellow blossoms. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
-
-Example 6 — comparison A | B on warm cream card (carries text):
-A warm pale cream card background divided vertically down the center by a dashed black ink line into two open panels. Above the left panel sits a white rectangular plaque framed in black reading STARCH in bold black uppercase lettering; above the right panel sits a matching plaque reading INULIN in bold dark-red uppercase lettering. Left panel: one smooth oval golden potato halved cleanly on a flat cream surface. Right panel: one bumpy tan tuber halved to reveal a pale blue interior with a curved black pointer arrow. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
-
-Example 7 — illustrated flat map (carries text):
-A flat illustrated map over a pale muted dusty-blue sea with olive-tan and sage landmass shapes outlined in clean dark ink. At the top center, a white rectangular banner framed in black reads TRADE ROUTE in bold black uppercase lettering. A dashed terracotta-red arrow curves across the sea from a small wooden cargo ship near the left coast to a small stone harbor crane on the right coast, with one small beige label card reading PORT beside the harbor. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
-
-Example 8 — number and era card (carries text):
-A warm pale cream card background with bold black uppercase hand lettering centered near the top reading 255 MILLION YEARS. Below the title sits one large olive-tan fused supercontinent landmass resting on a flat muted dusty-blue sea strip, accompanied by one small brass compass at the lower right on a soft oval ground shadow. Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer.
+Example 4 — comparison A | B with plaques (carries text):
+A dashed black ink line divides the composition vertically down the center into two open panels. Above the left panel sits a white rectangular plaque framed in black reading STARCH in bold black uppercase lettering; above the right panel sits a matching plaque reading INULIN in bold dark-red uppercase lettering. Left panel: one smooth oval golden potato halved cleanly. Right panel: one bumpy tan tuber halved to reveal a pale blue interior with a curved black pointer arrow.
 
 # Final Check
 
