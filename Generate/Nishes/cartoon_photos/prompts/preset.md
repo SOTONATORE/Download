@@ -1,1 +1,1 @@
-Flat 2D sketchy ink illustration, thin slightly sketchy black ink pen outlines, muted flat colors with minimal simple shading.
+Clean 2D hand-drawn educational comic art, smooth medium-fine dark ink linework, warm earthy pastel palette with subtle two-tone cel shading.
