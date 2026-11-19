@@ -1,36 +1,19 @@
-# Правила содержания кадра для ниши cartoon_photos. Только значения; ключи на английском.
-# Ключ max_characters: персонажи в кадре (герой и остальные, люди и животные вместе); лимит людей тогда не действует.
 max_characters: 4
-# животные входят в max_characters
 animals_count: true
-# мелкие предметы разрешены (соответствует relaxed_rules в profile.yaml)
 small_objects: allowed
-# речь и движение губ запрещены
 speech: forbidden
-# оружие в кадре запрещено
 weapons: forbidden
-# описание сцены в промптах изображения без слов «and its motion» (фото — один неподвижный кадр)
 scene_motion_wording: drop
-# крупные планы лиц запрещены (только фото)
 close_faces: forbidden
-# фото: один неподвижный кадр, без слов о движении камеры
 static_frame: true
-# эмоции показываются позой и действиями
 emotion: posture_and_action
-# объекты и текст в кадре только из строки Text
 subject_source: text_only
-# лимит лошадей, машин и животных в одной группе (текст для модели)
 horses_vehicles_animals_max: 3
-# дети запрещены всегда (фиксировано, не настраивается)
 children: forbidden
-# наборы предметов: стопки, кучи, ряды и линии предметов запрещены (allowed | forbidden)
 object_sets: forbidden
-# разрешённые типы кадра (через запятую): снимают запрет на эти слова и фразы; паспорт, флаг, герб, эмблема,
-# пергамент, форма остаются запрещёнными; имена проверяются по словарю ALLOWED_SHOT_ITEM_TERMS (prompt_check.py)
 allowed_shot_items: letter, map, diagram, chart, infographic, calendar, spreadsheet, newspaper, document, paper, blank sheet, sheet of paper, lettering
-# эскиз: линии тонкие, без толстых контуров (стиль фиксирован в style.md; проверка — forbid_thick_vector)
-sketch_style: true
-# запрет толстых контуров и векторного стиля: bold/thick/heavy outlines, vector, tube arms, thick white arms
-forbid_thick_vector: true
-# незаконченный текст в кадре: надпись не может оборваться на служебном слове (A, THE, OF, TO и т. п.)
+# Disabled so the system prompt does not force sketchy wobbly pen strokes instead of clean 2D comic outlines.
+sketch_style: false
+# Disabled so clean comic ink and rounded white callout or title borders do not trigger false-positive rework.
+forbid_thick_vector: false
 dangling_text_check: true
