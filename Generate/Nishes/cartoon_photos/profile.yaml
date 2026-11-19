@@ -1,68 +1,62 @@
 # Generate/Nishes/cartoon_photos/profile.yaml
-# проверочный профиль для verify_prompts; параметры генерации ещё не проверены на стенде.
+# Profile for the cartoon_photos niche (2D educational comic illustrations on Qwen Image 2.1 Turbo).
 
 name: cartoon_photos
 
-# тип результата: одиночное изображение (фото-ниша)
+# Output type: single image per SRT segment
 type: image
 
-# размер кадра: 16:9, как итоговый ImageScale 511 в workflow.json
+# Frame size: 16:9, matching final ImageScale 511 in workflow.json
 width: 1920
 height: 1080
 
-# текст в промптах разрешён; семейство текстовой модели для ниши (nemotron-super-vl: nvidia/nemotron-3.5-super-vl:free)
+# On-frame text enabled; text LLM family (nemotron-super-vl: nvidia/nemotron-3.5-super-vl:free)
 allow_text: true
 text_model: nemotron-super-vl
 
-# референсы отключены: граф чисто text-to-image (Variant A), узлы LoadImage удалены
+# References disabled: pure text-to-image graph (Variant A), LoadImage nodes removed
 refs_enabled: false
 
-# seed: run — новый seed на каждый прогон; привязка seed указывает на KSampler 488 (bindings.json)
+# seed: run — one seed per run; bound to KSampler 488 in bindings.json
 seed_mode: run
 
-# правила проверки, которые ниша отключает: art_medium, small_objects, emotion (эмоциональные слова в кадре разрешены
-# только в этой нише); текст в кадре разрешает allow_text;
-# правила безопасности (дети, нагота, люди, оружие и др.) здесь отключить нельзя
+# Relaxed verification rules: art_medium, small_objects, emotion (allow_text adds frame_text);
+# core safety rules (children, nudity, character count, weapons, etc.) remain enforced
 relaxed_rules: [art_medium, small_objects, emotion]
 
-# язык текста внутри кадра: srt — берётся из SRT текущего прогона (язык определяет код, не модель)
+# Language of on-frame text: srt — detected from the current run SRT in code
 text_language: "srt"
 
-# проверка промптов (verify_prompts): ключи по умолчанию выключены; заданы только для этой ниши
-# флаг стиля «отрицание» без refs: клип только с этим флагом идёт в очередь исправлений
+# Prompt verification flags: only active for this niche
 rework_style_flag_without_refs: true
-# прогон проверки падает, если клип остался на проверке (needs_review)
 fail_on_needs_review: true
-# прогон проверки падает, если у разных клипов одинаковый текст промпта
 fail_on_duplicate_prompts: true
 
-# на клипе с нарушением после всех кругов: keep — клип остаётся на проверке, прогон не останавливается;
-# fail — прогон останавливается до генерации
+# Unfixed clip after all repair rounds: keep in needs_review without stopping early
 on_unfixed: keep
 
-# список клипов берётся из всех сегментов SRT, missing.txt не читается
+# Take all segments from SRT; missing.txt is not read
 segments: all
 
-# диагностика: сырой текст каждого ответа модели (батч, повтор формата, исправление) пишется в <артефакт>/raw
-# как <ниша>_<волна>_<круг>_<батч>.txt; промпты и разбор от флага не зависят; по умолчанию выключено
+# Diagnostics: write raw model responses to <artifact>/raw as <niche>_<wave>_<round>_<batch>.txt
 debug:
   dump_raw_responses: true
 
-# число персонажей в кадре задаётся в prompts/rules.yaml (max_characters); ключ здесь перенесён
+# Character limit is configured in prompts/rules.yaml (max_characters)
 
-# предел длины промпта: для этой ниши практического ограничения нет, значение велико
+# Maximum prompt length in characters
 max_prompt_chars: 6000
 
-# граф ComfyUI (API-формат) и привязки; узел сохранения картинки (SaveImageAdvanced)
+# ComfyUI API workflow, bindings and output image node (SaveImageAdvanced)
 workflow:
   file: "Generate/Nishes/cartoon_photos/workflow.json"
   bindings_file: "Generate/Nishes/cartoon_photos/bindings.json"
   output: {node_id: "461", type: image}
 
-# стиль промпта: временная заглушка, см. prompts/style.md
+# Prompt style guide matching the clean 2D editorial comic reference style
 prompt_style: "Generate/Nishes/cartoon_photos/prompts/style.md"
 
-# параметры из workflow.json (KSampler 488, ImageScale 511, ImageScale 511 lanczos)
+# Generation parameters from workflow.json (KSampler 488, ImageScale 511 lanczos)
 params:
   cfg: 1                         # KSampler (488): cfg
   steps: 8                       # KSampler (488): steps
@@ -71,7 +65,7 @@ params:
   resolution: "1920x1080"        # ImageScale (511): width, height
   upscale: "lanczos 1920x1080 (ImageScale 511)"  # ImageScale (511): upscale_method, crop center
 
-# файлы моделей из weights.json (имена как в workflow.json)
+# Model weights from weights.json (matching workflow.json loaders)
 model_files:
   unet: "qwen_image_2.1_turbo_int8_convrot.safetensors"
   clip: "qwen3vl_8b_int8_convrot.safetensors"
