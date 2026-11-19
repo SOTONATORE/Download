@@ -32,7 +32,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
                            PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
-                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT)
+                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT, frame_has_lettering)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
@@ -44,7 +44,7 @@ except ImportError:  # pragma: no cover
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
                            PROBLEM_REF_TAG, PROBLEM_DUPLICATE_PROMPT, validate_allowed_shot_items,
-                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT)
+                           PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT, frame_has_lettering)
 
 try:  # отметка «ключевое событие» для консоли GitHub (см. log_setup.ConsoleFilter)
     from .log_setup import KEY_EVENT_EXTRA
@@ -151,8 +151,16 @@ class PromptConfig:
     # batch_passage: батч одним текстом (целые предложения контекста, строка на сегмент) и поле setting;
     # только cartoon_photos (profile.yaml prompt_batch_form: passage); по умолчанию выключено
     batch_passage: bool = False
+    # fix_batch_size: размер пакета исправлений профиля (batch_size профиля задаёт и обычные батчи); None — FIX_BATCH_SIZE
+    fix_batch_size: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # Русский: fix_batch_size, если задан, — целое не меньше 1 (bool не принимается)
+        if self.fix_batch_size is not None and (
+                isinstance(self.fix_batch_size, bool) or not isinstance(self.fix_batch_size, int)
+                or self.fix_batch_size < 1):
+            raise GeminiInputError(
+                f"Ошибка входных данных: fix_batch_size должен быть целым числом не меньше 1, а не {self.fix_batch_size!r}.")
         # max_characters задаётся в rules.yaml; поле cfg.max_characters — то же значение (сверяется)
         if self.max_characters is None:
             self.max_characters = self.rules.max_characters
@@ -208,7 +216,8 @@ class GeminiTransport(Protocol):
 # Склейка сегментов в предложения (порт идей из первой части)
 # ---------------------------------------------------------------------------
 
-SENTENCE_END_CHARS = ".?!\u2026"
+# Русский: полноширинные завершители CJK («。！？») — разбиение японских и китайских SRT на предложения
+SENTENCE_END_CHARS = ".?!\u2026\u3002\uff01\uff1f"
 SENTENCE_CLOSERS = "\"'\u00bb\u201d\u2019)]"
 SENTENCE_OPENERS = "\"'\u00ab\u201c\u2018\u201e(["
 NO_BREAK_ABBREVIATIONS = frozenset({"Mr.", "Mrs.", "Ms.", "Dr.", "St.", "No.", "Jr.", "Sr.", "vs."})
@@ -241,7 +250,7 @@ def _ends_sentence(text: str, next_text: Optional[str]) -> bool:
 
     if core.endswith("\u2026") or core.endswith("..."):
         return next_text is None or nxt[:1].isupper()
-    if core[-1] in "?!":
+    if core[-1] in "?!\uff01\uff1f\u3002":
         return True
 
     token = core.split()[-1].lstrip(SENTENCE_OPENERS)
@@ -497,6 +506,10 @@ _SHOW_ONLY_LINE = ("- Show only the people, animals and objects that the segment
 _CHILDREN_LINE = ("- Never show children, babies, boys, girls, teenagers or young people. If the segment mentions "
                   "them, show adults or no people, and keep the meaning through the setting.\n")
 _NUDITY_LINE = "- Every person wears named clothing. Never show anyone naked, shirtless or undressed.\n"
+# Русский: cartoon_photos (max_characters): Type B носит одежду по имени, Type A (герой-палочка) — только чёрное туловище
+_TYPE_AB_CLOTHING_LINE = ("- Every cartoon adult (Type B) wears their named clothing outfit; the stick-body main character "
+                          "(Type A) has a plain solid-black stick torso with at most a situational hat, apron or backpack. "
+                          "Never show anyone naked, shirtless or undressed.\n")
 _SMALL_OBJECTS_LINE = ("- Show only large, clearly visible objects. No small objects and no hand actions with small things "
                        "(needles, thread, abacus, beads, cloth, bundles, cups, dung cakes; no stacking, stitching, tucking "
                        "or threading).\n")
@@ -695,7 +708,7 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
         _SHOW_ONLY_LINE
         + _people_line(media, max_characters, rv)
         + _CHILDREN_LINE
-        + _NUDITY_LINE
+        + (_NUDITY_LINE if max_characters is None else _TYPE_AB_CLOTHING_LINE)
         + _horses_line(rv.horses_vehicles_animals_max)
         + ("" if rv.small_objects_allowed else _SMALL_OBJECTS_LINE)
         + (_OBJECT_SET_LINE if rv.object_sets_forbidden else "")
@@ -712,11 +725,21 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
     return text
 
 
+_BATCH_TEXT_FRAMING = (
+    "Most frames are text-free visual illustrations. Decide each segment independently and do not copy a label-card "
+    "pattern from earlier items in the batch. Never place label cards, plaques, header bands or lettering on ordinary "
+    "wide, medium, macro, overhead, spotlight, podium or neat-arrangement scenes, unless the frame shows a number, date "
+    "or measurement. Keep on-frame text strictly for maps, charts, timelines, split comparisons, balance scales, labeled "
+    "scientific cutaways or diagrams, and dedicated number, date or proper-name frames. Never split an incomplete "
+    "modifier across segments: a lone adjective without its noun is forbidden. ")
+
+
 def _output_language_sentence(cfg: PromptConfig) -> str:
     """Предложение о языке вывода для Task-блока. Без relaxed_rules и text_language — прежняя фраза.
 
     frame_text: текст в кадре пишется на языке из следующего правила; text_language: язык текста в кадре.
     Нет языка при заданном text_language — ошибка, а не тихое «English» (см. profile.yaml, text_language).
+    Русский: русский пример (ЗЕМЛЯНАЯ ГРУША) выводится только при frame_language == Russian.
     """
     text = ""
     if "frame_text" in cfg.relaxed_rules:
@@ -725,16 +748,19 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
     # cartoon_photos (batch_passage): текст в кадре только из строки Text; у прочих профилей фраза прежняя
     frame_source = "Text line" if cfg.batch_passage else "subtitle line"
     if cfg.rules.dangling_text_check:
-        text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the " + frame_source + " of the "
-                 "current segment only, except for the nominative rule below. The Before and After context is for "
-                 "understanding the meaning only; never copy words from it into on-frame text. Never end the text on a "
+        if cfg.batch_passage:
+            # Русский: рамка против потока табличек стоит до правил оформления
+            text += _BATCH_TEXT_FRAMING
+        russian = cfg.frame_language == "Russian"
+        example = (" (for example, write ЗЕМЛЯНАЯ ГРУША for the segment words земляной грушей)" if russian else "")
+        lead = "For inflected on-frame languages (such as Russian), " if russian else "For inflected on-frame languages, "
+        text += ("On-frame text must be a complete phrase of 1 to 4 words copied exactly from the " + frame_source
+                 + " of the current segment only, except for the nominative rule below. The Before and After context is "
+                 "for understanding the meaning only; never copy words from it into on-frame text. Never end the text on a "
                  "preposition, article, conjunction, auxiliary verb or the middle of a sentence. If the current segment "
                  "has no complete phrase to copy, write no on-frame text for that frame. "
-                 # Русский комментарий: для флективных языков (русский и др.) надпись — в именительном падеже словаря;
-                 # слова берутся только из реплики текущего сегмента, Before и After не используются
-                 "For inflected on-frame languages (such as Russian), write each on-frame phrase in its clean nominative "
-                 "singular or dictionary form, built only from words that appear in the " + frame_source + " of the "
-                 "current segment (for example, write ЗЕМЛЯНАЯ ГРУША for the segment words земляной грушей). Change only "
+                 + lead + "write each on-frame phrase in its clean nominative singular or dictionary form, built only "
+                 "from words that appear in the " + frame_source + " of the current segment" + example + ". Change only "
                  "the grammatical case or number; never invent, translate or add words, and never take words from the "
                  "Before or After lines. ")
     if cfg.text_language is None:
@@ -1009,6 +1035,34 @@ _FREE_OF_REASON = "стиль: «free of» вместо позитивного �
 _HERO_NAME_RX = re.compile(r"\bmain character\b", re.I)
 _HERO_CANON_PARTS = ("round head", "stick")
 # «free of» и следом (до двух слов) визуальное существительное; «free of quotation marks» не ловится
+# Русский: per-clip проверки batch_passage (без квот по пакету); английские подсказки — в _parse_hint_en
+_BLANK_CARD_REASON = "надпись: пустая табличка или карточка без текста"
+_UNAUTH_TEXT_REASON = "надпись: текст на обычной сцене без разрешения"
+_ZERO_PHRASE_REASON = "стиль: «zero» вместо позитивного описания"
+_TYPE_B_ON_HERO_REASON = "персонаж: одежда типа B на главном герое типа A"
+_MOUTH_REASON = "персонаж: рот противоречит себе или вынесен над головой"
+_LONG_LABEL_REASON = "надпись: слишком длинная надпись (больше 4 слов или 26 символов)"
+_CARD_WORDS_RX = re.compile(r"\b(?:label card|title plaque|accent plaque|framed plaque|header band|nameplate)s?\b", re.I)
+_READ_WORDS_RX = re.compile(r"\b(?:read|reads|reading)\b|:", re.I)
+_ORDINARY_MODES = frozenset({"wide", "medium", "macro", "overhead", "spotlight", "podium", "neat"})
+_ORDINARY_OPENER_RX = re.compile(r"^\W*(?:an?|the)?\s*(?:[\w-]+\s+){0,2}?(wide|medium|macro|overhead|spotlight|podium|neat)\b",
+                                 re.I)
+_ANALYTIC_RX = re.compile(r"\b(?:map|chart|timeline|split|scale|balance|diagram|cutaway|cross-section|checklist|process)\b"
+                          r"|(?<!label )(?<!title )\bcard\b", re.I)
+_ROMAN_TOKEN_RX = re.compile(r"\b[IVXLCDM]{2,6}\b")
+_ZERO_RX = re.compile(r"\bzero\s+(?:characters?|people|persons?|figures?|text|labels?|words?|plaques?|signs?|numbers?|"
+                      r"objects?|others?)\b", re.I)
+_CLOTHING_TYPE_B_RX = re.compile(r"\b(?:shirts?|trousers|pants|sweaters?|jackets?|overalls|boots|lab coats?|suits?)\b", re.I)
+_HERO_ROUND_HEAD_RX = re.compile(r"\bpure-white round head\b", re.I)
+_MOUTH_ABOVE_RX = re.compile(r"\bmouth\b[^.]{0,25}\babove\b", re.I)
+_CLOSED_MOUTH_RX = re.compile(r"\bclosed-line (?:mouth|smile)\b", re.I)
+_OTHER_MOUTH_RX = re.compile(r"\b(?:wavy worried mouth|worried wavy mouth|open O-shaped mouth)\b", re.I)
+_GROUP_WORDS_RX = re.compile(r"\b(?:two|three|four|five|several|many|group|crowd|villagers|people|men|women|figures|children)\b",
+                             re.I)
+_SINGLE_CHARACTER_RX = re.compile(r"\bcharacter\b", re.I)
+# «reads/reading <LABEL>»: метка до «in … lettering», запятой, точки, строчного продолжения или конца
+_READ_LABEL_RX = re.compile(r"\b(?i:reads?|reading)\s+(?:the\s+)?(?:words?\s+|text\s+|label\s+)?[\"'\u201c\u00ab]?"
+                            r"([^\n,.;\"'\u201d\u00bb]+?)(?=\s+(?i:in)\s|\s+[a-z\u0430-\u044f\u0451]|[\"'\u201d\u00bb]?\s*[,.;]|$)")
 _FREE_OF_RX = re.compile(r"\bfree of\s+(?:[\w-]+\s+){0,2}?(?:words?|text|labels?|smoke|fire|wood|clothing|headwear|"
                          r"expressions?|smiling|smile|stick limbs?|crowds?)\b", re.I)
 _STYLE_RULES = [
@@ -1189,6 +1243,23 @@ def _parse_hint_en(item: str) -> str:
         return ("Replace each phrase of the form free of X with a positive description of what IS visible instead, "
                 "for example a blank dark screen, a bare stick body, clear air or neutral animal features; "
                 "never name the excluded item.")
+    if reason == _BLANK_CARD_REASON:
+        return ("Either write valid uppercase text from the Text line on the card or plaque, or remove the card or "
+                "plaque completely.")
+    if reason == _UNAUTH_TEXT_REASON:
+        return ("Remove all plaques, label cards, header bands, pointer-arrow text and lettering; keep this "
+                "ordinary scene text-free.")
+    if reason == _ZERO_PHRASE_REASON:
+        return ("Do not write zero with a count; describe only the visible elements in positive wording, for example "
+                "an empty path or one figure.")
+    if reason == _TYPE_B_ON_HERO_REASON:
+        return ("The Type A stick-body main character has a bare solid-black stick body and wears at most a "
+                "situational hat, apron or backpack; remove the shirt, trousers or other Type B clothing from it.")
+    if reason == _MOUTH_REASON:
+        return ("Give the single character one consistent mouth expression placed directly on its face; "
+                "do not place a mouth above the head.")
+    if reason == _LONG_LABEL_REASON:
+        return ("Shorten the label to 1 or 2 words, at most 26 characters, or remove it.")
     if reason in CONTENT_HINT_BY_REASON:
         return CONTENT_HINT_BY_REASON[reason]
     if reason.startswith("длина "):
@@ -1624,8 +1695,8 @@ def _rework_gate_open(cfg: PromptConfig, r: PromptResult) -> bool:
     return bool(cfg.refs_enabled or cfg.rework_style_flag_without_refs)
 
 
-# Повтор 4 и далее для клипа, у которого все находки — надписи: кадр без текста (только при dangling_text_check)
-TEXTLESS_FROM_ROUND = 4
+# Повтор со 2-го круга для клипа, у которого все находки — надписи: кадр без текста (только при dangling_text_check)
+TEXTLESS_FROM_ROUND = 2
 _LETTERING_CODES = frozenset({PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT})
 TEXTLESS_REWORK_TEXT = ("Rewrite this still frame with NO on-frame text at all. Keep the subject of the segment as a scene, "
                         "a diagram or a character, and describe the action or object in plain words. Do not quote any phrase.")
@@ -1638,18 +1709,83 @@ def _textless_round(cfg: PromptConfig, pending: list, req_round: int) -> bool:
     return {problem_code(p) for p in pending} <= _LETTERING_CODES
 
 
-def _batch_style_reasons(text: str) -> list:
-    """cartoon_photos (batch_passage): причины разбора для неполного канона героя и для «free of X». Пусто — всё в порядке."""
+def _ordinary_layout(text: str, setting: str) -> bool:
+    """Обычная сцена: вид кадра из setting (префикс до «:») или из начала промпта. Русский: без вида — False."""
+    mode = (setting or "").split(":", 1)[0].strip().lower()
+    if mode in _ORDINARY_MODES:
+        return True
+    m = _ORDINARY_OPENER_RX.match(text[:60])
+    return bool(m)
+
+
+def _blank_card(text: str) -> bool:
+    """Табличка или карточка названа, но рядом нет «read/reads/reading» или «:» с текстом."""
+    for m in _CARD_WORDS_RX.finditer(text):
+        window = text[max(0, m.start() - 40):m.end() + 40]
+        if not _READ_WORDS_RX.search(window):
+            return True
+    return False
+
+
+def _label_too_long(text: str) -> bool:
+    """Извлечённая надпись «reading <LABEL>» длиннее 4 слов или 26 символов; цифры в надписи — не нарушение."""
+    for m in _READ_LABEL_RX.finditer(text):
+        label = " ".join(m.group(1).split())
+        if not label or re.search(r"\d", label):
+            continue
+        if len(label.split()) > 4 or len(label) > 26:
+            return True
+    return False
+
+
+def _type_b_on_hero(text: str) -> bool:
+    """Одно предложение описывает главного героя (тип A) и называет одежду типа B."""
+    for sentence in re.split(r"(?<=[.;])\s+", text):
+        hero = _HERO_NAME_RX.search(sentence) or _HERO_ROUND_HEAD_RX.search(sentence)
+        if hero and _CLOTHING_TYPE_B_RX.search(sentence):
+            return True
+    return False
+
+
+def _mouth_conflict(text: str) -> bool:
+    """Рот «выше» головы или два взаимоисключающих рта у одного персонажа."""
+    if _MOUTH_ABOVE_RX.search(text):
+        return True
+    single = _SINGLE_CHARACTER_RX.search(text) and not _GROUP_WORDS_RX.search(text)
+    return bool(single and _CLOSED_MOUTH_RX.search(text) and _OTHER_MOUTH_RX.search(text))
+
+
+def _batch_style_reasons(text: str, setting: str = "") -> list:
+    """cartoon_photos (batch_passage): причины разбора по одному клипу. Пусто — всё в порядке.
+
+    Русский: все проверки — по этому клипу (без квот на пакет): канон героя, «free of X», пустая табличка,
+    надпись на обычной сцене, «zero …», одежда типа B на герое типа A, рот, длинная надпись.
+    """
     reasons: list = []
     low = text.lower()
     if _HERO_NAME_RX.search(text) and not all(part in low for part in _HERO_CANON_PARTS):
         reasons.append(_HERO_CANON_REASON)
     if _FREE_OF_RX.search(text):
         reasons.append(_FREE_OF_REASON)
+    if _blank_card(text):
+        reasons.append(_BLANK_CARD_REASON)
+    if (frame_has_lettering(text) and _ordinary_layout(text, setting) and not _ANALYTIC_RX.search(text)
+            and not _ANALYTIC_RX.search(setting or "") and not re.search(r"\d", text)
+            and not _ROMAN_TOKEN_RX.search(text)):
+        reasons.append(_UNAUTH_TEXT_REASON)
+    if _ZERO_RX.search(text):
+        reasons.append(_ZERO_PHRASE_REASON)
+    if _type_b_on_hero(text):
+        reasons.append(_TYPE_B_ON_HERO_REASON)
+    if _mouth_conflict(text):
+        reasons.append(_MOUTH_REASON)
+    if _label_too_long(text):
+        reasons.append(_LONG_LABEL_REASON)
     return reasons
 
 
-def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None, textless: bool = False) -> list:
+def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=None, textless: bool = False,
+                       setting: str = "") -> list:
     """Нарушения промпта: запрещённые типы кадра, маркеры и содержание кадра; для фото ещё движение камеры.
     refs: валидный список номеров сегмента (только при refs_enabled): метки <imageN> должны совпадать с ним.
     segment_text: реплика текущего сегмента; надпись в кадре проверяется по ней (только при dangling_text_check)."""
@@ -1666,7 +1802,7 @@ def _find_all_problems(text: str, cfg: PromptConfig, refs=None, segment_text=Non
             problems.append(f"{REF_CODE_INVALID}: «{REF_COMBO_HINT}»")
     if cfg.batch_passage:
         # Русский: причины разбора — как у прочих флагов стиля, чтобы повтор получил английскую подсказку
-        problems += [_PARSE_PREFIX + r for r in _batch_style_reasons(text)]
+        problems += [_PARSE_PREFIX + r for r in _batch_style_reasons(text, setting)]
     return list(dict.fromkeys(problems))
 
 
@@ -1951,7 +2087,8 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
     for n in list(final):
         r = final[n]
         if r.prompt.strip():
-            found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"), builder.texts.get(n))
+            found = _find_all_problems(r.prompt, builder.cfg, r.extra.get("refs"), builder.texts.get(n),
+                                       setting=str(r.extra.get("setting") or ""))
             if n in invalid_refs:
                 found = list(dict.fromkeys(found + _ref_fix_problems(r.prompt, None, invalid_refs[n])))
             if _rework_gate_open(builder.cfg, r):
@@ -2058,16 +2195,30 @@ def _nums_ranges(nums) -> str:
 _SUBTITLE_NOTE_CODES = frozenset({PROBLEM_DUPLICATE_PROMPT, PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT})
 
 
-def _rework_subtitle_note(c: PromptResult, texts: dict) -> str:
+def _rework_subtitle_note(c: PromptResult, texts: dict, by_segment: Optional[dict] = None) -> str:
     """Текст субтитра текущего сегмента для повтора: при дубликате, надписи не из реплики, незаконченном тексте
-    и при этносе из очереди (причина разбора с префиксом тоже учитывается)."""
+    и при этносе из очереди (причина разбора с префиксом тоже учитывается).
+
+    Русский: при дубликате короткого или незаконченного фрагмента добавляется предложение-контекст (by_segment),
+    только для смысла сцены; слова из него в надпись не переносятся. Без by_segment — прежний текст."""
     reasons = {p[len(_PARSE_PREFIX):] if p.startswith(_PARSE_PREFIX) else p for p in c.rework_pending}
     need = any(problem_code(p) in _SUBTITLE_NOTE_CODES for p in c.rework_pending) \
         or CONTENT_REASON_RU[PROBLEM_ETHNICITY] in reasons
     if not need:
         return ""
     seg_text = " ".join(str(texts.get(c.num) or "").split())
-    return f" Subtitle text for segment_index {c.num}: {seg_text}." if seg_text else ""
+    if not seg_text:
+        return ""
+    note = f" Subtitle text for segment_index {c.num}: {seg_text}."
+    dup = any(problem_code(p) == PROBLEM_DUPLICATE_PROMPT for p in c.rework_pending)
+    sen = (by_segment or {}).get(c.num)
+    fragment = len(seg_text.split()) <= 4 or seg_text[-1] not in SENTENCE_END_CHARS
+    if dup and fragment and sen is not None and getattr(sen, "text", ""):
+        sentence = " ".join(str(sen.text).split())
+        if sentence and sentence != seg_text:
+            note += (" Sentence (for visual meaning only, never copy words from it into on-frame text): "
+                     f"{sentence}.")
+    return note
 
 
 _dup_subtitle_note = _rework_subtitle_note   # прежнее имя: совместимость
@@ -2086,6 +2237,9 @@ class _WaveJob:
         self.wave = wave                 # имя волны: по нему пул учитывает вызовы модели
         self.tag = tag                   # префикс строк журнала батчей: «[имя волны] » в пуле, «» без пула
         self.builder = builder
+        # Русский: размер пакета исправлений — fix_batch_size профиля, иначе FIX_BATCH_SIZE (25, как раньше)
+        fbs = getattr(getattr(builder, "cfg", None), "fix_batch_size", None)
+        self.fix_batch_size = fbs if isinstance(fbs, int) and not isinstance(fbs, bool) and fbs >= 1 else FIX_BATCH_SIZE
         self.batches = batches
         self.transport = transport
         self.model = model
@@ -2215,9 +2369,9 @@ class _WaveJob:
         self.rework_queue.clear()
         self.round_no += 1
         pkgs = []
-        for i in range(0, len(clips), FIX_BATCH_SIZE):
+        for i in range(0, len(clips), self.fix_batch_size):
             self.fix_no += 1   # номер пакета волны: растёт и здесь, под замком очереди
-            pkgs.append((self.fix_no, clips[i:i + FIX_BATCH_SIZE]))
+            pkgs.append((self.fix_no, clips[i:i + self.fix_batch_size]))
             self.pkg_round[self.fix_no] = self.round_no
         self.round_pkgs = pkgs
         self.round_left[self.round_no] = len(pkgs)
@@ -2279,7 +2433,7 @@ class _WaveJob:
         log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
                  self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
         lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
-                 + _rework_subtitle_note(c, builder.texts)
+                 + _rework_subtitle_note(c, builder.texts, getattr(builder, "by_segment", None))
                  # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
                  + (" " + TEXTLESS_REWORK_TEXT
                     if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
@@ -2326,7 +2480,8 @@ class _WaveJob:
             ref_bad = [p.reason for p in fix_problems if p.num == c.num and p.reason.startswith("refs:")]
             found = _find_all_problems(c.prompt_raw, builder.cfg, c.extra.get("refs"),
                                        builder.texts.get(c.num),  # проверка по сырому тексту, до стиля
-                                       textless=_textless_round(builder.cfg, c.rework_pending, c.rework_round))
+                                       textless=_textless_round(builder.cfg, c.rework_pending, c.rework_round),
+                                       setting=str(c.extra.get("setting") or ""))
             if ref_bad:
                 found = list(dict.fromkeys(found + _ref_fix_problems(c.prompt_raw, None, ref_bad)))
             # Флаг разбора ответа на исправление (стиль, длина, формат): клип без находок по сырому тексту, но с флагом,
@@ -2524,10 +2679,10 @@ class SharedBatchPool:
                 alive.append(job)
         if not remainder:
             for job in alive:
-                if job.round_pkgs and len(job.round_pkgs[0][1]) >= FIX_BATCH_SIZE:
+                if job.round_pkgs and len(job.round_pkgs[0][1]) >= job.fix_batch_size:
                     return self._cut_fix(job)
             for job in alive:
-                if not job.round_pkgs and len(job.rework_queue) >= FIX_BATCH_SIZE:
+                if not job.round_pkgs and len(job.rework_queue) >= job.fix_batch_size:
                     return self._cut_fix(job)
             return None
         if any(j.main_inflight for j in self._jobs.values() if j is not None):

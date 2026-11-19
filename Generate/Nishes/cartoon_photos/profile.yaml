@@ -24,6 +24,10 @@ seed_mode: run
 # core safety rules (children, nudity, character count, weapons, etc.) remain enforced
 relaxed_rules: [art_medium, small_objects, emotion]
 
+# Clips per request batch: 15 for regular batches and for fix/rework rounds (English: one size for both);
+# 15 клипов в батче — и для обычных батчей, и для раундов исправлений (единый размер)
+batch_size: 15
+
 # Form of one request batch: passage — one text per batch with a setting field per segment (only this niche);
 # blocks (or no key) — the earlier block form, one block per segment
 prompt_batch_form: passage

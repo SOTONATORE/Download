@@ -40,6 +40,13 @@ DUP_REWORK_MAX_PASSES = 3   # сколько проходов дедуплика
 MONOTONY_WINDOW = 3
 MONOTONY_JACCARD = 0.85
 _APPEARANCE_RX = re.compile(r"the main character has[^.]*\.", re.I)   # повторяемое описание героя — не сцена
+# Русский: типовой текст персонажей и стиля (Type B / Type C) не должен занижать различие сцен
+_BOILERPLATE_RX = re.compile(r"has warm natural skin tones[^.]*\.|has proportional cartoon limbs[^.]*\.|"
+                             r"small black dot eyes[^.]*\.|smooth closed (?:black )?(?:ink )?outlines|"
+                             r"flat matte (?:earthy )?fills", re.I)
+# Русский: серия из трёх подряд клипов одного вида кадра (setting до «:») с перекрытием слов соседей
+MONOTONY_RUN = 3
+MONOTONY_RUN_JACCARD = 0.65
 _WORD_RX = re.compile(r"[a-z0-9']+")
 
 
@@ -438,9 +445,21 @@ def _clip_setting(entry: dict) -> str:
 
 
 def _scene_words(entry: dict, style_text: str) -> frozenset:
-    """Слова сцены клипа без стиля и без повторяемой фразы о внешности героя."""
+    """Слова сцены клипа без стиля, без повторяемой фразы о внешности героя и без типового текста персонажей."""
     raw = _raw_prompt(str(entry.get("prompt", "")), style_text)
-    return frozenset(_WORD_RX.findall(_APPEARANCE_RX.sub(" ", raw).lower()))
+    cleaned = _BOILERPLATE_RX.sub(" ", _APPEARANCE_RX.sub(" ", raw))
+    return frozenset(_WORD_RX.findall(cleaned.lower()))
+
+
+def _visual_mode(entry: dict) -> str:
+    """Вид кадра клипа (часть setting до «:», например macro, medium); пусто, если его нет."""
+    setting = _clip_setting(entry)
+    return setting.split(":", 1)[0].strip() if ":" in setting else ""
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    """Доля общих слов; пусто — 0.0."""
+    return len(a & b) / len(a | b) if a and b else 0.0
 
 
 def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
@@ -461,16 +480,29 @@ def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
             continue
         setting = _clip_setting(entry)
         words = _scene_words(entry, style_text)
+        hit = None
         for earlier in ordered[max(0, idx - (MONOTONY_WINDOW - 1)):idx]:
             other = prompts.get(str(earlier)) or {}
             same_setting = bool(setting) and setting == _clip_setting(other)
             other_words = _scene_words(other, style_text)
             similar = bool(words and other_words) and len(words & other_words) / len(words | other_words) >= MONOTONY_JACCARD
             if same_setting or similar:
-                entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
-                entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(earlier))]
-                queued.append(n)
+                hit = earlier
                 break
+        if hit is None and idx >= MONOTONY_RUN - 1:
+            # Русский: третий и далее подряд клип того же вида кадра с перекрытием соседей — тоже монотонность
+            run = ordered[idx - (MONOTONY_RUN - 1):idx + 1]
+            run_entries = [prompts.get(str(x)) or {} for x in run]
+            modes = {_visual_mode(e) for e in run_entries}
+            run_words = [_scene_words(e, style_text) for e in run_entries]
+            pairs_ok = all(_jaccard(run_words[k], run_words[k + 1]) >= MONOTONY_RUN_JACCARD
+                           for k in range(len(run_words) - 1))
+            if len(modes) == 1 and "" not in modes and pairs_ok:
+                hit = run[-2]
+        if hit is not None:
+            entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
+            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(hit))]
+            queued.append(n)
     return queued
 
 

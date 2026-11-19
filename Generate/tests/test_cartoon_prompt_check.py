@@ -278,3 +278,183 @@ def test_plural_cooks_still_counted_as_people():
 def test_woman_cooks_verb_does_not_fail_person_limit_with_limit_one():
     one = RulesValues(max_characters=1, animals_count=True)
     assert pc.PROBLEM_PEOPLE_COUNT not in _codes("the woman cooks soup", one, max_characters=1)
+
+
+# ---------------------------------------------------------------------------
+# Надпись: английское описание сцены после заглавной или не латинской надписи отрезается
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("КАРТОФЕЛЬ above the crate", "КАРТОФЕЛЬ"),
+    ("МАГАЗИНЫ beside the arrow", "МАГАЗИНЫ"),
+    ("ТОПИНАМБУР and points to the field", "ТОПИНАМБУР"),
+    ("ОГРОМНОЕ КОЛИЧЕСТВО points from the sky", "ОГРОМНОЕ КОЛИЧЕСТВО"),
+    ("ТОПИНАМБУР on a warm cream backdrop", "ТОПИНАМБУР"),
+    ("POTATO STARCH on a warm cream backdrop", "POTATO STARCH"),
+    ("YEAR 2020 with a dashed border", "YEAR 2020"),
+    ("земляная груша on a hill", "земляная груша"),
+    ("A | B", "A | B"),
+])
+def test_lettering_phrase_trims_english_scene_clause(raw, expected):
+    m = pc._LETTERING_RX.search(f"white label lettering, reading {raw}.")
+    assert pc._lettering_phrase(m) == expected
+
+
+@pytest.mark.parametrize("raw", ["can't start a fire", "on a hill", "many farmers above the field"])
+def test_lowercase_latin_phrase_is_not_trimmed(raw):
+    m = pc._LETTERING_RX.search(f"white label lettering, reading {raw}.")
+    assert pc._lettering_phrase(m) == raw
+
+
+# ---------------------------------------------------------------------------
+# «shoots at»: ростки растения не стрельба; стрельба по цели остаётся нарушением
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "new shoots at the base",
+    "young shoots at the soil of the bed",
+    "green shoots at the top of the row",
+])
+def test_botanical_shoots_are_not_battle(text):
+    assert pc.PROBLEM_CHAOS not in [c for c, _ in pc.content_hits(text, "image")], text
+
+
+@pytest.mark.parametrize("text", [
+    "a rider shoots at the enemy",
+    "soldiers shooting at the rider",
+    "the herder shoot back at the raiders",
+    "the rider is shot at",
+])
+def test_shooting_at_target_is_still_battle(text):
+    assert pc.PROBLEM_CHAOS in [c for c, _ in pc.content_hits(text, "image")], text
+
+
+# ---------------------------------------------------------------------------
+# «forming» / «formed» — не бланк; «lettering» — не запрещённое слово «letter»
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", ["a red X forming on the wall", "a circle formed by pebbles on the ground"])
+def test_forming_and_formed_are_not_forbidden_shot_type(text):
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE not in _codes(text), text
+
+
+def test_plain_form_is_still_forbidden():
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE in _codes("a form lies on the table")
+
+
+def test_lettering_word_is_not_forbidden_letter():
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE not in _codes("a hand lettering on a wall")
+
+
+def test_letter_is_still_forbidden_without_allowance():
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE in _codes("A letter lies open on the table.")
+
+
+def test_lettering_hints_tell_model_to_remove_unmatched_label():
+    for hint in (pc.LETTERING_SEGMENT_HINT_EN, pc.DANGLING_TEXT_HINT_EN):
+        assert "remove the label card, plaque or lettering completely" in hint
+        assert "text-free" in hint
+
+
+# ---------------------------------------------------------------------------
+# Токенизация: комбинирующие знаки и апострофы
+# ---------------------------------------------------------------------------
+
+def test_word_tokens_keep_combining_marks():
+    assert pc._word_tokens("मैं आलू खाता") == ["मैं", "आलू", "खाता"]
+
+
+def test_word_tokens_keep_inner_apostrophe_and_strip_quotes():
+    assert pc._word_tokens("can't 'fire'") == ["can't", "fire"]
+
+
+# ---------------------------------------------------------------------------
+# Надписи в реплике сегмента: все языки SRT (кириллица, украинский, латиница, немецкий, испанский,
+# польский, турецкий, деванагари, CJK)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("title, segment", [
+    # русская кириллица и украинская (і, ї, є, ґ)
+    ("КЛУБНИ", "клубни"),
+    ("ТОПИНАМБУР", "топинамбура"),
+    ("ЧОЛОВІК", "чоловіка"),
+    ("КАРТОПЛЯ", "картоплі"),
+    ("ЇЖАК", "їжака"),
+    ("ЄВРОПА", "Європа."),
+    # английский: множественное число и флексии
+    ("POTATO", "potatoes"),
+    ("LEAF", "leaves"),
+    ("FARMERS", "farmer"),
+    # немецкий и испанский
+    ("KARTOFFEL", "Kartoffeln"),
+    ("STRASSE", "Straße"),
+    ("PATATA", "patatas"),
+    # польский: ó без диакритики
+    ("ZIEMNIAK", "ziemniaków"),
+    # турецкий: İ и ı, падежный суффикс после апострофа
+    ("İSTANBUL", "istanbul'da yaşıyorum"),
+    ("ILIK", "ılık"),
+    # деванагари: комбинирующие знаки входят в слово
+    ("आलू", "मैं आलू खाता हूँ।"),
+    # CJK: слова без пробелов
+    ("马铃薯 | 菊芋", "这种马铃薯和菊芋很有营养。"),
+    ("ジャガイモ", "ジャガイモを育てる"),
+])
+def test_multilang_label_matches_segment(title, segment):
+    assert _mismatch(title, segment) == [], (title, segment)
+
+
+@pytest.mark.parametrize("title, segment", [
+    ("РАСТУТ", "растение"),                       # разные основы: общее начало «раст» короче порога
+    ("POTATO", "potassium"),
+    ("FORM", "format"),                           # «format» — не флексия «form»
+    ("LAND", "landscape"),
+    ("आलू", "आल"),                                # комбинирующий знак входит в слово: «आल» — другое слово
+    ("马铃薯 | 菊芋", "这种马铃薯很有营养。"),          # второго слова в реплике нет
+])
+def test_multilang_label_not_in_segment_is_mismatch(title, segment):
+    assert _mismatch(title, segment) == [title], (title, segment)
+
+
+# ---------------------------------------------------------------------------
+# ALL-CAPS надпись в кадре при frame_text: текст этикетки не проверяется как описание сцены
+# ---------------------------------------------------------------------------
+
+FRAME_TEXT = frozenset({"frame_text"})
+
+
+def _plain_codes(prompt, relaxed=frozenset()):
+    return [pc.problem_code(p) for p in pc.find_problems(prompt, "image", relaxed=relaxed)]
+
+
+@pytest.mark.parametrize("label", ["FARMERS", "PEOPLE", "MANY", "FORM"])
+def test_caps_label_passes_when_frame_text_relaxed(label):
+    prompt = f"A small banner title reading {label} in bold black uppercase lettering on a cream card."
+    assert _plain_codes(prompt, FRAME_TEXT) == [], label
+
+
+def test_caps_label_is_checked_without_frame_text():
+    prompt = "A small banner title reading FARMERS in bold black uppercase lettering on a cream card."
+    assert pc.PROBLEM_PEOPLE_COUNT in _plain_codes(prompt)
+
+
+def test_lowercase_many_farmers_still_fail_when_frame_text_relaxed():
+    assert pc.PROBLEM_PEOPLE_COUNT in _plain_codes("A quiet field with many farmers walking along the road.",
+                                                   FRAME_TEXT)
+
+
+@pytest.mark.parametrize("label", ["ID CARD", "FLAG"])
+def test_strict_symbols_stay_forbidden_inside_caps_label(label):
+    prompt = f"A small card reading {label} in bold black uppercase lettering."
+    assert pc.PROBLEM_FORBIDDEN_SHOT_TYPE in _plain_codes(prompt, FRAME_TEXT), label
+
+
+# ---------------------------------------------------------------------------
+# Этнический признак: нормализация диакритики и европейские написания корней
+# ---------------------------------------------------------------------------
+
+def test_ethnicity_root_accent_and_german_spelling_match_segment():
+    prompt = "An African man walks by the river."
+    assert pc.ethnicity_reasons(prompt, "Ein Mann geht in Áfrika am Fluss.") == []
+    assert pc.ethnicity_reasons(prompt, "Der Mann geht in Afrika am Fluss.") == []
+    assert pc.ethnicity_reasons(prompt, "Der Mann geht am Fluss.") == [pc.CONTENT_REASON_RU[pc.PROBLEM_ETHNICITY]]

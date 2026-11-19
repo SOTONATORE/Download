@@ -52,7 +52,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
-        profile_refs_enabled, load_profile_rework_style_flag_without_refs)
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs, load_profile_batch_size)
     from Generate.core.gemini_prompts import (
         GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
         read_preset)
@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
         load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
-        profile_refs_enabled, load_profile_rework_style_flag_without_refs)
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs, load_profile_batch_size)
     from gemini_prompts import (  # type: ignore
         GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
         read_preset)
@@ -499,6 +499,11 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if dump_raw == "true":
         kwargs["dump_raw_responses"] = True
         kwargs["niche"] = profile
+    # batch_size профиля (video и photo): задаёт и обычные батчи, и пакеты исправлений; без ключа — как раньше
+    profile_batch = load_profile_batch_size(profile)
+    if profile_batch is not None:
+        batch_size = profile_batch
+        kwargs["fix_batch_size"] = profile_batch
     return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset, **kwargs)
 
 

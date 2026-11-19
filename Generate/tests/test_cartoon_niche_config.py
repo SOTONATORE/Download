@@ -131,3 +131,51 @@ def test_preset_passes_checks_with_profile_limits():
     text = gp.read_niche_preset(str(PRESET)).strip()
     assert pc.find_problems(text, "image", RELAXED, MAX_CHARACTERS, rules) == []
     assert gp._style_reasons(text, "image", RELAXED, MAX_CHARACTERS, rules) == []
+
+
+# ------------------------------------------------------------------ batch_size (fix6)
+
+def test_profile_batch_size_is_fifteen():
+    """batch_size: 15 в profile.yaml — и обычные батчи, и раунды исправлений."""
+    lines = PROFILE.read_text(encoding="utf-8").splitlines()
+    values = [ln.split(":", 1)[1].split("#", 1)[0].strip() for ln in lines if ln.startswith("batch_size:")]
+    assert values == ["15"], values
+
+
+# ------------------------------------------------------------------ позитивные формулировки (fix6)
+
+def test_style_mouth_slots_are_positive_and_single():
+    """Рот задаётся одним позитивным слотом в Type A и Type B; старого «closed-line mouth by default» нет."""
+    text = _style_text()
+    assert "a closed-line mouth by default" not in text
+    assert text.count("one mouth expression on the face") == 2
+    assert "choose one mouth shape directly on the face" in text
+
+
+def test_style_has_no_zero_or_rare_words():
+    """Слова zero и rare не употребляются в style.md: модель не должна выводить «Zero characters» и «rare»."""
+    assert re.search(r"\b(zero|rare)\b", _style_text(), re.I) is None
+
+
+def test_style_plaque_rule_for_ordinary_scenes_and_analytical_layouts():
+    """Обычные сцены без плашек; надписи только на аналитических схемах и при наличии Text."""
+    text = _style_text()
+    assert "with no plaques, label cards, header bands or lettering" in text
+    assert "analytical layouts" in text
+    assert "1 to 4 words" in text
+    assert "is always followed by in bold black uppercase lettering" in text
+
+
+def test_style_layout_rhythm_rule_present():
+    """В разделе кадров есть правило чередования режимов кадра между клипами."""
+    assert "never use the same layout mode for three consecutive segments" in _style_text()
+
+
+def test_style_emphasis_and_frame_choice_do_not_use_forming():
+    """Разделы Emphasis markers и Choosing the Frame пишут making / creating, а не forming / formed."""
+    text = _style_text()
+    emphasis = text.split("Emphasis markers:", 1)[1].split("\n\n", 1)[0]
+    frame = text.split("# Choosing the Frame", 1)[1].split("\n# ", 1)[0]
+    for body in (emphasis, frame):
+        assert re.search(r"\b(forming|formed)\b", body) is None
+    assert "making a red X" in emphasis

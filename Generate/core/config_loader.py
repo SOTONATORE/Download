@@ -557,6 +557,24 @@ def load_profile_seed_mode(profile_name: str) -> str:
     return value
 
 
+def load_profile_batch_size(profile_name: str) -> Optional[int]:
+    """Ключ batch_size профиля модели: размер батча (и пакета исправлений) для этого профиля.
+
+    Нет файла profile.yaml или нет ключа — None (тогда берётся gemini_batch_size из конфига, как раньше).
+    Не целое число (в том числе bool) или меньше 1 — ошибка входа (код 2).
+    """
+    if not profile_name or not profile_exists(profile_name):
+        return None
+    data = _read_profile(profile_name)
+    if "batch_size" not in data:
+        return None
+    value = data["batch_size"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «batch_size» должен быть целым числом не меньше 1.")
+    return value
+
+
 def load_profile_type(profile_name: str) -> str:
     """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
     value = _read_profile(profile_name).get("type", "video")

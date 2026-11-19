@@ -1,6 +1,6 @@
 """Проверка готовых промптов на запрещённые типы кадров и на нежелательное содержание (шаг 6 плана PLAN_generate_photo_video.md).
 
-Модуль самодостаточен: только стандартная библиотека (re). Он не импортирует gemini_prompts,
+Модуль самодостаточен: только стандартная библиотека (re, unicodedata). Он не импортирует gemini_prompts,
 чтобы не возникло циклического импорта; повтор запроса и ошибка остановки живут в gemini_prompts.
 
 Список здесь английский, потому что промпты пишутся по-английски. Русский список запрещённых
@@ -12,6 +12,7 @@
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -41,8 +42,12 @@ FORBIDDEN_IMAGE_WORDS_EN = (
 
 # Исключения для основ, которые являются началом обычных слов. «form» входит в «format», «formal»,
 # «formation», «formula»: эти слова допустимы, поэтому ставится отрицательный просмотр вперёд.
+# «forming» и «formed» («forming a red X», «formed by») описывают форму, а не бланк: тоже исключены.
+# «lettering» (надпись) — не запрещённое слово: ALLOWED_SHOT_ITEM_TERMS["lettering"] пуст, поэтому основа «letter»
+# не должна его ловить без разрешения «letter» в профиле.
 _STEM_EXCLUDE = {
-    "form": ("format", "formal", "formation", "formula"),
+    "form": ("format", "formal", "formation", "formula", "forming", "formed"),
+    "letter": ("lettering",),
 }
 
 
@@ -160,9 +165,17 @@ PROBLEM_DANGLING_TEXT = "dangling_text_fragment"
 PROBLEM_LETTERING_NOT_IN_SEGMENT = "lettering_not_in_segment"
 # текст в кадре у клипа, которому после 3 кругов нужен кадр без текста: только при textless=True и dangling_text_check: true
 PROBLEM_TEXT_IN_TEXTLESS_FRAME = "text_in_textless_frame"
-LETTERING_SEGMENT_HINT_EN = "copy the on-frame text exactly from the current subtitle line only"
+LETTERING_SEGMENT_HINT_EN = (
+    "copy the on-frame text exactly from the current subtitle line only; if the current subtitle line has no "
+    "matching standalone word, name or number, remove the label card, plaque or lettering completely and "
+    "leave the scene text-free"
+)
 # английская подсказка для повтора: дописать текст в кадре до полной фразы
-DANGLING_TEXT_HINT_EN = "finish the in-frame text as a complete 1 to 4 word phrase"
+DANGLING_TEXT_HINT_EN = (
+    "finish the in-frame text as a complete 1 to 4 word phrase; if the current subtitle line has no matching "
+    "standalone word, name or number, remove the label card, plaque or lettering completely and leave the "
+    "scene text-free"
+)
 # метки <imageN> и ref_N в промпте профиля без референсов (refs_enabled: false)
 PROBLEM_REF_TAG = "ref_tag_without_refs"
 # одинаковый текст промпта у разных клипов (нарушение очереди дубликатов, ниша с fail_on_duplicate_prompts)
@@ -356,6 +369,18 @@ def animal_plurals_by_count(max_characters: Optional[int], animals_count: bool =
     return max_characters is not None and bool(animals_count)
 
 
+# Стрельба: «shoot at», «shooting at», «shoot back», «shot at» и «shoots at <цель>». Множественное «shoots at» —
+# ещё и ростки растения («new shoots at the base»), поэтому оно не считается стрельбой, если перед ним стоит
+# ботаническое слово или за ним идёт место на растении («the base», «the soil» и т.п.).
+_BOTANICAL_BEFORE = ("new", "green", "pale", "young", "fresh", "thin", "small", "weed", "plant", "tuber")
+_BOTANICAL_AFTER = ("base", "soil", "surface", "ground", "root", "roots", "stem", "stems", "edge", "top", "bottom",
+                    "center", "centre", "side", "sides", "corner", "corners", "plant", "plants", "tuber", "tubers")
+_SHOOT_RX_PART = (
+    r"(?:shoot|shooting) (?:at|back)|shot at|"
+    + "".join(r"(?<!\b" + w + r" )" for w in _BOTANICAL_BEFORE)
+    + r"shoots (?:at|back)\b(?!\s+(?:the\s+)?(?:" + "|".join(_BOTANICAL_AFTER) + r")\b)"
+)
+
 _CONTENT_RX = (
     (PROBLEM_CHILD, re.compile(
         r"\b(?:child|children|kids?|boys?|girls?|babies|baby|infants?|toddlers?|sons?|daughters?|"
@@ -389,7 +414,7 @@ _CONTENT_RX = (
         r"\b(?:fire|fires|flames?|campfires?|bonfires?|candles?|lanterns?|torch(?:es)?|embers?|firelight)\b"
         r"[^.;]{0,60}\b(?:hands?|fingers?|palms?)\b", re.IGNORECASE)),
     (PROBLEM_CHAOS, re.compile(
-        r"\b(?:charg\w*|gallop\w*|battles?|battling|skirmish\w*|explo\w*|gunfire|firing|shoot(?:s|ing)? (?:at|back)|shot at|bullets?|"
+        r"\b(?:charg\w*|gallop\w*|battles?|battling|skirmish\w*|explo\w*|gunfire|firing|" + _SHOOT_RX_PART + r"|bullets?|"
         r"smoke puffs?|smoke clouds?|clouds? of (?:dust|smoke)|in formation|assault\w*|attack\w*|ambush\w*|"
         r"rush\w*|stampede\w*|riot\w*|fight\w*|blood\w*|wounded)\b", re.IGNORECASE)),
     (PROBLEM_WEAPON, re.compile(
@@ -479,6 +504,8 @@ ETHNIC_ROOTS = (
     "араб", "индус", "индий", "африк", "негр", "темн", "тёмн", "черн", "чёрн", "азиат", "китай", "япон",
     "корей", "монгол", "arab", "indian", "india", "african", "africa", "black", "dark", "asian", "chinese",
     "japan", "korean", "mongol", "middle east", "south asia",
+    # европейские написания (немецкий, испанский, французский, польский и др.); сравнение без диакритики
+    "áfrica", "afrika", "indien", "asien", "orient",
 )
 
 
@@ -616,6 +643,9 @@ def content_hits(text: str, media: str = "video", relaxed=frozenset(), max_chara
     машины — по числу (если нет object_sets: forbidden). Без max_characters всё работает как раньше.
     rules: значения rules.yaml; None — значения по умолчанию (прежнее поведение)."""
     t = text or ""
+    if "frame_text" in relaxed:
+        # ЗАГЛАВНАЯ надпись в кадре (FARMERS, MANY) — текст этикетки, не описание сцены: при frame_text маскируем её
+        t = _mask_spans(t, _caps_label_spans(t))
     rules = rules or RulesValues()
     hits = []
     skipped = frozenset(_RELAXED_CONTENT_CODE[r] for r in relaxed if r in _RELAXED_CONTENT_CODE) | rule_skipped_codes(rules)
@@ -671,11 +701,12 @@ def content_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_
 
 
 def ethnicity_reasons(prompt: str, segment_text: str) -> list:
-    """Причина, если в промпте есть этнический признак, которого нет в тексте сегмента."""
+    """Причина, если в промпте есть этнический признак, которого нет в тексте сегмента.
+    Корни и текст сегмента сравниваются без регистра и без диакритики («Áfrika» = «afrika»)."""
     if not _ETHNIC_RX.search(prompt or ""):
         return []
-    seg = (segment_text or "").lower()
-    if any(root in seg for root in ETHNIC_ROOTS):
+    seg = _fold(segment_text or "")
+    if any(_fold(root) in seg for root in ETHNIC_ROOTS):
         return []
     return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
 
@@ -718,10 +749,64 @@ _TYPO_APOSTROPHE = "\u2019"
 _TRAILING_PUNCT_RX = re.compile(r"[.,!?;:\u2026\"\u201d\u00bb)]+$")
 
 
+# Английское описание сцены после надписи (строчными буквами): «ТОПИНАМБУР above the crate», «... and points to».
+# Регистр учитывается: строчная фраза («can't start a fire», «on a hill») не обрезается.
+_LABEL_TRIM_RX = re.compile(
+    r"\s+(?:above|below|beside|near|next\s+to|under|over|inside|around|towards?|points?|pointing|placed|"
+    r"centered|centred|framed|showing|written|drawn|printed)\b"
+    r"|\s+(?:on|at|in|from|to|with|and)\s+(?:a|an|the|points?|pointing|shows?|showing|rests?|stands?|lies?|sits?)\b"
+)
+
+
+def _label_starts_as_lettering(phrase: str) -> bool:
+    """Надпись начинается с заглавной латиницы или с письма не на латинице (кириллица, CJK, тайский и др.)."""
+    first = phrase.split()[0]
+    letters = [c for c in first if c.isalpha()]
+    if not letters:
+        return False
+    if any(ord(c) > 0x24F for c in letters):
+        return True
+    return "".join(letters).isupper()
+
+
 def _lettering_phrase(match) -> str:
-    """Текст надписи из совпадения _LETTERING_RX (первая непустая группа альтернативы)."""
+    """Текст надписи из совпадения _LETTERING_RX (первая непустая группа альтернативы).
+    Для заглавной или не латинской надписи отрезается английское описание сцены после неё."""
     raw = next((g for g in match.groups() if g is not None), "")
-    return _LETTERING_COMMA_RE.split(raw, maxsplit=1)[0].strip()
+    phrase = _LETTERING_COMMA_RE.split(raw, maxsplit=1)[0].strip()
+    if phrase and _label_starts_as_lettering(phrase):
+        trim = _LABEL_TRIM_RX.search(phrase)
+        if trim:
+            phrase = phrase[:trim.start()].rstrip()
+    return phrase
+
+
+def _lettering_group_index(match) -> int:
+    """Номер группы _LETTERING_RX, из которой взята фраза надписи."""
+    return next(i for i in range(1, match.re.groups + 1) if match.group(i) is not None)
+
+
+def _caps_label_spans(text: str) -> list:
+    """Спаны надписей, написанных ЗАГЛАВНЫМИ буквами (после обрезки описания сцены)."""
+    spans = []
+    for m in _LETTERING_RX.finditer(text or ""):
+        phrase = _lettering_phrase(m)
+        if not phrase or not any(c.isalpha() for c in phrase) or phrase != phrase.upper():
+            continue
+        start = text.find(phrase, m.start(_lettering_group_index(m)))
+        spans.append((start, start + len(phrase)))
+    return spans
+
+
+def _mask_spans(text: str, spans) -> str:
+    """Замена спанов пробелами той же длины: позиции остальных совпадений не меняются."""
+    if not spans:
+        return text
+    chars = list(text)
+    for start, end in spans:
+        for k in range(start, end):
+            chars[k] = " "
+    return "".join(chars)
 
 
 def frame_has_lettering(prompt) -> bool:
@@ -754,85 +839,223 @@ _NEGATION_WORDS = frozenset({
     "doesn't", "didn't", "without",
     "не", "нет", "ни", "без",  # русские отрицания: «не является», «нет», «ни», «без»
 })
-_WORD_TOKEN_RX = re.compile(r"[\w']+")
+_WORD_CHAR_CATEGORIES = ("L", "N", "M")
+_APOSTROPHE_VARIANTS = ("\u2019", "\u2018", "\u02bc")
+# Письмо без пробелов между словами (китайский, японский, тайский): токен такого языка ищется как подстрока.
+_SPACELESS_RX = re.compile(r"[\u0e00-\u0e7f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_LATIN_CYR_RX = re.compile(r"[a-z\u00c0-\u024f\u0400-\u04ff]")
+_LATIN_RX = re.compile(r"[a-z\u00c0-\u024f]")
+_CYRILLIC_RX = re.compile(r"[а-яёіїєґ]")
 
-# Русские окончания для сравнения основ слов надписи и реплики (длинные первыми)
-_RU_ENDINGS = tuple(sorted({
+
+def _word_tokens(text: str) -> list:
+    """Слова текста с учётом Unicode: буквы, цифры и комбинирующие знаки (Mn, Mc) входят в слово.
+
+    Раньше слова делились по \\w, и комбинирующие знаки обрезали слово («आलू» → «आल»). Типографский апостроф
+    приводится к прямому; апострофы по краям слова не входят в него («'fire'» → «fire»), внутри — входят («can't»).
+    """
+    s = text or ""
+    for apo in _APOSTROPHE_VARIANTS:
+        s = s.replace(apo, "'")
+    tokens, cur = [], []
+    for ch in s:
+        if unicodedata.category(ch)[0] in _WORD_CHAR_CATEGORIES or ch in ("'", "_"):
+            cur.append(ch)
+        elif cur:
+            tokens.append("".join(cur))
+            cur = []
+    if cur:
+        tokens.append("".join(cur))
+    return [t.strip("'") for t in tokens if t.strip("'")]
+
+
+def _fold(text: str) -> str:
+    """Сравнительная форма: casefold и NFKD (ß → ss, İ → i̇), турецкое ı → i.
+
+    У текста с латиницей или кириллицей диакритика снимается («Áfrika» = «Afrika», «ёлка» = «елка»).
+    Деванагари, тайский и арабский не трогаются: их комбинирующие знаки — часть слова.
+    """
+    s = unicodedata.normalize("NFKD", (text or "").casefold()).replace("ı", "i")
+    if _LATIN_CYR_RX.search(s):
+        s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s
+
+
+def _norm_words(text: str) -> list:
+    """Сравнительные формы слов текста, без пустых."""
+    return [w for w in (_fold(t) for t in _word_tokens(text)) if w]
+
+
+# Русские и украинские окончания для сравнения основ, записанные в сравнительной форме («й» → «и», «ї» → «і»).
+# Украинские: «і», «ї», «ові», «еві», «єм», «ях», «ів»; русские добавлены: «ью», «ием», «ия», «ии», «ию».
+_CYR_ENDING_SRC = (
     "ого", "его", "ому", "ему", "ыми", "ими", "ая", "яя", "ое", "ее", "ые", "ие", "ый", "ий", "ой", "ую", "юю",
     "ом", "ем", "ам", "ям", "ах", "ях", "ою", "ею", "ей", "ов", "ев", "ых", "их", "ы", "и", "а", "я", "у", "ю",
-    "е", "о", "ь",
-}, key=len, reverse=True))
-_CYRILLIC_RX = re.compile(r"[а-яё]")
+    "е", "о", "ь", "ью", "ием", "ия", "ии", "ию", "і", "ї", "ові", "еві", "єм", "ів",
+)
+_RU_ENDINGS = tuple(sorted({_fold(e) for e in _CYR_ENDING_SRC}, key=len, reverse=True))
+_CYR_TAILS = frozenset(_RU_ENDINGS) | {""}
 
 
 def _ru_stem(word: str) -> str:
-    """Основа русского слова: срезано самое длинное окончание, если останется не меньше трёх букв."""
+    """Основа кириллического слова: срезано самое длинное окончание, если останется не меньше трёх букв."""
     for ending in _RU_ENDINGS:
         if word.endswith(ending) and len(word) - len(ending) >= 3:
             return word[:-len(ending)]
     return word
 
 
+def _common_prefix(a: str, b: str) -> int:
+    """Длина общего начала двух слов."""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
 def _ru_word_matches(a: str, b: str) -> bool:
-    """Слово надписи и слово реплики совпадают: точно, либо как одна основа в другом падеже.
-    Падежная форма — только для кириллицы и слов от четырёх букв; короткие слова и английские — только точно."""
+    """Кириллица (русская и украинская): слова совпадают точно или как одна основа в другом падеже.
+
+    Общее начало не короче max(4, длина длинного слова − 2), а хвосты после него — только окончания из списка.
+    Так «растут» и «растение» не совпадают (общее начало «раст» короче порога), а «земляная» и «земляной» совпадают.
+    """
     if a == b:
         return True
     if len(a) < 4 or len(b) < 4 or not (_CYRILLIC_RX.search(a) and _CYRILLIC_RX.search(b)):
         return False
-    # общее начало не короче половины слова (минус два), но не меньше четырёх букв: «земляная» и «земляной»
-    prefix = 0
-    for x, y in zip(a, b):
-        if x != y:
-            break
-        prefix += 1
-    if prefix >= max(4, min(len(a), len(b)) - 2):
+    prefix = _common_prefix(a, b)
+    if prefix >= max(4, max(len(a), len(b)) - 2) and a[prefix:] in _CYR_TAILS and b[prefix:] in _CYR_TAILS:
         return True
     stem_a, stem_b = _ru_stem(a), _ru_stem(b)
     return len(stem_a) >= 3 and stem_a == stem_b
 
 
-def _lettering_word_positions(norm: str, segment: str):
-    """Для каждого слова надписи — позиция слова реплики, которым оно закрыто; None, если хоть одно слово не нашлось."""
-    words = [w.replace("ё", "е") for w in _WORD_TOKEN_RX.findall(norm)]
-    seg_tokens = [w.replace("ё", "е") for w in _WORD_TOKEN_RX.findall(segment)]
-    if not words:
-        return None
+# Окончания европейских слов после общей основы: немецкий, испанский, польский, турецкий, французский и др.
+_EURO_TAILS = frozenset({"s", "n", "e", "en", "er", "ern", "es", "em", "ie", "ien", "ia", "os", "as", "ow",
+                         "ler", "lar"})
+
+
+def _latin_forms(word: str) -> set:
+    """Варианты английского слова: множественное число и флексии (-ies/-y, -ves/-f/-fe, -es, -s, -ed, -ing).
+
+    Варианты короче четырёх букв не берутся, поэтому короткие слова сравниваются только точно.
+    """
+    forms = {word}
+    if word.endswith("ies"):
+        forms.add(word[:-3] + "y")
+    if word.endswith("ves"):
+        forms.update({word[:-3] + "f", word[:-3] + "fe"})
+    if word.endswith("es") and word[:-2].endswith(("o", "s", "x", "z", "ch", "sh")):
+        forms.add(word[:-2])
+    if word.endswith("s") and not word.endswith("ss"):
+        forms.add(word[:-1])
+    if word.endswith("ed"):
+        forms.update({word[:-2], word[:-1]})
+    if word.endswith("ing"):
+        forms.update({word[:-3], word[:-3] + "e"})
+    return {f for f in forms if len(f) >= 4}
+
+
+def _euro_prefix_match(a: str, b: str) -> bool:
+    """Европейская флексия: общее начало не короче max(4, длинное − 2), а для длинных основ (от 7 букв) — − 3.
+    Короткая часть продолжается пустым хвостом или «e», длинная — европейским окончанием.
+    «form» и «format» не совпадают: хвост «at» не окончание."""
+    short, long_ = sorted((a, b), key=len)
+    prefix = _common_prefix(short, long_)
+    longest = len(long_)
+    threshold = max(4, longest - (3 if longest >= 7 else 2))
+    if prefix < threshold:
+        return False
+    return short[prefix:] in ("", "e") and long_[prefix:] in _EURO_TAILS
+
+
+def _latin_word_matches(a: str, b: str) -> bool:
+    """Латиница: точно, либо через варианты английской флексии, либо европейская флексия.
+    Апостроф: «istanbul'da» совпадает с «istanbul» (турецкий падежный суффикс после апострофа)."""
+    if "'" in b and _latin_word_matches(a, b.split("'")[0]):
+        return True
+    if "'" in a and _latin_word_matches(a.split("'")[0], b):
+        return True
+    if len(a) < 4 or len(b) < 4 or abs(len(a) - len(b)) > 3:
+        return False
+    if not (_LATIN_RX.search(a) and _LATIN_RX.search(b)):
+        return False
+    if _latin_forms(a) & _latin_forms(b):
+        return True
+    return _euro_prefix_match(a, b)
+
+
+def _word_matches(a: str, b: str) -> bool:
+    """Слово надписи и слово реплики (оба уже в сравнительной форме) совпадают по правилам своего письма."""
+    if a == b:
+        return True
+    if _CYRILLIC_RX.search(a) or _CYRILLIC_RX.search(b):
+        return _ru_word_matches(a, b)
+    return _latin_word_matches(a, b)
+
+
+def _lettering_word_positions(words: list, seg_tokens: list):
+    """Для каждого слова надписи — позиция слова реплики, которым оно закрыто; None, если хоть одно не нашлось.
+    Слово без пробелов (CJK, тайский) ищется как подстрока внутри слова реплики."""
     positions = []
     for word in words:
-        idx = next((i for i, tok in enumerate(seg_tokens) if _ru_word_matches(word, tok)), None)
+        if _SPACELESS_RX.search(word):
+            idx = next((i for i, tok in enumerate(seg_tokens) if word in tok), None)
+        else:
+            idx = next((i for i, tok in enumerate(seg_tokens) if _word_matches(word, tok)), None)
         if idx is None:
             return None
         positions.append(idx)
     return positions
 
 
+def _negated_before(seg_tokens: list, pos: int) -> bool:
+    """Отрицание в трёх словах перед словом реплики («не является», «can't»)."""
+    return any(w in _NEGATION_WORDS for w in seg_tokens[max(0, pos - 3):pos])
+
+
 def segment_lettering_mismatch(prompt: str, segment_text: str) -> list:
     """Надписи в кадре, которых нет в реплике текущего сегмента. Чистая функция.
-    Сначала точная подстрока (как раньше). Если её нет, каждое слово надписи должно совпасть со словом реплики
-    точно или как русская основа в другом падеже («ЗЕМЛЯНАЯ ГРУША» — «земляной грушей»). Отрицание в трёх словах
-    перед совпавшим словом («не является земляной грушей») делает надпись ошибочной."""
-    segment = _norm_lettering(segment_text or "")
+
+    Сначала точная последовательность слов (без учёта регистра, диакритики и апострофа). Если её нет, каждое
+    слово надписи должно совпасть со словом реплики по правилам его письма: кириллица — основа в другом падеже
+    (украинские «і/ї/є/ґ» тоже); латиница — форма или флексия («POTATO» — «potatoes», «LEAF» — «leaves»,
+    «KARTOFFEL» — «Kartoffeln»); деванагари и прочие — точно; CJK и тайский — подстрока. Отрицание в трёх словах
+    перед совпавшим словом делает надпись ошибочной.
+    """
+    seg_tokens = _norm_words(segment_text)
+    seg_line = " " + " ".join(seg_tokens) + " "
     out = []
     for m in _LETTERING_RX.finditer(prompt or ""):
         phrase = _lettering_phrase(m)
         if not phrase:
             continue
-        norm = _norm_lettering(phrase)
-        if norm not in segment:
-            positions = _lettering_word_positions(norm, segment)
-            seg_tokens = _WORD_TOKEN_RX.findall(segment)
-            if positions is None or any(any(w in _NEGATION_WORDS for w in seg_tokens[max(0, p - 3):p])
-                                        for p in positions):
+        words = _norm_words(phrase)
+        if not words:
+            out.append(phrase)
+            continue
+        label_line = " " + " ".join(words) + " "
+        if label_line in seg_line:
+            # фраза есть в реплике целиком: отрицание перед её первым словом делает надпись ошибочной
+            start = len(seg_line[:seg_line.find(label_line)].split())
+            if _negated_before(seg_tokens, start):
                 out.append(phrase)
             continue
-        # Русский комментарий: фраза есть в реплике, но если перед её первым вхождением
-        # в трёх словах стоит отрицание («can't start a fire»), надпись всё равно считается ошибочной
-        idx = segment.find(norm)
-        before = _WORD_TOKEN_RX.findall(segment[:idx])[-3:]
-        if any(w in _NEGATION_WORDS for w in before):
+        positions = _lettering_word_positions(words, seg_tokens)
+        if positions is None or any(_negated_before(seg_tokens, p) for p in positions):
             out.append(phrase)
     return out
+
+
+# Строгие символы: их не снимает даже заглавная надпись в кадре (флаг, паспорт, герб, эмблема, удостоверение)
+_STRICT_LABEL_STEMS = ("flag", "passport", "coat of arms", "emblem", "id card")
+
+
+def _in_spans(m, spans) -> bool:
+    """Совпадение целиком лежит внутри одного из спанов."""
+    return any(start <= m.start() and m.end() <= end for start, end in spans)
 
 
 def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_characters: Optional[int] = None,
@@ -849,15 +1072,21 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
     # слово внутри разрешённой фразы («paper» в «sheet of paper») снимается вместе с фразой
     released_spans = [m.span() for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text)
                       if m.group(0).lower() in released_phrases]
+    # при frame_text ЗАГЛАВНАЯ надпись («FARMERS», «FORM») — текст на кадре, а не предмет; строгие символы
+    # (флаг, паспорт, герб, эмблема, удостоверение) остаются запрещёнными и внутри надписи
+    label_spans = _caps_label_spans(text) if "frame_text" in relaxed else []
     for m in FORBIDDEN_IMAGE_RE.finditer(text):
         word = m.group(0).lower()
         inside = any(start <= m.start() and m.end() <= end for start, end in released_spans)
         if inside or any(word.startswith(w) for w in released_words):
             continue
+        if _in_spans(m, label_spans) and not word.startswith(_STRICT_LABEL_STEMS):
+            continue
         problems.append(make_problem(PROBLEM_FORBIDDEN_SHOT_TYPE, m.group(0)))
     for m in FORBIDDEN_IMAGE_PHRASE_RE.finditer(text):
-        if m.group(0).lower() not in released_phrases:
-            problems.append(make_problem(PROBLEM_FORBIDDEN_COMBINATION, m.group(0)))
+        if m.group(0).lower() in released_phrases or _in_spans(m, label_spans):
+            continue
+        problems.append(make_problem(PROBLEM_FORBIDDEN_COMBINATION, m.group(0)))
     for m in FORBIDDEN_FORMAT_PATTERNS_EN.finditer(text):
         problems.append(make_problem(PROBLEM_FORBIDDEN_FORMAT, m.group(0)))
     for m in LEFTOVER_MARKERS_RE.finditer(text):
