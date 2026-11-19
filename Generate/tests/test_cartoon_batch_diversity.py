@@ -52,6 +52,32 @@ def test_system_instruction_without_batch_passage_has_no_visual_mode_contract(tm
     assert "visual mode" not in system
 
 
+# --- крупные планы: профиль с max_characters разрешает предметы и руки, лица запрещены -------
+
+def test_close_faces_line_depends_on_max_characters(tmp_path):
+    """max_characters=4 (cartoon_photos): строка разрешает крупные планы рук и предметов;
+    без max_characters прежняя строка «Never show close-ups» остаётся на месте.
+    У каждого конфига свой RulesValues: PromptConfig синхронизирует max_characters с rules."""
+    style = _write_style(tmp_path)
+    niche = gp.build_system_instruction(PromptConfig(
+        style_file=str(style), media="image",
+        rules=gp.RulesValues(max_characters=4, close_faces_allowed=False)))
+    plain = gp.build_system_instruction(PromptConfig(
+        style_file=str(style), media="image",
+        rules=gp.RulesValues(close_faces_allowed=False)))
+    assert gp._CLOSE_FACES_OBJECTS_OK_LINE in niche
+    assert gp._CLOSE_FACES_LINE not in niche
+    assert "close-ups of hands, feet, objects, food, plants and cutaways are allowed" in niche
+    assert gp._CLOSE_FACES_LINE in plain
+    assert gp._CLOSE_FACES_OBJECTS_OK_LINE not in plain
+
+
+def _write_style(tmp_path):
+    style = tmp_path / "style.md"
+    style.write_text("Style guide for tests.", encoding="utf-8")
+    return style
+
+
 def test_same_sentence_note_only_when_consecutive_segments_share_sentence():
     # одно предложение на сегменты 1 и 2; сегмент 3 — другое предложение
     seg_a = gp.Sentence(number=1, seg_nums=[1, 2], text="Merchants opened their stalls and carts rolled in.", spans={})

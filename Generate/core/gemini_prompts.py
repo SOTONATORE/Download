@@ -514,6 +514,11 @@ _ETHNICITY_LINE = ("- Derive the place, period and people's appearance from the 
                    "a nationality, ethnicity or skin tone the text does not mention.\n")
 _CLOSE_FACES_LINE = ("- Never show close-ups, extreme close-ups or portraits. Show people from a medium or wide "
                      "distance, with faces small in the frame.\n")
+# Для профилей с max_characters (cartoon_photos): крупные планы рук, ног, предметов, еды, растений и врезки
+# разрешены (как в style.md и prompt_check.py); запрещены только крупные планы и портреты лиц людей.
+_CLOSE_FACES_OBJECTS_OK_LINE = ("- Never show close-ups or portraits of human faces. Show people from a medium or wide "
+                                "distance, with faces small in the frame; close-ups of hands, feet, objects, food, "
+                                "plants and cutaways are allowed.\n")
 _MOOD_LINE = ("- Show moods and ideas only through visible physical cues. Never use mood or emotion "
               "words such as thoughtful, pensive, solemn, serene, tense, mysterious, majestic, epic, "
               "cinematic, sad, lonely, or phrases like \"quiet stillness\".\n")
@@ -702,7 +707,8 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
         + _ETHNICITY_LINE
     )
     if media == "image" and not rv.close_faces_allowed:
-        text += _CLOSE_FACES_LINE
+        # Профили с max_characters разрешают крупные планы предметов; прочие — прежняя строка без изменений.
+        text += _CLOSE_FACES_LINE if max_characters is None else _CLOSE_FACES_OBJECTS_OK_LINE
     return text
 
 
