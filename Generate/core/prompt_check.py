@@ -55,7 +55,8 @@ _STEM_EXCLUDE = {
 # _STEM_EXCLUDE целиком: исключение только при глагольном окружении — перед a / an / the / into.
 # Регулярное выражение задаётся здесь целиком (без экранирования), как просмотр вперёд.
 _STEM_EXCLUDE_VERB_RE = {
-    "form": (r"forms(?=\s+(?:a|an|the|into)\b)",),
+    "form": (r"(?<!\bof )(?<!\btax )(?<!\bblank )forms(?=\s+(?:a|an|the|into|on|around|over|along|in|at|above|below|"
+             r"across|under|between|against|beside|near)\b)",),
 }
 
 
@@ -792,7 +793,10 @@ _LETTERING_FONT_WORDS = (
 _LETTERING_RX = re.compile(
     r"\blettering\b[^:.\n]{0,60}:\s*([^.\n;]+)"
     r"|\bread(?:s|ing)\s+([^.\n;]+?)\s+in\s+(?:" + _LETTERING_FONT_WORDS + r"\s+){0,10}lettering\b"
-    r"|\blettering\b[^:.,;\n]{0,60},?\s*\bread(?:s|ing)\s+(?!:)([^.\n;]+)",
+    r"|\blettering\b[^:.,;\n]{0,60},?\s*\bread(?:s|ing)\s+(?!:)"
+    # Русский: фраза надписи не захватывает хвост «in <шрифт> lettering» — он съедается, но в группу не попадает
+    r"((?:(?!\s+in\s+(?:" + _LETTERING_FONT_WORDS + r"\s+){0,10}lettering\b)[^.\n;])+)"
+    r"(?:\s+in\s+(?:" + _LETTERING_FONT_WORDS + r"\s+){0,10}lettering\b)?",
     re.IGNORECASE,
 )
 # служебные слова, на которых надпись не может закончиться

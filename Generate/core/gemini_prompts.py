@@ -1065,6 +1065,16 @@ _OTHER_MOUTH_RX = re.compile(r"\b(?:wavy worried mouth|worried wavy mouth|open O
 _GROUP_WORDS_RX = re.compile(r"\b(?:two|three|four|five|several|many|group|crowd|villagers|people|men|women|figures|children)\b",
                              re.I)
 _SINGLE_CHARACTER_RX = re.compile(r"\bcharacter\b", re.I)
+# Второй персонаж в кадре (названный по роли): «adult figure», «the farmer», «a historical figure» и т.п.
+_SECOND_CHARACTER_RX = re.compile(r"\b(?:adults?|child|children|figures?|farmers?|scientists?|chefs?|miners?|men|man|"
+                                  r"women|woman|persons?|microbes?|villagers?|boys?|girls?)\b", re.I)
+# Ссылка на персонажа внутри предложения: по ней режем клаузы («..., and the adult has ...»)
+_CHARACTER_REF_RX = re.compile(r"\b(?:main character|character|adults?|child|figures?|farmers?|scientists?|chefs?|"
+                               r"miners?|men|man|women|woman|persons?|microbes?|villagers?|boys?|girls?)\b", re.I)
+# Граница клаузы: «; », «, while» или «and» перед новой ссылкой на персонажа («and one», «and the other» — тоже)
+_CLAUSE_SPLIT_RX = re.compile(r";|,\s*while\b|\s+and\s+(?=(?:the\s+|an?\s+)?(?:main character|character|adults?|child|"
+                              r"figures?|farmers?|scientists?|chefs?|miners?|men|man|women|woman|persons?|microbes?|"
+                              r"villagers?|boys?|girls?|one|another|other)\b)", re.I)
 # «reads/reading <LABEL>»: метка до «in … lettering», запятой, точки, строчного продолжения или конца
 _READ_LABEL_RX = re.compile(r"\b(?i:reads?|reading)\s+(?:the\s+)?(?:words?\s+|text\s+|label\s+)?[\"'\u201c\u00ab]?"
                             r"([^\n,.;\"'\u201d\u00bb]+?)(?=\s+(?i:in)\s|\s+[a-z\u0430-\u044f\u0451]|[\"'\u201d\u00bb]?\s*[,.;]|$)")
@@ -1747,9 +1757,16 @@ def _ordinary_layout(text: str, setting: str) -> bool:
 
 
 def _blank_card(text: str) -> bool:
-    """Табличка или карточка названа, но рядом нет «read/reads/reading» или «:» с текстом."""
+    """Табличка или карточка названа, но в её предложении нет «read/reads/reading» или «:» с текстом.
+
+    Русский: окно — до 40 символов назад и до 120 вперёд, но не дальше границ предложения («.» и «;»),
+    иначе шаблон «header band separated by a thin line reading <TEXT>» ложно считается пустым.
+    """
     for m in _CARD_WORDS_RX.finditer(text):
-        window = text[max(0, m.start() - 40):m.end() + 40]
+        left = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
+        right_candidates = [i for i in (text.find(".", m.end()), text.find(";", m.end())) if i != -1]
+        right = min(right_candidates) if right_candidates else len(text)
+        window = text[max(left, m.start() - 40):min(right, m.end() + 120)]
         if not _READ_WORDS_RX.search(window):
             return True
     return False
@@ -1776,11 +1793,24 @@ def _type_b_on_hero(text: str) -> bool:
 
 
 def _mouth_conflict(text: str) -> bool:
-    """Рот «выше» головы или два взаимоисключающих рта у одного персонажа."""
+    """Рот «выше» головы или два взаимоисключающих рта у одного персонажа.
+
+    Русский: в кадре с одним персонажем оба рта — конфликт. Если персонажей несколько (группа или второй
+    персонаж по роли), конфликт только когда оба рта стоят в одной клаузе с одной ссылкой на персонажа.
+    """
     if _MOUTH_ABOVE_RX.search(text):
         return True
-    single = _SINGLE_CHARACTER_RX.search(text) and not _GROUP_WORDS_RX.search(text)
-    return bool(single and _CLOSED_MOUTH_RX.search(text) and _OTHER_MOUTH_RX.search(text))
+    if not (_CLOSED_MOUTH_RX.search(text) and _OTHER_MOUTH_RX.search(text)):
+        return False
+    multi = bool(_GROUP_WORDS_RX.search(text) or _SECOND_CHARACTER_RX.search(text))
+    if not multi:
+        return bool(_SINGLE_CHARACTER_RX.search(text))
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        for clause in _CLAUSE_SPLIT_RX.split(sentence):
+            if (_CLOSED_MOUTH_RX.search(clause) and _OTHER_MOUTH_RX.search(clause)
+                    and len(_CHARACTER_REF_RX.findall(clause)) <= 1):
+                return True
+    return False
 
 
 def _batch_style_reasons(text: str, setting: str = "") -> list:
