@@ -15,6 +15,7 @@ SPEC 0.5: все сообщения на русском языке.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -46,6 +47,8 @@ CARD_DIAGNOSTIC_FILES = frozenset({"ssh_diag.log", "vast_logs.txt", "worker_log.
 # Не больше 900 файлов в части: лимит GitHub на ассеты релиза 1000, запас на служебные файлы.
 DEFAULT_ASSET_LIMIT = 900
 STAGE_GEN = "gen"
+
+log = logging.getLogger(__name__)
 
 # Шаблоны токенов GitHub: вырезаем даже если токен не был передан явно.
 _TOKEN_RE = re.compile(r"(gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})")
@@ -92,6 +95,10 @@ class ReleaseStore(ABC):
     @abstractmethod
     def upload_asset(self, tag: str, path: str) -> None:
         """Загружает файл в релиз."""
+
+    def download_asset(self, tag: str, asset_name: str, dest: str) -> bool:
+        """Скачивает ассет релиза в dest. По умолчанию не умеет: False (не абстрактный, чтобы заглушки тестов работали)."""
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +201,16 @@ class GhReleaseStore(ReleaseStore):
     def upload_asset(self, tag: str, path: str) -> None:
         self._runner(["release", "upload", tag, path, "--repo", self.repo, "--clobber"])
 
+    def download_asset(self, tag: str, asset_name: str, dest: str) -> bool:
+        try:
+            self._runner(["release", "download", tag, "--repo", self.repo,
+                          "--pattern", asset_name, "--output", dest, "--clobber"])
+        except (GeminiRuntimeError, GeminiInputError) as exc:
+            # текст исключения уже очищен от токена в GhCommandRunner; трассировка не пишется
+            log.warning("Не удалось скачать %s из релиза %s: %s.", asset_name, tag, exc)
+            return False
+        return os.path.isfile(dest)
+
 
 # ---------------------------------------------------------------------------
 # Ссылки (SPEC 9.4)
@@ -263,6 +280,7 @@ class ReleaseUploader:
         self._parts: list = []       # теги частей ГЕНЕРАЦИЯ по порядку
         self.asset_tags: dict = {}   # имя файла клипа -> тег части
         self.done: set = set()
+        self.final_assets: list = []  # имена ассетов ФИНАЛ · ГЕНЕРАЦИЯ из prepare() (Блок 2: восстановление служебных файлов)
         self._prepared = False
 
     # --- предполётные проверки ------------------------------------------------
@@ -286,6 +304,7 @@ class ReleaseUploader:
         if rel is None:
             self._create_final()
         else:
+            self.final_assets = list(rel.assets)
             self._log(f"Продолжение: релиз {self.final_tag} уже есть, новый финал не создаётся.")
         done: set = set()
         n = 1
@@ -334,9 +353,10 @@ class ReleaseUploader:
         self._log(f"Создан релиз {pt} (ГЕНЕРАЦИЯ · ЧАСТЬ {n}).")
         return pt
 
-    def upload_clip(self, path: str) -> bool:
+    def upload_clip(self, path: str, refresh_links: bool = True) -> bool:
         """Загружает клип или фото в активную часть ГЕНЕРАЦИЯ; False, если номер уже загружен.
-        После загрузки обновляет generated_links.txt в финале."""
+        После загрузки обновляет generated_links.txt в финале, если refresh_links=True (по умолчанию, как раньше).
+        refresh_links=False: файл ссылок обновит отдельный вызов refresh_links() (пакетное обновление)."""
         self._ensure_prepared()
         name = os.path.basename(path)
         num = _clip_num_any(name, self.template)
@@ -349,8 +369,13 @@ class ReleaseUploader:
         self._counts[tag] += 1
         self.asset_tags[name] = tag
         self.done.add(num)
-        self._refresh_links()
+        if refresh_links:
+            self._refresh_links()
         return True
+
+    def refresh_links(self) -> None:
+        """Перезаписывает generated_links.txt в финале по текущему состоянию загруженных клипов (публичный вход)."""
+        self._refresh_links()
 
     def upload_preview(self, path: str) -> None:
         """Превью preview_<x>_<y>.png -> ФИНАЛ · ГЕНЕРАЦИЯ (исключение: превью - медиа, но живут в финале).
@@ -408,6 +433,32 @@ class ReleaseUploader:
             self._upload_service_asset(self.final_tag, path)
             return
         self.upload_run_file(path)
+
+    def download_service_file(self, filename: str, dest: str) -> bool:
+        """Скачивает служебный файл из ФИНАЛ · ГЕНЕРАЦИЯ в dest, только если он есть в релизе.
+
+        Загрузка идёт во временный файл в каталоге dest, затем os.replace: dest либо целый, либо не тронут.
+        False: файла нет в релизе или скачивание не удалось; временный файл удаляется."""
+        if filename not in self.final_assets:
+            return False
+        tmp = None
+        ok = False
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f"{filename}.", suffix=".part",
+                                       dir=os.path.dirname(os.path.abspath(dest)))
+            os.close(fd)
+            if self.store.download_asset(self.final_tag, filename, tmp):
+                os.replace(tmp, dest)
+                ok = True
+        except Exception as exc:  # любой сбой: dest не трогаем, временный файл убираем ниже
+            self._log(f"Служебный файл {filename} из релиза не восстановлен: {type(exc).__name__}.")
+        finally:
+            if tmp is not None and not ok:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        return ok
 
     def links_text(self, repo: str) -> str:
         """Содержимое generated_links.txt по всем загруженным клипам всех частей.

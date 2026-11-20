@@ -71,6 +71,13 @@ on:
           - "zimage_turbo"
           - "none"
         default: "zimage_turbo"
+      niche:
+        description: "Ниша: none = обычный выбор модели выше; cartoon_photos = фото-ниша: видео выключено, фото и текст берутся из папки ниши"
+        type: choice
+        options:
+          - "none"
+          - "cartoon_photos"
+        default: "none"
       text_model:
         description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"
         type: choice
@@ -159,8 +166,8 @@ jobs:
       # Подробный журнал (DEBUG и сырой обмен с Vast) пишется отдельно: run/debug.log в артефакте запуска.
       RUN_LOG: /tmp/generate-run.log
       # выбор моделей (none = модель выключена); шаги читают их из env, пропуск шагов — условием if
-      VIDEO_MODEL: ${{ inputs.video_model }}
-      PHOTO_MODEL: ${{ inputs.photo_model }}
+      VIDEO_MODEL: ${{ inputs.niche != 'none' && 'none' || inputs.video_model }}
+      PHOTO_MODEL: ${{ inputs.niche != 'none' && inputs.niche || inputs.photo_model }}
       # профиль видео берётся из video_model (ltx25); при none запасной профиль ltx25, видео-шаги всё равно пропускаются
       VIDEO_PROFILE: ${{ inputs.video_model != 'none' && inputs.video_model || 'ltx25' }}
 
@@ -187,6 +194,33 @@ jobs:
       - name: Install dependencies
         run: pip install -r Generate/requirements-dev.txt
 
+      # lingua нужна только профилю с text_language: srt (язык текста по SRT); имена профилей те же, что в шаге запуска
+      - name: Нужен ли lingua (язык текста по SRT)
+        id: lang_need
+        env:
+          VIDEO_NAME: ${{ inputs.niche == 'none' && inputs.video_model != 'none' && inputs.video_model || 'ltx25' }}
+          PHOTO_NAME: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_model != 'none' && inputs.photo_model || '') }}
+        run: |
+          need=false
+          for name in "$VIDEO_NAME" "$PHOTO_NAME"; do
+            if [ -z "$name" ] || [ "$name" = "none" ]; then continue; fi
+            for f in "Generate/Nishes/$name/profile.yaml" "Generate/model_profiles/models/$name/profile.yaml"; do
+              if [ -f "$f" ] && grep -Eq '^text_language:[[:space:]]*"?srt"?' "$f"; then need=true; fi
+            done
+          done
+          echo "needed=$need" >> "$GITHUB_OUTPUT"
+
+      - name: Кэш pip для lingua
+        if: steps.lang_need.outputs.needed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-lingua-${{ hashFiles('Generate/requirements-lang.txt') }}
+
+      - name: Установка lingua (язык текста по SRT)
+        if: steps.lang_need.outputs.needed == 'true'
+        run: pip install -r Generate/requirements-lang.txt
+
       # Значения входов передаются через env, а не подстановкой в текст скрипта:
       # так свободный текст (например, gpu_name) не может внедрить shell-команды.
       # Предстартовая проверка (SPEC 8.4, вариант A): конфиг и входные файлы. Образ карты стоковый,
@@ -198,7 +232,7 @@ jobs:
           PROMPTS_FILE: ${{ inputs.prompts_path }}
           PROMPTS_COUNT: ${{ inputs.prompts_count }}
           # фото-профиль для превью: пусто, если фото-модель выключена (превью без неё не запускаются)
-          PREVIEW_PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
+          PREVIEW_PHOTO_PROFILE: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_model != 'none' && inputs.photo_model || '') }}
           TEXT_MODEL: ${{ inputs.text_model }}
           OPENROUTER1: ${{ secrets.OPENROUTER1 }}
           OPENROUTER2: ${{ secrets.OPENROUTER2 }}
@@ -242,7 +276,7 @@ jobs:
         if: env.VIDEO_MODEL != 'none' || env.PHOTO_MODEL != 'none'
         env:
           # фото: профиль из photo_model; при none пусто, и флаг --photo-profile не передаётся
-          PHOTO_PROFILE: ${{ inputs.photo_model != 'none' && inputs.photo_model || '' }}
+          PHOTO_PROFILE: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_model != 'none' && inputs.photo_model || '') }}
           GEMINI1: ${{ secrets.GEMINI1 }}
           GEMINI2: ${{ secrets.GEMINI2 }}
           GEMINI3: ${{ secrets.GEMINI3 }}
@@ -279,7 +313,7 @@ jobs:
           MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
           TEXT_MODEL: ${{ inputs.text_model }}
           # STEP 3b: распределение видео/фото (distribution.json); читает оркестратор до промптов
-          VIDEO_PERCENT: ${{ inputs.video_percent }}
+          VIDEO_PERCENT: ${{ inputs.niche != 'none' && '0' || inputs.video_percent }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
           PRESET: ${{ inputs.preset }}
           GPU_NAME: ${{ inputs.gpu_name }}

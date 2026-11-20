@@ -37,12 +37,14 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
-    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "profile_exists",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "load_profile_text_model", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = GENERATE_DIR / "config.default.yaml"
 MODEL_PROFILES_DIR = GENERATE_DIR / "model_profiles"
+# Папки режимов (Generate/Nishes/<имя>/): ищутся после model_profiles/models/<имя>/
+NISHES_DIR = GENERATE_DIR / "Nishes"
 # Лимит GitHub Actions на одно задание, минут (generate.yml: timeout-minutes: 360).
 ACTIONS_JOB_LIMIT_MIN = 360
 
@@ -460,10 +462,20 @@ def load_config(path: Optional[Path | str] = None,
 
 
 def profile_dir(profile: str) -> Path:
-    """Папка профиля модели: Generate/model_profiles/models/<profile>/ (имя проверяется)."""
+    """Папка профиля модели (имя проверяется).
+
+    Порядок поиска: Generate/model_profiles/models/<profile>/, затем Generate/Nishes/<profile>/.
+    Если нет ни одной папки, возвращается путь в models (как раньше, для сообщений об ошибке).
+    """
     if not re.fullmatch(_PROFILE_NAME_PATTERN, profile or ""):
         raise GeminiInputError("Недопустимое имя профиля модели.")
-    return MODEL_PROFILES_DIR / "models" / profile
+    primary = MODEL_PROFILES_DIR / "models" / profile
+    if primary.is_dir():
+        return primary
+    secondary = NISHES_DIR / profile
+    if secondary.is_dir():
+        return secondary
+    return primary
 
 
 def profile_exists(profile: str) -> bool:
@@ -500,6 +512,69 @@ def load_profile_frame_rule(profile: str) -> dict:
     return dict(rule)
 
 
+def load_profile_text_model(profile: str) -> Optional[str]:
+    """Семейство текстовой модели из profile.yaml (ключ text_model).
+
+    Нет файла profile.yaml или нет ключа — None (тогда берётся default_text_model из конфига).
+    Пустое или не строковое значение — ошибка входа.
+    """
+    if not profile_exists(profile):
+        return None
+    value = _read_profile(profile).get("text_model")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise GeminiInputError(
+            f"В профиле {profile}/profile.yaml ключ «text_model» должен быть непустой строкой.")
+    return value.strip()
+
+
+def profile_refs_enabled(profile_name: str) -> bool:
+    """Профиль принимает референсы (refs_enabled: true в profile.yaml). Без профиля или поля — False.
+
+    Не выбрасывает исключений: оркестратор при False просто не передаёт поле refs (поведение ltx25 и zimage_turbo).
+    """
+    if not profile_name:
+        return False
+    try:
+        return _read_profile(profile_name).get("refs_enabled") is True
+    except (GeminiInputError, ValueError):
+        return False
+
+
+def load_profile_seed_mode(profile_name: str) -> str:
+    """Режим seed из profile.yaml (ключ seed_mode): «per_clip» (по умолчанию, если ключа нет) или «run».
+
+    Нет профиля (файла profile.yaml) — «per_clip», как при отсутствии ключа. Другое значение — ошибка входа (код 2).
+    Имена ниш в коде не сравниваются: решение принимает только значение из файла профиля.
+    """
+    if not profile_name or not profile_exists(profile_name):
+        return "per_clip"
+    value = _read_profile(profile_name).get("seed_mode", "per_clip")
+    if value not in ("per_clip", "run"):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «seed_mode» должен быть per_clip или run.")
+    return value
+
+
+def load_profile_batch_size(profile_name: str) -> Optional[int]:
+    """Ключ batch_size профиля модели: размер батча (и пакета исправлений) для этого профиля.
+
+    Нет файла profile.yaml или нет ключа — None (тогда берётся gemini_batch_size из конфига, как раньше).
+    Не целое число (в том числе bool) или меньше 1 — ошибка входа (код 2).
+    """
+    if not profile_name or not profile_exists(profile_name):
+        return None
+    data = _read_profile(profile_name)
+    if "batch_size" not in data:
+        return None
+    value = data["batch_size"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «batch_size» должен быть целым числом не меньше 1.")
+    return value
+
+
 def load_profile_type(profile_name: str) -> str:
     """Тип профиля модели (ключ type в profile.yaml): «video» или «image»; без поля — «video»."""
     value = _read_profile(profile_name).get("type", "video")
@@ -507,3 +582,38 @@ def load_profile_type(profile_name: str) -> str:
         raise GeminiInputError(
             f"В профиле {profile_name}/profile.yaml тип «type» должен быть video или image.")
     return value
+
+
+# Булевы ключи профиля ниши для проверки промптов (verify_prompts). По умолчанию выключены: профили ltx25 и
+# zimage_turbo их не задают и ведут себя как раньше. Разбор строгий: значение должно быть true или false;
+# другое значение — ошибка входа (код 2). Имена ниш в коде не сравниваются: решает значение из profile.yaml.
+
+
+def _load_profile_bool(profile_name: str, key: str) -> bool:
+    """Булевый ключ верхнего уровня из profile.yaml. Нет профиля или ключа — False; не true/false — ошибка входа."""
+    if not profile_name or not profile_exists(profile_name):
+        return False
+    data = _read_profile(profile_name)
+    if key not in data:
+        return False
+    value = data[key]
+    if not isinstance(value, bool):
+        raise GeminiInputError(
+            f"В профиле {profile_name}/profile.yaml ключ «{key}» должен быть true или false.")
+    return value
+
+
+def load_profile_rework_style_flag_without_refs(profile_name: str) -> bool:
+    """Ключ rework_style_flag_without_refs: клип с любым флагом разбора (стиль, длина, мусор, этнос, метки) идёт в очередь
+    исправлений и без refs при refs_enabled: false. Без ключа или при false клип с флагом без refs остаётся на проверке."""
+    return _load_profile_bool(profile_name, "rework_style_flag_without_refs")
+
+
+def load_profile_fail_on_needs_review(profile_name: str) -> bool:
+    """Ключ fail_on_needs_review: клип, оставшийся на проверке (needs_review), проваливает прогон verify_prompts."""
+    return _load_profile_bool(profile_name, "fail_on_needs_review")
+
+
+def load_profile_fail_on_duplicate_prompts(profile_name: str) -> bool:
+    """Ключ fail_on_duplicate_prompts: одинаковые промпты у разных клипов проваливают прогон verify_prompts."""
+    return _load_profile_bool(profile_name, "fail_on_duplicate_prompts")

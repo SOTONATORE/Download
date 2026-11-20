@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import logging
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -31,7 +33,7 @@ import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from types import MappingProxyType
-from dataclasses import asdict, dataclass
+from dataclasses import InitVar, asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -49,7 +51,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .segment_split import all_photo, select_video_segments, to_segments
     from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
     from .video_value import SCORE_BATCH_SIZE, score_segments, write_distribution
-    from .config_loader import DEFAULT_MODEL_PROFILE
+    from .config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled
     from .naming import clip_filename
     from . import previews
     from .card_roles import plan_card_roles
@@ -74,7 +76,7 @@ except ImportError:  # pragma: no cover
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
     from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
     from video_value import SCORE_BATCH_SIZE, score_segments, write_distribution  # type: ignore
-    from config_loader import DEFAULT_MODEL_PROFILE  # type: ignore
+    from config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled  # type: ignore
     from naming import clip_filename  # type: ignore
     import previews  # type: ignore
     import ssh_probe  # type: ignore
@@ -113,6 +115,10 @@ HEARTBEAT_JOIN_TIMEOUT_SEC = 5.0
 WAIT_LOG_INTERVAL_SEC = 30.0  # строка состояния ожидания воркера на карту: не чаще раза в 30 с
 VAST_SILENCE_INTERVAL_SEC = 10.0  # логи Vast у карты без ответа /health: одна попытка не чаще раза в 10 с
 COMFY_ANSWER_LIMIT_SEC = 300.0  # Правило A: ComfyUI на карте не ответил за 5 мин от аренды → карта снимается
+# буфер задач на карту: 1 выполняющаяся и до MAX_CARD_QUEUE_DEPTH-1 в очереди воркера (стриминговая очередь, Part 1A)
+MAX_CARD_QUEUE_DEPTH = 4
+# опрос статусов задач карты (GET /task/{id}); Vast и heartbeat идут по poll_interval (10 с), задачи — чаще
+TASK_POLL_INTERVAL_SEC = 1.0
 SSH_DIAG_INTERVAL_SEC = 30.0  # SSH-диагностика карт, не готовых к приёму задач: тик не чаще раза в 30 с
 CARD_WARN_REPEAT_SEC = 30.0  # повтор одного предупреждения карты в консоли: не чаще раза в 30 с (_warn_card)
 SSH_DIAG_TIMEOUT_SEC = 20  # таймаут одной SSH-проверки
@@ -169,7 +175,51 @@ WEIGHTS_FAILED_RETIRE = "загрузка весов не удалась"
 ACCEPT_REASON = "задача не принята"
 PORTAL_NOT_IMPLEMENTED = "проверка через портал не реализована (SPEC 8.2, 13.1)"
 
+# Число слотов референсов в workflow (как REF_SLOTS в worker/comfy_client.py)
+REFS_MAX = 10
+
+
+def _valid_refs(value) -> bool:
+    """Поле refs из prompts.json: список различных целых чисел от 1 до REFS_MAX (bool не считается числом)."""
+    if not isinstance(value, list):
+        return False
+    if any(isinstance(x, bool) or not isinstance(x, int) or not 1 <= x <= REFS_MAX for x in value):
+        return False
+    return len(set(value)) == len(value)
+
+
+def _entry_refs(entry) -> Optional[list]:
+    """Поле refs задачи из prompts.json: сначала верхний уровень entry["refs"], затем entry["extra"]["refs"].
+
+    Генерация пишет refs внутрь extra; превью и старые файлы пишут на верхний уровень. None — поля нет.
+    """
+    if not isinstance(entry, dict):
+        return None
+    refs = entry.get("refs")
+    if refs is None:
+        extra = entry.get("extra")
+        refs = extra.get("refs") if isinstance(extra, dict) else None
+    return refs
+
+
+def group_by_stack(nums: list, stack_of: Callable) -> list:
+    """Переставляет номера так, что задачи одного стека (набора референсов) идут подряд.
+
+    Стеки идут в порядке первого появления в исходном списке (порядок SRT); внутри стека порядок
+    сохраняется. Сами номера клипов не меняются. Задачи без референсов образуют группу с ключом ().
+    Если все номера без референсов, порядок не меняется.
+    """
+    groups: dict = {}
+    for num in nums:
+        groups.setdefault(stack_of(num), []).append(num)
+    return [num for group in groups.values() for num in group]
+
+
 _DONE_STATUSES = frozenset({"done", "completed", "ready"})
+# A2: generated_links.txt обновляется после каждых N клипов, выгруженных в фоне
+LINKS_REFRESH_EVERY = 20
+# A2: период записи в лог, пока фоновая выгрузка ещё идёт при остановке
+UPLOAD_JOIN_LOG_SEC = 60.0
 _FAILED_STATUSES = frozenset({"failed", "error"})
 # Нехватка видеопамяти при рендере: фраза из текста ComfyUI, которую воркер передаёт в ошибке задачи (worker/comfy_client.py)
 OUT_OF_MEMORY_TEXT = "out of memory"
@@ -254,6 +304,8 @@ class _Task:
     num: int
     id: str
     started: float
+    running_since: Optional[float] = None  # момент, когда воркер сообщил «running» (таймаут рендера)
+    state: str = "queued"                  # queued: в очереди воркера; running: рендерится на карте
 
 
 @dataclass
@@ -269,7 +321,9 @@ class _CardSlot:
     contacted: bool = False    # воркер хотя бы раз ответил
     net_fail: int = 0
     vast_status: str = ""      # последнее состояние Vast, для строк о переходах (не на каждый опрос)
-    task: Optional[_Task] = None
+    tasks: list = field(default_factory=list)  # буфер задач карты: 1 выполняющаяся и до MAX_CARD_QUEUE_DEPTH-1 в очереди воркера
+    task: InitVar[Optional[_Task]] = None      # совместимость: _CardSlot(..., task=...) кладёт задачу в буфер; свойство task — ниже
+    last_vast_poll: float = -1e9               # время последнего запроса статуса Vast по карте (throttle, см. _step_slot)
     log_next: Optional[int] = None    # курсор логов: номер последней строки, полученной с карты
     log_pulled: Optional[float] = None  # время последней попытки периодической выгрузки
     offer_id: int = 0                 # предложение, по которому арендована карта (для исключения)
@@ -319,6 +373,29 @@ class _CardSlot:
     def started(self) -> bool:
         """Старт карты начался: Vast показал «loading» или «created» (SPEC 8.2)."""
         return self.saw_loading or self.saw_created
+
+    def __post_init__(self, task: Optional[_Task]) -> None:
+        # совместимость: задача из аргумента конструктора попадает в буфер, если буфер пуст
+        if task is not None and not self.tasks:
+            self.tasks = [task]
+
+
+def _slot_task_get(self) -> Optional[_Task]:
+    """Текущая задача карты: выполняющаяся, иначе первая в буфере (прежнее поле task)."""
+    return next((t for t in self.tasks if t.state == "running"), self.tasks[0] if self.tasks else None)
+
+
+def _slot_task_set(self, value: Optional[_Task]) -> None:
+    """Прямое присваивание slot.task: None очищает буфер, задача становится единственной в буфере."""
+    if value is None:
+        self.tasks.clear()
+    else:
+        self.tasks = [value]
+
+
+# Свойство task добавляется после создания класса: объявленное в теле класса оно совпадало бы с InitVar,
+# и dataclass взял бы объект свойства как значение по умолчанию аргумента task.
+_CardSlot.task = property(_slot_task_get, _slot_task_set)
 
 
 def _has_start_marker(text: str) -> bool:
@@ -789,6 +866,15 @@ def _is_card_diagnostic(name: str) -> bool:
     return len(parts) >= 3 and parts[0] == "cards" and parts[-1] in CARD_DIAGNOSTIC_FILES
 
 
+def _read_json_dict(path) -> Optional[dict]:
+    """Содержимое JSON-файла, если это словарь; при ошибке чтения или формата — None (ошибку даст load_state)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 class RunPublisher:
     """Выдача служебных файлов запуска в релизы (SPEC 9.1, 9.4, 9.7; этап 6c, E1-E4).
 
@@ -870,6 +956,9 @@ class RunPublisher:
 class Orchestrator:
     """Координатор: промпты, карты Vast, рендер, выдача в Release, уборка."""
 
+    _upload_thread = None     # A2: фоновый поток выгрузки, существует только внутри _work
+    _pending_uploads: int = 0  # A2: скачано, но ещё не выгружено в Release
+    _uploaded_since_links: int = 0  # A2: выгружено с последнего обновления generated_links.txt
     _total_needed: int = 0  # клипов нужно в этом запуске: знаменатель строк «клип N из M» (задаёт run)
     # превью по умолчанию (без __init__, как в тестах): ничего не делается; только для чтения
     prompts_file = None
@@ -913,6 +1002,8 @@ class Orchestrator:
         worker_token: Optional[str] = None,
         seed_base: int = 0,
         poll_interval_sec: float = 10.0,
+        max_card_queue_depth: int = MAX_CARD_QUEUE_DEPTH,      # задач на карту: активная и очередь воркера
+        task_poll_interval_sec: Optional[float] = None,         # опрос задач карты, с; None = poll_interval_sec
         rent_retry_sec: float = 30.0,
         max_rent_tries: int = 5,
         scan_sec: float = 0.0,
@@ -926,6 +1017,7 @@ class Orchestrator:
         http_timeout_sec: float = 60.0,
         log_level: str = "INFO",
         photo_profile: Optional[str] = None,   # профиль фото (type: image); None: фото не делаются
+        segments_all: bool = False,            # список клипов: все сегменты SRT (segments: all в profile.yaml); False — missing.txt
         photo_prompt_cfg=None,                 # настройки промптов для фото
         prompts_file: Optional[str] = None,    # файл промптов для превью (prompts.txt); None = превью не делаются
         prompts_count: str = "выкл",           # переключатель превью: выкл / 1..4 (вариантов на промпт)
@@ -980,6 +1072,7 @@ class Orchestrator:
         self.log_level = log_level
         self.segments = segments
         self.missing_path = missing_path
+        self.segments_all = bool(segments_all)  # True: клипы — все номера SRT, missing.txt не читается (только выбор номеров)
         self.cfg = cfg
         self.timing_params = timing_params
         self.release_store = release_store
@@ -1047,6 +1140,19 @@ class Orchestrator:
         self.work_dir = work_dir
         self.seed_base = seed_base
         self.poll_interval = poll_interval_sec
+        # буфер задач на карту: не меньше одной задачи на карту (проверка значения до любых трат)
+        if int(max_card_queue_depth) < 1:
+            raise ValueError("max_card_queue_depth должен быть не меньше 1")
+        self.max_card_queue_depth = int(max_card_queue_depth)
+        # быстрый опрос задач отделён от опроса Vast и heartbeat: задачи — task_poll, Vast — poll_interval
+        if task_poll_interval_sec is None:
+            self._task_poll = self.poll_interval
+        else:
+            if float(task_poll_interval_sec) <= 0:
+                raise ValueError("task_poll_interval_sec должен быть больше 0")
+            self._task_poll = float(task_poll_interval_sec)
+        self._vast_poll = self.poll_interval  # статус Vast карты запрашивается с прежним интервалом (10 с в проде)
+        self._tick_429: set = set()           # карты, получившие 429 на этом обходе: до следующего обхода им не назначаем
         self.rent_retry = rent_retry_sec
         # лимит запросов аренды за запуск (9е-3): считается каждый запрос, успешный и неудачный
         self.max_rent_tries = int(max_rent_tries)
@@ -1086,6 +1192,7 @@ class Orchestrator:
         self._uploader: Optional[ReleaseUploader] = None
         self._state: dict = {"prompts": {}}
         self._prompts: dict = self._state["prompts"]
+        self._run_seed: Optional[int] = None  # Блок 3: seed прогона для ниш с seed_mode: run; иначе None
         self._video_queue: deque = deque()
         self._photo_queue: deque = deque()   # очередь фото (пуста без photo_profile)
         self._photo_nums: set = set()        # номера фото из распределения (STEP 3b)
@@ -1099,6 +1206,12 @@ class Orchestrator:
         self._done: set = set()
         self._failed: set = set()
         self._durations: list = []
+        # A2: общая блокировка состояния (главный поток и фоновая выгрузка); RLock: вложенные вызовы безопасны
+        self._state_lock = threading.RLock()
+        self._upload_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self._upload_thread: Optional[threading.Thread] = None
+        self._pending_uploads: int = 0
+        self._uploaded_since_links: int = 0
         self._bad_machines: set = set()
         self._bad_offers: set = set()
         # предложения, по которым отправлен запрос аренды (успешный или нет): в этом запуске не выбираются снова (9е-3)
@@ -1475,7 +1588,7 @@ class Orchestrator:
             if self.pilot:
                 return self._run_pilot()
             self._prepare_previews()  # превью из prompts.txt: до аренды; без файла/фото-модели — ошибка входа
-            missing = parse_missing(self.missing_path, self.segments)
+            missing = wanted_segment_numbers(self.segments, self.missing_path, getattr(self, "segments_all", False))
             if not missing and not self._previews:
                 log.info("Пропущенных сегментов нет: генерировать нечего.")
                 return RunSummary()
@@ -1511,6 +1624,7 @@ class Orchestrator:
             raise ReleaseStartError(
                 f"Не удалось открыть релиз запуска: {self._mask_remote(str(exc))}. "
                 "Запуск остановлен до трат.") from None
+        self._restore_prompts_from_release(uploader)  # Блок 2: при перезапуске промпты берутся из релиза, а не генерируются заново
         self._uploader = uploader
         self._publisher = RunPublisher(uploader, self.repo, self._tmp, artifact=self._artifact,
                                        mask=self._mask_remote)
@@ -1535,6 +1649,8 @@ class Orchestrator:
                     log.error("Прогон остановлен до аренды карт: ошибка генерации промптов (%s). "
                               "Готовые промпты сохранены, карты не арендованы.", self._prompt_abort)
                 else:
+                    if needed:
+                        self._ensure_run_seed()  # Блок 3: run_seed после промптов и до аренды карт
                     self._work(ready)
             finally:
                 self._cleanup()  # F1 (1)-(2): логи и JSON с лимитом времени, затем уничтожение по метке
@@ -1542,6 +1658,127 @@ class Orchestrator:
             self._fill_summary(summary, needed)
             self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
         return summary
+
+    def _active_profile_names(self) -> list:
+        """Имена профилей прогона (видео и фото) без пустых значений."""
+        names = [getattr(self, "profile", None), getattr(self, "photo_profile", None)]
+        return [n for n in names if n]
+
+    def _run_seed_active(self) -> bool:
+        """Хотя бы один активный профиль имеет seed_mode: run. Значения читаются только через config_loader."""
+        return any(load_profile_seed_mode(n) == "run" for n in self._active_profile_names())
+
+    def _seed_mode_run_for_role(self, role: str) -> bool:
+        """Профиль роли карты имеет seed_mode: run."""
+        return load_profile_seed_mode(self._profile_for_role(role)) == "run"
+
+    def _run_seed_meta(self) -> dict:
+        """Поле run_seed для meta.json карты: только когда seed прогона задан."""
+        run_seed = getattr(self, "_run_seed", None)
+        return {} if run_seed is None else {"run_seed": run_seed}
+
+    def _profile_differs(self, data: dict) -> bool:
+        """Поле profile файла не совпадает с профилями прогона. Без поля проверки нет."""
+        if "profile" not in data:
+            return False
+        return data["profile"] not in self._active_profile_names()
+
+    def _ensure_run_seed(self) -> None:
+        """Блок 3: один run_seed на прогон для ниш с seed_mode: run.
+
+        Если в состоянии уже есть целое run_seed >= 0, он используется; иначе создаётся один раз,
+        записывается в состояние вместе с srt_hash и сохраняется в prompts.json до старта карт.
+        """
+        if not self._run_seed_active():
+            return
+        with self._lock_state():
+            value = self._state.get("run_seed")
+            source = "из prompts.json"
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                value = secrets.randbelow(2 ** 32 - 1) + 1
+                source = "создан"
+                self._state["run_seed"] = value
+                # srt_hash обязателен: без него load_state следующего запуска отвергнет файл
+                self._state.setdefault("srt_hash", go.srt_hash(self.segments))
+                self._save_state()
+            self._run_seed = value
+        log.info("Seed прогона (run_seed) %s: %d.", source, value, extra=KEY_EVENT_EXTRA)
+
+    def _restore_prompts_from_release(self, uploader) -> None:
+        """Блок 2: при перезапуске под тем же final.srt промпты берутся из ФИНАЛ · ГЕНЕРАЦИЯ, а не генерируются заново.
+
+        Случай A: локального prompts.json нет, в релизе есть prompts.json -> скачать и проверить тем же load_state.
+        Случай B: локальный файл есть, но без run_seed, а в релизе есть run_seed -> скопировать только run_seed.
+        Иначе ничего не делается. Путь не удаляет и не перезаписывает локальный prompts.json при отмене или ошибке.
+        Вызывается до publisher.start: служебный файл уходит в релиз уже восстановленным.
+        """
+        if not self._run_seed_active():
+            return  # Блок 3: восстановление из релиза только для ниш с seed_mode: run
+        path = Path(self.prompts_path)
+        if not path.exists():
+            self._restore_prompts_file(uploader, path)
+        else:
+            self._restore_run_seed(uploader, path)
+
+    def _restore_prompts_file(self, uploader, path: Path) -> None:
+        """Случай A: скачивание во временный каталог, проверка через go.load_state, затем атомарная запись."""
+        tmpdir = tempfile.mkdtemp(prefix="prompts-restore-")
+        try:
+            tmp = os.path.join(tmpdir, PROMPTS_FILENAME)
+            if not uploader.download_service_file(PROMPTS_FILENAME, tmp) or not os.path.isfile(tmp):
+                return
+            # поле profile читаем до load_state: он перезаписывает его текущим профилем
+            raw = _read_json_dict(tmp)
+            # проверка та же, что у load_state: повреждённый JSON или чужой srt_hash -> GeminiInputError, без записи
+            state = go.load_state(tmp, self.segments, self.profile)
+            if raw is not None and self._profile_differs(raw):
+                log.warning("Промпты в релизе %s созданы для другого профиля: файл не используется, "
+                            "промпты генерируются заново.", PROMPTS_FILENAME, extra=KEY_EVENT_EXTRA)
+                return
+            try:
+                go.atomic_write_json(path, state)
+            except OSError as exc:
+                log.warning("Не удалось записать восстановленный %s: %s: %s.", path.name, type(exc).__name__, exc)
+                return
+            log.info("Промпты восстановлены из релиза %s: повторная генерация не нужна.", uploader.final_tag)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _restore_run_seed(self, uploader, path: Path) -> None:
+        """Случай B: в локальном файле нет run_seed, в релизе есть — копируется только это поле."""
+        try:
+            local = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log.warning("Файл %s не читается: run_seed из релиза не восстановлен.", path.name)
+            return
+        if not isinstance(local, dict) or "run_seed" in local or local.get("srt_hash") != uploader.full_hash:
+            return
+        tmpdir = tempfile.mkdtemp(prefix="prompts-seed-")
+        try:
+            tmp = os.path.join(tmpdir, PROMPTS_FILENAME)
+            if not uploader.download_service_file(PROMPTS_FILENAME, tmp):
+                return
+            try:
+                remote = json.loads(Path(tmp).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                log.warning("Копия %s в релизе не читается: run_seed не восстановлен.", PROMPTS_FILENAME)
+                return
+            if not isinstance(remote, dict) or "run_seed" not in remote or remote.get("srt_hash") != uploader.full_hash:
+                return
+            if self._profile_differs(remote):
+                log.warning("Копия %s в релизе создана для другого профиля: run_seed не восстановлен.",
+                            PROMPTS_FILENAME, extra=KEY_EVENT_EXTRA)
+                return
+            # в локальный файл добавляется только run_seed; содержимое промптов не меняется
+            local["run_seed"] = remote["run_seed"]
+            try:
+                go.atomic_write_json(path, local)
+            except OSError as exc:
+                log.warning("Не удалось записать run_seed в %s: %s: %s.", path.name, type(exc).__name__, exc)
+                return
+            log.info("Из релиза %s восстановлен run_seed; локальные промпты не изменены.", uploader.final_tag)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _apply_run_split(self, needed: list) -> None:
         """Исправления P1, P2: распределение видео и фото строится только по нужным клипам запуска.
@@ -1592,13 +1829,16 @@ class Orchestrator:
             f"- потрачено, USD: {summary.spent_usd:.4f}",
             f"- код завершения (до загрузки отчёта): {summary.exit_code}",
         ]
+        run_seed = getattr(self, "_run_seed", None)
+        if run_seed is not None:  # Блок 3: seed прогона попадает в отчёт только для ниш с seed_mode: run
+            lines.append(f"- run_seed прогона: {run_seed}")
         if not summary.cleanup_ok:
             lines.append("- ВНИМАНИЕ: уничтожение карт не подтверждено, проверьте Vast.ai")
         return "\n".join(lines) + "\n"
 
     def _finish(self, summary: RunSummary) -> None:
         """F1 (3)-(4) и E2: отчёт, архив логов и служебные файлы; итоговая строка последней."""
-        self._log_budget()
+        self._log_budget()  # A2: к этому моменту фоновая выгрузка уже дозалита (см. _work)
         pub = self._publisher
         if pub is not None and self._tmp:
             report_path = os.path.join(self._tmp, REPORT_FILENAME)
@@ -1882,22 +2122,49 @@ class Orchestrator:
             log.warning("Без готового промпта осталось клипов: %d.", len(needed) - len(ready))
         return ready
 
+    def _lock_state(self) -> threading.RLock:
+        """Блокировка общего состояния. Создаётся лениво: объекты без __init__ (тесты) тоже получают её."""
+        lock = self.__dict__.get("_state_lock")
+        if lock is None:
+            lock = threading.RLock()
+            self._state_lock = lock
+        return lock
+
+    def _upload_q(self) -> "queue.Queue":
+        """Очередь фоновой выгрузки; создаётся лениво по тем же причинам, что и блокировка."""
+        q = self.__dict__.get("_upload_queue")
+        if q is None:
+            q = queue.Queue()
+            self._upload_queue = q
+        return q
+
     def _save_state(self) -> None:
-        try:
-            go.atomic_write_json(self.prompts_path, self._state)
-        except OSError as exc:
-            log.warning("Не удалось сохранить файл промптов %s: %s: %s.",
-                        self.prompts_path, type(exc).__name__, exc)
+        with self._lock_state():
+            try:
+                go.atomic_write_json(self.prompts_path, self._state)
+            except OSError as exc:
+                log.warning("Не удалось сохранить файл промптов %s: %s: %s.",
+                            self.prompts_path, type(exc).__name__, exc)
 
     def _mark(self, num: int, status: str) -> None:
-        entry = self._prompts.get(str(num))
-        if isinstance(entry, dict):
-            entry["render_status"] = status
-            self._save_state()
+        with self._lock_state():
+            entry = self._prompts.get(str(num))
+            if isinstance(entry, dict):
+                entry["render_status"] = status
+                self._save_state()
 
     # --- основной цикл -------------------------------------------------------
+    def _render_inflight(self) -> int:
+        # незавершённые клипы на картах, включая задачи в буфере (не только выполняющиеся); без выгрузки
+        return sum(len(s.tasks) for s in list(self._slots.values()))
+
+    def _pending_uploads_count(self) -> int:
+        with self._lock_state():
+            return getattr(self, "_pending_uploads", 0)
+
     def _inflight(self) -> int:
-        return sum(1 for s in self._slots.values() if s.task is not None)
+        # A2: клипы, скачанные с карты и ждущие GitHub Release, тоже незавершённая работа: цикл не выходит раньше
+        return self._render_inflight() + self._pending_uploads_count()
 
     @property
     def _queue(self) -> deque:
@@ -1952,15 +2219,34 @@ class Orchestrator:
             return "video"  # исправление P2: обе очереди пусты и фото в распределении нет: карта берёт видео, не фото
         return "photo" if len(self._photo_queue) >= len(self._video_queue) else "video"
 
+    def _stack_of(self, num: int) -> tuple:
+        """Ключ стека клипа: отсортированный кортеж refs из prompts.json; () без поля или при некорректном поле."""
+        refs = _entry_refs(self._prompts.get(str(num)))
+        return tuple(sorted(refs)) if _valid_refs(refs) else ()
+
+    def _refs_enabled_for_role(self, role: str) -> bool:
+        """Профиль роли карты принимает референсы (refs_enabled в profile.yaml, без имён ниш)."""
+        return profile_refs_enabled(self._profile_for_role(role))
+
     def _work(self, ready: list) -> None:
+        # A2: фоновый поток выгрузки живёт на время цикла; при любом выходе дозаливаются все скачанные клипы
+        self._start_upload_thread()
+        try:
+            self._work_loop(ready)
+        finally:
+            self._stop_upload_thread()
+
+    def _work_loop(self, ready: list) -> None:
         # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
         self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
-        self._video_queue = deque(n for n in ready if n not in self._photo_nums)
-        self._photo_queue = deque(n for n in ready if n in self._photo_nums)
+        # задачи одного стека (refs из prompts.json) идут подряд; номера клипов не меняются
+        self._video_queue = deque(group_by_stack([n for n in ready if n not in self._photo_nums], self._stack_of))
+        self._photo_queue = deque(group_by_stack([n for n in ready if n in self._photo_nums], self._stack_of))
         # превью идут в самый конец очереди фото, после всех обычных фото; видеоочередь не меняется
         self._photo_queue.extend(self._preview_order)
         drain_since: Optional[float] = None
         while True:
+            self._tick_429 = set()  # новый обход: карты с 429 на прошлом обходе снова доступны
             if self._stop.is_set():
                 # сигнал остановки: новых поисков и аренд нет, дозаливки нет; карты уничтожает _cleanup
                 # по метке запуска (как kill-cards) и закрывает их записи бюджета
@@ -1989,6 +2275,8 @@ class Orchestrator:
                 self._step_slot(slot, now, stopping)
             # нехватка видеопамяти на этом обходе: аренды и новые клипы в этом же обходе не нужны
             stopping = stopping or self._oom_stopped
+            # уровни 2..MAX буфера: после того как каждая готовая карта получила первую задачу
+            self._dispatch_levels(now, stopping)
             self._pull_due_logs(now)
             self._pull_silent_vast_logs(now)
             self._heartbeat(now)
@@ -2009,14 +2297,44 @@ class Orchestrator:
                 if self._budget_blocked and not self._slots:
                     log.error("Бюджет не позволяет арендовать карту, активных карт нет: завершаем.")
                     break
-            self._sleep(self.poll_interval)
+            self._sleep(self._loop_sleep())
+
+    def _loop_sleep(self) -> float:
+        """Пауза обхода: task_poll, пока у готовой карты есть задачи; иначе poll_interval (Vast, аренда, heartbeat)."""
+        task_poll = getattr(self, "_task_poll", self.poll_interval)
+        if any(s.tasks for s in self._slots.values() if s.state == "ready"):
+            return min(self.poll_interval, task_poll)
+        return self.poll_interval
+
+    def _dispatch_levels(self, now: float, stopping: bool) -> None:
+        """Уровни буфера 2..MAX по всем готовым картам: сначала каждая карта получает k-ю задачу, потом (k+1)-ю.
+
+        Уровень 1 (первая задача пустой карты) выполняет _step_slot. Карта с 429 на этом обходе пропускается.
+        """
+        if stopping:
+            return
+        blocked = getattr(self, "_tick_429", set())
+        depth_max = getattr(self, "max_card_queue_depth", MAX_CARD_QUEUE_DEPTH)
+        for depth in range(2, depth_max + 1):
+            if not self._video_queue and not self._photo_queue:
+                return
+            for slot in list(self._slots.values()):
+                if self._slots.get(slot.index) is not slot or slot.state != "ready":
+                    continue
+                if slot.index in blocked or len(slot.tasks) != depth - 1:
+                    continue
+                if not self._queue_for_role(slot.role):
+                    continue
+                self._dispatch(slot, now)
 
     # --- аренда --------------------------------------------------------------
     def _desired(self, now: float) -> int:
-        remaining = len(self._video_queue) + len(self._photo_queue) + self._inflight()
+        remaining = len(self._video_queue) + len(self._photo_queue) + self._render_inflight()
         if remaining <= 0:
             return 0
-        avg = sum(self._durations) / len(self._durations) if self._durations else self.render_estimate
+        with self._lock_state():
+            durs = list(self._durations)
+        avg = sum(durs) / len(durs) if durs else self.render_estimate
         time_left = max(1.0, self._deadline_sec - (now - self._t0))
         need = math.ceil(remaining * avg / (time_left * 0.8))
         return max(1, min(self.max_cards, need, remaining))
@@ -2099,6 +2417,9 @@ class Orchestrator:
                 return
             offers = self._scan_close(now)
         while len(self._slots) < self._desired(now):
+            # очередей клипов нет: карта не арендуется (буферные клипы уже у карт); окно цен выше не меняется
+            if len(self._video_queue) + len(self._photo_queue) == 0:
+                break
             role = self._next_role(now)
             vq_len, pq_len = len(self._video_queue), len(self._photo_queue)  # очереди на момент выбора роли
             res = self._rent_one(now, offers, role=role)
@@ -2252,7 +2573,7 @@ class Orchestrator:
             self._artifact.card_meta(slot, {
                 "slot": slot.index, "generation": slot.generation, "instance_id": inst_id,
                 "machine_id": offer.machine_id, "offer_id": offer.offer_id,
-                "price_per_hr": price, "mode": mode, "created_utc": _utc_now()})
+                "price_per_hr": price, "mode": mode, "created_utc": _utc_now(), **self._run_seed_meta()})
         return "ok"
 
     def _rental_price(self, offer) -> float:
@@ -2269,15 +2590,16 @@ class Orchestrator:
         log.warning("%s снимается: %s.", _card_name(slot, cap=True), reason)
         self._card_status(slot, f"снята: {reason}")
         self._budget_blocked = False
-        task = slot.task
-        slot.task = None  # клип больше не назначен этой карте до возврата в очередь (SPEC 8.2)
-        if task is not None:
-            if bad:
-                # аварийно завершившаяся карта засчитывается как попытка (MAX_ATTEMPTS),
-                # иначе «отравленный» клип может зацикливать аренду карт
-                self._fail_clip(task.num, f"карта аварийно завершилась: {reason}")
-            else:
-                self._requeue_free(task.num)
+        tasks = list(slot.tasks)
+        # все задачи буфера больше не назначены карте до возврата в очередь (SPEC 8.2): буфер очищается до возврата
+        slot.tasks.clear()
+        # откат всего буфера без попытки (MAX_ATTEMPTS), и при аварии, и при обычном снятии: вина не в клипе.
+        # Обратный порядок сохраняет очерёдность клипов: самый ранний оказывается впереди очереди
+        for t in reversed(tasks):
+            self._requeue_free(t.num)
+        if tasks:
+            log.info("Задачи карты возвращены в очередь без попытки: клипы %s.",
+                     ", ".join(str(t.num) for t in tasks))
         if bad and slot.machine_id:
             self._bad_machines.add(slot.machine_id)
         try:
@@ -2555,8 +2877,13 @@ class Orchestrator:
     def _step_slot(self, slot: _CardSlot, now: float, stopping: bool) -> None:
         age = now - slot.created
         # статус у Vast запрашивается один раз на опрос в любом состоянии карты (9е-3). Перебитие ставки
-        # проверяется раньше любой логики состояний: перебитая карта не принимается за плохой хост
-        info, lookup_exc = self._lookup_status(slot)
+        # проверяется раньше любой логики состояний: перебитая карта не принимается за плохой хост.
+        # Запрос Vast идёт не чаще _vast_poll (10 с в проде), хотя обход задач может быть 1 с
+        if now - slot.last_vast_poll >= getattr(self, "_vast_poll", 0.0):
+            slot.last_vast_poll = now
+            info, lookup_exc = self._lookup_status(slot)
+        else:
+            info, lookup_exc = None, None
         if info is not None and self._is_outbid(info):
             self._retire_outbid(slot)
             return
@@ -2641,23 +2968,25 @@ class Orchestrator:
             return
         if slot.state != "ready":
             return
-        if slot.task is not None:
-            self._poll_task(slot, now)
-        if self._slots.get(slot.index) is not slot or slot.task is not None:
+        if slot.tasks:
+            self._poll_task(slot, now)  # опрос каждой задачи буфера
+        # карта с задачами в буфере не принимает первую задачу здесь и не переключается, не снимается
+        if self._slots.get(slot.index) is not slot or slot.tasks:
             return
         stopping = stopping or self._oom_stopped  # нехватка видеопамяти уже на этом шаге: новые клипы не берутся
         if not stopping and self._queue_for_role(slot.role):
             if not slot.accepted and self._accept_timed_out(slot, now):
                 return
-            self._dispatch(slot, now)
+            self._dispatch(slot, now)  # уровень 1 буфера; уровни 2..MAX — в _dispatch_levels
             return
-        # очередь своей роли пуста: карта простаивает и переключается на работу другой роли (если есть)
-        target = None if stopping else _switch_target(
-            slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
-        if target is not None:
-            self._start_switch(slot, target, now)
-            return
-        self._retire(slot, "работы для карты больше нет")
+        # очередь своей роли пуста и задач у карты нет: карта простаивает и переключается на работу другой роли
+        if len(slot.tasks) == 0:
+            target = None if stopping else _switch_target(
+                slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
+            if target is not None:
+                self._start_switch(slot, target, now)
+                return
+            self._retire(slot, "работы для карты больше нет")
 
     # --- воркер ----------------------------------------------------------------
     def _call(self, slot: _CardSlot, method: str, path: str, payload: Optional[dict] = None):
@@ -2963,8 +3292,8 @@ class Orchestrator:
 
     def _assigned_slot(self, num: int) -> Optional[_CardSlot]:
         """Слот, на котором сейчас назначен клип (состояние assigned, SPEC 8.2); None, если клип free."""
-        for slot in self._slots.values():
-            if slot.task is not None and slot.task.num == num:
+        for slot in list(self._slots.values()):
+            if any(t.num == num for t in slot.tasks):
                 return slot
         return None
 
@@ -3023,11 +3352,17 @@ class Orchestrator:
         """Клип возвращается в состояние free: в очередь, если он не done, не назначен и уже не в очереди."""
         if num in self._done or num in self._failed or num in self._queue_of(num) or self._assigned_slot(num):
             return
-        if self._attempts.get(num, 0) > 0:
-            self._attempts[num] -= 1
-        self._queue_of(num).appendleft(num)
+        with self._lock_state():
+            if self._attempts.get(num, 0) > 0:
+                self._attempts[num] -= 1
+            self._queue_of(num).appendleft(num)
 
     def _fail_clip(self, num: int, reason: str) -> None:
+        # A2: состояние общее с фоновой выгрузкой: вся запись под блокировкой (RLock допускает вложенный вызов)
+        with self._lock_state():
+            self._fail_clip_body(num, reason)
+
+    def _fail_clip_body(self, num: int, reason: str) -> None:
         preview = self._previews.get(num)
         if preview is not None:
             self._fail_preview(preview, reason)
@@ -3068,13 +3403,17 @@ class Orchestrator:
             raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
         if not self.prompts_file:
             raise previews.PreviewInputError("Превью запрошены, но файл промптов не задан (prompts_path пуст).")
-        prompts = previews.load_prompts(self.prompts_file)
-        items = previews.build_previews(prompts, count)
+        specs = previews.load_prompt_specs(self.prompts_file)
+        items = previews.build_previews(specs, count)
         self._previews = {item.num: item for item in items}
         self._preview_order = [item.num for item in items]
         log.info("Превью: промптов %d, вариантов на промпт %d, всего генераций %d (фото-модель, "
                  "в конце очереди фото, не входят в покрытие SRT).",
-                 len(prompts), count, len(items), extra=KEY_EVENT_EXTRA)
+                 len(specs), count, len(items), extra=KEY_EVENT_EXTRA)
+        with_refs = [x for x, (_text, refs) in enumerate(specs, 1) if refs is not None]
+        if with_refs:
+            log.info("Превью с референсами: промпты %s (refs передаются на воркер).",
+                     ", ".join(str(x) for x in with_refs), extra=KEY_EVENT_EXTRA)
 
     def _publish_previews_index(self) -> None:
         """previews_index.txt: в служебный релиз и в артефакт; со всеми деталями по каждому превью."""
@@ -3120,7 +3459,8 @@ class Orchestrator:
                  extra=CONSOLE_SKIP_EXTRA)
 
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
-        num = self._queue_for_role(slot.role).popleft()
+        with self._lock_state():
+            num = self._queue_for_role(slot.role).popleft()
         owner = self._assigned_slot(num)
         if owner is not None or num in self._done:
             # повторный POST /task для назначенного клипа создал бы дубль на воркере (SPEC 8.2, 13.1 п. 3)
@@ -3134,6 +3474,12 @@ class Orchestrator:
             preview.status = previews.STATUS_RUNNING
             payload = {"num": num, "prompt": preview.prompt,
                        "num_frames": PHOTO_NUM_FRAMES, "seed": preview.seed}
+            if preview.refs is not None:
+                # референсы блока: поле уходит только когда оно есть в файле промптов (старые блоки без изменений)
+                payload["refs"] = list(preview.refs)
+            elif self._refs_enabled_for_role(slot.role):
+                # превью без референсов в профиле с refs: явный пустой список (иначе воркер падает на ref_7..10)
+                payload["refs"] = []
             log.info("генерация превью: промпт %d, сид %d", preview.x, preview.y, extra=KEY_EVENT_EXTRA)
         else:
             entry = self._prompts.get(str(num))
@@ -3144,27 +3490,57 @@ class Orchestrator:
                 self._attempts[num] = MAX_ATTEMPTS
                 self._fail_clip(num, "в prompts.json нет корректного num_frames")
                 return
+            seed = self.seed_base + num
+            if self._seed_mode_run_for_role(slot.role):  # Блок 3: профиль роли с seed_mode: run
+                run_seed = getattr(self, "_run_seed", None)
+                if run_seed is None:
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "не задан run_seed для профиля с seed_mode: run")
+                    return
+                seed = run_seed
             payload = {"num": num, "prompt": entry["prompt"],
-                       "num_frames": num_frames, "seed": self.seed_base + num}
+                       "num_frames": num_frames, "seed": seed}
+            entry_refs = _entry_refs(entry)
+            if entry_refs is not None:
+                # референсы задачи: поле уходит на воркер только когда оно есть в prompts.json (старые задачи без изменений)
+                if not _valid_refs(entry_refs):
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json некорректное поле refs")
+                    return
+                payload["refs"] = sorted(entry_refs)
+            elif self._refs_enabled_for_role(slot.role):
+                # профиль с референсами, а у клипа их нет: явный пустой список, воркер уберёт все LoadImage (SPEC 8.1)
+                payload["refs"] = []
         try:
             resp = self._call(slot, "POST", "/task", payload)
         except _WorkerNetError as exc:
             slot.net_fail += 1
-            self._queue_for_role(slot.role).appendleft(num)
+            with self._lock_state():
+                self._queue_for_role(slot.role).appendleft(num)
             self._warn_card(slot, f"post_task:{num}:{exc}", "Воркер %s не принял клип %d (сбой связи: %s).",
                             _card_name(slot), num, exc)
             return
         except _WorkerHttpError as exc:
+            if exc.status == 429:
+                # воркер занят (backpressure): клип возвращается в начало очереди без попытки и без сбоя карты
+                with self._lock_state():
+                    self._queue_for_role(slot.role).appendleft(num)
+                blocked = getattr(self, "_tick_429", None)
+                if blocked is not None:
+                    blocked.add(slot.index)  # до следующего обхода этой карте задачи не назначаем
+                log.debug("%s: воркер занят (429), клип %d возвращён в очередь без попытки.",
+                          _card_name(slot, cap=True), num)
+                return
             slot.net_fail += 1
-            self._attempts[num] = self._attempts.get(num, 0) + 1
+            self._bump_attempts(num)
             self._fail_clip(num, f"воркер ответил {exc}")
             return
         slot.contacted = True
         slot.net_fail = 0
-        self._attempts[num] = self._attempts.get(num, 0) + 1
+        self._bump_attempts(num)
         data = self._json(resp)
         tid = str(data.get("id") or data.get("task_id") or num)
-        slot.task = _Task(num, tid, now)
+        slot.tasks.append(_Task(num, tid, now))  # задача встаёт в буфер карты; состояние queued до статуса running
         slot.accepted = True
         # текст промпта не логируем: только длина и короткий SHA-256 (SPEC 0.1)
         prompt = str(payload["prompt"])
@@ -3173,35 +3549,64 @@ class Orchestrator:
                  num, _card_name(slot), self._attempts[num], len(prompt), digest)
         log.info("%s: начало", self._clip_label(num), extra=KEY_EVENT_EXTRA)
 
+    @staticmethod
+    def _drop_task(slot: _CardSlot, task: _Task) -> None:
+        """Снимает с карты одну задачу (по ссылке), остальные задачи буфера не трогает."""
+        slot.tasks[:] = [x for x in slot.tasks if x is not task]
+
+    def _task_timed_out(self, slot: _CardSlot, now: float) -> bool:
+        """Таймаут рендера (task_timeout_sec). Выполняющаяся задача — от её старта на карте (running_since).
+
+        Если выполняющихся задач нет, а самая давняя задача ждёт в очереди воркера дольше таймаута,
+        воркер считается зависшим; клип при этом не виноват и попытки не теряет. True — карта снята.
+        """
+        for t in list(slot.tasks):
+            if t.running_since is not None and now - t.running_since >= self.task_timeout:
+                self._drop_task(slot, t)
+                self._fail_clip(t.num, "таймаут рендера")
+                self._retire(slot, "воркер завис", bad=True)
+                return True
+        if slot.tasks and not any(t.running_since is not None for t in slot.tasks):
+            oldest = min(slot.tasks, key=lambda t: t.started)
+            if now - oldest.started >= self.task_timeout:
+                self._retire(slot, "воркер завис", bad=True)
+                return True
+        return False
+
     def _poll_task(self, slot: _CardSlot, now: float) -> None:
-        task = slot.task
-        if now - task.started >= self.task_timeout:
-            slot.task = None
-            self._fail_clip(task.num, "таймаут рендера")
-            self._retire(slot, "воркер завис", bad=True)
+        """Опрос задач буфера карты (каждый обход, task_poll). Ошибка одной задачи не трогает остальные."""
+        if self._task_timed_out(slot, now):
             return
-        try:
-            resp = self._call(slot, "GET", f"/task/{task.id}")
-        except _WorkerNetError:
-            slot.net_fail += 1
-            return
-        except _WorkerHttpError as exc:
-            slot.task = None
-            self._fail_clip(task.num, f"статус задачи: {exc}")
-            return
-        slot.net_fail = 0
-        slot.contacted = True
-        data = self._json(resp)
-        status = str(data.get("status") or data.get("state") or "").lower()
-        if status in _DONE_STATUSES:
-            self._finish_clip(slot, now)
-        elif status in _FAILED_STATUSES:
-            slot.task = None
-            err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
-            if _is_out_of_memory(err):
-                self._stop_on_out_of_memory(slot, task.num, err)
-                return
-            self._fail_clip(task.num, f"воркер сообщил об ошибке: {err}")
+        for t in list(slot.tasks):
+            if not any(x is t for x in slot.tasks):
+                continue  # задача уже снята в этом обходе
+            try:
+                resp = self._call(slot, "GET", f"/task/{t.id}")
+            except _WorkerNetError:
+                slot.net_fail += 1
+                return  # связь с картой пропала: остальные задачи — на следующем обходе
+            except _WorkerHttpError as exc:
+                self._drop_task(slot, t)
+                self._fail_clip(t.num, f"статус задачи: {exc}")
+                continue
+            slot.net_fail = 0
+            slot.contacted = True
+            data = self._json(resp)
+            status = str(data.get("status") or data.get("state") or "").lower()
+            if status == "running" or status in _DONE_STATUSES:
+                t.state = "running"
+                if t.running_since is None:
+                    t.running_since = now  # старт на карте: отсюда таймаут рендера
+            if status in _DONE_STATUSES:
+                self._drop_task(slot, t)
+                self._finish_clip(slot, now, task=t)
+            elif status in _FAILED_STATUSES:
+                self._drop_task(slot, t)
+                err = self._mask_remote(str(data.get("error", "")))  # ошибка воркера целиком, полная маска с карты
+                if _is_out_of_memory(err):
+                    self._stop_on_out_of_memory(slot, t.num, err)
+                else:
+                    self._fail_clip(t.num, f"воркер сообщил об ошибке: {err}")
 
     def _download(self, slot: _CardSlot, tid: str, path: str) -> None:
         try:
@@ -3215,59 +3620,170 @@ class Orchestrator:
         except httpx.HTTPError as exc:
             raise _WorkerNetError(type(exc).__name__) from None
 
-    def _finish_clip(self, slot: _CardSlot, now: float) -> None:
-        task = slot.task
+    # --- A2: скачивание, ack и фоновая выгрузка в Release -------------------------
+    def _bump_attempts(self, num: int) -> None:
+        """Счётчик попыток клипа: запись под блокировкой состояния (фоновый поток читает его при отказе)."""
+        with self._lock_state():
+            self._attempts[num] = self._attempts.get(num, 0) + 1
+
+    def _start_upload_thread(self) -> None:
+        """Один фоновый поток выгрузки на запуск: все вызовы ReleaseUploader и gh идут только из него."""
+        self._upload_thread = threading.Thread(target=self._upload_worker, name="release-uploader", daemon=True)
+        self._upload_thread.start()
+
+    def _upload_worker(self) -> None:
+        q = self._upload_q()
+        while True:
+            item = q.get()
+            try:
+                if item is None:
+                    return
+                self._process_upload(item)
+            finally:
+                q.task_done()
+
+    def _stop_upload_thread(self) -> None:
+        """Дозаливка перед выходом из _work: None ставится в конец очереди, поэтому все скачанные клипы уходят в Release раньше.
+
+        Ожидание без таймаута: иначе _tmp удалился бы, пока файлы ещё нужны загрузчику. Раз в минуту пишется строка о ходе.
+        """
+        thread = self._upload_thread
+        if thread is None:
+            return
+        q = self._upload_q()
+        q.put(None)
+        while thread.is_alive():
+            thread.join(timeout=UPLOAD_JOIN_LOG_SEC)
+            if thread.is_alive():
+                log.info("Дозаливка в Release продолжается: клипов в очереди %d.", self._pending_uploads_count())
+        self._upload_thread = None
+        # поток завершился аварийно: остаток очереди разбирает главный поток, чтобы ничего не потерять
+        while True:
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if item is not None:
+                    self._process_upload(item)
+            finally:
+                q.task_done()
+
+    def _enqueue_upload(self, num: int, path: str, duration: float, is_preview: bool, card: str) -> None:
+        item = (num, path, duration, is_preview, card)
+        with self._lock_state():
+            self._pending_uploads += 1  # счётчик растёт ДО постановки: _inflight не отпустит цикл раньше времени
+        if getattr(self, "_upload_thread", None) is None:
+            # вне _work (прямой вызов, тесты): выгрузка в этом же потоке, как раньше
+            self._process_upload(item)
+            return
+        self._upload_q().put(item)
+
+    @staticmethod
+    def _accepts_refresh(uploader) -> bool:
+        """Есть ли у upload_clip параметр refresh_links (заглушки в тестах принимают только путь)."""
+        try:
+            return "refresh_links" in inspect.signature(uploader.upload_clip).parameters
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _release_download(path: str) -> None:
+        """Удаляет скачанный файл и его каталог задачи, если тот уже пуст."""
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        try:
+            os.rmdir(os.path.dirname(path))
+        except OSError:
+            pass
+
+    def _process_upload(self, item: tuple) -> None:
+        """Выгрузка одного скачанного клипа. Файл удаляется всегда, счётчик ожидающих уменьшается всегда."""
+        num, path, duration, is_preview, card = item
+        try:
+            self._upload_one(num, path, duration, is_preview, card)
+        finally:
+            self._release_download(path)
+            with self._lock_state():
+                self._pending_uploads -= 1
+
+    def _upload_one(self, num: int, path: str, duration: float, is_preview: bool, card: str) -> None:
+        uploader = self._uploader
+        try:
+            if uploader is None:
+                raise gp.GeminiRuntimeError("загрузчик Release не открыт")
+            if is_preview:
+                uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
+            elif self._accepts_refresh(uploader):
+                uploader.upload_clip(path, refresh_links=False)  # файл ссылок обновляется пакетом ниже
+            else:
+                uploader.upload_clip(path)
+        except Exception as exc:
+            with self._lock_state():
+                self._fail_clip(num, f"не удалось загрузить в Release: {exc}")
+            return
+        if is_preview:
+            with self._lock_state():
+                preview = self._previews.get(num)
+                if preview is not None:
+                    # превью не входит в счётчики клипов (готово/из скольких, ср. время клипа, покрытие SRT)
+                    preview.status = previews.STATUS_DONE
+                    log.info("генерация превью: промпт %d, сид %d: готово, в итоговом релизе", preview.x, preview.y,
+                             extra=KEY_EVENT_EXTRA)
+            return
+        # пакетное обновление generated_links.txt: после LINKS_REFRESH_EVERY выгруженных клипов
+        with self._lock_state():
+            self._uploaded_since_links += 1
+            refresh_now = self._uploaded_since_links >= LINKS_REFRESH_EVERY
+            if refresh_now:
+                self._uploaded_since_links = 0
+        if refresh_now and hasattr(uploader, "refresh_links"):
+            try:
+                uploader.refresh_links()
+            except Exception as exc:  # сбой ссылок не отменяет уже выгруженный клип
+                log.warning("Не удалось обновить generated_links.txt: %s", exc)
+        with self._lock_state():
+            self._done.add(num)
+            self._durations.append(duration)
+            self._mark(num, "done")
+            log.info("Клип %d выдан в Release (рендер: %s, %.1f с).", num, card, duration)
+            total = self._total_needed
+            done = len(self._done)
+            log.info("%s: готов", self._clip_label(num), extra=KEY_EVENT_EXTRA)
+            log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
+                     extra=KEY_EVENT_EXTRA)
+
+    def _finish_clip(self, slot: _CardSlot, now: float, task: Optional[_Task] = None) -> None:
+        # без аргумента task берётся текущая задача карты (прежний вызов); с task — конкретная задача буфера
+        task = task if task is not None else slot.task
         preview = self._previews.get(task.num)
         if preview is not None:
             name = preview.filename
         else:
             name = f"{task.num}.png" if slot.role == "photo" else clip_filename(task.num, self.width, self.template)
-        path = os.path.join(self._tmp, name)
-        reason = ""
+        # имя файла сохраняется (uploader разбирает номер по basename); уникальность даёт каталог задачи
+        path = os.path.join(self._tmp, "pending", task.id, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # задача снимается с карты сразу: буфер не ждёт GitHub, её файл учитывается в _pending_uploads
+        self._drop_task(slot, task)
+        # время рендера от старта на карте (running_since), а не от постановки в буфер
+        started_at = task.running_since if task.running_since is not None else task.started
+        duration = max(0.0, now - started_at)
         try:
             self._download(slot, task.id, path)
-            if preview is not None:
-                self._uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
-            else:
-                self._uploader.upload_clip(path)
         except (_WorkerNetError, _WorkerHttpError) as exc:
-            reason = f"не удалось скачать клип с воркера ({exc})"
-        except gp.GeminiRuntimeError as exc:
-            reason = f"не удалось загрузить клип в Release: {exc}"
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-        slot.task = None
-        if reason:
-            self._fail_clip(task.num, reason)
+            self._release_download(path)  # частично скачанный файл не нужен
+            with self._lock_state():
+                self._fail_clip(task.num, f"не удалось скачать клип с воркера ({exc})")
             return
-        if preview is not None:
-            # превью не входит в счётчики клипов (готово/из скольких, ср. время клипа, покрытие SRT)
-            preview.status = previews.STATUS_DONE
-            log.info("генерация превью: промпт %d, сид %d: готово, в итоговом релизе", preview.x, preview.y,
-                     extra=KEY_EVENT_EXTRA)
-            try:
-                self._call(slot, "POST", f"/ack/{task.id}")
-            except (_WorkerNetError, _WorkerHttpError):
-                log.warning("Воркер не подтвердил удаление превью %s.", preview.filename)
-            return
-        self._done.add(task.num)
-        duration = max(0.0, now - task.started)
-        self._durations.append(duration)
-        self._mark(task.num, "done")
-        log.info("Клип %d выдан в Release (рендер: %s, %.1f с).",
-                 task.num, _card_name(slot), duration)
-        total = self._total_needed
-        done = len(self._done)
-        log.info("%s: готов", self._clip_label(task.num), extra=KEY_EVENT_EXTRA)
-        log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
-                 extra=KEY_EVENT_EXTRA)
+        # файл уже у оркестратора: воркер освобождает диск сразу; сбой ack сам файл не отменяет
         try:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):
-            log.warning("Воркер не подтвердил удаление клипа %d с диска карты.", task.num)
+            log.warning("Воркер не подтвердил удаление файла %s с диска карты.", name)
+        self._enqueue_upload(task.num, path, duration, preview is not None, _card_name(slot))
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:
@@ -3334,6 +3850,19 @@ class Orchestrator:
             self._artifact.card_instance(slot, dict(getattr(info, "raw", None) or {}))
         except Exception as exc:
             log.warning("Не удалось сохранить JSON карты %d: %s.", slot.instance_id, type(exc).__name__)
+
+
+def wanted_segment_numbers(segments: list, missing_path, segments_all: bool) -> list:
+    """Номера клипов для запуска и проверки.
+
+    segments_all (segments: all в profile.yaml ниши): все номера SRT по возрастанию, missing.txt не читается.
+    Иначе — parse_missing, как раньше.
+    """
+    if segments_all:
+        numbers = sorted({s.num for s in segments})
+        log.info("Сегменты для ниши: все из SRT (missing.txt не используется), сегментов %d.", len(numbers))
+        return numbers
+    return parse_missing(missing_path, segments)
 
 
 def run_generation(*args, **kwargs) -> RunSummary:

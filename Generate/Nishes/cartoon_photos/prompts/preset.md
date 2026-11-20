@@ -1,0 +1,1 @@
+Every shape has crisp closed black edges, flat matte fills and a single soft shadow strip along the underside, set on a flat single layer. Clean 2D hand-drawn educational comic art, smooth medium-fine dark ink linework, warm earthy pastel palette with subtle two-tone cel shading.

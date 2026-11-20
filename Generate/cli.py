@@ -51,8 +51,11 @@ try:  # пакетный и «плоский» импорт
     from Generate.core.bad_hosts import BadHostsError, load_bad_hosts
     from Generate.core.config_loader import (
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, load_profile_type, profile_dir, profile_exists)
-    from Generate.core.gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset
+        load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs, load_profile_batch_size)
+    from Generate.core.gemini_prompts import (
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
+        read_preset)
     from Generate.core.model_constants import PRESET_NONE
     from Generate.core import previews
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
@@ -68,8 +71,11 @@ except ImportError:  # pragma: no cover
     from bad_hosts import BadHostsError, load_bad_hosts  # type: ignore
     from config_loader import (  # type: ignore
         DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PROFILE, Config, load_config, load_profile_frame_rule,
-        load_profile_number, load_profile_type, profile_dir, profile_exists)
-    from gemini_prompts import GeminiInputError, GeminiRuntimeError, read_preset  # type: ignore
+        load_profile_number, load_profile_text_model, load_profile_type, profile_dir, profile_exists,
+        profile_refs_enabled, load_profile_rework_style_flag_without_refs, load_profile_batch_size)
+    from gemini_prompts import (  # type: ignore
+        GeminiInputError, GeminiRuntimeError, REF_MAX, count_ref_files, detect_srt_language, parse_allowed_refs, profile_relaxation, load_rules,
+        read_preset)
     from model_constants import PRESET_NONE  # type: ignore
     import previews  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
@@ -97,6 +103,8 @@ DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
 STYLE_DIR = "Generate/model_profiles/models"
+# папка режимов: style.md режима лежит здесь, если профиля нет в model_profiles/models
+NISHES_DIR = "Generate/Nishes"
 # файлы, без которых профиль модели не запускается (проверяются до аренды, см. _check_profile_and_preset)
 PROFILE_REQUIRED_FILES = ("workflow.json", "bindings.json", "profile.yaml", "prompts/style.md")
 # запасной профиль, если профиля или файла стиля для выбранного профиля нет (прежнее поведение)
@@ -119,7 +127,9 @@ WATCH_NORMAL_SILENCE_SEC = 300
 MAX_AGE_SEC = 6 * 3600
 GEN_LABEL_RE = re.compile(r"gen-([0-9]+)")
 PILOT_LABEL_RE = re.compile(r"pilot-(.+)")
-CARD_LABEL_PREFIXES = ("gen-", "pilot-")
+# метка testwf- (старый ручной тест воркфлоу, команда удалена): уборка узнаёт такие карты так же, как gen-/pilot-
+TESTWF_LABEL_RE = re.compile(r"testwf-([0-9]+)")
+CARD_LABEL_PREFIXES = ("gen-", "pilot-", "testwf-")
 # статусы запуска GitHub Actions, при которых запуск ещё идёт (SPEC 8.3 г)
 ACTIVE_RUN_STATUSES = ("in_progress", "queued", "waiting", "requested", "pending")
 GH_STATUS_TIMEOUT_SEC = 60
@@ -354,7 +364,42 @@ def _check_profile_and_preset(model_profile: str, preset: str) -> Optional[int]:
     return None
 
 
-def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE):
+def _style_dir(profile: str) -> str:
+    """Папка, где лежит профиль для style.md: сначала STYLE_DIR, затем NISHES_DIR (тот же порядок, что profile_dir)."""
+    if os.path.isdir(os.path.join(STYLE_DIR, profile)):
+        return STYLE_DIR
+    if os.path.isdir(os.path.join(NISHES_DIR, profile)):
+        return NISHES_DIR
+    return STYLE_DIR
+
+
+def _srt_kwargs(profile: str, srt_path: str) -> dict:
+    """srt_path для _build_prompt_config — только профилю с text_language: srt; остальным вызов прежний (без аргумента)."""
+    try:
+        lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except (OSError, GeminiInputError):
+        return {}
+    return {"srt_path": srt_path} if _profile_flag(lines, "text_language", profile, default="") == "srt" else {}
+
+
+def _niche_preset_file(profile: str, preset: str) -> Optional[str]:
+    """Файл prompts/preset.md папки ниши: только при пресете «none» и профиле из папки Nishes.
+    Именованный пресет (не none) не меняется; у других профилей файла нет — None."""
+    if preset != PRESET_NONE:
+        return None
+    try:
+        folder = profile_dir(profile)
+    except GeminiInputError:
+        return None
+    if folder.parent.name != "Nishes" or folder.name != profile:
+        return None
+    path = folder / "prompts" / "preset.md"
+    return str(path) if path.is_file() else None
+
+
+def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE,
+                         fail_fast: bool = False, raw_dir: Optional[str] = None,
+                         srt_path: Optional[str] = None):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
     try:
@@ -366,7 +411,7 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if media not in ("video", "image"):
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml не задан тип «type» (video или image).")
-    style_file = f"{STYLE_DIR}/{profile}/prompts/style.md"
+    style_file = f"{_style_dir(profile)}/{profile}/prompts/style.md"
     # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
     if load_profile_type(profile) == "image":
         if not os.path.isfile(style_file):
@@ -376,7 +421,144 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     elif not os.path.isfile(style_file):
         # профили video и без поля type: прежняя подмена на профиль по умолчанию
         style_file = f"{STYLE_DIR}/{FALLBACK_STYLE_PROFILE}/prompts/style.md"
-    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset)
+    # флаги ответа и исправлений из profile.yaml; без них поведение прежнее (refs выключены, on_unfixed: keep)
+    refs_enabled = _profile_flag(profile_lines, "refs_enabled", profile, default="false") == "true"
+    on_unfixed = _profile_flag(profile_lines, "on_unfixed", profile, default="keep")
+    if on_unfixed not in ("keep", "fail"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml on_unfixed должен быть «keep» или «fail».")
+    if _profile_flag(profile_lines, "refs_enabled", profile, default="false") not in ("true", "false"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml refs_enabled должен быть true или false.")
+    # relaxed_rules и text_language из profile.yaml: без ключей — пусто и None, как раньше
+    relaxed_rules, text_language = profile_relaxation(profile_lines, profile)
+    for rule in sorted(relaxed_rules):
+        # один раз на прогон и профиль; текст модели в лог не пишется
+        log.info("Правило «%s» отключено профилем %s (relaxed_rules): проверка этого правила пропускается.",
+                 rule, profile)
+    # язык текста в кадре: «srt» — определяется по SRT прогона (код); явное название из профиля — как задано
+    frame_language = None
+    if text_language == "srt":
+        frame_language = detect_srt_language(srt_path) if srt_path else None
+    elif text_language is not None:
+        frame_language = text_language
+    # референсы: число ref_N.png в refs профиля, не больше REF_MAX; без refs_enabled — REF_MAX, как раньше
+    ref_max = count_ref_files(profile_dir(profile) / "refs", profile) if refs_enabled else REF_MAX
+    # allowed_refs: разрешённые сочетания refs из profile.yaml; без поля — None, как раньше
+    allowed_refs = parse_allowed_refs(profile_lines, profile)
+    # пресет ниши: файл prompts/preset.md, если пресет не выбран («none»)
+    niche_preset_file = _niche_preset_file(profile, preset)
+    # правила содержания из prompts/rules.yaml папки профиля; без файла — значения по умолчанию (прежнее поведение)
+    rules = load_rules(profile_dir(profile) / "prompts" / "rules.yaml")
+    # max_characters в profile.yaml — устаревший ключ: действует, пока значение не перенесено в rules.yaml
+    legacy_max = _profile_int(profile_lines, "max_characters", profile)
+    if legacy_max is not None:
+        log.warning("Ключ max_characters в profile.yaml профиля %s устарел: перенесите его в prompts/rules.yaml "
+                    "(сейчас взято значение из profile.yaml).", profile)
+        if rules.max_characters is None:
+            rules.max_characters = legacy_max
+        elif rules.max_characters != legacy_max:
+            raise GeminiInputError(
+                f"Ошибка входных данных: max_characters в profile.yaml ({legacy_max}) не совпадает с "
+                f"prompts/rules.yaml ({rules.max_characters}) профиля {profile}.")
+    max_prompt_chars = _profile_int(profile_lines, "max_prompt_chars", profile)
+    # fail_fast и raw_dir по умолчанию выключены: без них конфиг прежний
+    kwargs = {"refs_enabled": refs_enabled, "on_unfixed": on_unfixed, "fail_fast": fail_fast, "raw_dir": raw_dir,
+              "relaxed_rules": relaxed_rules, "text_language": text_language, "frame_language": frame_language,
+              "ref_max": ref_max, "allowed_refs": allowed_refs if refs_enabled else None,
+              "niche_preset_file": niche_preset_file}
+    kwargs["rework_style_flag_without_refs"] = load_profile_rework_style_flag_without_refs(profile)  # ключ профиля: клип только с флагом стиля в очередь исправлений
+    # батч одним текстом и поле setting: ключ prompt_batch_form профиля (cartoon_photos); без ключа — blocks, как раньше
+    batch_form = _profile_flag(profile_lines, "prompt_batch_form", profile, default="blocks")
+    if batch_form not in ("blocks", "passage"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml prompt_batch_form должен быть blocks или passage.")
+    batch_passage = batch_form == "passage"
+    if batch_passage:
+        kwargs["batch_passage"] = True
+    # передаём только заданные ключи: без них конфиг и фейки получают те же аргументы, что раньше
+    kwargs["rules"] = rules
+    if rules.max_characters is not None:
+        kwargs["max_characters"] = rules.max_characters
+    if max_prompt_chars is not None:
+        kwargs["max_prompt_chars"] = max_prompt_chars
+    if refs_enabled:
+        # ответ с номерами референсов: список целых на каждый сегмент
+        kwargs["response_format"] = [{"segment_index": int, "prompt": str, "refs": [int]}]
+    if batch_passage:
+        # ответ cartoon_photos: setting перед prompt; refs добавляется только у профиля с референсами
+        item = {"segment_index": int, "setting": str, "prompt": str}
+        if refs_enabled:
+            item["refs"] = [int]
+        kwargs["response_format"] = [item]
+    # диагностика сырых ответов: блок debug в profile.yaml; без блока или false — ключи не передаются, как раньше
+    dump_raw = _profile_nested_flag(profile_lines, "debug", "dump_raw_responses", profile, default="false")
+    if dump_raw not in ("true", "false"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml debug.dump_raw_responses должен быть true или false.")
+    if dump_raw == "true":
+        kwargs["dump_raw_responses"] = True
+        kwargs["niche"] = profile
+    # batch_size профиля (video и photo): задаёт и обычные батчи, и пакеты исправлений; без ключа — как раньше
+    profile_batch = load_profile_batch_size(profile)
+    if profile_batch is not None:
+        batch_size = profile_batch
+        kwargs["fix_batch_size"] = profile_batch
+    return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset, **kwargs)
+
+
+def _profile_flag(lines: list, key: str, profile: str, default: str) -> str:
+    """Значение поля верхнего уровня из profile.yaml строкой, без PyYAML. Нет поля — default."""
+    for ln in lines:
+        if ln.startswith(key + ":"):
+            return ln.split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
+    return default
+
+
+def _profile_nested_flag(lines: list, section: str, key: str, profile: str, default: str) -> str:
+    """Поле второго уровня (key внутри блока section:) из profile.yaml строкой, без PyYAML. Нет блока или поля — default.
+
+    Блок — строка без отступа «section:»; поле — строка с отступом «key: значение» внутри него. Пустые строки и
+    строки-комментарии пропускаются; значение без комментария, в нижнем регистре."""
+    inside = False
+    for ln in lines:
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if not ln[0].isspace():
+            # Русский: новая строка верхнего уровня закрывает прошлый блок
+            inside = ln.split("#", 1)[0].strip() == section + ":"
+            continue
+        if inside and ln.strip().startswith(key + ":"):
+            return ln.strip().split(":", 1)[1].split("#", 1)[0].strip().strip("\"'").lower() or default
+    return default
+
+
+def _profile_int(lines: list, key: str, profile: str) -> Optional[int]:
+    """Целое поле верхнего уровня из profile.yaml. Нет поля — None (поведение как раньше); не целое ≥1 — ошибка."""
+    raw = _profile_flag(lines, key, profile, default="")
+    if raw == "":
+        return None
+    if not raw.isdigit() or int(raw) < 1:
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml {key} должен быть целым числом не меньше 1.")
+    return int(raw)
+
+
+def _segments_mode(profile: str) -> str:
+    """Режим списка клипов из profile.yaml ниши: «missing» (номера из missing.txt, по умолчанию) или «all» (все сегменты SRT).
+
+    Нет поля segments — «missing», как раньше; любое другое значение — ошибка входа, до трат.
+    """
+    try:
+        lines = (profile_dir(profile) / "profile.yaml").read_text(encoding="utf-8").splitlines()
+    except (OSError, GeminiInputError):
+        return "missing"
+    mode = _profile_flag(lines, "segments", profile, default="missing")
+    if mode not in ("missing", "all"):
+        raise GeminiInputError(
+            f"Ошибка входных данных: в профиле {profile}/profile.yaml segments должен быть «missing» или «all», "
+            f"а не «{mode}».")
+    return mode
 
 
 def _key_names_range(provider: str) -> str:
@@ -398,13 +580,16 @@ def _key_names_range(provider: str) -> str:
     return f"{KEY_ENV_PREFIX}1…{KEY_ENV_PREFIX}{KEY_ENV_COUNT}"
 
 
-def resolve_text_family(cfg: Config, requested: Optional[str]) -> tuple[str, str, Optional[list[str]]]:
-    """Семейство текстовой модели: requested (--text-model) или default_text_model из конфига.
+def resolve_text_family(cfg: Config, requested: Optional[str],
+                        profile: Optional[str] = None) -> tuple[str, str, Optional[list[str]]]:
+    """Семейство текстовой модели.
 
-    Возвращает (имя, провайдер, модели); у gemini модели могут быть None (берутся из gemini_models).
-    Неизвестное имя = ошибка входа (GeminiInputError, код 2).
+    Приоритет: requested (--text-model), затем text_model из profile.yaml профиля режима,
+    затем default_text_model из конфига. Возвращает (имя, провайдер, модели); у gemini модели
+    могут быть None (берутся из gemini_models). Неизвестное имя = ошибка входа (GeminiInputError, код 2).
     """
-    name = requested or cfg.default_text_model
+    from_profile = load_profile_text_model(profile) if profile else None
+    name = requested or from_profile or cfg.default_text_model
     if name not in cfg.text_model_families:
         raise GeminiInputError(
             f"Ошибка входных данных: неизвестное семейство текстовой модели «{name}». "
@@ -505,8 +690,20 @@ def _check_previews(prompts_count, prompts_file: str, photo_profile) -> Optional
             return None
         if not photo_profile:
             raise previews.PreviewInputError("Превью не запускаются: фото-модель выключена (photo_model=none).")
-        previews.load_prompts(prompts_file)
-    except previews.PreviewInputError as exc:
+        specs = previews.load_prompt_specs(prompts_file)
+        if any(refs is not None for _text, refs in specs):
+            # блоки с refs: фото-профиль должен вести референсы; сочетания и метки — по профилю ниши
+            try:
+                lines = profile_dir(photo_profile).joinpath("profile.yaml").read_text(encoding="utf-8").splitlines()
+            except (OSError, GeminiInputError):
+                raise previews.PreviewInputError(
+                    f"Превью с refs: профиль фото-модели «{photo_profile}» не читается (profile.yaml).") from None
+            if _profile_flag(lines, "refs_enabled", photo_profile, default="false") != "true":
+                raise previews.PreviewInputError(
+                    f"Превью с refs: в блоках файла промптов, но фото-профиль «{photo_profile}» "
+                    f"не ведёт референсы (refs_enabled: true нужен в profile.yaml).")
+            previews.check_refs(specs, parse_allowed_refs(lines, photo_profile))
+    except (previews.PreviewInputError, GeminiInputError) as exc:
         _err(f"Ошибка входных данных: {exc}")
         return EXIT_INPUT
     return None
@@ -520,7 +717,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return code
     # семейство текстовой модели; для openrouter нужен хотя бы один ключ OPENROUTER (до любого вызова Vast)
     try:
-        family = resolve_text_family(_cfg, getattr(args, "text_model", None))
+        family = resolve_text_family(_cfg, getattr(args, "text_model", None), _cfg.model_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -655,9 +852,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
         return code
-    # семейство текстовой модели: --text-model или default_text_model из конфига (ошибка входа = код 2)
+    # семейство текстовой модели: --text-model, text_model профиля или default_text_model (ошибка входа = код 2)
     try:
-        family = resolve_text_family(cfg, getattr(args, "text_model", None))
+        family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -693,13 +890,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         input_code = _check_photo_profile(photo_profile)
         if input_code is not None:
             return input_code
+    # segments: all в profile.yaml ниши (фото): ошибка значения — до любых трат и аренды карт
+    try:
+        segments_all = photo_profile is not None and _segments_mode(photo_profile) == "all"
+    except GeminiInputError as e:
+        _err(str(e))
+        return EXIT_INPUT
 
     # текущий шаг подготовки: нужен, чтобы при ошибке назвать место, не раскрывая текст чужого исключения
     stage = "таймингов и промптов"
     try:
         timing = _build_timing(cfg, cfg.model_profile)
-        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset)
-        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+        # сырой ответ (диагностика, только при debug.dump_raw_responses в профиле): <артефакт>/raw; без fail_fast
+        # каталог больше ни для чего не используется, поэтому прочие ниши не меняются
+        raw_dir = str(Path(args.artifact_dir) / "raw") if getattr(args, "artifact_dir", "") else None
+        # raw_dir — только при заданном --artifact-dir: без него вызов прежний, без лишнего именованного аргумента
+        raw_kw = {"raw_dir": raw_dir} if raw_dir else {}
+        prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset,
+                                          **raw_kw, **_srt_kwargs(cfg.model_profile, args.srt))
+        photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
+                                                 **raw_kw, **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"
@@ -761,8 +971,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             transport,
             args.prompts_path,
             max_cards=cfg.max_cards,
+            # опрос задач карты каждую секунду; Vast и heartbeat остаются на 10 с (poll_interval по умолчанию)
+            task_poll_interval_sec=1.0,
             photo_profile=photo_profile,
             photo_prompt_cfg=photo_prompt_cfg,
+            # список клипов из всех сегментов SRT (segments: all в profile.yaml ниши); по умолчанию — missing.txt
+            segments_all=segments_all,
             # превью из prompts.txt: «выкл» = не делаются
             prompts_file=args.prompts_file or None,
             prompts_count=args.prompts_count or previews.PREVIEW_COUNT_OFF,
@@ -1159,9 +1373,9 @@ def cmd_watch_heartbeat(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- уборка по расписанию (SPEC 8.3 г)
 
 def parse_card_label(label: Optional[str]) -> Optional[str]:
-    """Номер запуска из метки карты: gen-<номер> или pilot-<что угодно>. None, если метка не разобрана."""
+    """Номер запуска из метки карты: gen-<номер>, testwf-<номер> или pilot-<что угодно>. None, если метка не разобрана."""
     text = label or ""
-    m = GEN_LABEL_RE.fullmatch(text) or PILOT_LABEL_RE.fullmatch(text)
+    m = GEN_LABEL_RE.fullmatch(text) or TESTWF_LABEL_RE.fullmatch(text) or PILOT_LABEL_RE.fullmatch(text)
     return m.group(1) if m else None
 
 
@@ -1414,9 +1628,20 @@ class _ReworkCounter:
         self._inner = inner
         self.rework_nums: set = set()
 
+    @property
+    def provider(self) -> str:
+        # провайдер читается у внутреннего транспорта; без атрибута — gemini, как в gemini_orchestrator
+        return getattr(self._inner, "provider", "gemini")
+
+    def __getattr__(self, name):
+        # прочие атрибуты (active_model и т.п.) берём у внутреннего транспорта; _inner задан в __init__
+        if name == "_inner" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
     def generate_json(self, model, system, user, schema, reasoning_effort=None) -> str:
-        m = VERIFY_REWORK_RE.match(user or "")
-        if m:
+        # в пакете исправления строк «Prompt for segment_index N:» несколько: учитываются все номера
+        for m in VERIFY_REWORK_RE.finditer(user or ""):
             self.rework_nums.add(int(m.group(1)))
         if reasoning_effort is None:
             # без параметра вызов такой же, как раньше
@@ -1463,22 +1688,24 @@ def _failure_reason(num: int, entry, errors: list) -> str:
     return f"статус «{entry.get('status')}»"
 
 
-def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool) -> tuple:
-    """Для одного вида: готовые, нарушения слов и маркеров, нарушения num_frames, не готовые."""
-    from Generate.core.prompt_check import (PROBLEM_FORBIDDEN_SHOT_TYPE, PROBLEM_LEFTOVER_MARKER,
-                                            find_problems, problem_code, problem_ru)
+def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, photo: bool,
+                 relaxed=frozenset(), max_characters=None, rules=None) -> tuple:
+    """Для одного вида: готовые, нарушения слов и маркеров, нарушения содержания кадра, нарушения num_frames, не готовые."""
+    from Generate.core.prompt_check import (CONTENT_CODES, PROBLEM_DANGLING_TEXT, PROBLEM_FORBIDDEN_SHOT_TYPE,
+                                            PROBLEM_LEFTOVER_MARKER, find_problems, problem_code, problem_ru)
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready
 
-    ready = forbidden = leftover = frames_bad = 0
+    ready = forbidden = leftover = content = frames_bad = 0
     not_ready: list = []
     problems: list = []
+    media = "image" if photo else "video"
     for n in nums:
         entry = prompts.get(str(n))
         if not _prompt_ready(entry):
             not_ready.append(n)
             continue
         ready += 1
-        for p in find_problems(entry["prompt"]):
+        for p in find_problems(entry["prompt"], media, relaxed, max_characters, rules):
             code = problem_code(p)
             if code == PROBLEM_FORBIDDEN_SHOT_TYPE:
                 forbidden += 1
@@ -1486,11 +1713,36 @@ def _type_counts(label: str, nums: list, prompts: dict, expected_frames: dict, p
             elif code == PROBLEM_LEFTOVER_MARKER:
                 leftover += 1
                 problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code in CONTENT_CODES:
+                content += 1
+                problems.append(f"{label} клип {n}: {problem_ru(p)}")
+            elif code == PROBLEM_DANGLING_TEXT:
+                # незаконченный текст в кадре: отдельная строка отчёта (только при dangling_text_check)
+                fragment = p.partition(": ")[2]
+                problems.append(f"Незаконченный текст в кадре: {label} клип {n}, фрагмент «{fragment}»")
         want = PHOTO_NUM_FRAMES if photo else expected_frames.get(n)
         if entry.get("num_frames") != want:
             frames_bad += 1
             problems.append(f"{label} клип {n}: num_frames {entry.get('num_frames')!r}, по правилу {want!r}")
-    return ready, forbidden, leftover, frames_bad, not_ready, problems
+    return ready, forbidden, leftover, content, frames_bad, not_ready, problems
+
+
+def _review_reasons(prompts: dict, nums) -> dict:
+    """Причины отправки на проверку: {причина: [номера клипов]} по полю error записей клипов nums.
+
+    error делится по «; »: каждая причина считается один раз на клип. Пустой error — «причина не указана».
+    Записи, которые не словари, пропускаются. Номера по возрастанию, причины по убыванию числа клипов.
+    """
+    found: dict = {}
+    for n in sorted(set(nums)):
+        entry = prompts.get(str(n)) if isinstance(prompts, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        parts = [x.strip() for x in str(entry.get("error") or "").split("; ")]
+        reasons = [x for x in dict.fromkeys(parts) if x] or ["причина не указана"]
+        for reason in reasons:
+            found.setdefault(reason, []).append(n)
+    return dict(sorted(found.items(), key=lambda item: (-len(item[1]), item[0])))
 
 
 def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
@@ -1505,15 +1757,31 @@ def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
         f"- Готово промптов: видео {v['ready']}, фото {ph['ready']}",
         f"- Переписано проверкой (запрещённые типы кадра и маркеры): видео {v['rework']}, фото {ph['rework']}",
         f"- Не готово промптов: {len(failures)}",
+        f"- На проверку (флаг needs_review, текст не прошёл проверку или исправления кончились): "
+        f"видео {len(v['flagged'])}, фото {len(ph['flagged'])}"
+        + (f"; видео клипы: {v['flagged']}" if v["flagged"] else "")
+        + (f"; фото клипы: {ph['flagged']}" if ph["flagged"] else ""),
         "",
         "### Проверка запрещённых слов и маркеров",
         f"- Видео: запрещённых типов кадра {v['forbidden']}, незаполненных маркеров {v['leftover']}",
         f"- Фото: запрещённых типов кадра {ph['forbidden']}, незаполненных маркеров {ph['leftover']}",
         "",
+        "### Проверка содержания кадра (дети, толпа, мелкие предметы, речь, руки у огня, битвы, оружие, лица, внешность)",
+        f"- Видео: нарушений содержания {v['content']}",
+        f"- Фото: нарушений содержания {ph['content']}",
+        "",
         "### Проверка num_frames",
         f"- Видео: несовпадений с правилом кадров профиля {v['frames_bad']}",
         f"- Фото: несовпадений с num_frames = {ph['frames_rule']}: {ph['frames_bad']}",
     ]
+    if "review_reasons" in counts:
+        # причины из prompts.json (error): без них отчёт не показывает, почему клипы на проверке
+        lines += ["", "### Причины отправки на проверку (needs_review)"]
+        reasons = counts["review_reasons"]
+        if not reasons:
+            lines.append("- клипов на проверке нет")
+        for reason, nums in reasons.items():
+            lines.append(f"- {reason}: клипов {len(nums)}, номера: {', '.join(str(n) for n in nums)}")
     if failures:
         lines += ["", "### Не готовые промпты", "", "| Клип | Тип | Причина |", "|---|---|---|"]
         lines += [f"| {n} | {kind} | {reason} |" for n, kind, reason in failures]
@@ -1535,6 +1803,34 @@ def limit_by_type(video_nums, photo_nums, limit) -> list:
     if not video:
         return photo[:limit]
     return sorted(video[: math.ceil(limit / 2)] + photo[: limit // 2])
+
+
+def _log_text_cards_count(nums, prompts, refs_enabled: bool) -> None:
+    """Считает клипы с текстовой карточкой (ref_2) среди номеров nums и пишет строку в журнал.
+
+    Норма: не больше 1 на 5 клипов (округление вверх), то есть 5 на 25. Превышение даёт предупреждение.
+    Только журнал: на ход прогона счёт не влияет; сбой разбора записи не должен ронять проверку.
+    refs_enabled False (профиль без референсов): ничего не пишется, ref_2 не считается.
+    """
+    if not refs_enabled:
+        return
+    total = len(nums)
+    if total == 0:
+        return
+    count = 0
+    for n in nums:
+        entry = prompts.get(str(n)) if isinstance(prompts, dict) else None
+        extra = entry.get("extra") if isinstance(entry, dict) else None
+        refs = extra.get("refs") if isinstance(extra, dict) else None
+        if isinstance(refs, (list, tuple)) and 2 in refs:
+            count += 1
+    limit = math.ceil(total / 5)
+    line = (f"Текстовые карточки (ref_2): {count} из {total} клипов, "
+            f"норма не больше {limit} на {total} клипов.")
+    if count > limit:
+        log.warning("Предупреждение. %s Текстовых карточек больше нормы.", line)
+    else:
+        log.info(line)
 
 
 def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
@@ -1568,15 +1864,24 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     if code is not None:
         raise GeminiInputError("Ошибка входных данных: конфигурация не загружена (см. сообщение выше).")
     segments = parse_srt(args.srt)
-    missing = list(parse_missing(args.missing, segments))
+    # segments: all в profile.yaml ниши (фото): все номера SRT по возрастанию; иначе missing.txt, как раньше
+    segments_all = photo_profile is not None and _segments_mode(photo_profile) == "all"
+    missing = list(orch_mod.wanted_segment_numbers(segments, args.missing, segments_all))
     if not missing:
         raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
 
     timing = _build_timing(cfg, args.video_profile)
-    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset)
-    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset)
+    # fail_fast из ns (нет атрибута — выключено); сырой ответ — в <artifact_dir>/raw, только при проблеме
+    fail_fast = bool(getattr(args, "fail_fast", False))
+    raw_dir = str(Path(args.artifact_dir) / "raw") if args.artifact_dir else None
+    prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset,
+                                      fail_fast=fail_fast, raw_dir=raw_dir,
+                                      **_srt_kwargs(args.video_profile, args.srt))
+    photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
+                                      fail_fast=fail_fast, raw_dir=raw_dir,
+                                      **_srt_kwargs(photo_profile, args.srt))
                  if photo_profile is not None else None)
-    family = resolve_text_family(cfg, getattr(args, "text_model", None))
+    family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     counting = _ReworkCounter(_make_transport(cfg, family))
     gemini_options = _gemini_options(cfg, family)
 
@@ -1610,28 +1915,47 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             raise GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
 
     prompts = run.state.get("prompts", {})
+    # только проверка: счёт текстовых карточек (в refs есть 2); строка в журнале, прогон не останавливается
+    # Блок 3: ref_2 считается только если профиль (видео или фото) принимает референсы
+    refs_on = profile_refs_enabled(args.video_profile) or (
+        photo_profile is not None and profile_refs_enabled(photo_profile))
+    _log_text_cards_count(missing, prompts, refs_on)
     video_nums = [n for n in missing if n not in photo_nums]
     photo_list = [n for n in missing if n in photo_nums]
-    v = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
-                 _type_counts("видео", video_nums, prompts, expected_frames, photo=False)))
-    p = dict(zip(("ready", "forbidden", "leftover", "frames_bad", "not_ready", "problems"),
-                 _type_counts("фото", photo_list, prompts, expected_frames, photo=True)))
+    keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
+    v = dict(zip(keys, _type_counts("видео", video_nums, prompts, expected_frames, photo=False,
+                                    relaxed=prompt_cfg.relaxed_rules,
+                                    max_characters=getattr(prompt_cfg, "max_characters", None),
+                                    rules=getattr(prompt_cfg, "rules", None))))
+    p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True,
+                                    relaxed=photo_cfg.relaxed_rules if photo_cfg is not None else frozenset(),
+                                    max_characters=getattr(photo_cfg, "max_characters", None)
+                                    if photo_cfg is not None else None,
+                                    rules=getattr(photo_cfg, "rules", None) if photo_cfg is not None else None)))
     failures = ([(n, "видео", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
                 + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
     failures.sort(key=lambda row: row[0])
     rework_video = len(counting.rework_nums & set(video_nums))
     rework_photo = len(counting.rework_nums & set(photo_list))
 
+    # клипы, оставшиеся на проверке (флаг needs_review в записи): их нужно смотреть вручную
+    flag_video = [n for n in video_nums if (prompts.get(str(n)) or {}).get("needs_review")]
+    flag_photo = [n for n in photo_list if (prompts.get(str(n)) or {}).get("needs_review")]
     counts = {
         "video_nums": video_nums, "photo_nums": photo_list,
         "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
-                  "frames_bad": v["frames_bad"], "rework": rework_video},
+                  "content": v["content"], "frames_bad": v["frames_bad"], "rework": rework_video,
+                  "flagged": flag_video},
         "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
-                  "frames_bad": p["frames_bad"], "rework": rework_photo, "frames_rule": PHOTO_NUM_FRAMES},
+                  "content": p["content"], "frames_bad": p["frames_bad"], "rework": rework_photo,
+                  "frames_rule": PHOTO_NUM_FRAMES, "flagged": flag_photo},
+        "review_reasons": _review_reasons(prompts, flag_video + flag_photo),
     }
     prep_args = {"video_model": video_model, "video_profile": args.video_profile,
                  "photo_profile": photo_profile, "missing": missing}
-    problems = v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+    problems = (v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+                + [f"видео клип {n}: на проверку" for n in flag_video]
+                + [f"фото клип {n}: на проверку" for n in flag_photo])
     report = _verify_report(prep_args, counts, failures)
     return PreparedPrompts(
         state=run.state, missing=missing, video_nums=video_nums, photo_nums=photo_list,

@@ -12,16 +12,22 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Optional
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from . import gemini_orchestrator as go
     from . import gemini_prompts as gp
+    from . import config_loader as cl
+    from . import duplicate_check as dc
+    from . import prompt_check as pc
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
+    import config_loader as cl  # type: ignore
+    import duplicate_check as dc  # type: ignore
+    import prompt_check as pc  # type: ignore
 
 # тот же логгер, что у оркестратора: строки журнала не меняются
 log = logging.getLogger("Generate.orchestrator")
@@ -29,6 +35,62 @@ log = logging.getLogger("Generate.orchestrator")
 PHOTO_NUM_FRAMES = 1        # фото: один промпт = один кадр; задаётся кодом, не из тайминга
 VIDEO_WAVE = "видео"        # имя волны видео в общем пуле батчей
 PHOTO_WAVE = "фото"         # имя волны фото в общем пуле батчей
+DUP_REWORK_MAX_PASSES = 3   # сколько проходов дедупликации делается, если переписанный клип совпал с другим
+# cartoon_photos (batch_passage): монотонность соседних клипов — окно из стольких номеров и порог сходства сцены
+MONOTONY_WINDOW = 3
+MONOTONY_JACCARD = 0.85
+# Русский: повторяемое описание героя — не сцена; «the main character» — роль, а не сцена (глаголы и предметы остаются)
+_APPEARANCE_RX = re.compile(r"the main character has[^.]*\.|\bthe main character\b", re.I)
+# Русский: типовой текст персонажей, наряда и стиля (style.md повторяет его в каждом промпте) не должен занижать
+# различие сцен. Фразы ищутся независимо от порядка клауз и от «with/and» перед ними; предметы, места и действия
+# (stakes, twine, digging fork, basket, cellar, farm shop и т. п.) сюда не входят.
+_BOILERPLATE_RX = re.compile(
+    # старые правила «до точки»: предложение целиком типовое, сохранены без изменений
+    r"has warm natural skin tones[^.]*\.|has proportional cartoon limbs[^.]*\.|small black dot eyes[^.]*\.|"
+    # голова и тело главного героя
+    r"(?:(?:with|and)\s+)?a\s+large\s+smooth\s+pure-white\s+round\s+head|"
+    r"(?:(?:with|and)\s+)?a\s+crisp\s+medium-fine\s+black\s+ink\s+outline|"
+    r"(?:(?:with|and)\s+)?small\s+(?:solid\s+)?black\s+dot\s+eyes|"
+    r"(?:(?:and|with)\s+)?a\s+plain(?:\s+thin)?\s+solid-black\s+stick\s+(?:torso|body)|"
+    r"(?:(?:with|and)\s+)?(?:thin\s+|simple\s+)?black\s+stick\s+(?:arms|hands|legs)|"
+    # мимика: один рот на лице
+    r"(?:a\s+)?(?:closed-line\s+(?:smile|mouth)|(?:worried\s+wavy|wavy\s+worried|open\s+O-shaped)\s+mouth)|"
+    r"one\s+mouth\s+expression(?:\s+showing)?|"
+    # рост в кадре (доля высоты кадра)
+    r"(?:at\s+about\s+)?(?:\d+|twenty|forty|fifty|sixty)\s+percent\s+of\s+image\s+height|"
+    # взрослые персонажи и макро-руки: пропорции, кожа, волосы, нос, брови
+    r"(?:a\s+)?head\s+about\s+one\s+fifth\s+of\s+body\s+height|"
+    r"(?:a\s+)?proportional\s+(?:cartoon|clothed|2d)\s+(?:body|figure|limbs)|"
+    r"(?:(?:with|and)\s+)?warm\s+natural\s+skin\s+tones|"
+    r"(?:(?:with|and)\s+)?simple\s+rounded\s+fingers|"
+    r"simple\s+(?:solid(?:-colou?r)?\s+|(?:brown|dark|black|light|gray|grey)\s+)?hair|"
+    r"(?:a\s+)?small\s+curved-line\s+nose|"
+    r"(?:(?:with|and)\s+)?(?:raised|relaxed|neutral|expressive|lifted)(?:\s+expressive)?(?:\s+thin\s+curved)?\s+eyebrows|"
+    # контур и заливка из общего стиля
+    r"(?:smooth|crisp)\s+closed\s+(?:black\s+)?(?:ink\s+)?outlines|"
+    r"flat\s+(?:matte\s+)?(?:earthy\s+|muted\s+)?fills|"
+    # фиксированные наряды ролей (одежда одна на весь ролик)
+    r"(?:(?:wearing|wears)\s+)?(?:"
+    r"muted\s+rust\s+plaid\s+flannel\s+shirt,?\s+medium-blue\s+denim\s+overalls\s+and\s+brown\s+boots|"
+    r"muted\s+sage\s+sweater\s+and\s+medium-brown\s+trousers|"
+    r"white\s+lab\s+coat\s+and\s+eyeglasses|"
+    r"white\s+jacket\s+and\s+tall\s+white\s+cap|"
+    r"muted\s+brown\s+work\s+shirt,?\s+tan\s+trousers,?\s+brown\s+boots\s+and\s+a\s+tan\s+hard\s+hat|"
+    r"period\s+tunic\s+and\s+trousers)",
+    re.I)
+# Русский: серия из трёх подряд клипов одного вида кадра (setting до «:») с перекрытием слов соседей
+MONOTONY_RUN = 3
+MONOTONY_RUN_JACCARD = 0.65
+_WORD_RX = re.compile(r"[a-z0-9']+")
+# Русский: анти-клон сцены (batch_passage) — сравнение с последними CLONE_WINDOW клипами того же вида кадра
+CLONE_WINDOW = 100
+CLONE_JACCARD = 0.65
+# Русский: общие слова стиля и поверхности — не признак сцены; предметы, здания, инструменты и культуры остаются
+_FILLER_WORDS = frozenset({
+    "warm", "cream", "pale", "flat", "matte", "crisp", "closed", "outline", "outlines", "fills", "cel",
+    "shading", "clean", "2d", "single", "layer", "soft", "shadow", "strip", "underside", "backdrop", "surface",
+})
+_HAND_DRAWN_RX = re.compile(r"hand-drawn", re.IGNORECASE)
 
 
 @dataclass
@@ -214,7 +276,7 @@ def _photo_step(needed: list, *, segments, photo_cfg, watch, prompts_path,
         pending = go.missing_segments(prompts, needed)
         # очередь исправлений фото из сохранённого состояния (под замком: словарь пишут обе волны)
         with guard:
-            seeds = go._rework_seeds(prompts, photo=True, only=set(needed))
+            seeds = go._rework_seeds(prompts, photo=True, only=set(needed), **go.rework_kwargs(photo_cfg))
         if not pending and not seeds:
             return
 
@@ -289,6 +351,27 @@ def _pool_threads(provider: str, sends_per_window: Optional[int] = None) -> int:
     return min(max(keys, 1), gp.MAX_PARALLEL_BATCHES)
 
 
+def _photo_only_pool(watch, gemini_options: dict):
+    """Общий пул для прогона, где есть только фото-волна (видео нет).
+
+    Потоки те же, что фото получает в двух волнах: OpenRouter — ключи × openrouter_sends_per_window,
+    прочие провайдеры — как _pool_threads. per_wave_cap ограничивает их числом батчей волны прямо в
+    arrive_and_wait, поэтому число батчей здесь заранее не нужно. Без пула исправления очереди начинались
+    бы только после конца всех главных батчей; пул даёт им выполняться раньше.
+    """
+    provider = getattr(watch, "provider", "gemini")
+    sends = gemini_options.get("openrouter_sends_per_window")
+    if provider == "openrouter":
+        try:
+            keys = gp._provider_key_count(provider)
+        except Exception:  # ключей нет или не прочитались: как в _run_waves_together, ноль
+            keys = 0
+        threads = gp.openrouter_thread_count(keys, sends)
+    else:
+        threads = _pool_threads(provider, sends)
+    return gp.SharedBatchPool({PHOTO_WAVE: threads}, bind=watch.bind, per_wave_cap=True)
+
+
 def _progress_for(video: list, photo: list, started: float):
     """Функция строки прогресса для колбэков сохранения пула: читает словарь prompts и вызывается под замком состояния."""
     def progress(prompts: dict) -> str:
@@ -305,9 +388,22 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
     state до барьера пула, поэтому пишут в один словарь prompts. Ошибка видео вне батчей останавливает пул.
     Ошибка фото пробрасывается после обеих волн; видео имеет приоритет, если упали обе.
     """
-    total = _pool_threads(provider, gemini_options.get("openrouter_sends_per_window"))
-    video_threads = total // 2
-    pool = gp.SharedBatchPool({VIDEO_WAVE: video_threads, PHOTO_WAVE: total - video_threads}, bind=watch.bind)
+    sends = gemini_options.get("openrouter_sends_per_window")
+    if provider == "openrouter":
+        # OpenRouter: каждой волне — ключи × отправки; потоки волны не больше её батчей (per_wave_cap в пуле).
+        # Лимит отправок по каждому ключу держит транспорт, поэтому лишние потоки только ждут.
+        try:
+            keys = gp._provider_key_count(provider)
+        except Exception:  # ключей нет или не прочитались: как в generate_prompts, ноль
+            keys = 0
+        per_wave = gp.openrouter_thread_count(keys, sends)
+        log.info("Потоки OpenRouter: ключей %d, отправок в окне %s, потоков на волну до %d (не больше батчей волны).",
+                 keys, sends if sends is not None else "не задано", per_wave)
+        pool = gp.SharedBatchPool({VIDEO_WAVE: per_wave, PHOTO_WAVE: per_wave}, bind=watch.bind, per_wave_cap=True)
+    else:
+        total = _pool_threads(provider, sends)
+        video_threads = total // 2
+        pool = gp.SharedBatchPool({VIDEO_WAVE: video_threads, PHOTO_WAVE: total - video_threads}, bind=watch.bind)
     box: dict = {}
 
     def run_photo() -> None:
@@ -336,6 +432,223 @@ def _run_waves_together(video: list, photo: list, *, segments, cfg, photo_cfg, w
     return state
 
 
+def _raw_prompt(styled: str, style_text: str) -> str:
+    """Сырой текст клипа без стиля: обратная операция attach_style (стиль дописан через «. »)."""
+    text = (styled or "").strip()
+    if style_text and text.endswith(style_text):
+        text = text[: -len(style_text)].rstrip()
+        if text.endswith("."):
+            text = text[:-1].rstrip()
+    return text
+
+
+def _with_dup_niche(cfg, dup_pass: int):
+    """Отдельный суффикс niche на время прохода дедупликации, чтобы дампы не перезаписывали основной раунд."""
+    if cfg is None or not getattr(cfg, "niche", ""):
+        return cfg
+    if is_dataclass(cfg):
+        return replace(cfg, niche=f"{cfg.niche}_dup{dup_pass}")
+    return cfg
+
+
+def mark_duplicates_for_rework(prompts: dict, nums, style_text: str, *,
+                               allow_extra_round: bool = False) -> list:
+    """Клипы из групп одинаковых промптов, кроме первого номера группы, ставятся в очередь исправлений.
+
+    Меняет записи prompts (словарь состояния; вызывать под замком). Первый номер группы (самый малый) не трогается.
+    Клип с непустой очередью не меняется: его нарушение уже исправляется, повтор дубликата проверит барьер.
+    При allow_extra_round=False (по умолчанию) клип на пределе кругов (REPAIR_ROUNDS) не ставится; при
+    allow_extra_round=True (цикл _duplicate_rework) ему выделяется чистый счётчик кругов, чтобы он не остался
+    дубликатом после прошлых исправлений содержания. Возвращает номера, поставленные в очередь.
+    """
+    texts = {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(nums))}
+    queued: list = []
+    for group in dc.find_duplicate_prompts(texts):
+        first = int(group[0])
+        for key in group[1:]:
+            entry = prompts.get(key)
+            if not isinstance(entry, dict) or entry.get("rework_pending"):
+                continue
+            rework_round = int(entry.get("rework_round", 0) or 0)
+            if rework_round >= gp.REPAIR_ROUNDS and not allow_extra_round:
+                continue
+            if allow_extra_round:
+                rework_round = 0
+            entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
+            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, str(first))]
+            entry["rework_round"] = rework_round
+            queued.append(int(key))
+    return queued
+
+
+def _clip_setting(entry: dict) -> str:
+    """Setting клипа batch_passage в нижнем регистре, без лишних пробелов; пусто, если его нет."""
+    extra = entry.get("extra") if isinstance(entry.get("extra"), dict) else {}
+    return " ".join(str(extra.get("setting") or "").split()).lower()
+
+
+def _scene_words(entry: dict, style_text: str) -> frozenset:
+    """Слова сцены клипа без стиля, без повторяемой фразы о внешности героя и без типового текста персонажей."""
+    raw = _raw_prompt(str(entry.get("prompt", "")), style_text)
+    cleaned = _BOILERPLATE_RX.sub(" ", _APPEARANCE_RX.sub(" ", raw))
+    cleaned = _HAND_DRAWN_RX.sub(" ", cleaned)   # «hand-drawn» — один стилевой термин, а не два слова
+    return frozenset(_WORD_RX.findall(cleaned.lower())) - _FILLER_WORDS
+
+
+def _visual_mode(entry: dict) -> str:
+    """Вид кадра клипа (часть setting до «:», например macro, medium); пусто, если его нет."""
+    setting = _clip_setting(entry)
+    return setting.split(":", 1)[0].strip() if ":" in setting else ""
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    """Доля общих слов; пусто — 0.0."""
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def mark_monotony_for_rework(prompts: dict, nums, style_text: str) -> list:
+    """cartoon_photos (batch_passage): соседние клипы монотонны — ставятся в очередь исправлений.
+
+    Окно: клип сравнивается с двумя предыдущими номерами волны (в числовом порядке). Монотонность — одинаковый
+    непустой setting или сцена с долей общих слов не ниже MONOTONY_JACCARD. Клип с очередью или на пределе кругов
+    (REPAIR_ROUNDS) пропускается, поэтому цикл не бесконечен. Текст повтора — DUPLICATE_REWORK_TEXT (через код
+    дубликата, без новых кодов).
+
+    Русский: после окна и серии — анти-клон между пакетами: клип с тем же видом кадра (setting до «:») и сценой
+    с долей общих слов не ниже CLONE_JACCARD среди последних CLONE_WINDOW клипов (уже принятых, без очереди)
+    ставится в очередь с маркером «mode=<вид>»; _rework_text даёт для него свою английскую подсказку.
+    Соседи из локального окна MONOTONY_WINDOW в анти-клон не входят: для них действуют прежние правила.
+    Меняет prompts под замком вызывающего. Возвращает номера, поставленные в очередь.
+    """
+    ordered = sorted(set(int(n) for n in nums))
+    queued: list = []
+    for idx, n in enumerate(ordered):
+        entry = prompts.get(str(n))
+        if not isinstance(entry, dict) or entry.get("rework_pending"):
+            continue
+        if int(entry.get("rework_round", 0) or 0) >= gp.REPAIR_ROUNDS:
+            continue
+        setting = _clip_setting(entry)
+        mode = _visual_mode(entry)
+        words = _scene_words(entry, style_text)
+        hit = None
+        for earlier in ordered[max(0, idx - (MONOTONY_WINDOW - 1)):idx]:
+            other = prompts.get(str(earlier)) or {}
+            same_setting = bool(setting) and setting == _clip_setting(other)
+            other_words = _scene_words(other, style_text)
+            similar = bool(words and other_words) and len(words & other_words) / len(words | other_words) >= MONOTONY_JACCARD
+            if same_setting or similar:
+                hit = earlier
+                break
+        if hit is None and idx >= MONOTONY_RUN - 1:
+            # Русский: третий и далее подряд клип того же вида кадра с перекрытием соседей — тоже монотонность
+            run = ordered[idx - (MONOTONY_RUN - 1):idx + 1]
+            run_entries = [prompts.get(str(x)) or {} for x in run]
+            modes = {_visual_mode(e) for e in run_entries}
+            run_words = [_scene_words(e, style_text) for e in run_entries]
+            pairs_ok = all(_jaccard(run_words[k], run_words[k + 1]) >= MONOTONY_RUN_JACCARD
+                           for k in range(len(run_words) - 1))
+            if len(modes) == 1 and "" not in modes and pairs_ok:
+                hit = run[-2]
+        marker = ""
+        if hit is None and mode and words:
+            # Русский: анти-клон — тот же вид кадра и почти та же сцена в последних CLONE_WINDOW клипах, кроме соседей
+            # из локального окна (их проверяют правила выше, прежний порог); поэтому срез до idx - (MONOTONY_WINDOW - 1)
+            for earlier in ordered[max(0, idx - CLONE_WINDOW):max(0, idx - (MONOTONY_WINDOW - 1))]:
+                other = prompts.get(str(earlier))
+                if not isinstance(other, dict) or other.get("rework_pending") or _visual_mode(other) != mode:
+                    continue
+                if _jaccard(words, _scene_words(other, style_text)) >= CLONE_JACCARD:
+                    hit, marker = earlier, mode
+                    break
+        if hit is not None:
+            fragment = f"{hit} mode={marker}" if marker else str(hit)
+            entry["prompt_raw"] = _raw_prompt(str(entry.get("prompt", "")), style_text)
+            entry["rework_pending"] = [pc.make_problem(pc.PROBLEM_DUPLICATE_PROMPT, fragment)]
+            queued.append(n)
+    return queued
+
+
+def _duplicate_rework(needed: list, *, photo_nums, segments, cfg, photo_cfg, profile: str,
+                      photo_profile: Optional[str], timing, watch, prompts_path, gemini_options: dict,
+                      errors: list, aborts: list, state, lock) -> dict:
+    """Ниши с ключом fail_on_duplicate_prompts: одинаковые промпты разных клипов идут в очередь исправлений.
+
+    Выполняется после обеих волн генерации и до итогового состояния. Для профилей без ключа ничего не делает
+    (ни чтения состояния, ни вызова модели). Исправление повторяется до DUP_REWORK_MAX_PASSES проходов, чтобы
+    переписанный клип, совпавший с другим клипом прогона, тоже был переписан. Итоговую проверку дубликатов
+    делает verify_prompts после этого этапа.
+    """
+    if state is None:
+        state = read_state(prompts_path)
+    photo = [n for n in needed if n in photo_nums] if photo_profile is not None else []
+    photo_set = set(photo)
+    video = [n for n in needed if n not in photo_set]
+    dup_photo = bool(photo) and cl.load_profile_fail_on_duplicate_prompts(photo_profile)
+    dup_video = bool(video) and cl.load_profile_fail_on_duplicate_prompts(profile)
+    if not (dup_photo or dup_video):
+        return state
+    style_video = gp.preset_text(cfg.preset, cfg.niche_preset_file) if dup_video else ""
+    style_photo = gp.preset_text(photo_cfg.preset, photo_cfg.niche_preset_file) if dup_photo else ""
+    managed = None
+    for dup_pass in range(1, DUP_REWORK_MAX_PASSES + 1):
+        with lock:
+            prompts = state.setdefault("prompts", {})
+            queued_video = mark_duplicates_for_rework(
+                prompts, video, style_video, allow_extra_round=True) if dup_video else []
+            queued_photo = mark_duplicates_for_rework(
+                prompts, photo, style_photo, allow_extra_round=True) if dup_photo else []
+            # Русский: монотонность только для batch_passage; точные дубликаты уже поставлены выше и пропускаются
+            if dup_video and getattr(cfg, "batch_passage", False):
+                queued_video = sorted(set(queued_video) | set(mark_monotony_for_rework(prompts, video, style_video)))
+            if dup_photo and getattr(photo_cfg, "batch_passage", False):
+                queued_photo = sorted(set(queued_photo) | set(mark_monotony_for_rework(prompts, photo, style_photo)))
+            if not queued_video and not queued_photo:
+                return state
+            state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+            go.atomic_write_json(prompts_path, state)
+        queued = sorted(queued_video + queued_photo)
+        log.info("Дубликаты промптов (проход %d из %d): в очередь исправлений поставлено клипов %d: %s.",
+                 dup_pass, DUP_REWORK_MAX_PASSES, len(queued), gp._num_ranges(queued), extra=gp.KEY_EVENT_EXTRA)
+        if aborts:
+            loaded = read_state(prompts_path)
+            return loaded if loaded.get("prompts") else state
+        if managed is None:
+            managed = go.ManagedTransport(
+                watch, gemini_options.get("models", go.DEFAULT_MODELS),
+                rpm_limit=gemini_options.get("rpm_limit", 15), tpm_limit=gemini_options.get("tpm_limit", 250_000),
+                rpd_limit=gemini_options.get("rpd_limit", 500))
+        dup_cfg = _with_dup_niche(cfg, dup_pass)
+        dup_photo_cfg = _with_dup_niche(photo_cfg, dup_pass)
+        if queued_video:
+            state = _video_step(queued_video, segments=segments, cfg=dup_cfg, watch=watch, prompts_path=prompts_path,
+                                profile=profile, timing=timing, gemini_options=gemini_options, errors=errors,
+                                aborts=aborts, managed=managed, state=state, lock=lock)
+        if queued_photo and not aborts:
+            _photo_step(queued_photo, segments=segments, photo_cfg=dup_photo_cfg, watch=watch, prompts_path=prompts_path,
+                        gemini_options=gemini_options, errors=errors, aborts=aborts, managed=managed,
+                        state=state, lock=lock)
+        loaded = read_state(prompts_path)
+        if loaded.get("prompts"):
+            state = loaded
+        if aborts:
+            return state
+    with lock:
+        prompts = state.get("prompts", {})
+        leftover = []
+        if dup_video:
+            leftover.extend(dc.find_duplicate_prompts(
+                {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(video))}))
+        if dup_photo:
+            leftover.extend(dc.find_duplicate_prompts(
+                {str(n): str((prompts.get(str(n)) or {}).get("prompt", "")) for n in sorted(set(photo))}))
+    if leftover:
+        groups_text = "; ".join(", ".join(str(x) for x in g) for g in leftover)
+        log.warning("Дубликаты промптов: после %d проходов остались совпадающие группы: %s.",
+                    DUP_REWORK_MAX_PASSES, groups_text)
+    return state
+
+
 def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str, timing,
                   photo_profile: Optional[str], photo_cfg, transport, gemini_options: dict,
                   prompts_path) -> PromptRun:
@@ -356,6 +669,9 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
     watch = _TransportWatch(transport)  # все вызовы Gemini идут через него, и видео, и фото
     lock = threading.Lock()
     state = None
+    # Русский: клипы «на проверку» из прошлого запуска пересматриваются по текущим правилам до решения,
+    # какие волны идти (run_video / run_photo); вызова модели нет. Фото — только при photo_profile.
+    go.recover_resolved_file(prompts_path, segments, cfg, photo_cfg if photo_profile is not None else None)
     if photo_profile is None:
         state = _video_step(list(needed), segments=segments, cfg=cfg, watch=watch,
                             prompts_path=prompts_path, profile=profile, timing=timing,
@@ -367,8 +683,9 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
         # очередь исправлений прошлого запуска: волна с очередью идёт, даже если клипов для генерации у неё нет
         # (только чтение файла, без замка и без вызовов модели: потоков волн ещё нет)
         prev_prompts = read_state(prompts_path).get("prompts", {})
-        video_seeds = bool(go._rework_seeds(prev_prompts, only=set(video)))
-        photo_seeds = bool(go._rework_seeds(prev_prompts, photo=True, only=set(photo)))
+        video_seeds = bool(go._rework_seeds(prev_prompts, only=set(video), **go.rework_kwargs(cfg)))
+        photo_seeds = bool(go._rework_seeds(prev_prompts, photo=True, only=set(photo),
+                                            **go.rework_kwargs(photo_cfg)))
         run_video = bool(video) or video_seeds
         run_photo = bool(photo) or photo_seeds
         # цепочка строится на наблюдателе: её вызовы видны _TransportWatch и для видео, и для фото
@@ -396,10 +713,17 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
                                     managed=managed, state=state, lock=lock)
             if run_photo:
                 state = _load_shared(state, prompts_path, segments, file_profile)
+                # Русский: фото без видео тоже через общий пул, чтобы очередь исправлений шла до конца главных батчей
                 _photo_step(photo, segments=segments, photo_cfg=photo_cfg, watch=watch,
                             prompts_path=prompts_path, gemini_options=gemini_options,
-                            errors=errors, aborts=aborts, managed=managed, state=state, lock=lock)
+                            errors=errors, aborts=aborts, managed=managed, state=state, lock=lock,
+                            pool=_photo_only_pool(watch, gemini_options))
         state = read_state(prompts_path)  # после обеих волн: состояние файла с обоими видами
+    # Русский: дубликаты промптов — только ниши с fail_on_duplicate_prompts; остальные профили этот этап не трогает
+    state = _duplicate_rework(needed, photo_nums=photo_nums, segments=segments, cfg=cfg, photo_cfg=photo_cfg,
+                              profile=profile, photo_profile=photo_profile, timing=timing, watch=watch,
+                              prompts_path=prompts_path, gemini_options=gemini_options, errors=errors,
+                              aborts=aborts, state=state, lock=lock)
     prompts = state.setdefault("prompts", {})
     ready = [n for n in needed if _prompt_ready(prompts.get(str(n)))]
     if aborts:

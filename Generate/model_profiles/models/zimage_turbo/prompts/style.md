@@ -20,7 +20,9 @@ Write one paragraph, with no lists. Make it detailed enough to specify compositi
 
 # 3. Composition
 
-Show the subject named in the segment text in a historically plausible late Ottoman setting (1900 to 1922), with one main subject lit by natural light. Keep the subject, the number of subjects, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
+Show the subject named in the segment text, with one main subject lit by natural light. Take the place, the period and the people's appearance from the segment text and its setting (for the Kazakh steppe story: Kazakh steppe landscape, Kazakh people, the period the text names); never add a nationality, ethnicity or skin tone the text does not mention. Keep the subject, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
+
+When the text says something is absent (for example no saddle), describe the visible state instead (for example a bare horse back).
 
 # 4. Style
 
@@ -28,7 +30,7 @@ Photographic realism with an archival look and muted colours. No cartoon or pain
 
 # 5. Avoid
 
-No text, letters, numbers, logos or signs. No maps, documents or flags anywhere in the frame. No paper or papers either. No close-up faces unless the segment text names a person. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions. No aspect ratio, widescreen or framing terms, and no blank sheets or sheets of paper.
+No text, letters, numbers, logos or signs. No maps, documents or flags anywhere in the frame. No paper or papers either. No close-ups, extreme close-ups or portraits of any face; people stay small in the frame, at a medium or wide distance. No children, babies, boys, girls or young people; if the text mentions them, show adults or no people. Show at most one person, named once and described distinctly (age, clothing colour, hair). Every person wears named clothing; no nudity. No crowds, groups, rows or several people. Show at most one or two horses, vehicles or animals. No small objects and no hand actions with small things. No speaking, shouting, laughing, crying or lip movement. No hands near fire or flames. No battles, charges, gunfire or smoke clouds. No weapons. Add no characters, animals, vehicles or props that the segment text does not name. No anachronisms. No metaphors or emotional wording. No meta tags such as "8K", "masterpiece" or "best quality". The word "photorealistic" may appear only inside a sentence that describes the photo, never as a standalone tag. No drawing instructions. No aspect ratio, widescreen or framing terms, and no blank sheets or sheets of paper.
 
 # 6. Output
 

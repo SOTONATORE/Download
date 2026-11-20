@@ -10,6 +10,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import PromptConfig
 from Generate.core.prompt_check import (
     MAX_REWORK_ATTEMPTS,
+    content_hits,
     find_camera_motion,
     PROBLEM_FORBIDDEN_FORMAT,
     PROBLEM_FORBIDDEN_SHOT_TYPE,
@@ -215,3 +216,46 @@ def test_sheet_of_parchment_gives_phrase_and_stem_problems():
 
 def test_sheet_of_ice_is_not_forbidden():
     assert find_problems("A sheet of ice covers the lake.") == []
+
+
+# ---------------------------------------------------------------- флаг после исправления и остановка пакета
+
+def test_fixed_clip_is_not_flagged(tmp_path):
+    # первичный ответ с нарушением (флаг от шага 6), исправление прошло: флаг снимается, текст без стиля не нужен
+    t = ScriptedTransport([
+        answer(1, "A detailed map of the Balkans on a wooden table."),
+        answer(1, CLEAN),
+    ])
+    res = gp.generate_prompts([seg(1, "The map was drawn.")], [1], cfg_for(tmp_path), t, "m")
+    assert res[0].prompt == CLEAN
+    assert res[0].needs_review is False
+    assert res[0].review_reason == ""
+
+
+def test_people_count_ignores_repeated_mentions():
+    # два человека, названных несколько раз, — это не четыре человека
+    from Generate.core.prompt_check import count_people
+    text = ("An older man with grey hair stands by the wall. Beside him, a middle-aged man stands facing him. "
+            "The older man turns his head. The middle-aged man lowers his gaze.")
+    assert count_people(text) == 2
+    assert content_hits(text, "video") == []
+
+
+def test_people_count_still_flags_three_people_and_crowds():
+    from Generate.core.prompt_check import count_people
+    assert count_people("An old man stands. A woman sits. A girl plays.") == 3
+    assert count_people("A crowd of men gathers. Two riders ride past.") >= 3
+
+
+def test_rework_counter_counts_every_clip_in_batch():
+    # пакет исправления: строки «Prompt for segment_index N:» идут все, считаются все номера
+    from Generate.cli import _ReworkCounter
+
+    class Inner:
+        def generate_json(self, model, system, user, schema):
+            return "[]"
+
+    counter = _ReworkCounter(Inner())
+    user = "Prompt for segment_index 3: a map. x\nPrompt for segment_index 7: a sheet. y\nPrompt for segment_index 9: z"
+    counter.generate_json("m", "s", user, {})
+    assert counter.rework_nums == {3, 7, 9}

@@ -214,7 +214,7 @@ def test_too_long_prompt_keeps_text_flagged(tmp_path):
     long = "x " * 100
     t = FakeTransport([ok([1], long), ok([1], long)])
     res = generate_prompts(make_segments(), [1], cfg, t, "m")
-    assert len(t.calls) == 2
+    assert len(t.calls) == 1   # нарушение правил не повторяется: сразу на исправление
     assert res[0].needs_review and res[0].prompt and "длина" in res[0].review_reason
 
 
@@ -372,10 +372,10 @@ def test_style_violation_retry_gets_fix_note(tmp_path):
     cfg = make_cfg(tmp_path)
     t = FakeTransport([ok([1], "A baker looks thoughtful."), ok([1])])
     res = generate_prompts(make_segments(), [1], cfg, t, "m")
-    assert len(t.calls) == 2 and not res[0].needs_review
+    # нарушение правил не повторяется: один вызов, клип на проверке с причиной (исправление — шаг 6)
+    assert len(t.calls) == 1 and res[0].needs_review
     assert "Fix these issues" not in t.calls[0]["user"]
-    assert "Fix these issues" in t.calls[1]["user"]
-    assert "segment_index: 1:" in t.calls[1]["user"] and "mood or emotion" in t.calls[1]["user"]
+    assert "эмоциональная метка" in res[0].review_reason
 
 
 def test_style_violation_stays_flagged_after_retry(tmp_path):

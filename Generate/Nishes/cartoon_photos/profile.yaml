@@ -1,0 +1,80 @@
+# Generate/Nishes/cartoon_photos/profile.yaml
+# Profile for the cartoon_photos niche (2D educational comic illustrations on Qwen Image 2.1 Turbo).
+
+name: cartoon_photos
+
+# Output type: single image per SRT segment
+type: image
+
+# Frame size: 16:9, matching final ImageScale 511 in workflow.json
+width: 1920
+height: 1080
+
+# On-frame text enabled; text LLM family (nemotron-super-vl: nvidia/nemotron-3.5-super-vl:free)
+allow_text: true
+text_model: nemotron-super-vl
+
+# References disabled: pure text-to-image graph (Variant A), LoadImage nodes removed
+refs_enabled: false
+
+# seed: run — one seed per run; bound to KSampler 488 in bindings.json
+seed_mode: run
+
+# Relaxed verification rules: art_medium, small_objects, emotion (allow_text adds frame_text);
+# core safety rules (children, nudity, character count, weapons, etc.) remain enforced
+relaxed_rules: [art_medium, small_objects, emotion]
+
+# Clips per request batch: 15 for regular batches and for fix/rework rounds (English: one size for both);
+# 15 клипов в батче — и для обычных батчей, и для раундов исправлений (единый размер)
+batch_size: 15
+
+# Form of one request batch: passage — one text per batch with a setting field per segment (only this niche);
+# blocks (or no key) — the earlier block form, one block per segment
+prompt_batch_form: passage
+
+# Language of on-frame text: srt — detected from the current run SRT in code
+text_language: "srt"
+
+# Prompt verification flags: only active for this niche
+rework_style_flag_without_refs: true
+fail_on_needs_review: true
+fail_on_duplicate_prompts: true
+
+# Unfixed clip after all repair rounds: keep in needs_review without stopping early
+on_unfixed: keep
+
+# Take all segments from SRT; missing.txt is not read
+segments: all
+
+# Diagnostics: write raw model responses to <artifact>/raw as <niche>_<wave>_<round>_<batch>.txt
+debug:
+  dump_raw_responses: true
+
+# Character limit is configured in prompts/rules.yaml (max_characters)
+
+# Maximum prompt length in characters
+max_prompt_chars: 6000
+
+# ComfyUI API workflow, bindings and output image node (SaveImageAdvanced)
+workflow:
+  file: "Generate/Nishes/cartoon_photos/workflow.json"
+  bindings_file: "Generate/Nishes/cartoon_photos/bindings.json"
+  output: {node_id: "461", type: image}
+
+# Prompt style guide matching the clean 2D editorial comic reference style
+prompt_style: "Generate/Nishes/cartoon_photos/prompts/style.md"
+
+# Generation parameters from workflow.json (KSampler 488, ImageScale 511 lanczos)
+params:
+  cfg: 1                         # KSampler (488): cfg
+  steps: 8                       # KSampler (488): steps
+  sampler: "er_sde"              # KSampler (488): sampler_name
+  scheduler: "linear_quadratic"  # KSampler (488): scheduler
+  resolution: "1920x1080"        # ImageScale (511): width, height
+  upscale: "lanczos 1920x1080 (ImageScale 511)"  # ImageScale (511): upscale_method, crop center
+
+# Model weights from weights.json (matching workflow.json loaders)
+model_files:
+  unet: "qwen_image_2.1_turbo_int8_convrot.safetensors"
+  clip: "qwen3vl_8b_int8_convrot.safetensors"
+  vae: "qwen_image_2.1_vae_bf16.safetensors"

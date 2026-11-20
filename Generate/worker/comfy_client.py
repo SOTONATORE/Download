@@ -20,11 +20,17 @@ DEFAULT_TIMEOUT = 600.0
 REQUIRED_BINDINGS = ("prompt", "num_frames", "seed", "filename_prefix")
 # Для профиля изображения num_frames не нужен: он не требуется и не подставляется
 IMAGE_REQUIRED_BINDINGS = ("prompt", "seed", "filename_prefix")
+# Число слотов референсов в workflow: узлы LoadImage ref_1…ref_10 и входы images.image_1…image_10 узла промпта
+REF_SLOTS = 10
 PROFILE_TYPES = ("video", "image")
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".mkv", ".gif")
 # Файлы изображений для профиля типа image (фото): берутся, только если видео в результате нет
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 OUTPUT_KINDS = ("videos", "gifs", "images")
+# Узел промпта Qwen Image 2.1: при refs=() его латент заменяется на EmptyLatentImage (профиль изображения)
+QWEN_TEXT_NODE = "TextEncodeQwenImage21"
+# Длина текста ошибки узла в сообщении (защита от длинных ответов ComfyUI)
+NODE_ERROR_TEXT_LIMIT = 160
 # Тип профиля, назначенный после переключения модели (set_profile_type); None — брать из окружения
 _profile_type_override: Optional[str] = None
 
@@ -93,10 +99,111 @@ def profile_type() -> str:
     return value
 
 
+def _apply_refs(graph: dict, bindings: dict, refs: tuple) -> None:
+    """Оставляет в workflow только референсы refs (номера 1…10) и меняет граф на месте.
+
+    Узел промпта — тот, что в привязке «prompt»; у него входы images.image_1…images.image_K.
+    Неиспользуемый референс: его узел LoadImage удаляется, а все входы images.image_* узла промпта
+    убираются. Используемые референсы: LoadImage получает ref_N.png, входы images.image_1…images.image_K
+    идут по возрастанию N, так что наименьший номер попадает в image_1. Другие входы узла не меняются.
+    """
+    prompt_binding = bindings.get("prompt")
+    if not isinstance(prompt_binding, dict) or "node_id" not in prompt_binding:
+        raise ComfyError("Для референсов в привязках нет узла промпта «prompt».")
+    text_id = str(prompt_binding["node_id"])
+    text_node = graph.get(text_id)
+    if not isinstance(text_node, dict) or not isinstance(text_node.get("inputs"), dict):
+        raise ComfyError(f"В workflow нет узла промпта «{text_id}» для референсов.")
+    inputs = text_node["inputs"]
+    ref_nodes = {}  # номер референса -> id узла LoadImage из привязки ref_N
+    for n in range(1, REF_SLOTS + 1):
+        binding = bindings.get(f"ref_{n}")
+        if isinstance(binding, dict) and "node_id" in binding:
+            ref_nodes[n] = str(binding["node_id"])
+    for n in refs:
+        if n not in ref_nodes:
+            raise ComfyError(f"Для референса {n} нет привязки «ref_{n}».")
+    # входы images.image_* должны вести только на узлы референсов: иначе их нельзя безопасно переписать
+    known_ids = set(ref_nodes.values())
+    for key, value in inputs.items():
+        if key.startswith("images.image_"):
+            if not isinstance(value, list) or not value or str(value[0]) not in known_ids:
+                raise ComfyError(f"Вход «{key}» узла промпта ведёт не на привязанный референс.")
+    # 1. неиспользуемые референсы: удаляем их узлы LoadImage
+    for n, node_id in ref_nodes.items():
+        if n in refs:
+            continue
+        node = graph.get(node_id)
+        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+            raise ComfyError(f"Привязка «ref_{n}» должна указывать на узел LoadImage.")
+        del graph[node_id]
+    # 2. убираем все входы images.image_* узла промпта; используемые переподключим ниже
+    for key in [k for k in inputs if k.startswith("images.image_")]:
+        del inputs[key]
+    # 3. используемые референсы по возрастанию номера: image_1 получает наименьший
+    for slot, n in enumerate(sorted(refs), start=1):
+        _set_input(graph, bindings[f"ref_{n}"], f"ref_{n}", f"ref_{n}.png")
+        inputs[f"images.image_{slot}"] = [ref_nodes[n], 0]
+    # журнал: какие референсы задачи легли в какие слоты ComfyUI (проверка «рефы доехали»)
+    log.info("Референсы задачи: %s; слоты: %s.", list(refs),
+             ", ".join(f"image_{slot}=ref_{n}" for slot, n in enumerate(sorted(refs), start=1)))
+
+
+def _free_node_id(graph: dict) -> str:
+    """Свободный id узла: наибольший числовой id + 1 (ComfyUI принимает строковые id)."""
+    numeric = [int(k) for k in graph if str(k).isdigit()]
+    return str((max(numeric) if numeric else 0) + 1)
+
+
+def _target_size(graph: dict) -> tuple:
+    """Размер выходного кадра из узла ImageScale, округлённый вверх до кратного 32 (латент SD-подобных моделей).
+
+    Для 1080 высоты результат 1088: так латент не обрезается центральным кропом ImageScale (crop=center).
+    Если узла ImageScale нет, размер неизвестен: это ошибка, а не подстановка по умолчанию.
+    """
+    scales = sorted((k for k, n in graph.items()
+                     if isinstance(n, dict) and n.get("class_type") == "ImageScale"), key=str)
+    for node_id in scales:
+        inputs = graph[node_id].get("inputs") or {}
+        width, height = inputs.get("width"), inputs.get("height")
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            return (-(-width // 32)) * 32, (-(-height // 32)) * 32
+    raise ComfyError("В workflow нет узла ImageScale с размером кадра: пустой латент не может быть подставлен.")
+
+
+def _replace_text_latent_with_empty(graph: dict) -> None:
+    """Для 0 референсов: latent_image у KSampler, взятый из TextEncodeQwenImage21, заменяется на EmptyLatentImage.
+
+    Без этого ComfyUI берёт латент узла промпта без картинок (1024x1024), и ImageScale с crop=center обрезает
+    кадр по вертикали. Узел вставляется новым id; граф меняется на месте (копия уже сделана в inject_workflow).
+    Граф без KSampler с латентом из TextEncodeQwenImage21 не меняется.
+    """
+    size = None  # размер узнаём только при реальной замене: граф без таких KSampler не требует ImageScale
+    for node in list(graph.values()):  # список: в граф добавляется узел, словарь нельзя менять на ходу
+        if not isinstance(node, dict) or node.get("class_type") != "KSampler":
+            continue
+        inputs = node.get("inputs")
+        link = inputs.get("latent_image") if isinstance(inputs, dict) else None
+        if not isinstance(link, list) or not link:
+            continue
+        source = graph.get(str(link[0]))
+        if not isinstance(source, dict) or source.get("class_type") != QWEN_TEXT_NODE:
+            continue
+        if size is None:
+            size = _target_size(graph)
+        width, height = size
+        new_id = _free_node_id(graph)
+        graph[new_id] = {"class_type": "EmptyLatentImage",
+                         "inputs": {"width": width, "height": height, "batch_size": 1}}
+        inputs["latent_image"] = [new_id, 0]
+        log.info("Референсов нет: латент KSampler заменён на пустой %dx%d (узел %s).", width, height, new_id)
+
+
 def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frames: int,
                     seed: int, filename_prefix: str,
                     extra_inputs: Optional[dict] = None,
-                    second_seed: Optional[int] = None) -> dict:
+                    second_seed: Optional[int] = None,
+                    refs: Optional[tuple] = None) -> dict:
     """Возвращает глубокую копию workflow с подставленными значениями.
 
     bindings: {имя: {"node_id": "6", "field": "text"}}. Обязательные имена:
@@ -104,6 +211,7 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
     каждое имя должно присутствовать в bindings.
     second_seed: сид нешифрованного (не привязанного) RandomNoise, то есть второго прохода;
     None = новый случайный сид. Привязанный сид (первый проход) задаётся только через bindings.
+    refs: отсортированный кортеж номеров референсов задачи (1…10); None = поле не передано, workflow не меняется.
     """
     is_image = profile_type() == "image"
     required = IMAGE_REQUIRED_BINDINGS if is_image else REQUIRED_BINDINGS
@@ -121,6 +229,11 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
         if name not in bindings:
             raise ComfyError(f"Для дополнительного входа «{name}» нет привязки.")
         _set_input(graph, bindings[name], name, value)
+    if refs is not None:
+        _apply_refs(graph, bindings, refs)
+        if is_image and len(refs) == 0:
+            # 0 референсов в профиле изображения: пустой латент нужного размера вместо латента узла промпта
+            _replace_text_latent_with_empty(graph)
     # второй проход: каждый RandomNoise, которого нет в привязках, получает сид этого запуска
     bound_nodes = {str(b["node_id"]) for b in bindings.values()
                    if isinstance(b, dict) and "node_id" in b}
@@ -184,6 +297,28 @@ def extract_output_path(entry: dict) -> str:
 # Клиент
 # ---------------------------------------------------------------------------
 
+def _node_errors_text(body: Any) -> str:
+    """Короткая сводка node_errors из ответа 400 ComfyUI: «узел 507 (LoadImage): <пояснение>».
+
+    Поля details и входы узла не берутся: там может оказаться текст промпта или пути к файлам.
+    """
+    if not isinstance(body, dict):
+        return ""
+    node_errors = body.get("node_errors")
+    if not isinstance(node_errors, dict) or not node_errors:
+        return ""
+    parts = []
+    for node_id in sorted(node_errors, key=str)[:10]:
+        info = node_errors[node_id] if isinstance(node_errors[node_id], dict) else {}
+        class_type = str(info.get("class_type") or "?")
+        errors = info.get("errors") if isinstance(info.get("errors"), list) else []
+        first = errors[0] if errors and isinstance(errors[0], dict) else {}
+        text = str(first.get("message") or first.get("type") or "без пояснения")
+        text = " ".join(text.split())[:NODE_ERROR_TEXT_LIMIT]
+        parts.append(f"узел {node_id} ({class_type}): {text}")
+    return "; ".join(parts)
+
+
 class ComfyClient:
     def __init__(self, base_url: str = DEFAULT_BASE_URL, timeout: float = DEFAULT_TIMEOUT,
                  client: Optional[httpx.Client] = None) -> None:
@@ -223,6 +358,7 @@ class ComfyClient:
         resp = self._request("POST", "/prompt", json={"prompt": prompt_workflow})
         if resp.status_code != 200:
             detail = ""
+            nodes = ""
             try:
                 body = resp.json()
                 err = body.get("error") if isinstance(body, dict) else None
@@ -230,10 +366,16 @@ class ComfyClient:
                     detail = str(err.get("message") or "")
                 elif err:
                     detail = str(err)
+                nodes = _node_errors_text(body)
             except ValueError:
                 pass
+            if nodes:
+                # узлы с ошибками: только id, класс и короткое пояснение; текст промпта и входы не выводим
+                log.warning("ComfyUI отклонил граф (код %d): %s.", resp.status_code, nodes)
             raise ComfyExecutionError(
-                f"ComfyUI отклонил задачу (код {resp.status_code})" + (f": {detail}" if detail else "."))
+                f"ComfyUI отклонил задачу (код {resp.status_code})"
+                + (f": {detail}" if detail else ".")
+                + (f" Узлы с ошибками: {nodes}." if nodes else ""))
         data = self._json(resp, "prompt")
         prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
         if not prompt_id:

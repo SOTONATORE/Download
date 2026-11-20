@@ -487,3 +487,55 @@ def test_kill_cards_list_error_exits_nonzero_and_prints_warning(capsys, monkeypa
     captured = capsys.readouterr()
     assert code == cli.EXIT_RUNTIME
     assert cli.LIST_UNRELIABLE_LINE in captured.err
+
+
+# ---------------------------------------------------------------- метки testwf-<номер> (тестовый прогон)
+# Карты тестового прогона (workflow_ab_test) получают метку testwf-<run-id>. Уборка обязана
+# разбирать их так же, как gen-*: завершённый запуск -> карта уничтожается, идущий и молодой -> оставляется.
+
+@pytest.mark.parametrize("label, run_id", [
+    ("testwf-123", "123"),
+    ("testwf-abc", None),              # номер не цифры -> метка не разобрана
+    ("testwf-", None),
+    ("testwf-12a", None),
+    ("testwf-1\nx", None),             # fullmatch: перевод строки не пропускается
+])
+def test_parse_testwf_label(label, run_id):
+    assert cli.parse_card_label(label) == run_id
+
+
+def test_cleanup_destroys_finished_testwf_and_keeps_active_young(cleanup_env):
+    FakeCleanupVast.instances = [
+        _inst(1, "testwf-10", YOUNG),      # запуск завершён -> уничтожить
+        _inst(2, "testwf-11", YOUNG),      # запуск идёт, карта молодая -> оставить
+    ]
+    fn = _status_fn({"10": "completed", "11": "in_progress"})
+    out = []
+    result = cli.cleanup_cards(FakeCleanupVast(), run_status_fn=fn, now=NOW, out=out.append)
+    assert FakeCleanupVast.destroyed == [1]
+    assert 2 not in FakeCleanupVast.destroyed
+    assert (result.destroyed, result.kept, result.failed) == (1, 1, 0)
+    assert result.exit_code == 0
+    assert sorted(fn.asked) == ["10", "11"]     # статус запрашивается по номеру из метки
+    assert any("Карта 2: оставлена" in line for line in out)
+    assert any("Карта 1: уничтожается" in line for line in out)
+
+
+def test_cleanup_testwf_old_active_card_is_destroyed(cleanup_env):
+    # правило шести часов общее для всех меток: идущий запуск, но карта старше 6 ч -> уничтожить
+    FakeCleanupVast.instances = [_inst(3, "testwf-12", OLD)]
+    fn = _status_fn({"12": "in_progress"})
+    result = cli.cleanup_cards(FakeCleanupVast(), run_status_fn=fn, now=NOW, out=lambda s: None)
+    assert FakeCleanupVast.destroyed == [3]
+    assert result.destroyed == 1 and result.kept == 0
+
+
+def test_cleanup_testwf_unparsed_label_is_not_asked_for_status(cleanup_env):
+    # testwf-abc: номер не разобран, статус не запрашивается; по правилу меток неразобранная
+    # карта уничтожается при любом статусе (как gen-abc), поэтому карта молодая -> уничтожить
+    FakeCleanupVast.instances = [_inst(4, "testwf-abc", YOUNG)]
+    fn = _status_fn({})
+    result = cli.cleanup_cards(FakeCleanupVast(), run_status_fn=fn, now=NOW, out=lambda s: None)
+    assert fn.asked == []
+    assert FakeCleanupVast.destroyed == [4]
+    assert (result.destroyed, result.kept) == (1, 0)

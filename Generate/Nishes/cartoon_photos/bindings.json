@@ -1,0 +1,14 @@
+{
+  "prompt": {
+    "node_id": "491",
+    "field": "prompt"
+  },
+  "seed": {
+    "node_id": "488",
+    "field": "seed"
+  },
+  "filename_prefix": {
+    "node_id": "461",
+    "field": "filename_prefix"
+  }
+}

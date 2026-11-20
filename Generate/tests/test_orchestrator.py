@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import deque
 import sys
 import types
@@ -67,6 +68,9 @@ class FakeClock:
 
     def sleep(self, sec: float) -> None:
         self.now += sec
+        # уступаем реальному фоновому потоку (release-uploader), иначе цикл крутит тысячи виртуальных
+        # шагов до его конца и ложно срабатывают job_deadline_min и drain_grace_sec
+        time.sleep(0.001)
 
 
 class FakeStore(orch.ReleaseStore):
@@ -257,6 +261,8 @@ class FakeWorker:
         self.stats_reply = None      # ответ /system_stats (код, тело) или None = 404
         self.logs_text = ""          # текст GET /logs (строки лога карты)
         self.health_hits = []        # время каждого GET /health с верным токеном
+        # Одна карта = одна видеокарта: рендеры идут строго по очереди, без параллели.
+        self._gpu_free_at = 0.0      # момент, когда GPU освободится от уже принятых задач
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.urls.append(str(request.url))
@@ -289,15 +295,23 @@ class FakeWorker:
             tid = f"t{self._seq}"
             plan = self.plan.get(num, [])
             outcome = plan.pop(0) if plan else "ok"
-            self.tasks[tid] = {"num": num, "started": self.clock(), "outcome": outcome}
+            # Старт рендера: не раньше текущего времени и не раньше освобождения GPU (последовательно).
+            render_start = max(self.clock(), self._gpu_free_at)
+            self._gpu_free_at = render_start + self.render_sec
+            self.tasks[tid] = {"num": num, "started": self.clock(), "render_start": render_start,
+                               "outcome": outcome}
             return httpx.Response(200, json={"id": tid})
         if method == "GET" and path.startswith("/task/"):
             t = self.tasks[path.rsplit("/", 1)[1]]
-            if t["outcome"] == "error":
+            now = self.clock()
+            if t["outcome"] == "error" and now >= t["render_start"]:
                 return httpx.Response(200, json={self.key: "error", "error": f"сбой {self.error_text}"})
-            if t["outcome"] == "ok" and self.clock() - t["started"] >= self.render_sec:
+            if t["outcome"] == "ok" and now >= t["render_start"] + self.render_sec:
                 return httpx.Response(200, json={self.key: "done"})
-            return httpx.Response(200, json={self.key: "running"})
+            if now >= t["render_start"]:
+                return httpx.Response(200, json={self.key: "running"})
+            # GPU ещё занят предыдущими задачами: клип стоит в очереди воркера
+            return httpx.Response(200, json={self.key: "queued"})
         if method == "GET" and path.startswith("/file/"):
             t = self.tasks[path.rsplit("/", 1)[1]]
             return httpx.Response(200, content=f"MP4-{t['num']}".encode())
@@ -402,7 +416,7 @@ def test_happy_path(tmp_path, monkeypatch, caplog):
     # порядок этапов
     ev = rig.events
     assert ev.index("release_create") < ev.index("gemini") < ev.index("vast_create")
-    assert ev.index("vast_create") < ev.index("upload:1.mp4") < ev.index("ack:1")
+    assert ev.index("vast_create") < ev.index("ack:1") < ev.index("upload:1.mp4")
     assert ev.index("ack:2") < ev.index("destroy_by_label")
     assert rig.worker.bad_token == 0
     _no_secrets(caplog.text)
@@ -538,8 +552,9 @@ def test_failed_cheapest_offer_climbs_to_next_cheapest(tmp_path, monkeypatch):
 
 def test_job_deadline_drains_inflight_and_returns_partial(tmp_path, monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1, job_deadline_min=1,
-              worker_kw={"render_sec": 80.0})
+    # глубина очереди карты 1: второй клип не ставится в очередь воркера заранее
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1, max_card_queue_depth=1,
+              job_deadline_min=1, worker_kw={"render_sec": 80.0})
     summary = rig.run()
 
     assert summary.deadline_reached is True
@@ -608,7 +623,9 @@ def test_ordinary_render_error_still_retries_and_run_goes_on(tmp_path, monkeypat
 def test_out_of_memory_stops_run_without_retry_or_new_card(tmp_path, monkeypatch, caplog):
     """P1: out of memory на клипе — без повтора и без новой карты; запуск останавливается штатным путём."""
     caplog.set_level(logging.INFO)
-    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1, worker_kw={"error_text": OOM_TEXT})
+    # глубина очереди карты 1: второй клип не ставится в очередь воркера до ошибки первого
+    rig = Rig(tmp_path, monkeypatch, missing=(1, 2), max_cards=1, max_card_queue_depth=1,
+              worker_kw={"error_text": OOM_TEXT})
     rig.worker.plan[1] = ["error"]
     summary = rig.run()
 
