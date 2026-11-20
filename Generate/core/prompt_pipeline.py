@@ -39,11 +39,45 @@ DUP_REWORK_MAX_PASSES = 3   # сколько проходов дедуплика
 # cartoon_photos (batch_passage): монотонность соседних клипов — окно из стольких номеров и порог сходства сцены
 MONOTONY_WINDOW = 3
 MONOTONY_JACCARD = 0.85
-_APPEARANCE_RX = re.compile(r"the main character has[^.]*\.", re.I)   # повторяемое описание героя — не сцена
-# Русский: типовой текст персонажей и стиля (Type B / Type C) не должен занижать различие сцен
-_BOILERPLATE_RX = re.compile(r"has warm natural skin tones[^.]*\.|has proportional cartoon limbs[^.]*\.|"
-                             r"small black dot eyes[^.]*\.|smooth closed (?:black )?(?:ink )?outlines|"
-                             r"flat matte (?:earthy )?fills", re.I)
+# Русский: повторяемое описание героя — не сцена; «the main character» — роль, а не сцена (глаголы и предметы остаются)
+_APPEARANCE_RX = re.compile(r"the main character has[^.]*\.|\bthe main character\b", re.I)
+# Русский: типовой текст персонажей, наряда и стиля (style.md повторяет его в каждом промпте) не должен занижать
+# различие сцен. Фразы ищутся независимо от порядка клауз и от «with/and» перед ними; предметы, места и действия
+# (stakes, twine, digging fork, basket, cellar, farm shop и т. п.) сюда не входят.
+_BOILERPLATE_RX = re.compile(
+    # старые правила «до точки»: предложение целиком типовое, сохранены без изменений
+    r"has warm natural skin tones[^.]*\.|has proportional cartoon limbs[^.]*\.|small black dot eyes[^.]*\.|"
+    # голова и тело главного героя
+    r"(?:(?:with|and)\s+)?a\s+large\s+smooth\s+pure-white\s+round\s+head|"
+    r"(?:(?:with|and)\s+)?a\s+crisp\s+medium-fine\s+black\s+ink\s+outline|"
+    r"(?:(?:with|and)\s+)?small\s+(?:solid\s+)?black\s+dot\s+eyes|"
+    r"(?:(?:and|with)\s+)?a\s+plain(?:\s+thin)?\s+solid-black\s+stick\s+(?:torso|body)|"
+    r"(?:(?:with|and)\s+)?(?:thin\s+|simple\s+)?black\s+stick\s+(?:arms|hands|legs)|"
+    # мимика: один рот на лице
+    r"(?:a\s+)?(?:closed-line\s+(?:smile|mouth)|(?:worried\s+wavy|wavy\s+worried|open\s+O-shaped)\s+mouth)|"
+    r"one\s+mouth\s+expression(?:\s+showing)?|"
+    # рост в кадре (доля высоты кадра)
+    r"(?:at\s+about\s+)?(?:\d+|twenty|forty|fifty|sixty)\s+percent\s+of\s+image\s+height|"
+    # взрослые персонажи и макро-руки: пропорции, кожа, волосы, нос, брови
+    r"(?:a\s+)?head\s+about\s+one\s+fifth\s+of\s+body\s+height|"
+    r"(?:a\s+)?proportional\s+(?:cartoon|clothed|2d)\s+(?:body|figure|limbs)|"
+    r"(?:(?:with|and)\s+)?warm\s+natural\s+skin\s+tones|"
+    r"(?:(?:with|and)\s+)?simple\s+rounded\s+fingers|"
+    r"simple\s+(?:solid(?:-colou?r)?\s+|(?:brown|dark|black|light|gray|grey)\s+)?hair|"
+    r"(?:a\s+)?small\s+curved-line\s+nose|"
+    r"(?:(?:with|and)\s+)?(?:raised|relaxed|neutral|expressive|lifted)(?:\s+expressive)?(?:\s+thin\s+curved)?\s+eyebrows|"
+    # контур и заливка из общего стиля
+    r"(?:smooth|crisp)\s+closed\s+(?:black\s+)?(?:ink\s+)?outlines|"
+    r"flat\s+(?:matte\s+)?(?:earthy\s+|muted\s+)?fills|"
+    # фиксированные наряды ролей (одежда одна на весь ролик)
+    r"(?:(?:wearing|wears)\s+)?(?:"
+    r"muted\s+rust\s+plaid\s+flannel\s+shirt,?\s+medium-blue\s+denim\s+overalls\s+and\s+brown\s+boots|"
+    r"muted\s+sage\s+sweater\s+and\s+medium-brown\s+trousers|"
+    r"white\s+lab\s+coat\s+and\s+eyeglasses|"
+    r"white\s+jacket\s+and\s+tall\s+white\s+cap|"
+    r"muted\s+brown\s+work\s+shirt,?\s+tan\s+trousers,?\s+brown\s+boots\s+and\s+a\s+tan\s+hard\s+hat|"
+    r"period\s+tunic\s+and\s+trousers)",
+    re.I)
 # Русский: серия из трёх подряд клипов одного вида кадра (setting до «:») с перекрытием слов соседей
 MONOTONY_RUN = 3
 MONOTONY_RUN_JACCARD = 0.65

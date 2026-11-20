@@ -53,10 +53,25 @@ _STEM_EXCLUDE = {
 # Глагол «forms» («chain forms a curved bridge», «forms into a ring») описывает форму, как «forming» и «formed».
 # Слово «forms» во множественном числе бывает и бланком («stack of forms»), поэтому оно не добавляется в
 # _STEM_EXCLUDE целиком: исключение только при глагольном окружении — перед a / an / the / into.
-# Регулярное выражение задаётся здесь целиком (без экранирования), как просмотр вперёд.
+# Бланки с прилагательным перед словом («paper forms», «printed forms», «application forms») остаются запрещёнными.
+# Регулярные выражения задаются здесь целиком (без экранирования), как просмотр вперёд. Все просмотры назад
+# фиксированной ширины: стандартный модуль re не принимает переменную ширину внутри (?<!...) и (?<=...).
+#   1) «forms» во множественном числе перед предлогом или артиклем, но не после слов, обозначающих бланк;
+#   2) глагол «form» в значении «образуют» («two strokes form a red X»), не после артиклей и слов-бланков;
+#   3) идиома «in the form of» («в виде»);
+#   4) «each form is», «its form looks», «their form remains»: форма предмета, а не бланк.
+_FORM_PREP_AFTER = r"(?=\s+(?:a|an|the|into|on|around|over|along|in|at|above|below|across|under|between|against|beside|near)\b)"
 _STEM_EXCLUDE_VERB_RE = {
-    "form": (r"(?<!\bof )(?<!\btax )(?<!\bblank )forms(?=\s+(?:a|an|the|into|on|around|over|along|in|at|above|below|"
-             r"across|under|between|against|beside|near)\b)",),
+    "form": (
+        r"(?<!\bof )(?<!\btax )(?<!\bblank )(?<!\bpaper )(?<!\bprinted )(?<!\border )(?<!\bapplication )"
+        r"(?<!\bentry )forms" + _FORM_PREP_AFTER,
+        r"(?<!\ba )(?<!\ban )(?<!\bthe )(?<!\bof )(?<!\bblank )(?<!\btax )(?<!\bpaper )(?<!\bprinted )"
+        r"(?<!\border )(?<!\bapplication )(?<!\bentry )form" + _FORM_PREP_AFTER,
+        r"(?<=\bin the )form(?=\s+of\b)",
+        r"(?<=\beach )form(?=\s+(?:is|looks|appears|stays|remains)\b)",
+        r"(?<=\bits )form(?=\s+(?:is|looks|appears|stays|remains)\b)",
+        r"(?<=\btheir )form(?=\s+(?:is|looks|appears|stays|remains)\b)",
+    ),
 }
 
 
@@ -382,9 +397,13 @@ def animal_plurals_by_count(max_characters: Optional[int], animals_count: bool =
 # Стрельба: «shoot at», «shooting at», «shoot back», «shot at» и «shoots at <цель>». Множественное «shoots at» —
 # ещё и ростки растения («new shoots at the base»), поэтому оно не считается стрельбой, если перед ним стоит
 # ботаническое слово или за ним идёт место на растении («the base», «the soil» и т.п.).
-_BOTANICAL_BEFORE = ("new", "green", "pale", "young", "fresh", "thin", "small", "weed", "plant", "tuber")
+_BOTANICAL_BEFORE = ("new", "green", "pale", "young", "fresh", "thin", "small", "weed", "plant", "tuber",
+                    "unwanted", "wild", "tender", "leafy", "tiny", "tall", "short", "thick", "sprouting",
+                    "emerging", "volunteer")
 _BOTANICAL_AFTER = ("base", "soil", "surface", "ground", "root", "roots", "stem", "stems", "edge", "top", "bottom",
-                    "center", "centre", "side", "sides", "corner", "corners", "plant", "plants", "tuber", "tubers")
+                    "center", "centre", "side", "sides", "corner", "corners", "plant", "plants", "tuber", "tubers",
+                    "lower", "upper", "left", "right", "far", "middle", "foreground", "background", "front",
+                    "field", "patch", "plot", "pot", "pots", "tray", "earth", "horizon")
 _SHOOT_RX_PART = (
     r"(?:shoot|shooting) (?:at|back)|shot at|"
     + "".join(r"(?<!\b" + w + r" )" for w in _BOTANICAL_BEFORE)

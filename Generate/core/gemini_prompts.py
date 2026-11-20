@@ -1060,8 +1060,15 @@ _ZERO_RX = re.compile(r"\bzero\s+(?:characters?|people|persons?|figures?|text|la
 _CLOTHING_TYPE_B_RX = re.compile(r"\b(?:shirts?|trousers|pants|sweaters?|jackets?|overalls|boots|lab coats?|suits?)\b", re.I)
 _HERO_ROUND_HEAD_RX = re.compile(r"\bpure-white round head\b", re.I)
 _MOUTH_ABOVE_RX = re.compile(r"\bmouth\b[^.]{0,25}\babove\b", re.I)
-_CLOSED_MOUTH_RX = re.compile(r"\bclosed-line (?:mouth|smile)\b", re.I)
-_OTHER_MOUTH_RX = re.compile(r"\b(?:wavy worried mouth|worried wavy mouth|open O-shaped mouth)\b", re.I)
+# Русский: четыре канонических типа рта из style.md; два разных типа у одного персонажа — конфликт, один тип дважды — нет
+_MOUTH_TYPE_RXS = (
+    re.compile(r"\bclosed-line mouth\b", re.I),
+    re.compile(r"\bclosed-line smile\b", re.I),
+    re.compile(r"\bopen O-shaped mouth\b", re.I),
+    re.compile(r"\b(?:wavy worried|worried wavy) mouth\b", re.I),
+)
+# Русский: определённые слова перед ссылкой на персонажа — повтор того же персонажа («the farmer»), не второй
+_DEFINITE_WORDS = frozenset({"the", "his", "her", "their", "its", "this", "that", "such"})
 _GROUP_WORDS_RX = re.compile(r"\b(?:two|three|four|five|several|many|group|crowd|villagers|people|men|women|figures|children)\b",
                              re.I)
 _SINGLE_CHARACTER_RX = re.compile(r"\bcharacter\b", re.I)
@@ -1792,23 +1799,55 @@ def _type_b_on_hero(text: str) -> bool:
     return False
 
 
-def _mouth_conflict(text: str) -> bool:
-    """Рот «выше» головы или два взаимоисключающих рта у одного персонажа.
+def _mouth_types(text: str) -> set:
+    """Русский: индексы канонических типов рта, найденных в тексте (порядок — как в _MOUTH_TYPE_RXS)."""
+    return {i for i, rx in enumerate(_MOUTH_TYPE_RXS) if rx.search(text)}
 
-    Русский: в кадре с одним персонажем оба рта — конфликт. Если персонажей несколько (группа или второй
-    персонаж по роли), конфликт только когда оба рта стоят в одной клаузе с одной ссылкой на персонажа.
+
+def _has_multiple_characters(text: str) -> bool:
+    """Русский: в кадре больше одного персонажа.
+
+    Да, если есть группа; есть главный герой и второй персонаж по роли; или второй персонаж назван
+    по роли два раза и более как новое введение. Повтор «the farmer» (определённое слово перед ролью)
+    и соседние слова одной фразы («adult figure») вторым персонажем не считаются.
+    """
+    if _GROUP_WORDS_RX.search(text):
+        return True
+    if _HERO_NAME_RX.search(text) and _SECOND_CHARACTER_RX.search(text):
+        return True
+    introductions = 0
+    last_end = None
+    for m in _SECOND_CHARACTER_RX.finditer(text):
+        adjacent = last_end is not None and m.start() - last_end <= 2   # «adult figure»: одна фраза
+        last_end = m.end()
+        if adjacent:
+            continue
+        before = re.findall(r"\b\w+\b", text[:m.start()])[-3:]
+        if any(w.lower() in _DEFINITE_WORDS for w in before):           # «the farmer»: тот же персонаж
+            continue
+        introductions += 1
+        if introductions >= 2:
+            return True
+    return False
+
+
+def _mouth_conflict(text: str) -> bool:
+    """Рот «выше» головы или два разных взаимоисключающих рта у одного персонажа.
+
+    Русский: один персонаж (в том числе названный по роли и повторно: «a farmer … the farmer») — два разных
+    типа рта в тексте конфликт. Повтор одного и того же типа не конфликт. Если персонажей несколько (группа
+    или второй персонаж по роли), конфликт только когда оба рта стоят в одной клаузе с одной ссылкой на персонажа.
     """
     if _MOUTH_ABOVE_RX.search(text):
         return True
-    if not (_CLOSED_MOUTH_RX.search(text) and _OTHER_MOUTH_RX.search(text)):
+    if len(_mouth_types(text)) < 2:
         return False
-    multi = bool(_GROUP_WORDS_RX.search(text) or _SECOND_CHARACTER_RX.search(text))
-    if not multi:
-        return bool(_SINGLE_CHARACTER_RX.search(text))
+    if not _has_multiple_characters(text):
+        # Русский: одиночный персонаж — нужна хотя бы одна ссылка на персонажа в тексте
+        return bool(_SINGLE_CHARACTER_RX.search(text) or _SECOND_CHARACTER_RX.search(text))
     for sentence in re.split(r"(?<=[.!?])\s+", text):
         for clause in _CLAUSE_SPLIT_RX.split(sentence):
-            if (_CLOSED_MOUTH_RX.search(clause) and _OTHER_MOUTH_RX.search(clause)
-                    and len(_CHARACTER_REF_RX.findall(clause)) <= 1):
+            if len(_mouth_types(clause)) >= 2 and len(_CHARACTER_REF_RX.findall(clause)) <= 1:
                 return True
     return False
 
@@ -2680,7 +2719,10 @@ class SharedBatchPool:
             self._cond.notify_all()
             self._cond.wait_for(lambda: set(self._shares) <= self._arrived)
             if self._per_wave_cap:
-                return max(1, min(int(self._shares[wave]), len(job.batches)))
+                # Русский: батчей может не быть (только исправления) — тогда потоки считаются по пакетам исправлений
+                rework_pkgs = ((len(job.rework_queue) + job.fix_batch_size - 1) // job.fix_batch_size
+                               if job.rework_queue else 0)
+                return max(1, min(int(self._shares[wave]), max(len(job.batches), rework_pkgs)))
             other_has_work = any(j is not None and (j.batches or j.rework_queue)
                                  for w, j in self._jobs.items() if w != wave)
             if other_has_work:
@@ -2962,9 +3004,16 @@ def generate_prompts(segments: list, wanted_nums: list, cfg: PromptConfig,
             for th in threads:
                 th.join()
         # исправления очереди этой волны: потоков уже нет; раунды по барьеру, пакеты раунда — параллельно
+        # Русский: потоки исправлений берутся по ключам, а не по числу главных батчей (при пустых batches — тоже)
+        if provider == "openrouter":
+            fix_max_workers = max(1, max_workers)
+        else:
+            fix_max_workers = max(1, min(max_workers, MAX_PARALLEL_BATCHES))
         while job.rework_queue and not first_error:
             job.start_round()
-            fix_threads = max(1, min(n_workers, len(job.round_pkgs)))
+            fix_threads = max(1, min(fix_max_workers, len(job.round_pkgs)))
+            if fix_threads > 1:
+                log.info("Исправления очереди выполняются в %d потоках, пакетов: %d.", fix_threads, len(job.round_pkgs))
 
             def fix_worker() -> None:
                 logged_fix = _LoggedTransport(transport)   # журнал свой у каждого потока
