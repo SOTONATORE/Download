@@ -635,6 +635,9 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
     watch = _TransportWatch(transport)  # все вызовы Gemini идут через него, и видео, и фото
     lock = threading.Lock()
     state = None
+    # Русский: клипы «на проверку» из прошлого запуска пересматриваются по текущим правилам до решения,
+    # какие волны идти (run_video / run_photo); вызова модели нет. Фото — только при photo_profile.
+    go.recover_resolved_file(prompts_path, segments, cfg, photo_cfg if photo_profile is not None else None)
     if photo_profile is None:
         state = _video_step(list(needed), segments=segments, cfg=cfg, watch=watch,
                             prompts_path=prompts_path, profile=profile, timing=timing,

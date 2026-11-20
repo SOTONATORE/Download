@@ -27,7 +27,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
                            make_problem, problem_ru, rework_remark,
-                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
+                           CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, ethnicity_hits, RELAXABLE_RULES,
                            CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, PROBLEM_ETHNICITY, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
                           make_problem, problem_ru, rework_remark,
-                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, RELAXABLE_RULES,
+                          CONTENT_HINT_BY_REASON, content_reasons, ethnicity_reasons, ethnicity_hits, RELAXABLE_RULES,
                           CONTENT_REASON_RU, PROBLEM_PEOPLE_COUNT, PROBLEM_ETHNICITY, people_hint, problem_code, problem_label,
                            RulesValues, PEOPLE_LIMIT, EMOTION_VALUES, SUBJECT_SOURCE_VALUES,
                            PROBLEM_MANY_OF_ONE, MANY_OF_ONE_VEHICLES_HINT_EN, animal_plurals_by_count,
@@ -2021,6 +2021,20 @@ def _content_rule_label(found: list, max_characters: Optional[int] = None) -> Op
 _CONTENT_CODE_BY_REASON = {reason: code for code, reason in CONTENT_REASON_RU.items()}
 
 
+def ethnicity_problems(prompt: str, n: int, texts: Optional[dict]) -> list:
+    """Русский: нарушения внешности клипа n с фрагментами, как «код: «фрагмент»» (очередь исправлений).
+
+    Окно проверки — текст сегментов n-1, n, n+1 (как у разбора). Нет texts или номера в нём — пусто.
+    Фрагменты берутся из промпта без стиля (prompt_raw или prompt до стиля)."""
+    if texts is None or n not in texts:
+        return []
+    window = " ".join(str(texts.get(k) or "") for k in (n - 1, n, n + 1))
+    return [make_problem(PROBLEM_ETHNICITY, frag) for frag in ethnicity_hits(prompt, window)]
+
+
+_ETHNICITY_REASON = CONTENT_REASON_RU[PROBLEM_ETHNICITY]   # причина внешности без фрагмента (разбор ответа)
+
+
 def _merge_parse_reasons(found: list, reasons) -> list:
     """Добавляет к находкам find_problems причины разбора («разбор: причина») и не дублирует уже покрытое.
 
@@ -2126,7 +2140,13 @@ def _run_batch(transport: GeminiTransport, model: str, builder: _Builder, batch:
             if _rework_gate_open(builder.cfg, r):
                 # Русский: клип с флагом разбора (стиль, длина, мусор, этнос) идёт в очередь, даже если find_problems
                 # нашёл свою находку; причины разбора, не покрытые ею, добавляются (_merge_parse_reasons).
-                found = _merge_parse_reasons(found, r.review_reason.split("; "))
+                # Внешность с фрагментом (по тексту сегментов n-1..n+1) идёт в очередь как нарушение, а не причина разбора.
+                parse_reasons = r.review_reason.split("; ")
+                eth = ethnicity_problems(r.prompt, n, builder.texts) if _ETHNICITY_REASON in parse_reasons else []
+                if eth:
+                    parse_reasons = [x for x in parse_reasons if x != _ETHNICITY_REASON]
+                    found = list(dict.fromkeys(found + eth))
+                found = _merge_parse_reasons(found, parse_reasons)
             if found:
                 if builder.cfg.fail_fast:
                     # fail_fast: исправлений нет; сырой ответ этого батча — первый (других запросов не было)
@@ -2224,7 +2244,8 @@ def _nums_ranges(nums) -> str:
     return ", ".join(parts)
 
 
-_SUBTITLE_NOTE_CODES = frozenset({PROBLEM_DUPLICATE_PROMPT, PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT})
+_SUBTITLE_NOTE_CODES = frozenset({PROBLEM_DUPLICATE_PROMPT, PROBLEM_LETTERING_NOT_IN_SEGMENT, PROBLEM_DANGLING_TEXT,
+                                  PROBLEM_ETHNICITY})
 
 
 def _rework_subtitle_note(c: PromptResult, texts: dict, by_segment: Optional[dict] = None) -> str:
@@ -2522,6 +2543,13 @@ class _WaveJob:
             parse_reasons = [p.reason for p in fix_problems if p.num == c.num]
             if not parse_reasons and rr_now is not None and rr_now.needs_review:
                 parse_reasons = [x for x in (rr_now.review_reason or "ответ помечен на проверку").split("; ") if x]
+            if _ETHNICITY_REASON in parse_reasons:
+                # Русский: внешность из разбора — нарушение с фрагментом по сырому тексту клипа; без фрагментов
+                # (нет окна текста) остаётся причиной разбора, как раньше
+                eth = ethnicity_problems(c.prompt_raw, c.num, builder.texts)
+                if eth:
+                    parse_reasons = [x for x in parse_reasons if x != _ETHNICITY_REASON]
+                    found = list(dict.fromkeys(found + eth))
             if empty_fix and c.rework_pending:
                 # Русский: модель не вернула текст сегмента — прежняя очередь остаётся, причина «номер отсутствует»
                 # или «пустой prompt» не пишется; prompt_raw не менялся, поэтому очередь прежняя

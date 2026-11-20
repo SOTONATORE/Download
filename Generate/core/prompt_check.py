@@ -518,6 +518,42 @@ ETHNIC_ROOTS = (
 )
 
 
+# Русский: «тёмная кожа» у растения (клубень, корень, плод, кожура) — не признак внешности человека.
+# Ближайшее к фразе существительное в её предложении решает: растительное — не признак, человеческое или
+# отсутствие обоих — признак (по умолчанию проверяем как раньше).
+_SKIN_DARK_RX = re.compile(r"^dark[- ]skin", re.IGNORECASE)
+_PERSON_WORD_RX = re.compile(
+    r"\b(?:man|men|woman|women|person|people|girl|boy|child|children|kid|kids|lady|guy|human|humans|"
+    r"he|she|him|her|his|hers|villagers?|farmers?|workers?|character|actors?)\b", re.IGNORECASE)
+_PRODUCE_WORD_RX = re.compile(
+    r"\b(?:tubers?|potato(?:es)?|artichokes?|topinambur|sunchokes?|jerusalem|roots?|fruits?|vegetables?|"
+    r"peels?|flesh|bulbs?|onions?|beets?|carrots?|apples?|pears?|oranges?|bananas?|mangoes?|mangos?|"
+    r"coconuts?|cucumbers?|pumpkins?|squash|yams?|cassava|ginger|mushrooms?|rinds?|husks?|pods?|nuts?|"
+    r"seeds?|kernels?|leaf|leaves|bark|produce|crops?)\b", re.IGNORECASE)
+_SENTENCE_END_CHARS = ".;!?\n"
+
+
+def _is_plant_skin(prompt: str, start: int, end: int) -> bool:
+    """Русский: фраза «dark skin» в промпте относится к растению, если ближайшее существительное её предложения
+    растительное (tuber, flesh, fruit и т. п.), а ближайшего человеческого нет или он дальше."""
+    s0 = max(prompt.rfind(ch, 0, start) for ch in _SENTENCE_END_CHARS) + 1
+    ends = [i for i in (prompt.find(ch, end) for ch in _SENTENCE_END_CHARS) if i != -1]
+    s1 = min(ends) if ends else len(prompt)
+    sentence = prompt[s0:s1]
+    a0, a1 = start - s0, end - s0
+
+    def nearest(rx) -> Optional[int]:
+        gaps = [max(0, max(a0, m.start()) - min(a1, m.end())) for m in rx.finditer(sentence)]
+        return min(gaps) if gaps else None
+
+    person, produce = nearest(_PERSON_WORD_RX), nearest(_PRODUCE_WORD_RX)
+    if produce is None:
+        return False
+    if person is None:
+        return True
+    return produce < person   # при равенстве человек: проверка строже
+
+
 _DEFINITE_BEFORE = frozenset({"the", "his", "her", "their", "its", "my", "your", "this", "that", "these", "those", "our"})
 
 
@@ -709,15 +745,30 @@ def content_reasons(prompt: str, media: str = "video", relaxed=frozenset(), max_
                               for code, _ in content_hits(prompt, media, relaxed, max_characters, rules)))
 
 
-def ethnicity_reasons(prompt: str, segment_text: str) -> list:
-    """Причина, если в промпте есть этнический признак, которого нет в тексте сегмента.
+def ethnicity_hits(prompt: str, segment_text: str) -> list:
+    """Фрагменты промпта (как написаны), которые вводят этнический признак, не найденный в тексте сегмента.
+    Пусто, если признаков нет или корень признака есть в тексте сегмента. «Тёмная кожа» растения не признак.
     Корни и текст сегмента сравниваются без регистра и без диакритики («Áfrika» = «afrika»)."""
-    if not _ETHNIC_RX.search(prompt or ""):
+    prompt = prompt or ""
+    if not _ETHNIC_RX.search(prompt):
         return []
     seg = _fold(segment_text or "")
     if any(_fold(root) in seg for root in ETHNIC_ROOTS):
         return []
-    return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]]
+    hits: list = []
+    for m in _ETHNIC_RX.finditer(prompt):
+        frag = m.group(0)
+        if _SKIN_DARK_RX.match(frag) and _is_plant_skin(prompt, m.start(), m.end()):
+            continue
+        if frag.lower() not in (h.lower() for h in hits):
+            hits.append(frag)
+    return hits
+
+
+def ethnicity_reasons(prompt: str, segment_text: str) -> list:
+    """Причина, если в промпте есть этнический признак, которого нет в тексте сегмента (без фрагментов).
+    Обёртка над ethnicity_hits: прежний вид результата для всех вызывающих."""
+    return [CONTENT_REASON_RU[PROBLEM_ETHNICITY]] if ethnicity_hits(prompt, segment_text) else []
 
 
 # Толстые контуры и векторный стиль (проверка при rules forbid_thick_vector: true)
@@ -1122,9 +1173,16 @@ def find_problems(prompt: str, media: str = "video", relaxed=frozenset(), max_ch
 def rework_remark(problems: list) -> str:
     """Английская помощь для Gemini: что исправить в промпте при повторном запросе."""
     joined = "; ".join(problem_en(p) for p in problems)
+    # Русский: для этноса подсказка содержания + точная фраза из нарушения, чтобы модель заменила именно её
+    ethnic = ""
+    if any(problem_code(p) == PROBLEM_ETHNICITY for p in problems):
+        ethnic = (" " + CONTENT_HINT_EN[PROBLEM_ETHNICITY] +
+                  " Replace or remove the exact phrase quoted in the problem above; if it describes a plant, "
+                  "fruit or object rather than a person, keep it as a plain colour or texture description.")
     return (
         "Rewrite this prompt. Remove these problems: "
-        f"{joined}. "
+        f"{joined}."
+        f"{ethnic} "
         "Keep the subject, count, action and setting from the segment. "
         "Replace any forbidden frame type with a permitted image of the same subject "
         "(for example a map becomes a landscape or a city view without labels). "
