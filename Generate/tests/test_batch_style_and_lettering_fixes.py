@@ -138,9 +138,12 @@ def test_noun_forms_still_flagged():
     assert "forbidden_shot_type" in _codes("stack of tax forms")
 
 
-def test_verb_form_with_article_still_handled_as_before():
-    # одиночное «form» с «a» не исключалось и раньше: поведение не меняется
-    assert "forbidden_shot_type" in _codes("tubers form a heap on the table")
+def test_verb_form_with_article_is_allowed():
+    # глагол «form» с «a» («образуют») описывает форму, а не бланк: допустим
+    assert "forbidden_shot_type" not in _codes("tubers form a heap on the table")
+    assert _codes("tubers form a heap on the table") == []
+    # существительное «form» с «a» остаётся запрещённым
+    assert "forbidden_shot_type" in _codes("a blank form on the table")
 
 
 # ---------------------------------------------------------------------------
