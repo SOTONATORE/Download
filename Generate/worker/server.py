@@ -1079,6 +1079,8 @@ def _make_handler(app: "WorkerApp") -> type:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                self.send_header("Connection", "close")  # клиент не переиспользует сокет после ответа без чтения тела
             self.end_headers()
             self.wfile.write(body)
 
@@ -1263,6 +1265,7 @@ def _make_handler(app: "WorkerApp") -> type:
             if length <= 0:
                 return self._error(400, "Пустое тело запроса.")
             if length > MAX_INPUT_IMAGE_BYTES:
+                self.close_connection = True  # тело не читается: сокет закрывается, хвост не попадёт в следующий запрос
                 return self._error(413, "Входное изображение превышает допустимый размер.")
             raw = self.rfile.read(length)
             if len(raw) != length:
