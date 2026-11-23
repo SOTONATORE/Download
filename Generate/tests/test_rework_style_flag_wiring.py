@@ -6,7 +6,7 @@ from Generate import cli  # noqa: F401
 
 
 def test_cartoon_photos_flag_is_true():
-    cfg = cli._build_prompt_config("cartoon_photos", 20, "none")
+    cfg = cli._build_prompt_config("cartoon", 20, "none")
     assert cfg.rework_style_flag_without_refs is True
 
 

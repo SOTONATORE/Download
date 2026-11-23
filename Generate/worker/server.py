@@ -53,6 +53,8 @@ DEFAULT_OUTPUT_DIR = os.path.join(os.environ.get("COMFY_DIR") or DEFAULT_COMFY_D
 # Папка входа ComfyUI: сюда копируются референсы ниши (LoadImage читает ref_N.png из неё)
 COMFY_INPUT_DIR_ENV = "COMFY_INPUT_DIR"
 MAX_BODY_BYTES = 1024 * 1024
+MAX_INPUT_IMAGE_BYTES = 25 * 1024 * 1024
+_RE_INPUT_IMAGE = re.compile(r"clip_\d+\.png")
 CHUNK_SIZE = 1024 * 1024
 TOKEN_HEADER = "X-Worker-Token"
 
@@ -623,6 +625,7 @@ class _Task:
     size_bytes: Optional[int] = None
     second_seed: Optional[int] = None  # сид второго прохода этого клипа (первый проход = seed)
     refs: Optional[Tuple[int, ...]] = None  # номера референсов задачи (отсортированы); None = без изменений workflow
+    input_image: Optional[str] = None  # имя входного кадра clip_N.png (для I2V-профилей); None = без изменений
     acked: bool = False
     lines: Deque[str] = field(default_factory=collections.deque)  # журнал клипа целиком, без хвоста (этап 9в)
 
@@ -668,11 +671,13 @@ class TaskManager:
                  bindings: Optional[dict] = None, output_dir: Any = DEFAULT_OUTPUT_DIR,
                  extra_inputs: Optional[dict] = None, max_unacked: int = DEFAULT_MAX_UNACKED,
                  task_timeout: float = 600.0,
-                 on_event: Optional[Callable[[str], None]] = None) -> None:
+                 on_event: Optional[Callable[[str], None]] = None,
+                 input_dir: Any = None) -> None:
         self.comfy = comfy
         self.workflow = workflow if workflow is not None else {}
         self.bindings = bindings if bindings is not None else {}
         self.output_dir = Path(output_dir)
+        self._input_dir: Optional[Path] = Path(input_dir) if input_dir is not None else None
         self.extra_inputs = extra_inputs or {}
         self.max_unacked = max_unacked
         self.task_timeout = task_timeout
@@ -737,8 +742,12 @@ class TaskManager:
                 return task
         return None
 
+    def get_input_dir(self) -> Path:
+        return self._input_dir if self._input_dir is not None else comfy_input_dir()
+
     def submit(self, num: int, prompt: str, num_frames: int, seed: int,
-               refs: Optional[Tuple[int, ...]] = None) -> str:
+               refs: Optional[Tuple[int, ...]] = None,
+               input_image: Optional[str] = None) -> str:
         """Ставит клип в очередь. Идемпотентность: если для того же номера есть открытая задача
         (не подтверждена и не в ошибке), возвращается её id и новая задача не создаётся.
         Проверка идёт до лимита очереди: повтор не должен получить 429 из-за собственной задачи."""
@@ -753,7 +762,8 @@ class TaskManager:
                 if self._unacked_locked() >= self.max_unacked:
                     raise BacklogFullError()
                 task_id = uuid.uuid4().hex
-                task = _Task(task_id, num, prompt, num_frames, seed, received=received, refs=refs)
+                task = _Task(task_id, num, prompt, num_frames, seed, received=received,
+                             refs=refs, input_image=input_image)
                 self._log(task, "задача принята, в очереди")
                 self._tasks[task_id] = task
         if existing is not None:
@@ -788,21 +798,28 @@ class TaskManager:
             return None
 
     def ack(self, task_id: str) -> bool:
-        """Подтверждение скачивания: удаляет файл. False, если задачи нет."""
+        """Подтверждение скачивания: удаляет файл (и временное входное изображение). False, если задачи нет."""
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
                 return False
             path = task.path
+            input_image = task.input_image
             task.acked = True
             task.size_bytes = None
             task.path = None
+            task.input_image = None
             self._log(task, "скачивание подтверждено, файл удалён")
         if path is not None:
             try:
                 path.unlink(missing_ok=True)
             except OSError as exc:
                 log.error("Не удалось удалить файл клипа: %s.", type(exc).__name__)
+        if input_image is not None:
+            try:
+                (self.get_input_dir() / input_image).unlink(missing_ok=True)
+            except OSError as exc:
+                log.error("Не удалось удалить входное изображение: %s.", type(exc).__name__)
         log.info("Клип подтверждён и удалён (id %s).", task_id[:8])
         return True
 
@@ -863,7 +880,8 @@ class TaskManager:
                 task.second_seed = second_seed
             graph = inject_workflow(self.workflow, self.bindings, task.prompt,
                                     task.num_frames, task.seed, prefix, self.extra_inputs,
-                                    second_seed=second_seed, refs=task.refs)
+                                    second_seed=second_seed, refs=task.refs,
+                                    input_image=task.input_image)
             self._set(task, "running", "постановка в очередь ComfyUI")
             started = time.monotonic()
             log.info("Клип %d: старт рендера в %s (id %s), сид первого прохода %d, сид второго прохода %d.",
@@ -978,7 +996,7 @@ def prepare_niche_refs(profile_dir: Path, nishes_root: Path, input_dir: Path) ->
 
 
 def find_profile_folder(models_root: Path, nishes_root: Path, name: str) -> Path:
-    """Папка профиля: сначала models_root/<имя>, затем nishes_root/<имя>.
+    """Папка профиля: сначала models_root/<имя>, затем nishes_root/<имя>, затем для *_i2v — nishes_root/<ниша>/i2v.
 
     Если нет ни в одной папке, возвращается путь в models_root (проверка «не найдена» выполняется отдельно).
     """
@@ -988,6 +1006,10 @@ def find_profile_folder(models_root: Path, nishes_root: Path, name: str) -> Path
     secondary = nishes_root / name
     if secondary.is_dir():
         return secondary
+    if name.endswith("_i2v") and len(name) > 4:
+        i2v_dir = nishes_root / name[:-4] / "i2v"
+        if i2v_dir.is_dir():
+            return i2v_dir
     return primary
 
 
@@ -1031,6 +1053,16 @@ def _validate_payload(data: Any) -> Tuple[int, str, int, int, Optional[Tuple[int
             raise ValueError("Номера в поле «refs» не должны повторяться.")
         refs = tuple(sorted(raw_refs))
     return num, prompt, num_frames, seed, refs
+
+
+def _validate_input_image(data: Any) -> Optional[str]:
+    """Проверяет необязательное поле input_image в теле POST /task (вид clip_<число>.png)."""
+    if not isinstance(data, dict) or "input_image" not in data or data["input_image"] is None:
+        return None
+    value = data["input_image"]
+    if not isinstance(value, str) or not _RE_INPUT_IMAGE.fullmatch(value):
+        raise ValueError("Поле «input_image» должно иметь вид clip_<число>.png.")
+    return value
 
 
 def _make_handler(app: "WorkerApp") -> type:
@@ -1084,6 +1116,8 @@ def _make_handler(app: "WorkerApp") -> type:
                     return self._get_logs()
                 if path == "/task" and method == "POST":
                     return self._post_task()
+                if path == "/input_image" and method == "POST":
+                    return self._post_input_image()
                 if path == "/profile" and method == "POST":
                     return self._post_profile()
                 m = _RE_TASK.match(path)
@@ -1104,7 +1138,7 @@ def _make_handler(app: "WorkerApp") -> type:
                 except OSError:
                     pass
                 return
-            known = path in ("/health", "/task", "/profile", LOGS_PATH) or _RE_TASK.match(path) \
+            known = path in ("/health", "/task", "/input_image", "/profile", LOGS_PATH) or _RE_TASK.match(path) \
                 or _RE_FILE.match(path) or _RE_ACK.match(path)
             self._drain_body()
             if known:
@@ -1194,20 +1228,60 @@ def _make_handler(app: "WorkerApp") -> type:
                 return self._error(413, "Тело запроса слишком большое.")
             raw = self.rfile.read(length)
             try:
-                num, prompt, num_frames, seed, refs = _validate_payload(json.loads(raw.decode("utf-8")))
+                payload = json.loads(raw.decode("utf-8"))
+                num, prompt, num_frames, seed, refs = _validate_payload(payload)
+                input_image = _validate_input_image(payload)
             except (ValueError, UnicodeDecodeError) as exc:
                 msg = str(exc) if isinstance(exc, ValueError) and not isinstance(
                     exc, (json.JSONDecodeError, UnicodeDecodeError)) else "Тело запроса — некорректный JSON."
                 return self._error(400, msg)
+            if input_image is not None and not (app.get_input_dir() / input_image).is_file():
+                return self._error(400, f"Входное изображение «{input_image}» не найдено в папке входа ComfyUI.")
             if app.switch_state == "failed":  # сбой переключения: карта больше не принимает клипы
                 return self._error(503, "Воркер не готов: переключение модели не удалось, карту нужно заменить.")
             try:
-                task_id = app.manager.submit(num, prompt, num_frames, seed, refs=refs)
+                task_id = app.manager.submit(num, prompt, num_frames, seed,
+                                             refs=refs, input_image=input_image)
             except BacklogFullError:
                 return self._error(429, "Очередь заполнена, ожидается скачивание готовых клипов")
             except SwitchingError:
                 return self._error(503, "Воркер переключает модель, повторите запрос позже.")
             self._json(200, {"task_id": task_id})
+
+        def _post_input_image(self) -> None:
+            """POST /input_image?name=clip_<N>.png: атомарная запись входного кадра в папку входа ComfyUI."""
+            params = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "", keep_blank_values=True)
+            names = params.get("name", [])
+            name = names[0] if len(names) == 1 else ""
+            if not name or not _RE_INPUT_IMAGE.fullmatch(name):
+                self._drain_body()
+                return self._error(400, "Параметр «name» должен иметь вид clip_<число>.png.")
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._error(400, "Некорректный заголовок Content-Length.")
+            if length <= 0:
+                return self._error(400, "Пустое тело запроса.")
+            if length > MAX_INPUT_IMAGE_BYTES:
+                return self._error(413, "Входное изображение превышает допустимый размер.")
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                return self._error(400, "Неполное тело запроса.")
+            input_dir = app.get_input_dir()
+            input_dir.mkdir(parents=True, exist_ok=True)
+            target = input_dir / name
+            fd, tmp_path = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=str(input_dir))
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+                os.replace(tmp_path, target)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            self._json(200, {"ok": True, "name": name, "size_bytes": len(raw)})
 
         def _post_profile(self) -> None:
             """POST /profile {"profile": "<имя>"}: принять переключение (202), отказ 400/409."""
@@ -1319,7 +1393,8 @@ class WorkerApp:
                  models_root: Any = None,
                  switch_script: Any = None,
                  weights_plan_script: Any = None,
-                 nishes_root: Any = None) -> None:
+                 nishes_root: Any = None,
+                 input_dir: Any = None) -> None:
         if not token:
             raise ValueError("Не задан токен воркера: переменная окружения WORKER_TOKEN пуста.")
         if log_level not in LOG_LEVELS:
@@ -1334,13 +1409,15 @@ class WorkerApp:
         self._log_handler = BufferHandler(self.logbuf)
         self._log_attached = False
         self.comfy = comfy
+        self._input_dir: Optional[Path] = Path(input_dir) if input_dir is not None else None
         # Телеметрия: видеопамять берётся из /system_stats ComfyUI (check_health), см. telemetry.py
         self.sysampler = SystemSampler(gpu_stats=telemetry_gpu_stats or comfy.check_health,
                                        disk_path=output_dir)
         self.telemetry = TelemetrySampler(self.sysampler.snapshot, log_level,
                                           check_interval=telemetry_interval_check)
         self.manager = TaskManager(comfy, workflow, bindings, output_dir, extra_inputs,
-                                   max_unacked, task_timeout, on_event=self.telemetry.notify)
+                                   max_unacked, task_timeout, on_event=self.telemetry.notify,
+                                   input_dir=input_dir)
         # Профиль модели (POST /profile, шаг W4): стартовый из MODEL_PROFILE, по умолчанию ltx25 (как в setup.sh)
         self.profile_name = profile_name or os.environ.get(MODEL_PROFILE_ENV) or DEFAULT_MODEL_PROFILE
         self.models_root = Path(models_root) if models_root else MODELS_ROOT_DEFAULT
@@ -1351,7 +1428,7 @@ class WorkerApp:
         self.switch_reason = ""
         # референсы ниши при старте (стартовый MODEL_PROFILE — ниша с refs_enabled): копия до первой задачи
         try:
-            prepare_niche_refs(self.profile_dir, self.nishes_root, comfy_input_dir())
+            prepare_niche_refs(self.profile_dir, self.nishes_root, self.get_input_dir())
         except NicheRefsError as exc:
             self.switch_state = "failed"   # /task отказывает с причиной, как при сбое переключения
             self.switch_reason = mask_secrets(str(exc))
@@ -1387,6 +1464,9 @@ class WorkerApp:
         self.httpd = ThreadingHTTPServer((host, port), _make_handler(self))
         self.httpd.daemon_threads = True
         self._serve_thread: Optional[threading.Thread] = None
+
+    def get_input_dir(self) -> Path:
+        return self._input_dir if self._input_dir is not None else comfy_input_dir()
 
     @property
     def profile_dir(self) -> Path:
@@ -1439,7 +1519,7 @@ class WorkerApp:
                 raise SwitchFailed(script_line or f"скрипт переключения завершился с кодом {rc}.")
             # референсы ниши до смены workflow: первая задача читает ref_N.png из папки входа ComfyUI
             try:
-                prepare_niche_refs(new_dir, self.nishes_root, comfy_input_dir())
+                prepare_niche_refs(new_dir, self.nishes_root, self.get_input_dir())
             except NicheRefsError as exc:
                 raise SwitchFailed(str(exc)) from None
             set_profile_type(info["type"])

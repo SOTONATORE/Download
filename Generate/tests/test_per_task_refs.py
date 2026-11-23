@@ -35,7 +35,7 @@ def _graph_10_slots() -> dict:
 
 
 def _bindings_10() -> dict:
-    """Привязки, как в Nishes/cartoon_photos/bindings.json (ref_N -> LoadImage)."""
+    """Привязки, как в Nishes/cartoon/bindings.json (ref_N -> LoadImage)."""
     load_ids = {1: "470", 2: "475", 3: "503", 4: "504", 5: "505",
                 6: "506", 7: "507", 8: "508", 9: "509", 10: "510"}
     bindings = {

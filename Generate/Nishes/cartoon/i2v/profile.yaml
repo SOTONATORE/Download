@@ -1,0 +1,57 @@
+# Generate/Nishes/cartoon/i2v/profile.yaml
+# Profile for cartoon niche LTX-2.5 Image-to-Video (I2V) animation.
+
+name: cartoon_i2v
+type: video
+requires_input_image: true
+
+# Allowed frame count: 8k+1 (9, 17, 25, ..., 49, 57, 73, ...)
+frame_rule: {kind: "8k+1"}
+
+# Timing and output resolution
+fps: 24
+clip_min_sec: 2.0
+clip_max_sec: 8.0
+gpu_max_sec: 10.0
+tail_pad_sec: 0.5
+target_resolution: "1920x1080"
+
+# Prompt generation settings
+text_model: nemotron-super-vl
+allow_text: true
+text_language: "srt"
+refs_enabled: false
+batch_size: 15
+relaxed_rules: [art_medium, small_objects, emotion]
+on_unfixed: keep
+rework_style_flag_without_refs: true
+fail_on_needs_review: true
+max_prompt_chars: 1500
+
+# Diagnostics: write raw model responses to <artifact>/raw
+debug:
+  dump_raw_responses: true
+
+# ComfyUI API workflow, bindings and output video node (SaveVideo)
+workflow:
+  file: "Generate/Nishes/cartoon/i2v/workflow.json"
+  bindings_file: "Generate/Nishes/cartoon/i2v/bindings.json"
+  output: {node_id: "75", type: video}
+
+# Prompt style guide for 2D cartoon I2V animation
+prompt_style: "Generate/Nishes/cartoon/i2v/prompts/style.md"
+
+# Generation parameters from workflow.json
+params:
+  cfg: 1.0
+  resolution: "1280x720"
+  sampler: "euler_ancestral"
+  quantization: "int8-convrot"
+
+# Model weights (identical to ltx25: 5 Lightricks/LTX-2.5 files)
+model_files:
+  unet: "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+  clip: "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+  vae_video: "ltx-2.5-video-vae-bf16.safetensors"
+  vae_audio: "ltx-2.5-audio-vae-bf16.safetensors"
+  latent_upscaler: "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"

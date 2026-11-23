@@ -1,4 +1,4 @@
-"""Исключение emotion для ниши cartoon_photos, очередь исправлений через общий пул и on_unfixed: keep.
+"""Исключение emotion для ниши cartoon, очередь исправлений через общий пул и on_unfixed: keep.
 
 Проверяется:
 - a) профиль с emotion снимает причину «стиль: эмоциональная метка» (в том числе для «body tense with eyes wide»);
@@ -29,7 +29,7 @@ from Generate.core import gemini_prompts as gp  # noqa: E402
 from Generate.core.srt_parser import Segment  # noqa: E402
 
 GEN = _HERE.parents[1]
-NICHE = GEN / "Nishes" / "cartoon_photos"
+NICHE = GEN / "Nishes" / "cartoon"
 STYLE = GEN / "model_profiles" / "models" / "zimage_turbo" / "prompts" / "style.md"
 TENSE_PHRASES = ["The main character stands, body tense", "The main character stands, body tense with eyes wide"]
 
@@ -78,7 +78,7 @@ def _run_pool(cfg, transport, seed):
 
 def test_a_emotion_relaxed_passes_style_check():
     lines = (NICHE / "profile.yaml").read_text(encoding="utf-8").splitlines()
-    relaxed, _ = gp.profile_relaxation(lines, "cartoon_photos")
+    relaxed, _ = gp.profile_relaxation(lines, "cartoon")
     assert "emotion" in relaxed          # профиль ниши действительно включает emotion
     for text in TENSE_PHRASES:
         reasons = gp._style_reasons(text, "image", frozenset({"emotion"}))
@@ -93,9 +93,9 @@ def test_b_emotion_not_relaxed_still_flagged():
 
 
 def test_c_parse_relaxed_rules_accepts_emotion_and_rejects_unknown():
-    assert "emotion" in gp.parse_relaxed_rules(["emotion"], "cartoon_photos")
+    assert "emotion" in gp.parse_relaxed_rules(["emotion"], "cartoon")
     with pytest.raises(gp.GeminiInputError, match="недопустимо"):
-        gp.parse_relaxed_rules(["child_in_frame"], "cartoon_photos")
+        gp.parse_relaxed_rules(["child_in_frame"], "cartoon")
 
 
 # --- д: очередь исправлений через общий пул ---------------------------------------------------

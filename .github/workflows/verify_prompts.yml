@@ -21,8 +21,28 @@ on:
         type: choice
         options:
           - "none"
-          - "cartoon_photos"
+          - "cartoon"
         default: "none"
+      cartoon_i2v:
+        description: "Для ниши cartoon: проверить двухэтапный I2V-конвейер (фото для всех + I2V-видео для выбранных)"
+        type: boolean
+        default: false
+      intro_minutes:
+        description: "Для cartoon_i2v: длина вступления, минут"
+        type: number
+        default: 3
+      intro_video_percent:
+        description: "Для cartoon_i2v: доля видео во вступлении, %"
+        type: number
+        default: 70
+      after_intro_video_percent:
+        description: "Для cartoon_i2v: доля видео после вступления, %"
+        type: number
+        default: 10
+      min_anim_sec:
+        description: "Для cartoon_i2v: минимальная длительность сегмента для анимации, с"
+        type: number
+        default: 2.0
       video_profile:
         description: "Видео-модель: ltx25 = видео проверяется; none = видео не проверяется. Варианты сверяются с профилями без поля type (видео)"
         type: choice
@@ -105,13 +125,17 @@ jobs:
       - name: Нужен ли lingua (язык текста по SRT)
         id: lang_need
         env:
-          VIDEO_NAME: ${{ inputs.niche != 'none' && 'none' || inputs.video_profile != 'none' && inputs.video_profile || 'ltx25' }}
+          VIDEO_NAME: ${{ inputs.niche != 'none' && (inputs.cartoon_i2v && format('{0}_i2v', inputs.niche) || 'none') || (inputs.video_profile != 'none' && inputs.video_profile || 'ltx25') }}
           PHOTO_NAME: ${{ inputs.niche != 'none' && inputs.niche || inputs.photo_profile }}
         run: |
           need=false
           for name in "$VIDEO_NAME" "$PHOTO_NAME"; do
             if [ -z "$name" ] || [ "$name" = "none" ]; then continue; fi
-            for f in "Generate/Nishes/$name/profile.yaml" "Generate/model_profiles/models/$name/profile.yaml"; do
+            candidates=("Generate/Nishes/$name/profile.yaml" "Generate/model_profiles/models/$name/profile.yaml")
+            if [[ "$name" == *_i2v ]]; then
+              candidates+=("Generate/Nishes/${name%_i2v}/i2v/profile.yaml")
+            fi
+            for f in "${candidates[@]}"; do
               if [ -f "$f" ] && grep -Eq '^text_language:[[:space:]]*"?srt"?' "$f"; then need=true; fi
             done
           done
@@ -155,14 +179,19 @@ jobs:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
           # выбор моделей (none = модель выключена), как в generate.yml
-          # ниша (не none) переопределяет видео и фото: видео выключено, фото = ниша, доля видео 0
-          VIDEO_MODEL: ${{ inputs.niche != 'none' && 'none' || inputs.video_profile }}
+          # ниша (не none) переопределяет видео и фото; при cartoon_i2v: true включается профиль <niche>_i2v
+          VIDEO_MODEL: ${{ inputs.niche != 'none' && (inputs.cartoon_i2v && format('{0}_i2v', inputs.niche) || 'none') || inputs.video_profile }}
           PHOTO_MODEL: ${{ inputs.niche != 'none' && inputs.niche || inputs.photo_profile }}
-          # профиль видео: при none запасной ltx25 (как в generate.yml); профиль фото: ниша, иначе выбор фото; пусто при none
-          VIDEO_PROFILE: ${{ inputs.video_profile != 'none' && inputs.video_profile || 'ltx25' }}
+          # профиль видео: при cartoon_i2v берётся <niche>_i2v; при none запасной ltx25; профиль фото: ниша, иначе выбор фото
+          VIDEO_PROFILE: ${{ inputs.niche != 'none' && inputs.cartoon_i2v && format('{0}_i2v', inputs.niche) || (inputs.video_profile != 'none' && inputs.video_profile || 'ltx25') }}
           PHOTO_PROFILE: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_profile != 'none' && inputs.photo_profile || '') }}
           # строка '0', а не число: при числе 0 выражение && || вернёт значение выбора
           VIDEO_PERCENT: ${{ inputs.niche != 'none' && '0' || inputs.video_percent }}
+          CARTOON_I2V: ${{ inputs.niche == 'cartoon' && inputs.cartoon_i2v || false }}
+          INTRO_MINUTES: ${{ inputs.intro_minutes }}
+          INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
+          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           PRESET: ${{ inputs.preset }}
@@ -320,6 +349,11 @@ jobs:
               fail("FAIL_FAST допускает только значения true и false")
           fail_fast = fail_fast_text == "true"
 
+          cartoon_i2v_text = os.environ.get("CARTOON_I2V", "false").strip()
+          if cartoon_i2v_text not in ("true", "false"):
+              fail("CARTOON_I2V допускает только значения true и false")
+          cartoon_i2v = cartoon_i2v_text == "true"
+
           # Тот же путь, что у cli run: профили, пресет, распределение, промпты (без Vast и релиза).
           from Generate.cli import prepare_prompts_only
 
@@ -338,6 +372,11 @@ jobs:
               # та же семья, что проверили по ключам: иначе прогон взял бы text_model профиля видео
               text_model=text_env or text_from_photo or None,
               fail_fast=fail_fast,
+              i2v_mode=cartoon_i2v,
+              intro_minutes=float(os.environ.get("INTRO_MINUTES") or 3.0),
+              intro_video_percent=float(os.environ.get("INTRO_VIDEO_PERCENT") or 70.0),
+              after_intro_video_percent=float(os.environ.get("AFTER_INTRO_VIDEO_PERCENT") or 10.0),
+              min_anim_sec=float(os.environ.get("MIN_ANIM_SEC") or 2.0),
           )
           try:
               prep = prepare_prompts_only(ns)
@@ -404,7 +443,8 @@ jobs:
                   if fail_review_photo:
                       review_nums += [n for n in prep.photo_nums if (state_prompts.get(str(n)) or {}).get("needs_review")]
                   if fail_review_video:
-                      review_nums += [n for n in prep.video_nums if (state_prompts.get(str(n)) or {}).get("needs_review")]
+                      review_key = "video_needs_review" if cartoon_i2v else "needs_review"
+                      review_nums += [n for n in prep.video_nums if (state_prompts.get(str(n)) or {}).get(review_key)]
                   if review_nums:
                       nums = sorted(set(review_nums))
                       fail("промпт на проверке (needs_review) у клипов: " + ", ".join(str(n) for n in nums))

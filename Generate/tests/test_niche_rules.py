@@ -1,4 +1,4 @@
-"""Ниша cartoon_photos: отключаемые правила (relaxed_rules), язык текста в кадре (text_language), число референсов.
+"""Ниша cartoon: отключаемые правила (relaxed_rules), язык текста в кадре (text_language), число референсов.
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). cli не импортируется: он тянет orchestrator,
 поэтому профиль читается через функции gemini_prompts на строках реального profile.yaml.
@@ -11,7 +11,7 @@ from Generate.core import gemini_prompts as gp
 from Generate.core import prompt_check as pc
 from Generate.core.gemini_prompts import GeminiInputError, PromptConfig
 
-NICHE_DIR = Path(__file__).resolve().parents[1] / "Nishes" / "cartoon_photos"
+NICHE_DIR = Path(__file__).resolve().parents[1] / "Nishes" / "cartoon"
 RELAX_ALL = frozenset({"art_medium", "small_objects", "frame_text"})
 STICKMAN = "A cartoon stickman in a flat style."
 PEN = "a pen on the desk"
@@ -56,7 +56,7 @@ def test_relaxable_rules_is_exactly_three_ids_and_no_safety_rule():
 
 def test_unknown_relaxed_rule_fails_at_load_with_russian_message():
     with pytest.raises(GeminiInputError) as exc:
-        gp.profile_relaxation(["type: image", "relaxed_rules: [child_in_frame]"], "cartoon_photos")
+        gp.profile_relaxation(["type: image", "relaxed_rules: [child_in_frame]"], "cartoon")
     msg = str(exc.value)
     assert "child_in_frame" in msg
     assert "Ошибка входных данных" in msg
@@ -199,10 +199,10 @@ def test_default_refs_range_keeps_old_reason():
     assert reasons == [gp.REF_REASON_RANGE] == ["refs: номер вне 1…10"]
 
 
-# --- й) профиль cartoon_photos: ключи читаются, без ключей поведение прежнее -------------------------
+# --- й) профиль cartoon: ключи читаются, без ключей поведение прежнее -------------------------
 
 def test_cartoon_profile_reports_relaxed_rules_and_text_language():
-    relaxed, text_language = gp.profile_relaxation(_profile_lines(), "cartoon_photos")
+    relaxed, text_language = gp.profile_relaxation(_profile_lines(), "cartoon")
     assert relaxed == frozenset({"art_medium", "small_objects", "frame_text", "emotion"})
     assert text_language == "srt"
 

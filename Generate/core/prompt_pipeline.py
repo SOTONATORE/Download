@@ -22,12 +22,18 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import config_loader as cl
     from . import duplicate_check as dc
     from . import prompt_check as pc
+    from . import segment_split as ss
+    from . import video_value as vv
+    from .timing import compute_timings
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
     import gemini_prompts as gp  # type: ignore
     import config_loader as cl  # type: ignore
     import duplicate_check as dc  # type: ignore
     import prompt_check as pc  # type: ignore
+    import segment_split as ss  # type: ignore
+    import video_value as vv  # type: ignore
+    from timing import compute_timings  # type: ignore
 
 # тот же логгер, что у оркестратора: строки журнала не меняются
 log = logging.getLogger("Generate.orchestrator")
@@ -730,4 +736,220 @@ def build_prompts(needed: list, *, segments: list, photo_nums, cfg, profile: str
         # итог до остановки: сколько клипов уже в prompts.json после обеих волн; недостающие догенерируются при повторном запуске
         log.warning("Остановка промптов: готовы промпты для %d из %d клипов, они сохранены в prompts.json.",
                     len(ready), len(needed))
+    return PromptRun(ready=ready, state=state, errors=errors, abort=aborts[0] if aborts else None)
+
+
+_I2V_VALUE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "integer"},
+            "video_value": {"type": "integer"},
+        },
+        "required": ["id", "video_value"],
+    },
+}
+
+
+def _video_prompt_ready(entry) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    num_frames = entry.get("video_num_frames")
+    return (entry.get("video_status") == "ready"
+            and bool(str(entry.get("video_prompt", "")).strip())
+            and isinstance(num_frames, int) and not isinstance(num_frames, bool)
+            and num_frames > 0)
+
+
+def _default_i2v_value_sender(transport, gemini_options: dict):
+    managed = go.ManagedTransport(
+        transport, gemini_options.get("models", go.DEFAULT_MODELS),
+        rpm_limit=gemini_options.get("rpm_limit", 15),
+        tpm_limit=gemini_options.get("tpm_limit", 250_000),
+        rpd_limit=gemini_options.get("rpd_limit", 500))
+    return lambda prompt: managed.generate_json("", "", prompt, _I2V_VALUE_SCHEMA, reasoning_effort="none")
+
+
+def build_i2v_prompts(
+    needed: list,
+    *,
+    segments: list,
+    photo_cfg,
+    photo_profile: str,
+    video_cfg,
+    video_profile: str,
+    timing,
+    transport,
+    gemini_options: dict,
+    prompts_path,
+    distribution_path=None,
+    intro_seconds: float = 180.0,
+    intro_video_percent: float = 70.0,
+    after_intro_video_percent: float = 10.0,
+    min_anim_sec: float = 2.0,
+    score_send=None,
+    score_workers: int = 1,
+) -> PromptRun:
+    """Двухэтапный конвейер промптов для I2V (ниша картунов):
+    1. Фото-промпты для всех needed (с дедупликацией и антимонотонностью).
+    2. Оценка video_value по фото-промпту + SRT и равномерный отбор select_i2v_segments
+       (при resume сохранённый выбор i2v в prompts.json не пересчитывается).
+    3. Генерация I2V видео-промптов батчами только для выбранных сегментов с расчётом video_num_frames (8k+1).
+    4. Раздельное хранение полей фото и видео в prompts.json.
+    """
+    needed_list = list(needed)
+    # Этап 1: фото-промпты для ВСЕХ сегментов
+    photo_run = build_prompts(
+        needed_list,
+        segments=segments,
+        photo_nums=set(needed_list),
+        cfg=photo_cfg,
+        profile=photo_profile,
+        timing=None,
+        photo_profile=photo_profile,
+        photo_cfg=photo_cfg,
+        transport=transport,
+        gemini_options=gemini_options,
+        prompts_path=prompts_path,
+    )
+    if photo_run.abort:
+        return photo_run
+
+    state = photo_run.state
+    prompts = state.setdefault("prompts", {})
+    ready_photos = [n for n in needed_list if _prompt_ready(prompts.get(str(n)))]
+    if not ready_photos:
+        return photo_run
+
+    style_photo = gp.preset_text(photo_cfg.preset, photo_cfg.niche_preset_file)
+    by_num = {s.num: s for s in segments}
+
+    # Этап 2: выбор I2V-сегментов (при resume сохранённый выбор i2v не пересчитывается)
+    has_saved_selection = bool(needed_list) and all(
+        isinstance((prompts.get(str(n)) or {}).get("i2v"), bool) for n in needed_list
+    )
+    if has_saved_selection:
+        i2v_nums = [n for n in needed_list if (prompts.get(str(n)) or {}).get("i2v") is True]
+        log.info("I2V-отбор (resume): сохранён выбор из prompts.json — видео %d из %d сегментов.",
+                 len(i2v_nums), len(needed_list))
+    else:
+        ss_segs = ss.to_segments(segments, needed_list)
+        raw_photo_map = {
+            n: _raw_prompt(str((prompts.get(str(n)) or {}).get("prompt", "")), style_photo)
+            for n in needed_list
+        }
+        eligible_segs = [s for s in ss_segs if s.duration >= min_anim_sec - 1e-9]
+        if not eligible_segs or (intro_video_percent == 0 and after_intro_video_percent == 0):
+            values = {s.id: 0 for s in eligible_segs}
+        else:
+            send_fn = score_send if score_send is not None else _default_i2v_value_sender(transport, gemini_options)
+            try:
+                values = vv.score_i2v_segments(
+                    ss_segs, raw_photo_map, send_fn, workers=score_workers, min_anim_sec=min_anim_sec,
+                )
+            except ValueError as exc:
+                raise gp.GeminiRuntimeError(
+                    f"Оценка I2V video_value не удалась: {exc} Запуск остановлен, запасного значения нет."
+                ) from None
+        dist = ss.select_i2v_segments(
+            ss_segs, values,
+            intro_seconds=intro_seconds,
+            intro_video_percent=intro_video_percent,
+            after_intro_video_percent=after_intro_video_percent,
+            min_anim_sec=min_anim_sec,
+        )
+        if distribution_path is not None:
+            vv.write_distribution(distribution_path, dist, ss_segs, values)
+            log.info("I2V-распределение записано в файл: %s.", distribution_path)
+        i2v_nums = list(dist["video"])
+        i2v_set = set(i2v_nums)
+        for n in needed_list:
+            entry = prompts.get(str(n))
+            if isinstance(entry, dict):
+                entry["i2v"] = n in i2v_set
+        state["i2v_mode"] = True
+        state["video_profile"] = video_profile
+        state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+        go.atomic_write_json(prompts_path, state)
+        log.info("I2V-отбор готов: видео %d из %d сегментов (вступление %.0f с: %.0f%%, далее %.0f%%, порог %.1f с).",
+                 len(i2v_nums), len(needed_list), intro_seconds, intro_video_percent,
+                 after_intro_video_percent, min_anim_sec)
+
+    # Этап 3: генерация I2V видео-промптов только для выбранных сегментов
+    pending_i2v = [n for n in i2v_nums if n in set(ready_photos) and not _video_prompt_ready(prompts.get(str(n)))]
+    errors = list(photo_run.errors)
+    aborts: list = []
+
+    if pending_i2v:
+        timings = {
+            t.num: t for t in compute_timings(
+                segments, timing.fps, timing.frame_rule,
+                timing.clip_min_sec, timing.clip_max_sec,
+                timing.gpu_max_sec, timing.tail_pad_sec,
+            )
+        }
+        source_photo_prompts = {
+            n: _raw_prompt(str((prompts.get(str(n)) or {}).get("prompt", "")), style_photo)
+            for n in pending_i2v
+        }
+        segment_durations = {
+            n: (by_num[n].end_ms - by_num[n].start_ms) / 1000.0
+            for n in pending_i2v if n in by_num
+        }
+        i2v_cfg = replace(
+            video_cfg,
+            source_photo_prompts=source_photo_prompts,
+            segment_durations=segment_durations,
+        )
+        watch = _TransportWatch(transport)
+        lock = threading.Lock()
+        managed = go.ManagedTransport(
+            watch, gemini_options.get("models", go.DEFAULT_MODELS),
+            rpm_limit=gemini_options.get("rpm_limit", 15),
+            tpm_limit=gemini_options.get("tpm_limit", 250_000),
+            rpd_limit=gemini_options.get("rpd_limit", 500),
+        )
+        mark = watch.calls
+
+        def on_video_batch(results: list) -> None:
+            with lock:
+                for r in results:
+                    old = dict(prompts.get(str(r.num)) or {})
+                    old["i2v"] = True
+                    old["video_prompt"] = r.prompt
+                    old["video_num_frames"] = timings[r.num].num_frames if r.num in timings else 1
+                    old["video_status"] = "ready" if r.prompt.strip() else "failed"
+                    old["video_needs_review"] = r.needs_review
+                    old["video_error"] = r.review_reason
+                    old["video_attempts"] = int(old.get("video_attempts", 0)) + 1
+                    prompts[str(r.num)] = old
+                state["model"] = managed.active_model
+                state["i2v_mode"] = True
+                state["video_profile"] = video_profile
+                state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
+                go.atomic_write_json(prompts_path, state)
+
+        provider = getattr(watch, "provider", "gemini")
+        extra = {} if provider == "gemini" else {"provider": provider}
+        sends = gemini_options.get("openrouter_sends_per_window")
+        sends_kw = {} if sends is None else {"sends_per_window": sends}
+        try:
+            gp.generate_prompts(
+                segments, pending_i2v, i2v_cfg, managed, managed.active_model,
+                on_batch=on_video_batch, **extra, **sends_kw,
+            )
+        except gp.GeminiRuntimeError as exc:
+            errors.append(str(exc))
+            if _is_hard(exc, watch, mark):
+                aborts.append(_abort_text("I2V-видео", exc))
+                log.error("Генерация I2V-промптов остановлена: %s.", exc)
+            else:
+                log.error("Генерация I2V-промптов прервана: %s. Используем уже сохранённые.", exc)
+        loaded = read_state(prompts_path)
+        if loaded.get("prompts"):
+            state = loaded
+
+    prompts = state.setdefault("prompts", {})
+    ready = [n for n in needed_list if _prompt_ready(prompts.get(str(n)))]
     return PromptRun(ready=ready, state=state, errors=errors, abort=aborts[0] if aborts else None)

@@ -58,7 +58,7 @@ def test_prompts_file_passes_refs_check_for_cartoon(prompts_file):
 
 
 def test_prompts_file_passes_cli_check_for_cartoon(prompts_file, tmp_path, monkeypatch):
-    # Русский: профиль cartoon_photos имеет refs_enabled: false, поэтому проверка блоков с refs идёт
+    # Русский: профиль cartoon имеет refs_enabled: false, поэтому проверка блоков с refs идёт
     # на синтетической нише в tmp_path: refs_enabled: true и allowed_refs из COMBOS. Имя теста прежнее.
     folder = tmp_path / "Nishes" / "refs_niche"
     folder.mkdir(parents=True)
@@ -145,7 +145,7 @@ def test_cli_old_file_on_profile_without_refs_still_passes(tmp_path):
 
 
 def test_cli_switch_off_checks_nothing(tmp_path):
-    assert cli._check_previews("выкл", str(tmp_path / "нет.txt"), "cartoon_photos") is None
+    assert cli._check_previews("выкл", str(tmp_path / "нет.txt"), "cartoon") is None
 
 
 # --- payload и индекс -------------------------------------------------------------------------

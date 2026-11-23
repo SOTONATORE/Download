@@ -1,0 +1,17 @@
+max_characters: 4
+animals_count: true
+small_objects: allowed
+speech: forbidden
+weapons: forbidden
+close_faces: forbidden
+children: forbidden
+static_frame: false
+scene_motion_wording: allow
+fire_hands: forbidden
+sketch_style: false
+forbid_thick_vector: false
+emotion: posture_and_action
+subject_source: text_and_context
+horses_vehicles_animals_max: 3
+object_sets: allowed
+allowed_shot_items: letter, map, diagram, chart, infographic, calendar, spreadsheet, newspaper, document, paper, blank sheet, sheet of paper, lettering

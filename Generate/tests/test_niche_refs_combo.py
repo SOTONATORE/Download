@@ -1,4 +1,4 @@
-"""Ниша cartoon_photos (N6): разрешённые сочетания refs (allowed_refs) и копия референсов в папку ComfyUI.
+"""Ниша cartoon (N6): разрешённые сочетания refs (allowed_refs) и копия референсов в папку ComfyUI.
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). Копия проверяется на временной папке,
 настоящий ComfyUI не нужен.
@@ -36,7 +36,7 @@ def _refs_reasons(refs, tmp_path, allowed=frozenset(ALLOWED)):
 # --- таблица сочетаний -----------------------------------------------------------------------------
 
 def test_allowed_list_parses_to_exactly_eight_combinations(tmp_path):
-    # Русский: файл профиля создаётся в tmp_path (восемь сочетаний); profile.yaml ниши cartoon_photos не читается
+    # Русский: файл профиля создаётся в tmp_path (восемь сочетаний); profile.yaml ниши cartoon не читается
     f = tmp_path / "profile.yaml"
     f.write_text('allowed_refs: ["1", "1,2", "1,2,6", "1,6", "2", "3", "4", "5"]\n', encoding="utf-8")
     got = gp.parse_allowed_refs(f.read_text(encoding="utf-8").splitlines(), "refs_allowed")

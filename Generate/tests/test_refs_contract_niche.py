@@ -19,7 +19,7 @@ from Generate.core.gemini_prompts import GeminiError, PromptConfig, generate_pro
 from Generate.core.srt_parser import Segment
 
 GEN = pathlib.Path(__file__).resolve().parents[1]
-NICHE = GEN / "Nishes" / "cartoon_photos"
+NICHE = GEN / "Nishes" / "cartoon"
 MODELS = GEN / "model_profiles" / "models"
 MARK = "SECRET-RAW-MARKER"
 GOOD = "A wide shot of a quiet street at dawn, a baker lifts a tray."
@@ -50,7 +50,7 @@ def no_network(monkeypatch):
 
 def _allowed_instruction(tmp_path) -> str:
     """Русский: системная инструкция для синтетического профиля в tmp_path (refs_enabled: true, свой allowed_refs).
-    Профиль cartoon_photos здесь не читается: в нём нет allowed_refs, и его текст дал бы ветку «без allowed_refs»."""
+    Профиль cartoon здесь не читается: в нём нет allowed_refs, и его текст дал бы ветку «без allowed_refs»."""
     prof = tmp_path / "refs_allowed"
     prof.mkdir()
     (prof / "profile.yaml").write_text(

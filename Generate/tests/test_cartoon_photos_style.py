@@ -1,4 +1,4 @@
-"""Офлайн-проверки style.md ниши cartoon_photos.
+"""Офлайн-проверки style.md ниши cartoon.
 
 Что проверяется:
 - инструкция модели не просит «закрывающее предложение стиля» и не содержит слов without и rendered
@@ -24,7 +24,7 @@ for _p in (_HERE.parents[2], _HERE.parents[1]):
 from Generate.core import gemini_prompts as gp  # noqa: E402
 from Generate.core import prompt_check as pc  # noqa: E402
 
-NICHE = _HERE.parents[1] / "Nishes" / "cartoon_photos"
+NICHE = _HERE.parents[1] / "Nishes" / "cartoon"
 STYLE = NICHE / "prompts" / "style.md"
 PRESET = NICHE / "prompts" / "preset.md"
 RULES = NICHE / "prompts" / "rules.yaml"
@@ -68,8 +68,8 @@ def _rules_and_relaxed():
     lines = PROFILE.read_text(encoding="utf-8").splitlines()
     assert gp._profile_value(lines, "type") == "image", "профиль ниши должен быть типа image"
     rules = gp.load_rules(RULES)
-    names = gp.parse_flow_list(gp._profile_value(lines, "relaxed_rules"), "relaxed_rules", "cartoon_photos")
-    return rules, gp.parse_relaxed_rules(names, "cartoon_photos")
+    names = gp.parse_flow_list(gp._profile_value(lines, "relaxed_rules"), "relaxed_rules", "cartoon")
+    return rules, gp.parse_relaxed_rules(names, "cartoon")
 
 
 def _problems(text: str) -> tuple:

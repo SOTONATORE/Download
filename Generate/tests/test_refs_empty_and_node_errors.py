@@ -1,6 +1,6 @@
 """Офлайн-тесты: поле refs из extra, явный refs=[] для профиля с референсами, латент 1920x1088, node_errors.
 
-Сети нет: ComfyUI подменяется объектом с методом request; граф и профиль ниши создаются в tmp_path (реальная ниша cartoon_photos не читается), профили ltx25 и zimage_turbo в тестах не меняются.
+Сети нет: ComfyUI подменяется объектом с методом request; граф и профиль ниши создаются в tmp_path (реальная ниша cartoon не читается), профили ltx25 и zimage_turbo в тестах не меняются.
 Сообщения на русском (SPEC 0.5). Тексты промптов и секреты в тестах не используются.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ _REF_LOAD_IDS = {n: str(500 + n) for n in range(1, 11)}
 def _minimal_graph() -> dict:
     graph = {
         "461": {"class_type": "SaveImageAdvanced",
-                "inputs": {"filename_prefix": "cartoon_photos", "images": ["511", 0]}},
+                "inputs": {"filename_prefix": "cartoon", "images": ["511", 0]}},
         "488": {"class_type": "KSampler",
                 "inputs": {"seed": 1, "latent_image": ["491", 2], "positive": ["491", 0], "negative": ["491", 1]}},
         "491": {"class_type": "TextEncodeQwenImage21", "inputs": {"prompt": "x"}},

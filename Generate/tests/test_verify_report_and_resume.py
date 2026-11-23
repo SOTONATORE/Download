@@ -65,7 +65,7 @@ def _counts(flag_photo, reasons):
     }
 
 
-PREP = {"video_model": "none", "video_profile": "ltx25", "photo_profile": "cartoon_photos", "missing": [1]}
+PREP = {"video_model": "none", "video_profile": "ltx25", "photo_profile": "cartoon", "missing": [1]}
 
 
 def test_review_reasons_breakdown_lists_reason_and_clips():
@@ -201,7 +201,7 @@ def _photo_cfg(tmp_path):
 
 
 def _write_state(path: Path, prompts: dict) -> dict:
-    state = {"srt_hash": "x", "model": "fake", "profile": "cartoon_photos", "prompts": prompts}
+    state = {"srt_hash": "x", "model": "fake", "profile": "cartoon", "prompts": prompts}
     go.atomic_write_json(path, state)
     return state
 
@@ -257,7 +257,7 @@ def test_build_prompts_photo_only_resumes_needs_review_from_file(monkeypatch, tm
     cfg = PromptConfig(style_file="style.md", media="image", rework_style_flag_without_refs=True)
     run = pp.build_prompts(
         [26], segments=[SrtSegment(num=26, start_ms=0, end_ms=10_000, text="t")], photo_nums={26},
-        cfg=cfg, profile="cartoon_photos", timing=None, photo_profile="cartoon_photos",
+        cfg=cfg, profile="cartoon", timing=None, photo_profile="cartoon",
         photo_cfg=_photo_cfg(tmp_path), transport=SimpleNamespace(), gemini_options={},
         prompts_path=prompts_path)
     assert seen and seen[0]["rework"] == [26]

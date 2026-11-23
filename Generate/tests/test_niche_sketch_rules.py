@@ -1,4 +1,4 @@
-"""Блок 6B: правила эскиза для ниши cartoon_photos (rules.yaml).
+"""Блок 6B: правила эскиза для ниши cartoon (rules.yaml).
 
 Разрешённые типы кадра снимают только свои слова; запрещённые (флаг, паспорт, удостоверение) остаются;
 фигурки, строки текста, несколько кружков и штрихи не считаются людьми при max_characters;
@@ -16,13 +16,13 @@ from Generate.core import frame_rules as fr
 from Generate.core import gemini_prompts as gp
 from Generate.core import prompt_check as pc
 
-# Блок 7A: набор разрешённых типов кадра читается из реального rules.yaml ниши cartoon_photos, а не из строки в тесте.
-CARTOON_RULES = pathlib.Path(__file__).resolve().parents[1] / "Nishes" / "cartoon_photos" / "prompts" / "rules.yaml"
+# Блок 7A: набор разрешённых типов кадра читается из реального rules.yaml ниши cartoon, а не из строки в тесте.
+CARTOON_RULES = pathlib.Path(__file__).resolve().parents[1] / "Nishes" / "cartoon" / "prompts" / "rules.yaml"
 
 
 def _real_cartoon_rules():
     # если файла ниши нет, тест падает с понятным текстом, а не с пустым набором
-    assert CARTOON_RULES.is_file(), f"нет файла правил ниши cartoon_photos: {CARTOON_RULES}"
+    assert CARTOON_RULES.is_file(), f"нет файла правил ниши cartoon: {CARTOON_RULES}"
     return gp.load_rules(CARTOON_RULES)
 
 
@@ -33,7 +33,7 @@ PAPER_SEVEN = "paper, document, newspaper, letter, spreadsheet, blank sheet, she
 
 def test_lettering_is_listed_in_real_cartoon_rules_yaml():
     # Блок 7A: lettering обязан стоять в allowed_shot_items реального rules.yaml; без него тест падает
-    assert "lettering" in REAL_ALLOWED, "lettering нет в allowed_shot_items в rules.yaml ниши cartoon_photos"
+    assert "lettering" in REAL_ALLOWED, "lettering нет в allowed_shot_items в rules.yaml ниши cartoon"
 
 ALLOWED_CASES = [
     ("lettering", "the word HELLO drawn as hand lettering on a wall"),

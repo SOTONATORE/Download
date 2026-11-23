@@ -1,6 +1,6 @@
 name: Test cartoon workflows
 
-# Ручной A/B-тест сценариев workflow ниши cartoon_photos: 4 варианта × 4 сюжета = 16 PNG на одной карте.
+# Ручной A/B-тест сценариев workflow ниши cartoon: 4 варианта × 4 сюжета = 16 PNG на одной карте.
 # Результат идёт только в артефакт Actions (retention 30 дней). Релизы (Release) не создаются и не меняются.
 # Только ручной запуск: никаких push и pull_request.
 

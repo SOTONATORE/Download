@@ -1,4 +1,4 @@
-"""Ниша cartoon_photos (N6): текст правила на кадре, allow_text, пресет ниши, язык SRT (lingua).
+"""Ниша cartoon (N6): текст правила на кадре, allow_text, пресет ниши, язык SRT (lingua).
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). Тесты с lingua пропускаются,
 если библиотеки нет (pytest.importorskip).
@@ -10,7 +10,7 @@ import pytest
 from Generate.core import gemini_prompts as gp
 from Generate.core.gemini_prompts import GeminiInputError
 
-NICHE_DIR = Path(__file__).resolve().parents[1] / "Nishes" / "cartoon_photos"
+NICHE_DIR = Path(__file__).resolve().parents[1] / "Nishes" / "cartoon"
 RUSSIAN_SRT = (
     "1\n00:00:00,000 --> 00:00:03,000\nВ центральном архиве есть картонная карточка.\n\n"
     "2\n00:00:03,100 --> 00:00:06,000\nНа этой карточке записано немного.\n"
@@ -56,7 +56,7 @@ def test_allow_text_bad_value_is_error():
 
 def test_real_cartoon_profile_relaxes_frame_text_through_allow_text():
     lines = (NICHE_DIR / "profile.yaml").read_text(encoding="utf-8").splitlines()
-    relaxed, text_language = gp.profile_relaxation(lines, "cartoon_photos")
+    relaxed, text_language = gp.profile_relaxation(lines, "cartoon")
     assert "frame_text" in relaxed
     assert text_language == "srt"
 
@@ -89,9 +89,9 @@ def test_empty_niche_preset_file_is_error(tmp_path):
 
 def test_cli_finds_niche_preset_only_for_none():
     from Generate import cli
-    found = cli._niche_preset_file("cartoon_photos", "none")
+    found = cli._niche_preset_file("cartoon", "none")
     assert found is not None and found.endswith("prompts/preset.md")
-    assert cli._niche_preset_file("cartoon_photos", "named") is None
+    assert cli._niche_preset_file("cartoon", "named") is None
 
 
 # --- язык текста по SRT (lingua) -----------------------------------------------------------------

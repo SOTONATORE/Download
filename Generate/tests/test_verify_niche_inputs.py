@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "verify_prompts.yml"
 MODELS_DIR = ROOT / "Generate" / "model_profiles" / "models"
 NISHES_DIR = ROOT / "Generate" / "Nishes"
-CARTOON_DIR = NISHES_DIR / "cartoon_photos"
+CARTOON_DIR = NISHES_DIR / "cartoon"
 
 
 def _dispatch_inputs():

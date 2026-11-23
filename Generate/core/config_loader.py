@@ -37,7 +37,8 @@ except ImportError:  # pragma: no cover
 
 __all__ = [
     "Config", "DEFAULT_CONFIG_PATH", "MODEL_PROFILES_DIR", "ACTIONS_JOB_LIMIT_MIN", "DEFAULT_MODEL_PROFILE",
-    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type", "load_profile_text_model", "profile_exists",
+    "parse_config", "load_config", "load_profile_number", "load_profile_frame_rule", "load_profile_type",
+    "load_profile_text_model", "load_profile_requires_input_image", "profile_exists",
 ]
 
 GENERATE_DIR = Path(__file__).resolve().parent.parent
@@ -464,7 +465,8 @@ def load_config(path: Optional[Path | str] = None,
 def profile_dir(profile: str) -> Path:
     """Папка профиля модели (имя проверяется).
 
-    Порядок поиска: Generate/model_profiles/models/<profile>/, затем Generate/Nishes/<profile>/.
+    Порядок поиска: Generate/model_profiles/models/<profile>/, затем Generate/Nishes/<profile>/,
+    затем для суффикса _i2v — Generate/Nishes/<niche>/i2v/.
     Если нет ни одной папки, возвращается путь в models (как раньше, для сообщений об ошибке).
     """
     if not re.fullmatch(_PROFILE_NAME_PATTERN, profile or ""):
@@ -475,6 +477,10 @@ def profile_dir(profile: str) -> Path:
     secondary = NISHES_DIR / profile
     if secondary.is_dir():
         return secondary
+    if profile.endswith("_i2v") and len(profile) > 4:
+        i2v_dir = NISHES_DIR / profile[:-4] / "i2v"
+        if i2v_dir.is_dir():
+            return i2v_dir
     return primary
 
 
@@ -617,3 +623,8 @@ def load_profile_fail_on_needs_review(profile_name: str) -> bool:
 def load_profile_fail_on_duplicate_prompts(profile_name: str) -> bool:
     """Ключ fail_on_duplicate_prompts: одинаковые промпты у разных клипов проваливают прогон verify_prompts."""
     return _load_profile_bool(profile_name, "fail_on_duplicate_prompts")
+
+
+def load_profile_requires_input_image(profile_name: str) -> bool:
+    """Ключ requires_input_image: профиль I2V требует входное изображение перед запуском задачи."""
+    return _load_profile_bool(profile_name, "requires_input_image")

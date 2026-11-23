@@ -49,9 +49,13 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from .log_setup import WORKER_LOG_EXTRA, print_worker_group  # строки карты: файл с префиксом, консоль группой
     from .missing import parse_missing
     from .segment_split import all_photo, select_video_segments, to_segments
-    from .prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # noqa: F401
+    from .prompt_pipeline import (  # noqa: F401
+        PHOTO_NUM_FRAMES, _prompt_ready, _video_prompt_ready, build_i2v_prompts, build_prompts,
+    )
     from .video_value import SCORE_BATCH_SIZE, score_segments, write_distribution
-    from .config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled
+    from .config_loader import (
+        DEFAULT_MODEL_PROFILE, load_profile_requires_input_image, load_profile_seed_mode, profile_refs_enabled,
+    )
     from .naming import clip_filename
     from . import previews
     from .card_roles import plan_card_roles
@@ -74,9 +78,13 @@ except ImportError:  # pragma: no cover
     from log_setup import WORKER_LOG_EXTRA, print_worker_group  # type: ignore  # строки карты: файл с префиксом, консоль группой
     from missing import parse_missing  # type: ignore
     from segment_split import all_photo, select_video_segments, to_segments  # type: ignore
-    from prompt_pipeline import PHOTO_NUM_FRAMES, _prompt_ready, build_prompts  # type: ignore  # noqa: F401
+    from prompt_pipeline import (  # type: ignore  # noqa: F401
+        PHOTO_NUM_FRAMES, _prompt_ready, _video_prompt_ready, build_i2v_prompts, build_prompts,
+    )
     from video_value import SCORE_BATCH_SIZE, score_segments, write_distribution  # type: ignore
-    from config_loader import DEFAULT_MODEL_PROFILE, load_profile_seed_mode, profile_refs_enabled  # type: ignore
+    from config_loader import (  # type: ignore
+        DEFAULT_MODEL_PROFILE, load_profile_requires_input_image, load_profile_seed_mode, profile_refs_enabled,
+    )
     from naming import clip_filename  # type: ignore
     import previews  # type: ignore
     import ssh_probe  # type: ignore
@@ -294,6 +302,7 @@ class RunSummary:
     cards_rented: int = 0
     destroyed_cards: int = 0   # карты, уничтоженные в этом запуске (по ходу и при уборке)
     avg_render_sec: float = 0.0  # среднее время клипа от отправки до выгрузки, с (не время рендера)
+    fallback_photos: list = field(default_factory=list)  # клипы I2V, оставшиеся на фото (fallback_photo)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -965,6 +974,14 @@ class Orchestrator:
     prompts_count: str = "выкл"
     _previews = MappingProxyType({})
     _preview_order: tuple = ()
+    i2v_mode: bool = False
+    intro_seconds: float = 180.0
+    intro_video_percent: float = 70.0
+    after_intro_video_percent: float = 10.0
+    min_anim_sec: float = 2.0
+    i2v_video_cfg = None
+    i2v_video_profile: Optional[str] = None
+    i2v_timing = None
     clock = staticmethod(time.monotonic)  # часы по умолчанию; конструктор подменяет их своими
 
     def __init__(
@@ -1040,6 +1057,14 @@ class Orchestrator:
         artifact_dir=None,
         vast_logs_attempts: int = 5,
         vast_logs_pause_sec: float = 30.0,
+        i2v_mode: bool = False,
+        intro_seconds: float = 180.0,
+        intro_video_percent: float = 70.0,
+        after_intro_video_percent: float = 10.0,
+        min_anim_sec: float = 2.0,
+        i2v_video_cfg=None,
+        i2v_video_profile: Optional[str] = None,
+        i2v_timing=None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -1082,6 +1107,15 @@ class Orchestrator:
         # фото (STEP 7, блок B2): без photo_profile поведение прежнее, все номера — видео
         self.photo_profile = photo_profile or None
         self.photo_prompt_cfg = photo_prompt_cfg
+        # I2V-режим (например ниша cartoon -> cartoon_i2v)
+        self.i2v_mode = bool(i2v_mode)
+        self.intro_seconds = float(intro_seconds)
+        self.intro_video_percent = float(intro_video_percent)
+        self.after_intro_video_percent = float(after_intro_video_percent)
+        self.min_anim_sec = float(min_anim_sec)
+        self.i2v_video_cfg = i2v_video_cfg
+        self.i2v_video_profile = i2v_video_profile or None
+        self.i2v_timing = i2v_timing
         # превью (prompts.txt): задачи фото без Gemini, в конце очереди фото; при «выкл» не создаются
         self.prompts_file = prompts_file
         self.prompts_count = prompts_count
@@ -1196,6 +1230,10 @@ class Orchestrator:
         self._video_queue: deque = deque()
         self._photo_queue: deque = deque()   # очередь фото (пуста без photo_profile)
         self._photo_nums: set = set()        # номера фото из распределения (STEP 3b)
+        self._i2v_phase2_nums: set = set()   # клипы I2V, перешедшие в фазу 2 (видео)
+        self._pending_i2v_uploads: set = set()  # фото I2V, скачанные с карты и ждущие выгрузки в Release
+        self._i2v_fallback_photos: set = set()  # клипы I2V, для которых оставлено фото после исчерпания попыток
+        self._photos_cache: Optional[Path] = None
         self._prompt_abort: Optional[str] = None  # жёсткая ошибка промптов («волна, сегмент N»): аренды не будет
         self._role_plan = None               # роли первых карт запуска (plan_card_roles), один раз
         self._plan_idx = 0
@@ -1628,8 +1666,13 @@ class Orchestrator:
         self._uploader = uploader
         self._publisher = RunPublisher(uploader, self.repo, self._tmp, artifact=self._artifact,
                                        mask=self._mask_remote)
-        needed = [n for n in missing if n not in done]
-        self._apply_run_split(needed)  # исправление P1: распределение только по нужным клипам; P2: фото-профиль без фото снимается
+        if getattr(self, "i2v_mode", False):
+            needed = self._i2v_needed(missing, uploader)
+            self._split = None
+            self._photo_nums = set()
+        else:
+            needed = [n for n in missing if n not in done]
+            self._apply_run_split(needed)  # исправление P1: распределение только по нужным клипам; P2: фото-профиль без фото снимается
         summary = RunSummary(total_needed=len(needed), skipped_done=len(missing) - len(needed))
         self._total_needed = len(needed)  # тот же счётчик, что у итоговой строки (summary.total_needed)
         self._run_pos = {n: i for i, n in enumerate(needed, 1)}  # P2: место клипа в списке этого запуска
@@ -1659,10 +1702,62 @@ class Orchestrator:
             self._finish(summary)  # F1 (3)-(4): отчёт и архив, итоговый релиз, итоговая строка
         return summary
 
+    def _i2v_photo_profile(self) -> str:
+        return getattr(self, "photo_profile", None) or getattr(self, "profile", None) or DEFAULT_MODEL_PROFILE
+
+    def _i2v_photo_cfg(self):
+        cfg = getattr(self, "photo_prompt_cfg", None)
+        return cfg if cfg is not None else self.cfg
+
+    def _i2v_video_profile(self) -> str:
+        return getattr(self, "i2v_video_profile", None) or getattr(self, "profile", None) or DEFAULT_MODEL_PROFILE
+
+    def _i2v_video_cfg(self):
+        cfg = getattr(self, "i2v_video_cfg", None)
+        return cfg if cfg is not None else self.cfg
+
+    def _i2v_timing(self):
+        t = getattr(self, "i2v_timing", None)
+        return t if t is not None else self.timing_params
+
+    def _photos_cache_dir(self) -> Path:
+        cache = getattr(self, "_photos_cache", None)
+        if cache is not None:
+            p = Path(cache)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        base = getattr(self, "_tmp", "") or getattr(self, "work_dir", None)
+        if base:
+            p = Path(base) / "photos_cache"
+        else:
+            p = Path(tempfile.mkdtemp(prefix="photos-cache-"))
+        p.mkdir(parents=True, exist_ok=True)
+        self._photos_cache = p
+        return p
+
+    def _i2v_needed(self, missing: list, uploader) -> list:
+        """Отбор сегментов для I2V: .mp4 или статичный (i2v=False) с .png в Release уже готовы."""
+        done_videos = getattr(uploader, "done_videos", set())
+        done_photos = getattr(uploader, "done_photos", set())
+        raw = _read_json_dict(self.prompts_path) if self.prompts_path.exists() else None
+        prompts = raw.get("prompts") if isinstance(raw, dict) and isinstance(raw.get("prompts"), dict) else {}
+        needed = []
+        for n in missing:
+            if n in done_videos:
+                continue
+            entry = prompts.get(str(n))
+            if n in done_photos and isinstance(entry, dict) and entry.get("i2v") is False:
+                continue
+            needed.append(n)
+        return needed
+
     def _active_profile_names(self) -> list:
         """Имена профилей прогона (видео и фото) без пустых значений."""
-        names = [getattr(self, "profile", None), getattr(self, "photo_profile", None)]
-        return [n for n in names if n]
+        if getattr(self, "i2v_mode", False):
+            names = [self._i2v_photo_profile(), self._i2v_video_profile()]
+        else:
+            names = [getattr(self, "profile", None), getattr(self, "photo_profile", None)]
+        return [n for n in dict.fromkeys(names) if n]
 
     def _run_seed_active(self) -> bool:
         """Хотя бы один активный профиль имеет seed_mode: run. Значения читаются только через config_loader."""
@@ -1712,8 +1807,8 @@ class Orchestrator:
         Иначе ничего не делается. Путь не удаляет и не перезаписывает локальный prompts.json при отмене или ошибке.
         Вызывается до publisher.start: служебный файл уходит в релиз уже восстановленным.
         """
-        if not self._run_seed_active():
-            return  # Блок 3: восстановление из релиза только для ниш с seed_mode: run
+        if not self._run_seed_active() and not getattr(self, "i2v_mode", False):
+            return  # Блок 3: восстановление из релиза только для ниш с seed_mode: run (или I2V)
         path = Path(self.prompts_path)
         if not path.exists():
             self._restore_prompts_file(uploader, path)
@@ -1810,6 +1905,7 @@ class Orchestrator:
         summary.destroyed_cards = self._destroyed
         summary.avg_render_sec = (sum(self._durations) / len(self._durations)
                                   if self._durations else 0.0)
+        summary.fallback_photos = sorted(getattr(self, "_i2v_fallback_photos", ()))
         full = summary.completed == len(needed) and self.cleanup_ok
         summary.exit_code = EXIT_OK if full else EXIT_PARTIAL
 
@@ -1829,6 +1925,9 @@ class Orchestrator:
             f"- потрачено, USD: {summary.spent_usd:.4f}",
             f"- код завершения (до загрузки отчёта): {summary.exit_code}",
         ]
+        fallback = getattr(summary, "fallback_photos", None) or sorted(getattr(self, "_i2v_fallback_photos", ()))
+        if fallback:
+            lines.append(f"- I2V fallback на фото ({len(fallback)}): клипы {', '.join(str(n) for n in fallback)}")
         run_seed = getattr(self, "_run_seed", None)
         if run_seed is not None:  # Блок 3: seed прогона попадает в отчёт только для ниш с seed_mode: run
             lines.append(f"- run_seed прогона: {run_seed}")
@@ -2104,11 +2203,32 @@ class Orchestrator:
 
     # --- промпты -------------------------------------------------------------
     def _generate(self, needed: list) -> list:
-        # один конвейер для видео и фото (prompt_pipeline.build_prompts); проверку вызывает тот же путь
-        run = build_prompts(
-            needed, segments=self.segments, photo_nums=self._photo_nums, cfg=self.cfg, profile=self.profile,
-            timing=self.timing_params, photo_profile=self.photo_profile, photo_cfg=self.photo_prompt_cfg,
-            transport=self.gemini_transport, gemini_options=self.gemini_options, prompts_path=self.prompts_path)
+        if getattr(self, "i2v_mode", False):
+            dist_path = Path(self._artifact.root) / DISTRIBUTION_FILENAME if getattr(self, "_artifact", None) else None
+            run = build_i2v_prompts(
+                needed,
+                segments=self.segments,
+                photo_cfg=self._i2v_photo_cfg(),
+                photo_profile=self._i2v_photo_profile(),
+                video_cfg=self._i2v_video_cfg(),
+                video_profile=self._i2v_video_profile(),
+                timing=self._i2v_timing(),
+                transport=self.gemini_transport,
+                gemini_options=self.gemini_options,
+                prompts_path=self.prompts_path,
+                distribution_path=dist_path,
+                intro_seconds=getattr(self, "intro_seconds", 180.0),
+                intro_video_percent=getattr(self, "intro_video_percent", 70.0),
+                after_intro_video_percent=getattr(self, "after_intro_video_percent", 10.0),
+                min_anim_sec=getattr(self, "min_anim_sec", 2.0),
+                score_workers=_value_workers(self.gemini_transport),
+            )
+        else:
+            # один конвейер для видео и фото (prompt_pipeline.build_prompts); проверку вызывает тот же путь
+            run = build_prompts(
+                needed, segments=self.segments, photo_nums=self._photo_nums, cfg=self.cfg, profile=self.profile,
+                timing=self.timing_params, photo_profile=self.photo_profile, photo_cfg=self.photo_prompt_cfg,
+                transport=self.gemini_transport, gemini_options=self.gemini_options, prompts_path=self.prompts_path)
         self._state = run.state
         self._prompts = self._state.setdefault("prompts", {})
         ready = run.ready
@@ -2189,10 +2309,19 @@ class Orchestrator:
         video = getattr(self, "_video_queue", None)
         if previews.is_preview_num(num):
             return photo if photo is not None else video  # превью всегда в очереди фото (повтор тоже)
+        if getattr(self, "i2v_mode", False):
+            phase2 = getattr(self, "_i2v_phase2_nums", frozenset())
+            if num in phase2:
+                return video if video is not None else photo
+            return photo if photo is not None else video
         return photo if num in photo_nums and photo is not None else video
 
     def _profile_for_role(self, role: str) -> str:
         # профили читаются с запасным значением: без __init__ фото-профиля нет, видеопрофиль — по умолчанию
+        if getattr(self, "i2v_mode", False):
+            if role == "photo":
+                return self._i2v_photo_profile()
+            return self._i2v_video_profile()
         photo_profile = getattr(self, "photo_profile", None)
         if role == "photo" and photo_profile:
             return photo_profile
@@ -2200,6 +2329,8 @@ class Orchestrator:
 
     def _next_role(self, now: float) -> str:
         """Роль новой карты: первые карты по плану plan_card_roles, дальше по длине очередей."""
+        if getattr(self, "i2v_mode", False):
+            return "photo" if self._photo_queue else "video"
         if self.photo_profile is None:
             return "video"
         if self._role_plan is None:
@@ -2236,14 +2367,93 @@ class Orchestrator:
         finally:
             self._stop_upload_thread()
 
-    def _work_loop(self, ready: list) -> None:
-        # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
-        self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
-        # задачи одного стека (refs из prompts.json) идут подряд; номера клипов не меняются
-        self._video_queue = deque(group_by_stack([n for n in ready if n not in self._photo_nums], self._stack_of))
-        self._photo_queue = deque(group_by_stack([n for n in ready if n in self._photo_nums], self._stack_of))
-        # превью идут в самый конец очереди фото, после всех обычных фото; видеоочередь не меняется
+    def _is_i2v_clip(self, num: int) -> bool:
+        entry = self._prompts.get(str(num))
+        return isinstance(entry, dict) and entry.get("i2v") is True
+
+    def _has_pending_phase1_i2v(self) -> bool:
+        if not getattr(self, "i2v_mode", False):
+            return False
+        with self._lock_state():
+            if getattr(self, "_pending_i2v_uploads", None):
+                return True
+            for num in self._photo_queue:
+                if self._is_i2v_clip(num):
+                    return True
+            for s in list(self._slots.values()):
+                if s.role == "photo" and any(self._is_i2v_clip(t.num) for t in s.tasks):
+                    return True
+        return False
+
+    def _record_i2v_fallback(self, num: int, reason: str) -> None:
+        """Фиксирует откат клипа на уже выгруженное фото N.png после провала I2V."""
+        with self._lock_state():
+            if not hasattr(self, "_i2v_fallback_photos") or not isinstance(self._i2v_fallback_photos, set):
+                self._i2v_fallback_photos = set()
+            self._i2v_fallback_photos.add(num)
+            self._done.add(num)
+            entry = self._prompts.get(str(num))
+            if isinstance(entry, dict):
+                entry["video_render_status"] = "fallback_photo"
+                entry["render_status"] = "done"
+                self._save_state()
+        log.warning("%s: I2V не удался (%s); оставлено фото %d.png (fallback_photo).",
+                    self._clip_label(num), reason, num, extra=KEY_EVENT_EXTRA)
+
+    def _init_i2v_queues(self, ready: list) -> None:
+        """Распределяет готовые промпты I2V по очередям фазы 1 (фото) и фазы 2 (видео, при resume)."""
+        uploader = getattr(self, "_uploader", None)
+        done_photos = getattr(uploader, "done_photos", set()) if uploader is not None else set()
+        done_videos = getattr(uploader, "done_videos", set()) if uploader is not None else set()
+        photo_ready = []
+        video_ready = []
+        if not hasattr(self, "_i2v_phase2_nums") or not isinstance(self._i2v_phase2_nums, set):
+            self._i2v_phase2_nums = set()
+        for n in ready:
+            if n in done_videos:
+                self._done.add(n)
+                continue
+            entry = self._prompts.get(str(n))
+            is_i2v = isinstance(entry, dict) and entry.get("i2v") is True
+            if n in done_photos:
+                if not is_i2v:
+                    self._done.add(n)
+                    continue
+                if _video_prompt_ready(entry):
+                    cache_dest = self._photos_cache_dir() / f"{n}.png"
+                    ok = cache_dest.is_file()
+                    if not ok and uploader is not None and hasattr(uploader, "download_clip_asset"):
+                        try:
+                            uploader.download_clip_asset(f"{n}.png", cache_dest)
+                            ok = cache_dest.is_file()
+                        except Exception as exc:
+                            log.warning("Не удалось скачать %d.png из Release при resume (%s): повторим рендер фото.",
+                                        n, exc)
+                    if ok:
+                        self._i2v_phase2_nums.add(n)
+                        video_ready.append(n)
+                        continue
+                    photo_ready.append(n)
+                else:
+                    self._record_i2v_fallback(n, "видео-промпт не готов")
+            else:
+                photo_ready.append(n)
+        self._photo_nums = set(photo_ready)
+        self._video_queue = deque(group_by_stack(video_ready, self._stack_of))
+        self._photo_queue = deque(group_by_stack(photo_ready, self._stack_of))
         self._photo_queue.extend(self._preview_order)
+
+    def _work_loop(self, ready: list) -> None:
+        if getattr(self, "i2v_mode", False):
+            self._init_i2v_queues(ready)
+        else:
+            # очереди по ролям клипов (STEP 7, блок B2): фото — только при photo_profile, иначе всё видео
+            self._photo_nums = set((self._split or {}).get("photo", [])) if self.photo_profile else set()
+            # задачи одного стека (refs из prompts.json) идут подряд; номера клипов не меняются
+            self._video_queue = deque(group_by_stack([n for n in ready if n not in self._photo_nums], self._stack_of))
+            self._photo_queue = deque(group_by_stack([n for n in ready if n in self._photo_nums], self._stack_of))
+            # превью идут в самый конец очереди фото, после всех обычных фото; видеоочередь не меняется
+            self._photo_queue.extend(self._preview_order)
         drain_since: Optional[float] = None
         while True:
             self._tick_429 = set()  # новый обход: карты с 429 на прошлом обходе снова доступны
@@ -2981,6 +3191,14 @@ class Orchestrator:
             return
         # очередь своей роли пуста и задач у карты нет: карта простаивает и переключается на работу другой роли
         if len(slot.tasks) == 0:
+            if getattr(self, "i2v_mode", False):
+                if not stopping and slot.role == "photo" and len(self._video_queue) > 0:
+                    self._start_switch(slot, "video", now)
+                    return
+                if not stopping and self._has_pending_phase1_i2v():
+                    return
+                self._retire(slot, "работы для карты больше нет")
+                return
             target = None if stopping else _switch_target(
                 slot.role, len(self._video_queue), len(self._photo_queue), self.photo_profile is not None)
             if target is not None:
@@ -3371,6 +3589,9 @@ class Orchestrator:
             return  # готовый или назначенный клип не возвращается в очередь
         used = self._attempts.get(num, 0)
         if used >= MAX_ATTEMPTS:
+            if getattr(self, "i2v_mode", False) and num in getattr(self, "_i2v_phase2_nums", ()):
+                self._record_i2v_fallback(num, reason)
+                return
             log.error("%s: ошибка: %s", self._clip_label(num), reason, extra=KEY_EVENT_EXTRA)
             self._failed.add(num)
             self._mark(num, "failed")
@@ -3458,6 +3679,35 @@ class Orchestrator:
         log.info("%s: видеопамять по /health при готовности карты: %s.", _card_name(slot, cap=True), vram_text,
                  extra=CONSOLE_SKIP_EXTRA)
 
+    def _upload_input_image(self, slot: _CardSlot, num: int, image_path: Path) -> str:
+        """Загружает входное изображение N.png на воркер перед POST /task (I2V)."""
+        image_name = f"clip_{num}.png"
+        data = image_path.read_bytes()
+        headers = {
+            **self._headers,
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "image/png",
+        }
+        try:
+            resp = self._http.request(
+                "POST",
+                f"{slot.url}/input_image",
+                params={"name": image_name},
+                content=data,
+                headers=headers,
+                timeout=self.http_timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise _WorkerNetError(type(exc).__name__) from None
+        if resp.status_code >= 400:
+            raise _WorkerHttpError(resp.status_code)
+        return image_name
+
+    def _needs_input_image(self, slot: _CardSlot) -> bool:
+        if getattr(self, "i2v_mode", False) and slot.role == "video":
+            return True
+        return load_profile_requires_input_image(self._profile_for_role(slot.role))
+
     def _dispatch(self, slot: _CardSlot, now: float) -> None:
         with self._lock_state():
             num = self._queue_for_role(slot.role).popleft()
@@ -3484,12 +3734,34 @@ class Orchestrator:
         else:
             entry = self._prompts.get(str(num))
             entry = entry if isinstance(entry, dict) else {}
-            num_frames = PHOTO_NUM_FRAMES if slot.role == "photo" else entry.get("num_frames")
-            if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
-                # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
-                self._attempts[num] = MAX_ATTEMPTS
-                self._fail_clip(num, "в prompts.json нет корректного num_frames")
-                return
+            is_i2v_video = self._needs_input_image(slot)
+            if is_i2v_video:
+                with self._lock_state():
+                    if not hasattr(self, "_i2v_phase2_nums") or not isinstance(self._i2v_phase2_nums, set):
+                        self._i2v_phase2_nums = set()
+                    self._i2v_phase2_nums.add(num)
+                raw_prompt = entry.get("video_prompt")
+                if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json нет корректного video_prompt")
+                    return
+                num_frames = entry.get("video_num_frames")
+                if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json нет корректного video_num_frames")
+                    return
+            else:
+                raw_prompt = entry.get("prompt")
+                if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json нет корректного prompt")
+                    return
+                num_frames = PHOTO_NUM_FRAMES if slot.role == "photo" else entry.get("num_frames")
+                if not isinstance(num_frames, int) or isinstance(num_frames, bool) or num_frames <= 0:
+                    # Подставлять значение по умолчанию нельзя: клип сразу считается неудачным.
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, "в prompts.json нет корректного num_frames")
+                    return
             seed = self.seed_base + num
             if self._seed_mode_run_for_role(slot.role):  # Блок 3: профиль роли с seed_mode: run
                 run_seed = getattr(self, "_run_seed", None)
@@ -3498,8 +3770,45 @@ class Orchestrator:
                     self._fail_clip(num, "не задан run_seed для профиля с seed_mode: run")
                     return
                 seed = run_seed
-            payload = {"num": num, "prompt": entry["prompt"],
+            payload = {"num": num, "prompt": raw_prompt,
                        "num_frames": num_frames, "seed": seed}
+            if is_i2v_video:
+                cache_path = self._photos_cache_dir() / f"{num}.png"
+                if not cache_path.is_file():
+                    uploader = getattr(self, "_uploader", None)
+                    if (uploader is not None and hasattr(uploader, "download_clip_asset")
+                            and num in getattr(uploader, "done_photos", ())):
+                        try:
+                            uploader.download_clip_asset(f"{num}.png", cache_path)
+                        except Exception as exc:
+                            log.warning("Не удалось скачать %d.png из Release для I2V: %s", num, exc)
+                if not cache_path.is_file():
+                    self._attempts[num] = MAX_ATTEMPTS
+                    self._fail_clip(num, f"в photos_cache нет входного изображения {num}.png")
+                    return
+                try:
+                    input_image_name = self._upload_input_image(slot, num, cache_path)
+                except _WorkerNetError as exc:
+                    slot.net_fail += 1
+                    with self._lock_state():
+                        self._queue_for_role(slot.role).appendleft(num)
+                    self._warn_card(slot, f"post_input_image:{num}:{exc}",
+                                    "Воркер %s не принял изображение клипа %d (сбой связи: %s).",
+                                    _card_name(slot), num, exc)
+                    return
+                except _WorkerHttpError as exc:
+                    if exc.status == 429:
+                        with self._lock_state():
+                            self._queue_for_role(slot.role).appendleft(num)
+                        blocked = getattr(self, "_tick_429", None)
+                        if blocked is not None:
+                            blocked.add(slot.index)
+                        return
+                    slot.net_fail += 1
+                    self._bump_attempts(num)
+                    self._fail_clip(num, f"воркер отклонил входное изображение ({exc})")
+                    return
+                payload["input_image"] = input_image_name
             entry_refs = _entry_refs(entry)
             if entry_refs is not None:
                 # референсы задачи: поле уходит на воркер только когда оно есть в prompts.json (старые задачи без изменений)
@@ -3688,6 +3997,14 @@ class Orchestrator:
             return False
 
     @staticmethod
+    def _accepts_allow_upgrade(uploader) -> bool:
+        """Есть ли у upload_clip параметр allow_upgrade (I2V: дозагрузка .mp4 поверх .png)."""
+        try:
+            return "allow_upgrade" in inspect.signature(uploader.upload_clip).parameters
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
     def _release_download(path: str) -> None:
         """Удаляет скачанный файл и его каталог задачи, если тот уже пуст."""
         try:
@@ -3707,19 +4024,28 @@ class Orchestrator:
         finally:
             self._release_download(path)
             with self._lock_state():
+                pending_i2v = getattr(self, "_pending_i2v_uploads", None)
+                if isinstance(pending_i2v, set) and path.lower().endswith(".png"):
+                    pending_i2v.discard(num)
                 self._pending_uploads -= 1
 
     def _upload_one(self, num: int, path: str, duration: float, is_preview: bool, card: str) -> None:
         uploader = self._uploader
+        i2v = getattr(self, "i2v_mode", False)
+        is_photo_file = not is_preview and path.lower().endswith(".png")
+        is_video_upgrade = i2v and not is_preview and not is_photo_file
         try:
             if uploader is None:
                 raise gp.GeminiRuntimeError("загрузчик Release не открыт")
             if is_preview:
                 uploader.upload_preview(path)  # превью в ФИНАЛ · ГЕНЕРАЦИЯ, не в generated_links.txt
-            elif self._accepts_refresh(uploader):
-                uploader.upload_clip(path, refresh_links=False)  # файл ссылок обновляется пакетом ниже
             else:
-                uploader.upload_clip(path)
+                kwargs = {}
+                if self._accepts_refresh(uploader):
+                    kwargs["refresh_links"] = False  # файл ссылок обновляется пакетом ниже
+                if is_video_upgrade and self._accepts_allow_upgrade(uploader):
+                    kwargs["allow_upgrade"] = True
+                uploader.upload_clip(path, **kwargs)
         except Exception as exc:
             with self._lock_state():
                 self._fail_clip(num, f"не удалось загрузить в Release: {exc}")
@@ -3744,7 +4070,36 @@ class Orchestrator:
                 uploader.refresh_links()
             except Exception as exc:  # сбой ссылок не отменяет уже выгруженный клип
                 log.warning("Не удалось обновить generated_links.txt: %s", exc)
+        if i2v and is_photo_file:
+            with self._lock_state():
+                entry = self._prompts.get(str(num))
+                is_i2v_entry = isinstance(entry, dict) and entry.get("i2v") is True
+                video_ready = is_i2v_entry and _video_prompt_ready(entry)
+            if is_i2v_entry and video_ready:
+                cache_dest = self._photos_cache_dir() / f"{num}.png"
+                tmp_cache = cache_dest.with_suffix(".png.tmp")
+                shutil.copyfile(path, tmp_cache)
+                os.replace(tmp_cache, cache_dest)
+                with self._lock_state():
+                    if not hasattr(self, "_i2v_phase2_nums") or not isinstance(self._i2v_phase2_nums, set):
+                        self._i2v_phase2_nums = set()
+                    self._attempts[num] = 0
+                    self._i2v_phase2_nums.add(num)
+                    self._video_queue.append(num)
+                    pending_i2v = getattr(self, "_pending_i2v_uploads", None)
+                    if isinstance(pending_i2v, set):
+                        pending_i2v.discard(num)
+                log.info("Фото %d.png выдано в Release (рендер: %s, %.1f с); клип поставлен в очередь I2V.",
+                         num, card, duration)
+                return
+            if is_i2v_entry and not video_ready:
+                self._record_i2v_fallback(num, "видео-промпт не готов")
+                return
         with self._lock_state():
+            if i2v and not is_photo_file:
+                entry = self._prompts.get(str(num))
+                if isinstance(entry, dict):
+                    entry["video_render_status"] = "done"
             self._done.add(num)
             self._durations.append(duration)
             self._mark(num, "done")
@@ -3783,6 +4138,12 @@ class Orchestrator:
             self._call(slot, "POST", f"/ack/{task.id}")
         except (_WorkerNetError, _WorkerHttpError):
             log.warning("Воркер не подтвердил удаление файла %s с диска карты.", name)
+        if getattr(self, "i2v_mode", False) and slot.role == "photo" and preview is None:
+            with self._lock_state():
+                if self._is_i2v_clip(task.num):
+                    if not hasattr(self, "_pending_i2v_uploads") or not isinstance(self._pending_i2v_uploads, set):
+                        self._pending_i2v_uploads = set()
+                    self._pending_i2v_uploads.add(task.num)
         self._enqueue_upload(task.num, path, duration, preview is not None, _card_name(slot))
 
     # --- финал -------------------------------------------------------------------

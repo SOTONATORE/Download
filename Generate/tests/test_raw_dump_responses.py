@@ -1,8 +1,8 @@
-"""Диагностика сырых ответов модели: debug.dump_raw_responses (профиль cartoon_photos).
+"""Диагностика сырых ответов модели: debug.dump_raw_responses (профиль cartoon).
 
 Проверяют: без флага каталога raw/ нет; с флагом один файл на запрос (первый ответ батча, повтор формата,
 исправление) с сырым текстом; сбой записи не поднимает исключение и даёт предупреждение только с путём;
-флаг включён только у cartoon_photos, у ltx25 и zimage_turbo ключи не передаются; разбор блока debug.
+флаг включён только у cartoon, у ltx25 и zimage_turbo ключи не передаются; разбор блока debug.
 
 Тесты написаны, не запускались (прогоняет пользователь). Сеть не используется.
 """
@@ -54,7 +54,7 @@ def _cfg(tmp_path, dump, raw_dir=None):
     style.write_text("# Style guide\nWrite one paragraph.\n", encoding="utf-8")
     return PromptConfig(style_file=str(style), max_prompt_chars=300, batch_size=10, media="video",
                         raw_dir=str(raw_dir if raw_dir is not None else tmp_path / "raw"),
-                        niche="cartoon_photos", dump_raw_responses=dump)
+                        niche="cartoon", dump_raw_responses=dump)
 
 
 def _ok(nums):
@@ -90,8 +90,8 @@ def test_flag_on_clean_answer_writes_one_file_with_raw_text(tmp_path):
     cfg = _cfg(tmp_path, dump=True)
     generate_prompts(SEGMENTS, [1, 3], cfg, CountingTransport([answer]), "m", max_workers=1)
     raw = tmp_path / "raw"
-    assert _names(raw) == [f"cartoon_photos_{WAVE}_0_1.txt"]
-    assert (raw / f"cartoon_photos_{WAVE}_0_1.txt").read_text(encoding="utf-8") == answer
+    assert _names(raw) == [f"cartoon_{WAVE}_0_1.txt"]
+    assert (raw / f"cartoon_{WAVE}_0_1.txt").read_text(encoding="utf-8") == answer
 
 
 def test_flag_on_format_retry_writes_first_answer_and_retry_files(tmp_path):
@@ -102,9 +102,9 @@ def test_flag_on_format_retry_writes_first_answer_and_retry_files(tmp_path):
     generate_prompts(SEGMENTS, [1, 3], cfg, transport, "m", max_workers=1)
     assert transport.calls == 2
     raw = tmp_path / "raw"
-    assert _names(raw) == sorted([f"cartoon_photos_{WAVE}_0_1.txt", f"cartoon_photos_{WAVE}_0_1r1.txt"])
-    assert (raw / f"cartoon_photos_{WAVE}_0_1.txt").read_text(encoding="utf-8") == bad
-    assert (raw / f"cartoon_photos_{WAVE}_0_1r1.txt").read_text(encoding="utf-8") == good
+    assert _names(raw) == sorted([f"cartoon_{WAVE}_0_1.txt", f"cartoon_{WAVE}_0_1r1.txt"])
+    assert (raw / f"cartoon_{WAVE}_0_1.txt").read_text(encoding="utf-8") == bad
+    assert (raw / f"cartoon_{WAVE}_0_1r1.txt").read_text(encoding="utf-8") == good
 
 
 def test_flag_on_fix_request_writes_round_and_package_file(tmp_path):
@@ -120,8 +120,8 @@ def test_flag_on_fix_request_writes_round_and_package_file(tmp_path):
     job.start_round()   # раунд 1, пакет 1
     job.process_fix(gp._LoggedTransport(transport), [clip], 1)
     raw = tmp_path / "raw"
-    assert _names(raw) == [f"cartoon_photos_{WAVE}_1_1.txt"]
-    assert (raw / f"cartoon_photos_{WAVE}_1_1.txt").read_text(encoding="utf-8") == fix_answer
+    assert _names(raw) == [f"cartoon_{WAVE}_1_1.txt"]
+    assert (raw / f"cartoon_{WAVE}_1_1.txt").read_text(encoding="utf-8") == fix_answer
 
 
 def test_flag_on_fix_request_without_dump_flag_writes_nothing(tmp_path):
@@ -159,9 +159,9 @@ def test_write_failure_does_not_raise_and_warns_with_path_only(tmp_path, monkeyp
     assert MARK not in caplog.text
 
 
-# --- профиль: флаг только у cartoon_photos -----------------------------------------------------------
+# --- профиль: флаг только у cartoon -----------------------------------------------------------
 
-@pytest.mark.parametrize("profile, expected", [("cartoon_photos", True), ("ltx25", False), ("zimage_turbo", False)])
+@pytest.mark.parametrize("profile, expected", [("cartoon", True), ("ltx25", False), ("zimage_turbo", False)])
 def test_flag_is_enabled_only_for_cartoon_profile(profile, expected):
     cfg = cli._build_prompt_config(profile, 25, "none", fail_fast=False, raw_dir=None, srt_path=None)
     assert cfg.dump_raw_responses is expected

@@ -153,6 +153,9 @@ class PromptConfig:
     batch_passage: bool = False
     # fix_batch_size: размер пакета исправлений профиля (batch_size профиля задаёт и обычные батчи); None — FIX_BATCH_SIZE
     fix_batch_size: Optional[int] = None
+    # I2V-режим: словарь {номер_сегмента: фото-промпт без хвоста preset.md} и {номер_сегмента: длительность_сек}
+    source_photo_prompts: Optional[dict] = None
+    segment_durations: Optional[dict] = None
 
     def __post_init__(self) -> None:
         # Русский: fix_batch_size, если задан, — целое не меньше 1 (bool не принимается)
@@ -332,12 +335,25 @@ def _collect_context_sentences(sentences: list, start: int, step: int, window_wo
     return out
 
 
-def _format_segment_block(seg: Segment, sentences: list, by_segment: dict, allowed_items=frozenset()) -> str:
+def _format_segment_block(
+    seg: Segment,
+    sentences: list,
+    by_segment: dict,
+    allowed_items=frozenset(),
+    *,
+    source_photo: Optional[str] = None,
+    duration_sec: Optional[float] = None,
+) -> str:
     """Блок одного сегмента для пользовательского запроса. Номер идёт только как служебное
     поле segment_index (его модель вернёт в ответе), в смысловой текст он не входит.
-    allowed_items: разрешённые типы кадра ниши (rules.yaml allowed_shot_items) для правила перефразирования."""
+    allowed_items: разрешённые типы кадра ниши (rules.yaml allowed_shot_items) для правила перефразирования.
+    source_photo / duration_sec: опциональные данные I2V (фото-промпт без хвоста стиля и длительность клипа)."""
     sen = by_segment[seg.num]
     lines = [f"segment_index: {seg.num}"]
+    if duration_sec is not None:
+        lines.append(f"Duration: {duration_sec:.2f}s")
+    if source_photo:
+        lines.append(f"Source photo (animate ONLY what is already drawn here): {source_photo}")
     text = " ".join((seg.text or "").split())
 
     if text:
@@ -491,7 +507,7 @@ _RULES_BOOL_KEYS = ("animals_count", "static_frame", "forbid_thick_vector", "ske
 _RULES_SWITCH_FIELDS = {"small_objects": "small_objects_allowed", "speech": "speech_allowed",
                         "weapons": "weapons_allowed", "close_faces": "close_faces_allowed",
                         "object_sets": "object_sets_forbidden", "fire_hands": "fire_hands_allowed"}
-SCENE_MOTION_VALUES = ("keep", "drop")
+SCENE_MOTION_VALUES = ("keep", "drop", "allow")
 _NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
                  9: "nine", 10: "ten"}
 _EMOTION_SENTENCE = {
@@ -628,7 +644,7 @@ def _rule_scalar(key: str, value: str, source: str):
         return None
     if key == "scene_motion_wording":
         if value not in SCENE_MOTION_VALUES:
-            raise rules_error(source, f"ключ scene_motion_wording должен быть keep или drop; получено «{value}».")
+            raise rules_error(source, f"ключ scene_motion_wording должен быть keep, drop или allow; получено «{value}».")
         return value
     choices = EMOTION_VALUES if key == "emotion" else SUBJECT_SOURCE_VALUES
     if value not in choices:
@@ -763,6 +779,11 @@ def _output_language_sentence(cfg: PromptConfig) -> str:
                  "from words that appear in the " + frame_source + " of the current segment" + example + ". Change only "
                  "the grammatical case or number; never invent, translate or add words, and never take words from the "
                  "Before or After lines. ")
+    if cfg.source_photo_prompts is not None:
+        if "frame_text" in cfg.relaxed_rules:
+            return ("Keep any existing on-frame text from the Source photo stationary and sharp; "
+                    "always write the animation prompt in English.")
+        return "Always write the animation prompt in English."
     if cfg.text_language is None:
         return text + "Always write the output in English."
     if not cfg.frame_language:
@@ -792,14 +813,14 @@ def build_system_instruction(cfg: PromptConfig) -> str:
     rules = cfg.rules
     # строки art_medium и frame_text: при отключении правила строки нет; без отключения текст тот же, что раньше
     if cfg.media == "video":
-        kind = "text-to-video prompt"
+        kind = "image-to-video animation prompt" if cfg.source_photo_prompts is not None else "text-to-video prompt"
         camera_end = _ONE_CAMERA_MOVE_LINE
         medium = "" if "art_medium" in cfg.relaxed_rules else _MEDIUM_LINE_VIDEO
     elif cfg.media == "image":
         # static_frame true: один неподвижный кадр и запрет движения камеры; false — без них (rules.yaml)
         kind = "text-to-image prompt, one still frame" if rules.static_frame else "text-to-image prompt"
         camera_end = _NO_CAMERA_MOVE_LINE if rules.static_frame else ""
-        image_line = _MEDIUM_LINE_IMAGE if rules.scene_motion_wording == "keep" else _MEDIUM_LINE_IMAGE_STILL
+        image_line = _MEDIUM_LINE_IMAGE if rules.scene_motion_wording in ("keep", "allow") else _MEDIUM_LINE_IMAGE_STILL
         medium = "" if "art_medium" in cfg.relaxed_rules else image_line
     else:
         raise GeminiInputError(f"media должен быть «video» или «image», получено: {cfg.media!r}.")
@@ -982,8 +1003,12 @@ class _Builder:
                 body = _format_passage(chunk, self.by_num, self.sentences, self.by_segment,
                                        self.cfg.rules.allowed_shot_items)
             else:
+                src_photos = self.cfg.source_photo_prompts or {}
+                durs = self.cfg.segment_durations or {}
                 blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment,
-                                                self.cfg.rules.allowed_shot_items)
+                                                self.cfg.rules.allowed_shot_items,
+                                                source_photo=src_photos.get(n),
+                                                duration_sec=durs.get(n))
                           for n in chunk]
                 body = "\n\n".join(blocks)
             user = ("Write prompts for the following segments. Return only the JSON array.\n\n" + body)

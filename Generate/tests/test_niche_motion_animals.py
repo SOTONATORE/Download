@@ -1,4 +1,4 @@
-"""Ниша cartoon_photos: слова про движение в строке медиа, животные во множественном числе и числа перед животными,
+"""Ниша cartoon: слова про движение в строке медиа, животные во множественном числе и числа перед животными,
 устаревший ключ max_characters в profile.yaml.
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). Сеть и ключи не используются.
@@ -15,7 +15,7 @@ from Generate.core import prompt_check as pc
 from Generate.core.gemini_prompts import PromptConfig, RulesValues
 
 GEN = Path(__file__).resolve().parents[1]
-NICHE_DIR = GEN / "Nishes" / "cartoon_photos"
+NICHE_DIR = GEN / "Nishes" / "cartoon"
 LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 ZIM_DIR = GEN / "model_profiles" / "models" / "zimage_turbo"
 

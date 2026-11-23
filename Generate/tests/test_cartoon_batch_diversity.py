@@ -1,4 +1,4 @@
-"""Разнообразие батча cartoon_photos (batch_passage): вид кадра в setting, канон героя, «free of X» и
+"""Разнообразие батча cartoon (batch_passage): вид кадра в setting, канон героя, «free of X» и
 монотонность соседних клипов в очереди исправлений. У прочих профилей поведение прежнее. Сеть не используется."""
 import re
 import threading
@@ -61,7 +61,7 @@ def test_system_instruction_without_batch_passage_has_no_visual_mode_contract(tm
 # --- крупные планы: профиль с max_characters разрешает предметы и руки, лица запрещены -------
 
 def test_close_faces_line_depends_on_max_characters(tmp_path):
-    """max_characters=4 (cartoon_photos): строка разрешает крупные планы рук и предметов;
+    """max_characters=4 (cartoon): строка разрешает крупные планы рук и предметов;
     без max_characters прежняя строка «Never show close-ups» остаётся на месте.
     У каждого конфига свой RulesValues: PromptConfig синхронизирует max_characters с rules."""
     style = _write_style(tmp_path)

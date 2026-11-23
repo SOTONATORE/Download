@@ -1,7 +1,7 @@
-# Generate/Nishes/cartoon_photos/profile.yaml
-# Profile for the cartoon_photos niche (2D educational comic illustrations on Qwen Image 2.1 Turbo).
+# Generate/Nishes/cartoon/profile.yaml
+# Profile for the cartoon niche (2D educational comic illustrations on Qwen Image 2.1 Turbo).
 
-name: cartoon_photos
+name: cartoon
 
 # Output type: single image per SRT segment
 type: image
@@ -57,12 +57,12 @@ max_prompt_chars: 6000
 
 # ComfyUI API workflow, bindings and output image node (SaveImageAdvanced)
 workflow:
-  file: "Generate/Nishes/cartoon_photos/workflow.json"
-  bindings_file: "Generate/Nishes/cartoon_photos/bindings.json"
+  file: "Generate/Nishes/cartoon/workflow.json"
+  bindings_file: "Generate/Nishes/cartoon/bindings.json"
   output: {node_id: "461", type: image}
 
 # Prompt style guide matching the clean 2D editorial comic reference style
-prompt_style: "Generate/Nishes/cartoon_photos/prompts/style.md"
+prompt_style: "Generate/Nishes/cartoon/prompts/style.md"
 
 # Generation parameters from workflow.json (KSampler 488, ImageScale 511 lanczos)
 params:

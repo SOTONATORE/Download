@@ -12,7 +12,7 @@ from Generate.core import prompt_check as pc
 from Generate.core.gemini_prompts import GeminiInputError, PromptConfig, RulesValues
 
 GEN = Path(__file__).resolve().parents[1]
-NICHE_DIR = GEN / "Nishes" / "cartoon_photos"
+NICHE_DIR = GEN / "Nishes" / "cartoon"
 LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 ZIM_DIR = GEN / "model_profiles" / "models" / "zimage_turbo"
 
@@ -39,7 +39,7 @@ def test_unknown_key_fails_with_russian_message_naming_it(tmp_path):
     assert "Ошибка входных данных" in message
 
 
-# (c) значения cartoon_photos: нет удалённых фраз, лимит животных 3
+# (c) значения cartoon: нет удалённых фраз, лимит животных 3
 def test_cartoon_system_instruction_drops_removed_sentences_and_uses_animal_limit_three():
     rules = gp.load_rules(NICHE_DIR / "prompts" / "rules.yaml")
     cfg = PromptConfig(style_file=str(NICHE_DIR / "prompts" / "style.md"), media="image", preset="none",

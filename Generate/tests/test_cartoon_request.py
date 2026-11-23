@@ -1,4 +1,4 @@
-"""Тесты запроса cartoon_photos: поле setting, батч одним текстом с маркерами сегментов, строка разнообразия
+"""Тесты запроса cartoon: поле setting, батч одним текстом с маркерами сегментов, строка разнообразия
 сеттингов, без финальной самопроверки. У прочих профилей прежний вид запроса. Сеть не используется."""
 import pathlib
 
@@ -7,7 +7,7 @@ from Generate.core.gemini_prompts import PromptConfig, build_requests, parse_and
 from Generate.core.srt_parser import Segment
 
 GEN = pathlib.Path(__file__).resolve().parent.parent
-CARTOON_DIR = GEN / "Nishes" / "cartoon_photos"
+CARTOON_DIR = GEN / "Nishes" / "cartoon"
 LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 SETTING_FORMAT = [{"segment_index": int, "setting": str, "prompt": str}]
 SELF_CHECK_BULLET = "check each prompt against the self-check checklist"
@@ -184,7 +184,7 @@ def test_real_ltx25_profile_keeps_block_form_and_schema(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Файлы профиля cartoon_photos (только этот профиль)
+# Файлы профиля cartoon (только этот профиль)
 # ---------------------------------------------------------------------------
 
 def test_cartoon_profile_files_enable_passage_and_text_and_context():

@@ -1,4 +1,4 @@
-"""Тесты четырёх исправлений валидации cartoon_photos по прогону.
+"""Тесты четырёх исправлений валидации cartoon по прогону.
 
 Покрывает: ложный конфликт рта на многоперсонажной сцене (клип 641), окно пустой таблички на шаблоне
 «header band» из style.md (клип 26), хвост «in <шрифт> lettering» в ветке 3 надписи (клипы 128, 234, 795),
@@ -172,7 +172,7 @@ def _timing():
 
 
 def _photo_cfg():
-    # batch_passage: как у профиля cartoon_photos — пакетные правила стиля (рот, табличка, надпись) включены
+    # batch_passage: как у профиля cartoon — пакетные правила стиля (рот, табличка, надпись) включены
     return gp.PromptConfig(style_file="unused.md", media="image", max_characters=4, batch_passage=True)
 
 
@@ -189,7 +189,7 @@ def test_resume_clip_641_clears_review_without_llm(monkeypatch, tmp_path):
     _timings(monkeypatch)
     segs = [SrtSegment(num=641, start_ms=0, end_ms=10_000, text=SEG_641)]
     path = tmp_path / "prompts.json"
-    state = {"srt_hash": go.srt_hash(segs), "model": "", "profile": "cartoon_photos",
+    state = {"srt_hash": go.srt_hash(segs), "model": "", "profile": "cartoon",
              "prompts": {"641": _entry_641()}}
     path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     transport = _NoCallTransport()

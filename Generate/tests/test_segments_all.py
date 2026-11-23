@@ -1,4 +1,4 @@
-"""Тесты segments: all в profile.yaml ниши (cartoon_photos): список клипов из SRT, missing.txt не читается.
+"""Тесты segments: all в profile.yaml ниши (cartoon): список клипов из SRT, missing.txt не читается.
 
 Сеть не используется: профиль и missing.txt создаются во временной папке.
 """
@@ -13,7 +13,7 @@ from Generate.core.missing import parse_missing
 from Generate.core.srt_parser import Segment
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CARTOON_STYLE = ROOT / "Generate" / "Nishes" / "cartoon_photos" / "prompts" / "style.md"
+CARTOON_STYLE = ROOT / "Generate" / "Nishes" / "cartoon" / "prompts" / "style.md"
 
 
 def _segs(*nums):
@@ -39,7 +39,7 @@ def _fail_if_called(*args, **kwargs):
 
 
 def test_segments_all_gives_srt_numbers_in_ascending_order(tmp_path, monkeypatch):
-    profile = _profile(tmp_path, monkeypatch, "name: cartoon_photos\nsegments: all\n")
+    profile = _profile(tmp_path, monkeypatch, "name: cartoon\nsegments: all\n")
     monkeypatch.setattr(orch, "parse_missing", _fail_if_called)
     segs = _segs(9, 2, 5, 1)
     assert cli._segments_mode(profile) == "all"
@@ -47,7 +47,7 @@ def test_segments_all_gives_srt_numbers_in_ascending_order(tmp_path, monkeypatch
 
 
 def test_profile_without_key_keeps_parse_missing_result(tmp_path, monkeypatch):
-    profile = _profile(tmp_path, monkeypatch, "name: cartoon_photos\ntype: image\n")
+    profile = _profile(tmp_path, monkeypatch, "name: cartoon\ntype: image\n")
     segs = _segs(1, 2, 3, 4)
     path = _missing(tmp_path, "3\n1\n")
     assert cli._segments_mode(profile) == "missing"
@@ -55,7 +55,7 @@ def test_profile_without_key_keeps_parse_missing_result(tmp_path, monkeypatch):
 
 
 def test_unknown_segments_value_is_russian_error_naming_value(tmp_path, monkeypatch):
-    profile = _profile(tmp_path, monkeypatch, "name: cartoon_photos\nsegments: some\n")
+    profile = _profile(tmp_path, monkeypatch, "name: cartoon\nsegments: some\n")
     with pytest.raises(GeminiInputError) as info:
         cli._segments_mode(profile)
     assert str(info.value).startswith("Ошибка входных данных")

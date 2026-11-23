@@ -1,7 +1,7 @@
 """Правило наборов предметов (rules.yaml: object_sets): стопки, кучи, ряды и линии предметов.
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub).
-Имя ниши cartoon_photos названо только здесь, в тесте; в коде его нет.
+Имя ниши cartoon названо только здесь, в тесте; в коде его нет.
 """
 import hashlib
 from pathlib import Path
@@ -13,7 +13,7 @@ from Generate.core import prompt_check as pc
 from Generate.core.gemini_prompts import GeminiInputError, PromptConfig, RulesValues
 
 GEN = Path(__file__).resolve().parents[1]
-NICHE_DIR = GEN / "Nishes" / "cartoon_photos"
+NICHE_DIR = GEN / "Nishes" / "cartoon"
 LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 ZIM_DIR = GEN / "model_profiles" / "models" / "zimage_turbo"
 

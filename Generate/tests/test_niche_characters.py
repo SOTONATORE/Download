@@ -1,4 +1,4 @@
-"""Ниша cartoon_photos: лимит персонажей (герой и до трёх других), max_prompt_chars из профиля, подпись fail_fast.
+"""Ниша cartoon: лимит персонажей (герой и до трёх других), max_prompt_chars из профиля, подпись fail_fast.
 
 Тесты написаны, не запускались (прогоняет пользователь на GitHub). Сеть и ключи не используются.
 Промпты в тестах — английские, как в настоящих промптах; комментарии — по-русски.
@@ -68,6 +68,6 @@ def test_fail_fast_label_names_people_rule_without_model_text():
 
 # (e) max_prompt_chars 6000 и max_characters 4 из профиля попадают в PromptConfig
 def test_cartoon_profile_keys_reach_prompt_config():
-    cfg = cli._build_prompt_config("cartoon_photos", 20, "none")
+    cfg = cli._build_prompt_config("cartoon", 20, "none")
     assert cfg.max_prompt_chars == 6000
     assert cfg.max_characters == 4

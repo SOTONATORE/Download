@@ -24,6 +24,7 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
 
 try:
@@ -279,6 +280,8 @@ class ReleaseUploader:
         self._counts: dict = {}      # тег части -> число файлов в ней
         self._parts: list = []       # теги частей ГЕНЕРАЦИЯ по порядку
         self.asset_tags: dict = {}   # имя файла клипа -> тег части
+        self.done_photos: set = set()
+        self.done_videos: set = set()
         self.done: set = set()
         self.final_assets: list = []  # имена ассетов ФИНАЛ · ГЕНЕРАЦИЯ из prepare() (Блок 2: восстановление служебных файлов)
         self._prepared = False
@@ -306,7 +309,8 @@ class ReleaseUploader:
         else:
             self.final_assets = list(rel.assets)
             self._log(f"Продолжение: релиз {self.final_tag} уже есть, новый финал не создаётся.")
-        done: set = set()
+        done_photos: set = set()
+        done_videos: set = set()
         n = 1
         while True:
             pt = part_tag(STAGE_GEN, n, self.full_hash)
@@ -314,12 +318,14 @@ class ReleaseUploader:
             if part is None:
                 break
             self._parts.append(pt)
-            self._absorb(part, done)
+            self._absorb(part, done_photos, done_videos)
             n += 1
-        self.done = done
+        self.done_photos = done_photos
+        self.done_videos = done_videos
+        self.done = done_photos | done_videos
         self._prepared = True
-        self._log(f"В частях ГЕНЕРАЦИЯ уже {len(done)} клипов.")
-        return set(done)
+        self._log(f"В частях ГЕНЕРАЦИЯ уже {len(self.done)} клипов.")
+        return set(self.done)
 
     def _create_final(self) -> None:
         self.store.create_release(self.final_tag,
@@ -327,12 +333,17 @@ class ReleaseUploader:
                                   release_body(STAGE_GEN, "final", self.full_hash))
         self._log(f"Создан релиз {self.final_tag} (ФИНАЛ · ГЕНЕРАЦИЯ).")
 
-    def _absorb(self, rel: ReleaseInfo, done: set) -> None:
+    def _absorb(self, rel: ReleaseInfo, done_photos: set, done_videos: set) -> None:
         self._counts[rel.tag] = len(rel.assets)
         for name in rel.assets:
-            num = _clip_num_any(name, self.template)
-            if num is not None:
-                done.add(num)
+            photo_num = parse_clip_num(name, PHOTO_FILENAME_TEMPLATE)
+            if photo_num is not None:
+                done_photos.add(photo_num)
+                self.asset_tags[name] = rel.tag
+                continue
+            video_num = parse_clip_num(name, self.template)
+            if video_num is not None:
+                done_videos.add(video_num)
                 self.asset_tags[name] = rel.tag
 
     # --- загрузка -------------------------------------------------------------
@@ -353,25 +364,62 @@ class ReleaseUploader:
         self._log(f"Создан релиз {pt} (ГЕНЕРАЦИЯ · ЧАСТЬ {n}).")
         return pt
 
-    def upload_clip(self, path: str, refresh_links: bool = True) -> bool:
+    def upload_clip(self, path: str, refresh_links: bool = True, allow_upgrade: bool = False) -> bool:
         """Загружает клип или фото в активную часть ГЕНЕРАЦИЯ; False, если номер уже загружен.
+        allow_upgrade=True позволяет дозагрузить .mp4 поверх уже загруженного фото .png (I2V).
         После загрузки обновляет generated_links.txt в финале, если refresh_links=True (по умолчанию, как раньше).
         refresh_links=False: файл ссылок обновит отдельный вызов refresh_links() (пакетное обновление)."""
         self._ensure_prepared()
         name = os.path.basename(path)
-        num = _clip_num_any(name, self.template)
+        photo_num = parse_clip_num(name, PHOTO_FILENAME_TEMPLATE)
+        video_num = None if photo_num is not None else parse_clip_num(name, self.template)
+        num = photo_num if photo_num is not None else video_num
         if num is None:
             raise GeminiInputError(f"Имя файла не соответствует шаблону клипа: {name}")
-        if num in self.done:
+        is_photo = photo_num is not None
+        if allow_upgrade and not is_photo:
+            if num in self.done_videos:
+                return False
+        elif num in self.done:
             return False
         tag = self._active_tag()
         self.store.upload_asset(tag, path)
         self._counts[tag] += 1
         self.asset_tags[name] = tag
-        self.done.add(num)
+        if is_photo:
+            self.done_photos.add(num)
+        else:
+            self.done_videos.add(num)
+        self.done = self.done_photos | self.done_videos
         if refresh_links:
             self._refresh_links()
         return True
+
+    def download_clip_asset(self, filename: str, dest: Path) -> Path:
+        """Скачивает ассет клипа или фото (например N.png) из соответствующей части релиза в dest."""
+        self._ensure_prepared()
+        tag = self.asset_tags.get(filename)
+        if not tag:
+            raise GeminiRuntimeError(f"Файл {filename} не найден в частях релиза.")
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = None
+        ok = False
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f"{filename}.", suffix=".part",
+                                       dir=str(dest_path.parent.resolve()))
+            os.close(fd)
+            if not self.store.download_asset(tag, filename, tmp):
+                raise GeminiRuntimeError(f"Не удалось скачать {filename} из релиза {tag}.")
+            os.replace(tmp, dest_path)
+            ok = True
+            return dest_path
+        finally:
+            if tmp is not None and not ok:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     def refresh_links(self) -> None:
         """Перезаписывает generated_links.txt в финале по текущему состоянию загруженных клипов (публичный вход)."""
@@ -463,9 +511,21 @@ class ReleaseUploader:
     def links_text(self, repo: str) -> str:
         """Содержимое generated_links.txt по всем загруженным клипам всех частей.
 
-        Пустая строка, если клипов нет (SPEC 9.4)."""
-        names = sorted(self.asset_tags,
-                       key=lambda n: (_clip_num_any(n, self.template) or 0, n))
+        Если для одного номера клипа N загружены и фото (N.png), и видео (N.mp4), в список
+        попадает только видео N.mp4. Пустая строка, если клипов нет (SPEC 9.4)."""
+        video_nums: set = set()
+        for name in self.asset_tags:
+            if parse_clip_num(name, PHOTO_FILENAME_TEMPLATE) is None:
+                vnum = parse_clip_num(name, self.template)
+                if vnum is not None:
+                    video_nums.add(vnum)
+        filtered = []
+        for name in self.asset_tags:
+            pnum = parse_clip_num(name, PHOTO_FILENAME_TEMPLATE)
+            if pnum is not None and pnum in video_nums:
+                continue
+            filtered.append(name)
+        names = sorted(filtered, key=lambda n: (_clip_num_any(n, self.template) or 0, n))
         return create_generated_links(repo, "", names, self.asset_tags)
 
     def _refresh_links(self) -> None:

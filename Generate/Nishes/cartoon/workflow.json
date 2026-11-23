@@ -1,7 +1,7 @@
 {
   "461": {
     "inputs": {
-      "filename_prefix": "cartoon_photos",
+      "filename_prefix": "cartoon",
       "format": "png",
       "format.bit_depth": "8-bit",
       "format.input_color_space": "sRGB",

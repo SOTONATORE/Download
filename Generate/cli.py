@@ -373,6 +373,16 @@ def _style_dir(profile: str) -> str:
     return STYLE_DIR
 
 
+def _style_file_for(profile: str) -> str:
+    """Путь к prompts/style.md профиля: STYLE_DIR, NISHES_DIR или NISHES_DIR/<niche>/i2v."""
+    candidate = f"{_style_dir(profile)}/{profile}/prompts/style.md"
+    if not os.path.isfile(candidate) and profile.endswith("_i2v") and len(profile) > 4:
+        i2v_path = f"{NISHES_DIR}/{profile[:-4]}/i2v/prompts/style.md"
+        if os.path.isfile(i2v_path):
+            return i2v_path
+    return candidate
+
+
 def _srt_kwargs(profile: str, srt_path: str) -> dict:
     """srt_path для _build_prompt_config — только профилю с text_language: srt; остальным вызов прежний (без аргумента)."""
     try:
@@ -411,7 +421,7 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if media not in ("video", "image"):
         raise GeminiInputError(
             f"Ошибка входных данных: в профиле {profile}/profile.yaml не задан тип «type» (video или image).")
-    style_file = f"{_style_dir(profile)}/{profile}/prompts/style.md"
+    style_file = _style_file_for(profile)
     # профиль type: image (фото, Z-Image-Turbo) читает только свой style.md и не подменяется стилем LTX
     if load_profile_type(profile) == "image":
         if not os.path.isfile(style_file):
@@ -709,15 +719,63 @@ def _check_previews(prompts_count, prompts_file: str, photo_profile) -> Optional
     return None
 
 
+def _validate_i2v_params(args) -> tuple[float, float, float, float]:
+    """Проверяет числовые параметры --i2v-mode; при ошибке бросает GeminiInputError."""
+    intro_minutes = float(getattr(args, "intro_minutes", 3.0))
+    intro_video_percent = float(getattr(args, "intro_video_percent", 70.0))
+    after_intro_video_percent = float(getattr(args, "after_intro_video_percent", 10.0))
+    min_anim_sec = float(getattr(args, "min_anim_sec", 2.0))
+    if not math.isfinite(intro_minutes) or intro_minutes < 0:
+        raise GeminiInputError("Ошибка входных данных: --intro-minutes должен быть неотрицательным числом.")
+    if not math.isfinite(intro_video_percent) or not 0.0 <= intro_video_percent <= 100.0:
+        raise GeminiInputError("Ошибка входных данных: --intro-video-percent должен быть от 0 до 100.")
+    if not math.isfinite(after_intro_video_percent) or not 0.0 <= after_intro_video_percent <= 100.0:
+        raise GeminiInputError("Ошибка входных данных: --after-intro-video-percent должен быть от 0 до 100.")
+    if not math.isfinite(min_anim_sec) or min_anim_sec < 0:
+        raise GeminiInputError("Ошибка входных данных: --min-anim-sec должен быть неотрицательным числом.")
+    return intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Проверяет конфигурацию, SRT и наличие missing.txt (без разбора missing)."""
     # --scan-sec проверяется здесь же, до любого вызова Vast (предстартовая проверка workflow)
     _cfg, code = _load_cfg(args.config, {"scan_sec": getattr(args, "scan_sec", None)})
     if code is not None:
         return code
+
+    i2v_mode = bool(getattr(args, "i2v_mode", False))
+    photo_profile = getattr(args, "photo_profile", None) or None
+    i2v_video_profile = None
+    if i2v_mode:
+        try:
+            intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+        except GeminiInputError as e:
+            _err(str(e))
+            return EXIT_INPUT
+        if photo_profile is None:
+            _err("Ошибка входных данных: режим --i2v-mode требует --photo-profile.")
+            return EXIT_INPUT
+        input_code = _check_photo_profile(photo_profile)
+        if input_code is not None:
+            return input_code
+        i2v_video_profile = f"{photo_profile}_i2v"
+        input_code = _check_profile_and_preset(i2v_video_profile, PRESET_NONE)
+        if input_code is not None:
+            return input_code
+        try:
+            i2v_type = load_profile_type(i2v_video_profile)
+        except GeminiInputError as e:
+            _err(f"Ошибка входных данных: {e}")
+            return EXIT_INPUT
+        if i2v_type != "video":
+            _err(f"Ошибка входных данных: I2V-профиль «{i2v_video_profile}» имеет тип «{i2v_type}»; "
+                 f"нужен профиль с type: video.")
+            return EXIT_INPUT
+
     # семейство текстовой модели; для openrouter нужен хотя бы один ключ OPENROUTER (до любого вызова Vast)
     try:
-        family = resolve_text_family(_cfg, getattr(args, "text_model", None), _cfg.model_profile)
+        family_profile = i2v_video_profile if i2v_mode else (photo_profile or _cfg.model_profile)
+        family = resolve_text_family(_cfg, getattr(args, "text_model", None), family_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -743,13 +801,17 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # превью (prompts.txt): проверяются до аренды; при «выкл» файл не читается
     code = _check_previews(getattr(args, "prompts_count", None), getattr(args, "prompts_file", ""),
-                           getattr(args, "photo_profile", None))
+                           photo_profile)
     if code is not None:
         return code
 
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(_text_family_line(_cfg, family))
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
+    if i2v_mode:
+        print(f"Режим I2V: фото {photo_profile}, видео {i2v_video_profile}, "
+              f"вступление {intro_minutes:g} мин ({intro_video_percent:g}%), "
+              f"далее {after_intro_video_percent:g}%, порог {min_anim_sec:g} с")
     if previews.count_value(getattr(args, "prompts_count", None)):
         print(f"Превью: файл промптов {args.prompts_file}, вариантов на промпт {args.prompts_count}")
     print(f"srt_hash: {srt_hash(segments)}")
@@ -776,6 +838,9 @@ def _print_summary(s) -> None:
         print("  достигнут срок задания: новые клипы не брались")
     if g("budget_exceeded", False):
         print("  достигнут потолок расходов")
+    fallback = g("fallback_photos", None) or []
+    if fallback:
+        print(f"  резервное фото (I2V не удалось): {len(fallback)}")
     if not g("cleanup_ok", True):
         print("  ВНИМАНИЕ: карты могли остаться арендованными, проверьте Vast.ai")
 
@@ -852,9 +917,29 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg, code = _load_cfg(args.config, overrides)
     if code is not None:
         return code
+
+    i2v_mode = bool(getattr(args, "i2v_mode", False))
+    photo_profile = getattr(args, "photo_profile", None) or None
+    i2v_video_profile = None
+    intro_minutes = 3.0
+    intro_video_percent = 70.0
+    after_intro_video_percent = 10.0
+    min_anim_sec = 2.0
+    if i2v_mode:
+        try:
+            intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+        except GeminiInputError as e:
+            _err(str(e))
+            return EXIT_INPUT
+        if photo_profile is None:
+            _err("Ошибка входных данных: режим --i2v-mode требует --photo-profile.")
+            return EXIT_INPUT
+        i2v_video_profile = f"{photo_profile}_i2v"
+
     # семейство текстовой модели: --text-model, text_model профиля или default_text_model (ошибка входа = код 2)
     try:
-        family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
+        family_profile = i2v_video_profile if i2v_mode else (photo_profile or cfg.model_profile)
+        family = resolve_text_family(cfg, getattr(args, "text_model", None), family_profile)
     except GeminiInputError as e:
         _err(str(e))
         return EXIT_INPUT
@@ -885,11 +970,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         _err(f"Ошибка входных данных: видеопрофиль «{cfg.model_profile}» имеет тип «{video_type}»; "
              f"фото задаются через --photo-profile.")
         return EXIT_INPUT
-    photo_profile = getattr(args, "photo_profile", None) or None
     if photo_profile is not None:
         input_code = _check_photo_profile(photo_profile)
         if input_code is not None:
             return input_code
+    if i2v_mode:
+        input_code = _check_profile_and_preset(i2v_video_profile, cfg.preset)
+        if input_code is not None:
+            return input_code
+        try:
+            i2v_type = load_profile_type(i2v_video_profile)
+        except GeminiInputError as e:
+            _err(f"Ошибка входных данных: {e}")
+            return EXIT_INPUT
+        if i2v_type != "video":
+            _err(f"Ошибка входных данных: I2V-профиль «{i2v_video_profile}» имеет тип «{i2v_type}»; "
+                 f"нужен профиль с type: video.")
+            return EXIT_INPUT
     # segments: all в profile.yaml ниши (фото): ошибка значения — до любых трат и аренды карт
     try:
         segments_all = photo_profile is not None and _segments_mode(photo_profile) == "all"
@@ -911,6 +1008,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
                                                  **raw_kw, **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
+        i2v_video_cfg = None
+        i2v_timing = None
+        if i2v_mode:
+            i2v_timing = _build_timing(cfg, i2v_video_profile)
+            i2v_video_cfg = _build_prompt_config(
+                i2v_video_profile, cfg.gemini_batch_size, cfg.preset,
+                **raw_kw, **_srt_kwargs(i2v_video_profile, args.srt))
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"
         transport = None if _pilot_mode(args) else _make_transport(cfg, family)
@@ -1031,6 +1135,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             pilot_start_cmd=(getattr(args, "pilot_start_cmd", "") or "").strip() or None,
             # артефакт запуска (SPEC 10.4): каталог задаёт workflow; пусто = не ведётся
             artifact_dir=(getattr(args, "artifact_dir", "") or None),
+            **({
+                "i2v_mode": True,
+                "intro_seconds": intro_minutes * 60.0,
+                "intro_video_percent": intro_video_percent,
+                "after_intro_video_percent": after_intro_video_percent,
+                "min_anim_sec": min_anim_sec,
+                "i2v_video_cfg": i2v_video_cfg,
+                "i2v_video_profile": i2v_video_profile,
+                "i2v_timing": i2v_timing,
+            } if i2v_mode else {}),
         )
     except ReleaseStartError as e:
         # служебный релиз или файл запуска не загружены: остановка до трат, код 2 (SPEC 9.1, E1)
@@ -1747,11 +1861,19 @@ def _review_reasons(prompts: dict, nums) -> dict:
 
 def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
     v, ph = counts["video"], counts["photo"]
+    i2v_line = (
+        [f"- Режим I2V: включён (вступление {prep_args['intro_minutes']:g} мин: "
+         f"{prep_args['intro_video_percent']:g}%, далее {prep_args['after_intro_video_percent']:g}%, "
+         f"порог {prep_args['min_anim_sec']:g} с)"]
+        if prep_args.get("i2v_mode")
+        else []
+    )
     lines = [
         "## Проверка Gemini: отчёт",
         "",
         f"- Видео-профиль: {prep_args['video_profile'] if prep_args['video_model'] != 'none' else 'выключен'}",
         f"- Фото-профиль: {prep_args['photo_profile'] or 'выключен'}",
+        *i2v_line,
         f"- Проверено сегментов: {len(prep_args['missing'])}",
         f"- Видео-сегментов: {len(counts['video_nums'])}, фото-сегментов: {len(counts['photo_nums'])}",
         f"- Готово промптов: видео {v['ready']}, фото {ph['ready']}",
@@ -1833,23 +1955,167 @@ def _log_text_cards_count(nums, prompts, refs_enabled: bool) -> None:
         log.info(line)
 
 
+def _i2v_video_prompts_view(prompts: dict, video_nums: list) -> dict:
+    """Проекция I2V-полей записи prompts.json (video_*) на стандартные ключи проверки."""
+    view: dict = {}
+    for n in video_nums:
+        entry = prompts.get(str(n))
+        if not isinstance(entry, dict):
+            continue
+        view[str(n)] = {
+            "status": entry.get("video_status"),
+            "prompt": entry.get("video_prompt", ""),
+            "num_frames": entry.get("video_num_frames"),
+            "needs_review": bool(entry.get("video_needs_review")),
+            "error": entry.get("video_error", ""),
+        }
+    return view
+
+
+def _merge_review_reasons(photo_prompts: dict, flag_photo: list,
+                          video_prompts: dict, flag_video: list) -> dict:
+    """Объединяет причины отправки на проверку (фото и видео) без дублей номеров."""
+    merged: dict = {}
+    for reason, nums in _review_reasons(photo_prompts, flag_photo).items():
+        merged[reason] = list(nums)
+    for reason, nums in _review_reasons(video_prompts, flag_video).items():
+        merged[reason] = sorted(set(merged.get(reason, [])) | set(nums))
+    return dict(sorted(merged.items(), key=lambda item: (-len(item[1]), item[0])))
+
+
 def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     """Подготовка промптов как у cmd_run до поиска карт: профили, пресет, распределение, промпты, проверка.
 
     Не создаёт клиентов Vast и релиза, не арендует карты. Входы (args):
       srt, missing, prompts_path, artifact_dir (пусто = распределение только в журнале),
       video_model (ltx25 или none; none = видео выключено), video_profile (профиль видео для cfg),
-      photo_profile (None = фото выключено), video_percent, intro_seconds, limit_clips, preset.
+      photo_profile (None = фото выключено), video_percent, intro_seconds, limit_clips, preset,
+      i2v_mode, intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec.
     Бросает GeminiInputError с текстом на русском при неверном входе.
     """
     from Generate.core import orchestrator as orch_mod
     from Generate.core import prompt_pipeline as pp
     from Generate.core.prompt_pipeline import PHOTO_NUM_FRAMES
-    from Generate.core.missing import parse_missing
     from Generate.core.timing import compute_timings
 
+    i2v_mode = bool(getattr(args, "i2v_mode", False))
     video_model = args.video_model
     photo_profile = args.photo_profile or None
+    fail_fast = bool(getattr(args, "fail_fast", False))
+    raw_dir = str(Path(args.artifact_dir) / "raw") if args.artifact_dir else None
+
+    if i2v_mode:
+        if photo_profile is None:
+            raise GeminiInputError("Ошибка входных данных: режим --i2v-mode требует --photo-profile.")
+        intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+        video_profile = f"{photo_profile}_i2v"
+        if _check_photo_profile(photo_profile) is not None:
+            raise GeminiInputError("Ошибка входных данных: профиль фото не прошёл проверку (см. сообщение выше).")
+        if _check_profile_and_preset(video_profile, args.preset) is not None:
+            raise GeminiInputError("Ошибка входных данных: I2V-профиль или пресет не прошли проверку (см. сообщение выше).")
+        if load_profile_type(video_profile) != "video":
+            raise GeminiInputError(f"Ошибка входных данных: I2V-профиль «{video_profile}» не имеет типа video.")
+
+        cfg, code = _load_cfg(None, {"limit_clips": args.limit_clips, "model_profile": video_profile,
+                                     "preset": args.preset})
+        if code is not None:
+            raise GeminiInputError("Ошибка входных данных: конфигурация не загружена (см. сообщение выше).")
+        segments = parse_srt(args.srt)
+        segments_all = _segments_mode(photo_profile) == "all"
+        missing = list(orch_mod.wanted_segment_numbers(segments, args.missing, segments_all))
+        if not missing:
+            raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
+        if cfg.limit_clips > 0:
+            missing = missing[: cfg.limit_clips]
+
+        timing = _build_timing(cfg, video_profile)
+        video_cfg = _build_prompt_config(video_profile, cfg.gemini_batch_size, cfg.preset,
+                                          fail_fast=fail_fast, raw_dir=raw_dir,
+                                          **_srt_kwargs(video_profile, args.srt))
+        photo_cfg = _build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
+                                          fail_fast=fail_fast, raw_dir=raw_dir,
+                                          **_srt_kwargs(photo_profile, args.srt))
+        family = resolve_text_family(cfg, getattr(args, "text_model", None), video_profile)
+        counting = _ReworkCounter(_make_transport(cfg, family))
+        gemini_options = _gemini_options(cfg, family)
+        dist_path = Path(args.artifact_dir) / orch_mod.DISTRIBUTION_FILENAME if args.artifact_dir else None
+
+        run = pp.build_i2v_prompts(
+            missing,
+            segments=segments,
+            photo_cfg=photo_cfg,
+            photo_profile=photo_profile,
+            video_cfg=video_cfg,
+            video_profile=video_profile,
+            timing=timing,
+            transport=counting,
+            gemini_options=gemini_options,
+            prompts_path=args.prompts_path,
+            distribution_path=dist_path,
+            intro_seconds=intro_minutes * 60.0,
+            intro_video_percent=intro_video_percent,
+            after_intro_video_percent=after_intro_video_percent,
+            min_anim_sec=min_anim_sec,
+        )
+        expected_frames = {}
+        if timing is not None:
+            try:
+                expected_frames = {t.num: t.num_frames for t in compute_timings(
+                    segments, timing.fps, timing.frame_rule, timing.clip_min_sec, timing.clip_max_sec,
+                    timing.gpu_max_sec, timing.tail_pad_sec)}
+            except ValueError as e:
+                raise GeminiInputError(f"Ошибка параметров тайминга: {e}") from None
+
+        prompts = run.state.get("prompts", {})
+        refs_on = profile_refs_enabled(video_profile) or profile_refs_enabled(photo_profile)
+        _log_text_cards_count(missing, prompts, refs_on)
+        photo_list = list(missing)
+        video_nums = [n for n in missing if isinstance(prompts.get(str(n)), dict) and prompts[str(n)].get("i2v") is True]
+        video_prompts = _i2v_video_prompts_view(prompts, video_nums)
+
+        keys = ("ready", "forbidden", "leftover", "content", "frames_bad", "not_ready", "problems")
+        v = dict(zip(keys, _type_counts("видео", video_nums, video_prompts, expected_frames, photo=False,
+                                        relaxed=video_cfg.relaxed_rules,
+                                        max_characters=getattr(video_cfg, "max_characters", None),
+                                        rules=getattr(video_cfg, "rules", None))))
+        p = dict(zip(keys, _type_counts("фото", photo_list, prompts, expected_frames, photo=True,
+                                        relaxed=photo_cfg.relaxed_rules,
+                                        max_characters=getattr(photo_cfg, "max_characters", None),
+                                        rules=getattr(photo_cfg, "rules", None))))
+        failures = ([(n, "видео", _failure_reason(n, video_prompts.get(str(n)), run.errors)) for n in v["not_ready"]]
+                    + [(n, "фото", _failure_reason(n, prompts.get(str(n)), run.errors)) for n in p["not_ready"]])
+        failures.sort(key=lambda row: row[0])
+        rework_video = len(counting.rework_nums & set(video_nums))
+        rework_photo = len(counting.rework_nums & set(photo_list))
+        flag_video = [n for n in video_nums if (video_prompts.get(str(n)) or {}).get("needs_review")]
+        flag_photo = [n for n in photo_list if (prompts.get(str(n)) or {}).get("needs_review")]
+        counts = {
+            "video_nums": video_nums, "photo_nums": photo_list,
+            "video": {"ready": v["ready"], "forbidden": v["forbidden"], "leftover": v["leftover"],
+                      "content": v["content"], "frames_bad": v["frames_bad"], "rework": rework_video,
+                      "flagged": flag_video},
+            "photo": {"ready": p["ready"], "forbidden": p["forbidden"], "leftover": p["leftover"],
+                      "content": p["content"], "frames_bad": p["frames_bad"], "rework": rework_photo,
+                      "frames_rule": PHOTO_NUM_FRAMES, "flagged": flag_photo},
+            "review_reasons": _merge_review_reasons(prompts, flag_photo, video_prompts, flag_video),
+        }
+        prep_args = {
+            "video_model": video_profile, "video_profile": video_profile,
+            "photo_profile": photo_profile, "missing": missing,
+            "i2v_mode": True, "intro_minutes": intro_minutes,
+            "intro_video_percent": intro_video_percent,
+            "after_intro_video_percent": after_intro_video_percent,
+            "min_anim_sec": min_anim_sec,
+        }
+        problems = (v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
+                    + [f"видео клип {n}: на проверку" for n in flag_video]
+                    + [f"фото клип {n}: на проверку" for n in flag_photo])
+        report = _verify_report(prep_args, counts, failures)
+        return PreparedPrompts(
+            state=run.state, missing=missing, video_nums=video_nums, photo_nums=photo_list,
+            ready_video=v["ready"], ready_photo=p["ready"], rework_video=rework_video, rework_photo=rework_photo,
+            failures=failures, problems=problems, report_md=report)
+
     if video_model == "none" and photo_profile is None:
         raise GeminiInputError("Ошибка входных данных: видео и фото выключены, проверять нечего.")
     if _check_profile_and_preset(args.video_profile, args.preset) is not None:
@@ -1872,8 +2138,6 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
 
     timing = _build_timing(cfg, args.video_profile)
     # fail_fast из ns (нет атрибута — выключено); сырой ответ — в <artifact_dir>/raw, только при проблеме
-    fail_fast = bool(getattr(args, "fail_fast", False))
-    raw_dir = str(Path(args.artifact_dir) / "raw") if args.artifact_dir else None
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset,
                                       fail_fast=fail_fast, raw_dir=raw_dir,
                                       **_srt_kwargs(args.video_profile, args.srt))
@@ -1963,6 +2227,19 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         failures=failures, problems=problems, report_md=report)
 
 
+def _add_i2v_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--i2v-mode", action="store_true", default=False,
+                   help="режим частичной I2V-анимации: фото для всех сегментов + I2V-видео для выбранных")
+    p.add_argument("--intro-minutes", type=float, default=3.0,
+                   help="длина вступления для I2V, минут (по умолчанию 3.0)")
+    p.add_argument("--intro-video-percent", type=float, default=70.0,
+                   help="доля I2V-видео во вступлении, %% (по умолчанию 70.0)")
+    p.add_argument("--after-intro-video-percent", type=float, default=10.0,
+                   help="доля I2V-видео после вступления, %% (по умолчанию 10.0)")
+    p.add_argument("--min-anim-sec", type=float, default=2.0,
+                   help="минимальная длительность сегмента для I2V-анимации, с (по умолчанию 2.0)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--srt", default=DEFAULT_SRT,
@@ -1992,6 +2269,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="превью: вариантов на промпт (выкл, 1, 2, 3, 4)")
     check_p.add_argument("--photo-profile", default=None,
                          help="фото-профиль; пусто = фото-модель выключена (нужен для превью)")
+    _add_i2v_args(check_p)
     check_p.set_defaults(func=lambda a: cmd_check(a))
 
     # Значения None = «не задано во входах»: берутся из конфига (см. cmd_run).
@@ -2061,6 +2339,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="команда старта ComfyUI в пилоте (UNVERIFIED); пусто = не передавать; пилот запускает pilot_start.sh из коммита")
     run_p.add_argument("--debug-logs", action="store_true", default=False,
                        help="сырой журнал обмена с Vast: запросы и ответы в лог, секреты маскируются")
+    _add_i2v_args(run_p)
     run_p.set_defaults(func=lambda a: cmd_run(a))
 
     kill_p = sub.add_parser("kill-cards", help="уничтожить арендованные карты по метке")

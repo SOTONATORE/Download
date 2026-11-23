@@ -72,11 +72,11 @@ on:
           - "none"
         default: "zimage_turbo"
       niche:
-        description: "Ниша: none = обычный выбор модели выше; cartoon_photos = фото-ниша: видео выключено, фото и текст берутся из папки ниши"
+        description: "Ниша: none = обычный выбор модели выше; cartoon = фото-ниша: видео выключено, фото и текст берутся из папки ниши"
         type: choice
         options:
           - "none"
-          - "cartoon_photos"
+          - "cartoon"
         default: "none"
       text_model:
         description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"

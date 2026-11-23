@@ -1,4 +1,4 @@
-"""Офлайн-проверки конфигурации ниши cartoon_photos после правок rules.yaml и style.md.
+"""Офлайн-проверки конфигурации ниши cartoon после правок rules.yaml и style.md.
 
 Что проверяется:
 - profile.yaml читается загрузчиками конфигурации без ошибок (тип, режим seed, референсы, relaxed_rules);
@@ -26,7 +26,7 @@ from Generate.core import config_loader as cl  # noqa: E402
 from Generate.core import gemini_prompts as gp  # noqa: E402
 from Generate.core import prompt_check as pc  # noqa: E402
 
-NICHE = "cartoon_photos"
+NICHE = "cartoon"
 NICHE_DIR = _HERE.parents[1] / "Nishes" / NICHE
 PROFILE = NICHE_DIR / "profile.yaml"
 RULES = NICHE_DIR / "prompts" / "rules.yaml"

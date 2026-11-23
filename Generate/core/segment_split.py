@@ -156,3 +156,136 @@ def to_segments(srt_segments, missing_nums) -> list[Segment]:
         Segment(id=s.num, start=s.start_ms / 1000, end=s.end_ms / 1000, text=s.text)
         for s in (by_num[n] for n in wanted)
     ]
+
+
+# Максимальный перенос остатка квоты между окнами 45 с (сек): предотвращает всплески в соседних окнах.
+_I2V_MAX_CARRY_SEC = 3.0
+
+
+def select_i2v_segments(
+    segments: Sequence[Segment],
+    video_values: Mapping[int, int],
+    intro_seconds: float,
+    intro_video_percent: float,
+    after_intro_video_percent: float,
+    min_anim_sec: float = 2.0,
+    window_seconds: float = WINDOW_SECONDS,
+) -> dict:
+    """Равномерный отбор сегментов для I2V-анимации в нише картунов. Чистая функция.
+
+    Правила:
+    - сегменты с duration < min_anim_sec всегда остаются фото (не допускаются к анимации);
+    - две зоны по start: вступление (start < intro_seconds -> intro_video_percent)
+      и основная часть (start >= intro_seconds -> after_intro_video_percent);
+    - внутри каждого окна window_seconds (45 с) квота считается локально по долям зоны,
+      с минимальным ограниченным переносом остатка (не более _I2V_MAX_CARRY_SEC), без всплесков;
+    - при низкой доле (< 50%) применяется мягкая защита от выбора подряд идущих сегментов.
+    """
+    _check_intro_seconds(intro_seconds)
+    _check_video_percent(intro_video_percent)
+    _check_video_percent(after_intro_video_percent)
+    if not _is_number(min_anim_sec) or min_anim_sec < 0:
+        raise ValueError(f"min_anim_sec должен быть неотрицательным числом, получено: {min_anim_sec!r}")
+    if not _is_number(window_seconds) or window_seconds <= 0:
+        raise ValueError(f"window_seconds должен быть положительным числом, получено: {window_seconds!r}")
+
+    ids = [s.id for s in segments]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Номера сегментов должны быть уникальными.")
+
+    ordered = sorted(segments, key=lambda s: (s.start, s.id))
+    eligible_ids = {s.id for s in ordered if s.duration >= min_anim_sec - _EPS}
+    for seg in ordered:
+        if seg.id in eligible_ids:
+            if seg.id not in video_values:
+                raise ValueError(f"Нет video_value для пригодного сегмента {seg.id}.")
+            _check_value(seg.id, video_values[seg.id])
+
+    intro_rate = intro_video_percent / 100.0
+    after_rate = after_intro_video_percent / 100.0
+
+    def _seg_rate(seg: Segment) -> float:
+        return intro_rate if seg.start < intro_seconds else after_rate
+
+    budget = sum(s.duration * _seg_rate(s) for s in ordered)
+    pos_by_id = {s.id: idx for idx, s in enumerate(ordered)}
+    selected: set[int] = set()
+    video_seconds = 0.0
+
+    windows: dict[int, list[Segment]] = {}
+    for seg in ordered:
+        windows.setdefault(math.floor(seg.start / window_seconds), []).append(seg)
+
+    carry = 0.0
+    prev_zone_intro: bool | None = None
+
+    for key in sorted(windows):
+        members = windows[key]
+        win_dur = sum(s.duration for s in members)
+        window_target = sum(s.duration * _seg_rate(s) for s in members)
+        avg_rate = (window_target / win_dur) if win_dur > 0 else 0.0
+
+        # Сброс остатка при переходе из вступления в основную часть, чтобы квота вступления не утекала далее.
+        zone_intro = members[0].start < intro_seconds
+        if prev_zone_intro is not None and zone_intro != prev_zone_intro:
+            carry = 0.0
+        prev_zone_intro = zone_intro
+
+        if window_target <= _EPS:
+            carry = 0.0
+            continue
+
+        eligible_members = [s for s in members if s.id in eligible_ids]
+        if not eligible_members:
+            continue
+
+        # 100% зона: выбираем все пригодные сегменты окна без ограничений.
+        if avg_rate >= 1.0 - _EPS:
+            for seg in eligible_members:
+                selected.add(seg.id)
+                video_seconds += seg.duration
+            carry = 0.0
+            continue
+
+        # Ограниченный перенос остатка (не больше _I2V_MAX_CARRY_SEC и не больше половины квоты окна).
+        carry_cap = min(_I2V_MAX_CARRY_SEC, max(window_target * 0.75, min_anim_sec))
+        effective_quota = max(0.0, window_target + carry)
+        candidates = sorted(eligible_members, key=lambda s: (-video_values[s.id], s.start, s.id))
+
+        window_video = 0.0
+        avoid_adjacent = avg_rate < 0.5
+
+        def _is_adjacent(seg: Segment) -> bool:
+            idx = pos_by_id[seg.id]
+            if idx > 0 and ordered[idx - 1].id in selected:
+                return True
+            if idx + 1 < len(ordered) and ordered[idx + 1].id in selected:
+                return True
+            return False
+
+        # Первый проход: при низкой доле избегаем соседних сегментов.
+        passes = (True, False) if avoid_adjacent else (False,)
+        for skip_adj in passes:
+            for seg in candidates:
+                if seg.id in selected:
+                    continue
+                if skip_adj and _is_adjacent(seg):
+                    continue
+                if window_video + seg.duration <= effective_quota + _EPS:
+                    selected.add(seg.id)
+                    window_video += seg.duration
+                    video_seconds += seg.duration
+
+        carry = max(-carry_cap, min(carry_cap, effective_quota - window_video))
+
+    return {
+        "video": [s.id for s in ordered if s.id in selected],
+        "photo": [s.id for s in ordered if s.id not in selected],
+        "eligible": [s.id for s in ordered if s.id in eligible_ids],
+        "budget_seconds": budget,
+        "video_seconds": video_seconds,
+        "intro_seconds_used": intro_seconds,
+        "intro_video_percent": intro_video_percent,
+        "after_intro_video_percent": after_intro_video_percent,
+        "min_anim_sec": min_anim_sec,
+    }

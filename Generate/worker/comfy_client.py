@@ -203,7 +203,8 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
                     seed: int, filename_prefix: str,
                     extra_inputs: Optional[dict] = None,
                     second_seed: Optional[int] = None,
-                    refs: Optional[tuple] = None) -> dict:
+                    refs: Optional[tuple] = None,
+                    input_image: Optional[str] = None) -> dict:
     """Возвращает глубокую копию workflow с подставленными значениями.
 
     bindings: {имя: {"node_id": "6", "field": "text"}}. Обязательные имена:
@@ -212,6 +213,7 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
     second_seed: сид нешифрованного (не привязанного) RandomNoise, то есть второго прохода;
     None = новый случайный сид. Привязанный сид (первый проход) задаётся только через bindings.
     refs: отсортированный кортеж номеров референсов задачи (1…10); None = поле не передано, workflow не меняется.
+    input_image: имя файла входного кадра (для I2V-профилей); None = не передано, workflow не меняется.
     """
     is_image = profile_type() == "image"
     required = IMAGE_REQUIRED_BINDINGS if is_image else REQUIRED_BINDINGS
@@ -225,6 +227,10 @@ def inject_workflow(workflow_graph: dict, bindings: dict, prompt: str, num_frame
         values["num_frames"] = int(num_frames)
     for name, value in values.items():
         _set_input(graph, bindings[name], name, value)
+    if input_image is not None:
+        if "input_image" not in bindings:
+            raise ComfyError("Для входного изображения «input_image» нет привязки.")
+        _set_input(graph, bindings["input_image"], "input_image", input_image)
     for name, value in (extra_inputs or {}).items():
         if name not in bindings:
             raise ComfyError(f"Для дополнительного входа «{name}» нет привязки.")

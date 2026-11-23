@@ -161,6 +161,91 @@ def score_segments(segments: Sequence[Segment], send: Callable[[str], str], work
     return result
 
 
+def build_i2v_value_prompt(segments: Sequence[Segment], photo_prompts: Mapping[int, str]) -> str:
+    """Builds the English instruction for LLM: rate I2V animation suitability (0-100) from SRT + photo prompt."""
+    lines = [
+        "You rate how well each 2D cartoon still frame suits being animated as a short image-to-video (I2V) clip",
+        "rather than staying a static photo, based on BOTH the subtitle text and the already-written photo prompt.",
+        "",
+        "For every segment give an integer video_value from 0 to 100:",
+        "- high value (70-100): character action (walking, running, climbing, cooking, working, pointing, reacting), "
+        "personified microbes or crops interacting, macro hands peeling/slicing/handling objects, moving animals;",
+        "- low value (0-30): static text or number cards, checklists, flat maps, timelines, charts, split A|B diagrams, "
+        "plain inanimate object arrangements with no natural motion;",
+        "- medium value (31-69): calm character pose or mild environmental motion (leaves swaying, balance scale tipping).",
+        "",
+        "Return ONLY a JSON list of objects of the form {\"id\": <number>, \"video_value\": <integer>},",
+        "one object for each segment number. No text before or after the JSON.",
+        "",
+        "Segments:",
+    ]
+    for seg in sorted(segments, key=lambda s: (s.start, s.id)):
+        photo = " ".join(str(photo_prompts.get(seg.id, "")).split())
+        lines.append(
+            f"id {seg.id} ({seg.start:.2f}–{seg.end:.2f} s, {seg.duration:.2f} s) | SRT: {seg.text} | Photo: {photo}"
+        )
+    return "\n".join(lines)
+
+
+def _score_i2v_chunk(
+    no: int,
+    total: int,
+    chunk: Sequence[Segment],
+    photo_prompts: Mapping[int, str],
+    send: Callable[[str], str],
+) -> dict:
+    prompt = build_i2v_value_prompt(chunk, photo_prompts)
+    expected = [s.id for s in chunk]
+    parsed = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        log.info("Оценка I2V video_value: батч %d из %d, сегменты %s–%s, попытка %d",
+                 no, total, expected[0], expected[-1], attempt)
+        try:
+            text = send(prompt)
+            parsed = parse_value_response(text, expected)
+            break
+        except Exception:
+            continue
+    if parsed is None:
+        ids = ", ".join(str(i) for i in expected)
+        raise ValueError(f"Не удалось получить I2V video_value для сегментов: {ids}")
+    log.info("Оценка I2V video_value: батч %d готов, результатов %d", no, len(parsed))
+    return parsed
+
+
+def score_i2v_segments(
+    segments: Sequence[Segment],
+    photo_prompts: Mapping[int, str],
+    send: Callable[[str], str],
+    workers: int = 1,
+    min_anim_sec: float = 0.0,
+) -> dict:
+    """Оценивает I2V video_value только для пригодных сегментов (duration >= min_anim_sec), по фото-промпту + SRT."""
+    eligible = [s for s in segments if s.duration >= min_anim_sec - 1e-9]
+    if not eligible:
+        return {}
+    ordered = sorted(eligible, key=lambda s: (s.start, s.id))
+    chunks = [ordered[i:i + SCORE_BATCH_SIZE] for i in range(0, len(ordered), SCORE_BATCH_SIZE)]
+    total = len(chunks)
+    n_workers = max(1, min(workers, total))
+    result: dict = {}
+    if n_workers == 1:
+        for no, chunk in enumerate(chunks, start=1):
+            result.update(_score_i2v_chunk(no, total, chunk, photo_prompts, send))
+        return result
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_score_i2v_chunk, no, total, chunk, photo_prompts, send)
+                   for no, chunk in enumerate(chunks, start=1)]
+        try:
+            for fut in futures:
+                result.update(fut.result())
+        except ValueError:
+            for fut in futures:
+                fut.cancel()
+            raise
+    return result
+
+
 def write_distribution(
     path: str | Path,
     result: Mapping,
@@ -170,23 +255,33 @@ def write_distribution(
     """Записывает распределение в JSON.
 
     Записи в порядке start: id, start, end, duration, video_value, mode ("video" или "photo").
+    При наличии I2V-полей в result также записывает intro_video_percent, after_intro_video_percent,
+    min_anim_sec и eligible (в корне и для каждого сегмента).
     video_value берётся из values; если значения нет, записывается null.
     """
     video_ids = set(result["video"])
+    has_eligible = "eligible" in result
+    eligible_ids = set(result["eligible"]) if has_eligible else set()
     records = []
     for seg in sorted(segments, key=lambda s: (s.start, s.id)):
-        records.append({
+        rec = {
             "id": seg.id,
             "start": seg.start,
             "end": seg.end,
             "duration": seg.duration,
             "video_value": values.get(seg.id),
             "mode": "video" if seg.id in video_ids else "photo",
-        })
+        }
+        if has_eligible:
+            rec["eligible"] = seg.id in eligible_ids
+        records.append(rec)
     payload = {
         "budget_seconds": result["budget_seconds"],
         "video_seconds": result["video_seconds"],
         "intro_seconds_used": result["intro_seconds_used"],
-        "segments": records,
     }
+    for key in ("intro_video_percent", "after_intro_video_percent", "min_anim_sec", "eligible"):
+        if key in result:
+            payload[key] = result[key]
+    payload["segments"] = records
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

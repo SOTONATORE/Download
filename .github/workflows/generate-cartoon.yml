@@ -1,0 +1,516 @@
+name: Generate Cartoon
+
+# SPEC 0.1: только ручной запуск. Никаких push / pull_request.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Режим генерации: partial_i2v = фото для всех сегментов + I2V-анимация выбранных; photo_only = только фото (cartoon)"
+        type: choice
+        options:
+          - "partial_i2v"
+          - "photo_only"
+        default: "partial_i2v"
+      intro_minutes:
+        description: "Длина вступления для I2V, минут (по умолчанию 3)"
+        type: number
+        default: 3
+      intro_video_percent:
+        description: "Доля I2V-видео во вступлении, % (0–100)"
+        type: number
+        default: 70
+      after_intro_video_percent:
+        description: "Доля I2V-видео после вступления, % (0–100)"
+        type: number
+        default: 10
+      min_anim_sec:
+        description: "Минимальная длительность сегмента для I2V-анимации, секунд"
+        type: number
+        default: 2.0
+      srt_path:
+        description: "Путь к файлу SRT"
+        type: string
+        default: "final.srt"
+      limit_clips:
+        description: "0 = все сегменты SRT; N > 0 = первые N сегментов по возрастанию номера (пробный прогон)"
+        type: string
+        default: "0"
+      release_tag:
+        description: "Пользовательский тег Release (необязательно)"
+        type: string
+        default: ""
+      max_cards:
+        description: "Число параллельных видеокарт (меню 1..10)"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+          - "6"
+          - "7"
+          - "8"
+          - "9"
+          - "10"
+        default: "1"
+      budget_limit_usd:
+        description: "Жёсткий потолок бюджета на запуск (USD)"
+        type: string
+        default: "2.0"
+      min_balance_usd:
+        description: "Минимальный баланс Vast.ai для старта (USD); не меньше бюджета, ниже = запуск не стартует"
+        type: string
+        default: "2.0"
+      text_model:
+        description: "Семейство текстовой модели для промптов: nemotron-super-vl (по умолчанию), gemini, gemma или nemotron"
+        type: choice
+        options:
+          - "nemotron-super-vl"
+          - "gemini"
+          - "gemma"
+          - "nemotron"
+        default: "nemotron-super-vl"
+      preset:
+        description: "Пресет промптов: none = без пресета; другое значение = файл Generate/model_profiles/presets/prompts/<имя>.md"
+        type: choice
+        options:
+          - "none"
+          - "test"
+        default: "none"
+      gpu_name:
+        description: "Модель видеокарты на Vast.ai"
+        type: string
+        default: "RTX 5090"
+      min_price_per_hour:
+        description: "Минимальная цена аренды ($/ч, отсекает битые карты)"
+        type: string
+        default: "0.35"
+      max_price_per_hour:
+        description: "Потолок цены карты, $/ч (по умолчанию 1.00)"
+        type: string
+        default: "1.00"
+      min_reliability:
+        description: "Минимальная надёжность хоста (0-1)"
+        type: string
+        default: "0.90"
+      min_inet_mbps:
+        description: "Минимальная скорость интернета карты для отбора предложений, Мбит/с"
+        type: string
+        default: "500"
+      max_inet_price_per_tb:
+        description: "Максимальная цена трафика карты (USD за ТБ, загрузка и выгрузка)"
+        type: string
+        default: "6.1"
+      rental_type:
+        description: "Режим аренды Vast: on-demand или interruptible"
+        type: choice
+        options:
+          - "interruptible"
+          - "on-demand"
+        default: "on-demand"
+      disk_gb:
+        description: "Размер диска карты Vast.ai, ГБ"
+        type: number
+        default: 100
+      silent_host_timeout_min:
+        description: "Таймаут первого ответа хоста, минут"
+        type: number
+        default: 15
+
+# SPEC 8.2: не допускать параллельных запусков; запущенный не отменять.
+concurrency:
+  group: generate-cartoon
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # создание/обновление Release через gh CLI
+  actions: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUN_LOG: /tmp/generate-cartoon-run.log
+      PHOTO_PROFILE: "cartoon"
+      VIDEO_PROFILE: ${{ inputs.mode == 'partial_i2v' && 'cartoon_i2v' || 'ltx25' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r Generate/requirements-dev.txt
+
+      # lingua нужна только профилю с text_language: srt (язык текста по SRT)
+      - name: Нужен ли lingua (язык текста по SRT)
+        id: lang_need
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          need=false
+          files=(
+            "Generate/Nishes/cartoon/profile.yaml"
+            "Generate/Nishes/cartoon/i2v/profile.yaml"
+          )
+          for f in "${files[@]}"; do
+            if [ -f "$f" ] && grep -Eq '^text_language:[[:space:]]*"?srt"?' "$f"; then need=true; fi
+          done
+          echo "needed=$need" >> "$GITHUB_OUTPUT"
+
+      - name: Кэш pip для lingua
+        if: steps.lang_need.outputs.needed == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-lingua-${{ hashFiles('Generate/requirements-lang.txt') }}
+
+      - name: Установка lingua (язык текста по SRT)
+        if: steps.lang_need.outputs.needed == 'true'
+        run: pip install -r Generate/requirements-lang.txt
+
+      - name: Preflight check
+        env:
+          SRT_PATH: ${{ inputs.srt_path }}
+          MODE: ${{ inputs.mode }}
+          INTRO_MINUTES: ${{ inputs.intro_minutes }}
+          INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
+          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
+          PHOTO_PROFILE: ${{ env.PHOTO_PROFILE }}
+          TEXT_MODEL: ${{ inputs.text_model }}
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
+        run: |
+          args=(
+            --srt "$SRT_PATH"
+            --missing "missing.txt"
+            --photo-profile "$PHOTO_PROFILE"
+            --text-model "$TEXT_MODEL"
+          )
+          if [ "$MODE" = "partial_i2v" ]; then
+            args+=(
+              --i2v-mode
+              --intro-minutes "$INTRO_MINUTES"
+              --intro-video-percent "$INTRO_VIDEO_PERCENT"
+              --after-intro-video-percent "$AFTER_INTRO_VIDEO_PERCENT"
+              --min-anim-sec "$MIN_ANIM_SEC"
+            )
+          fi
+          python -m Generate.cli check "${args[@]}"
+
+      - name: Start heartbeat observer
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          hb_path="$RUNNER_TEMP/generate-heartbeat/heartbeat.json"
+          watch_log="$RUNNER_TEMP/generate-watch.log"
+          python -m Generate.cli watch-heartbeat \
+            --heartbeat-path "$hb_path" \
+            --run-id "$RUN_ID" \
+            --max-silence-sec 120 \
+            --check-every-sec 30 \
+            > "$watch_log" 2>&1 &
+          echo "WATCH_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Run generation
+        env:
+          GEMINI1: ${{ secrets.GEMINI1 }}
+          GEMINI2: ${{ secrets.GEMINI2 }}
+          GEMINI3: ${{ secrets.GEMINI3 }}
+          GEMINI4: ${{ secrets.GEMINI4 }}
+          GEMINI5: ${{ secrets.GEMINI5 }}
+          GEMINI6: ${{ secrets.GEMINI6 }}
+          GEMINI7: ${{ secrets.GEMINI7 }}
+          GEMINI8: ${{ secrets.GEMINI8 }}
+          GEMINI9: ${{ secrets.GEMINI9 }}
+          GEMINI10: ${{ secrets.GEMINI10 }}
+          OPENROUTER1: ${{ secrets.OPENROUTER1 }}
+          OPENROUTER2: ${{ secrets.OPENROUTER2 }}
+          OPENROUTER3: ${{ secrets.OPENROUTER3 }}
+          OPENROUTER4: ${{ secrets.OPENROUTER4 }}
+          OPENROUTER5: ${{ secrets.OPENROUTER5 }}
+          OPENROUTER6: ${{ secrets.OPENROUTER6 }}
+          OPENROUTER7: ${{ secrets.OPENROUTER7 }}
+          OPENROUTER8: ${{ secrets.OPENROUTER8 }}
+          OPENROUTER9: ${{ secrets.OPENROUTER9 }}
+          OPENROUTER10: ${{ secrets.OPENROUTER10 }}
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          VAST_SSH_KEY: ${{ secrets.VAST_SSH_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          INTRO_MINUTES: ${{ inputs.intro_minutes }}
+          INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
+          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
+          SRT_PATH: ${{ inputs.srt_path }}
+          LIMIT_CLIPS: ${{ inputs.limit_clips }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MAX_CARDS: ${{ inputs.max_cards }}
+          BUDGET_LIMIT: ${{ inputs.budget_limit_usd }}
+          MIN_BALANCE: ${{ inputs.min_balance_usd }}
+          MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
+          PHOTO_PROFILE: ${{ env.PHOTO_PROFILE }}
+          TEXT_MODEL: ${{ inputs.text_model }}
+          PRESET: ${{ inputs.preset }}
+          GPU_NAME: ${{ inputs.gpu_name }}
+          MIN_PRICE: ${{ inputs.min_price_per_hour }}
+          MAX_PRICE: ${{ inputs.max_price_per_hour }}
+          MIN_RELIABILITY: ${{ inputs.min_reliability }}
+          MIN_INET: ${{ inputs.min_inet_mbps }}
+          MAX_INET_PRICE: ${{ inputs.max_inet_price_per_tb }}
+          RENTAL_TYPE: ${{ inputs.rental_type }}
+          WORKER_BUILD: ${{ github.sha }}
+          DISK_GB: ${{ inputs.disk_gb }}
+          SILENT_HOST_TIMEOUT_MIN: ${{ inputs.silent_host_timeout_min }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          GEN_LOG_LEVEL: "DEBUG"
+        run: |
+          HB_PATH="$RUNNER_TEMP/generate-heartbeat/heartbeat.json"
+          ART_DIR="$RUNNER_TEMP/generate-artifact"
+          mkdir -p "$(dirname "$HB_PATH")" "$ART_DIR"
+
+          args=(
+            --srt "$SRT_PATH"
+            --missing "missing.txt"
+            --limit-clips "$LIMIT_CLIPS"
+            --max-cards "$MAX_CARDS"
+            --budget-limit "$BUDGET_LIMIT"
+            --min-balance-usd "$MIN_BALANCE"
+            --model-profile "$MODEL_PROFILE"
+            --photo-profile "$PHOTO_PROFILE"
+            --text-model "$TEXT_MODEL"
+            --preset "$PRESET"
+            --gpu-name "$GPU_NAME"
+            --min-price-per-hour "$MIN_PRICE"
+            --max-price-per-hour "$MAX_PRICE"
+            --min-reliability "$MIN_RELIABILITY"
+            --min-inet-mbps "$MIN_INET"
+            --max-inet-price-per-tb "$MAX_INET_PRICE"
+            --rental-type "$RENTAL_TYPE"
+            --disk-gb "$DISK_GB"
+            --silent-host-timeout-min "$SILENT_HOST_TIMEOUT_MIN"
+            --repo "$REPO"
+            --run-id "$RUN_ID"
+            --worker-build "$WORKER_BUILD"
+            --heartbeat-path "$HB_PATH"
+            --artifact-dir "$ART_DIR"
+            --debug-logs
+          )
+          if [ "$MODE" = "partial_i2v" ]; then
+            args+=(
+              --i2v-mode
+              --intro-minutes "$INTRO_MINUTES"
+              --intro-video-percent "$INTRO_VIDEO_PERCENT"
+              --after-intro-video-percent "$AFTER_INTRO_VIDEO_PERCENT"
+              --min-anim-sec "$MIN_ANIM_SEC"
+            )
+          fi
+          if [ -n "$RELEASE_TAG" ]; then
+            args+=(--release-tag "$RELEASE_TAG")
+          fi
+
+          mask_filter="$RUNNER_TEMP/mask_filter.py"
+          cat > "$mask_filter" <<'PY'
+          import os
+          import sys
+
+          values = {os.environ.get(k, "").strip() for k in (
+              "GEMINI1", "GEMINI2", "GEMINI3", "GEMINI4", "GEMINI5",
+              "GEMINI6", "GEMINI7", "GEMINI8", "GEMINI9", "GEMINI10",
+              "OPENROUTER1", "OPENROUTER2", "OPENROUTER3", "OPENROUTER4", "OPENROUTER5",
+              "OPENROUTER6", "OPENROUTER7", "OPENROUTER8", "OPENROUTER9", "OPENROUTER10",
+              "GEN_VAST_API_KEY", "HF_TOKEN", "GH_TOKEN", "VAST_SSH_KEY")}
+          values |= {line.strip() for line in os.environ.get("VAST_SSH_KEY", "").splitlines()
+                     if len(line.strip()) >= 20}
+          values = sorted(values - {""}, key=len, reverse=True)
+          values = [v for v in values if len(v) >= 8]
+          for line in sys.stdin:
+              for v in values:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          PY
+
+          summary_filter="$RUNNER_TEMP/summary_filter.py"
+          cat > "$summary_filter" <<'PY'
+          import re
+          import sys
+
+          RECORD_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?\[[A-Z]+\] ")
+          RAW_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} )?(?:\[[A-Z]+\] )?(?:Запрос Vast #|Ответ Vast #)")
+          GROUP_OPEN = "::group::"
+          GROUP_CLOSE = "::endgroup::"
+
+          summary = None
+          try:
+              summary = open(sys.argv[1], "a", encoding="utf-8")
+          except OSError:
+              sys.stderr.write("Сводка: файл итогов не открыт, в «Итоги генерации» ничего не попадёт\n")
+
+          raw = False
+          in_group = False
+          for line in sys.stdin:
+              if line.startswith(GROUP_OPEN) or line.startswith(GROUP_CLOSE):
+                  in_group = line.startswith(GROUP_OPEN)
+                  raw = False
+                  skip = True
+              else:
+                  skip = in_group
+                  if not in_group and RECORD_RE.match(line):
+                      raw = RAW_RE.match(line) is not None
+              sys.stdout.write(line)
+              sys.stdout.flush()
+              if summary is not None and not raw and not skip:
+                  try:
+                      summary.write(line)
+                      summary.flush()
+                  except OSError:
+                      sys.stderr.write("Сводка: запись в файл итогов прервана, дальше в сводку ничего не пишется\n")
+                      summary = None
+
+          if summary is not None:
+              try:
+                  summary.close()
+              except OSError:
+                  pass
+          PY
+
+          summary_written=0
+          if { echo '## Итоги генерации'; echo '```'; } 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; then
+            summary_written=1
+          fi
+
+          rc=0
+          python -m Generate.cli run "${args[@]}" 2>&1 \
+            | python3 -I -u "$mask_filter" \
+            | python3 -I -u "$summary_filter" "$GITHUB_STEP_SUMMARY" \
+            | tee -a "$RUN_LOG" || rc=$?
+          if [ "$summary_written" = 1 ]; then
+            echo '```' 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          exit "$rc"
+
+      - name: Stop heartbeat observer
+        if: always()
+        timeout-minutes: 5
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${WATCH_PID:-}" ]; then
+            kill "$WATCH_PID" 2>/dev/null || true
+          fi
+          watch_log="$RUNNER_TEMP/generate-watch.log"
+          if [ -f "$watch_log" ]; then
+            mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+            python3 -I -u -c "$mask_code" < "$watch_log" | tee -a "$RUN_LOG" || true
+          fi
+
+      - name: Kill rented cards
+        if: always()
+        timeout-minutes: 5
+        env:
+          GEN_VAST_API_KEY: ${{ secrets.GEN_VAST_API_KEY }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          python -m Generate.cli kill-cards --run-id "$RUN_ID" \
+            --card-dir "$RUNNER_TEMP/generate-artifact" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG"
+
+      - name: Finalize release on completion or cancel
+        if: always()
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SRT_PATH: ${{ inputs.srt_path }}
+          MODEL_PROFILE: ${{ env.VIDEO_PROFILE }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          args=(
+            --repo "$REPO"
+            --srt "$SRT_PATH"
+            --model-profile "$MODEL_PROFILE"
+            --run-id "$RUN_ID"
+          )
+          mask_code='
+          import os, sys
+          vals = sorted({os.environ.get(k, "").strip() for k in ("GEN_VAST_API_KEY", "GH_TOKEN")} - {""}, key=len, reverse=True)
+          vals = [v for v in vals if len(v) >= 8]
+          for line in sys.stdin:
+              for v in vals:
+                  line = line.replace(v, "***")
+              sys.stdout.write(line)
+              sys.stdout.flush()
+          '
+          python -m Generate.cli finalize-release "${args[@]}" 2>&1 \
+            | python3 -I -u -c "$mask_code" \
+            | tee -a "$RUN_LOG"
+
+      - name: Collect run log
+        if: always()
+        run: |
+          dir="$RUNNER_TEMP/generate-artifact"
+          if ! mkdir -p "$dir"; then
+            echo "WARNING: каталог артефакта $dir не создан, журнал окон в артефакт не попадёт"
+            exit 0
+          fi
+          if [ ! -f "$RUN_LOG" ]; then
+            echo "WARNING: лог запуска $RUN_LOG не найден, в артефакт он не попадёт"
+            exit 0
+          fi
+          if ! cp "$RUN_LOG" "$dir/generate-run.log"; then
+            echo "WARNING: лог запуска не скопирован в артефакт"
+          fi
+
+      - name: Upload run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generate-cartoon-${{ github.run_id }}
+          path: ${{ runner.temp }}/generate-artifact
+          retention-days: 30
+          if-no-files-found: warn

@@ -1,4 +1,4 @@
-"""Очередь исправлений на реальном пути проверки промптов (verify_prompts) для ниши cartoon_photos.
+"""Очередь исправлений на реальном пути проверки промптов (verify_prompts) для ниши cartoon.
 
 Путь реального прогона (cli.prepare_prompts_only -> prompt_pipeline.build_prompts -> _photo_step):
 - gp.generate_prompts(segments, pending, photo_cfg, managed, model, on_batch=on_batch) без pool, wave, rework
@@ -45,7 +45,7 @@ from Generate import cli  # noqa: E402
 from Generate.core import gemini_prompts as gp  # noqa: E402
 from Generate.core.srt_parser import Segment  # noqa: E402
 
-NICHE = "cartoon_photos"
+NICHE = "cartoon"
 NUMS = list(range(1, 26))            # 25 клипов, как в прогоне
 FLAGGED = [11, 12, 13, 14]           # клипы, помеченные первым ответом
 SPAM_REASON = "стиль: keyword spam"  # причина разбора без находок по содержанию
@@ -94,9 +94,9 @@ def _chunks(nums: list, size: int) -> list:
 
 
 def _real_cfg() -> gp.PromptConfig:
-    """Конфиг, построенный из profile.yaml ниши cartoon_photos (как в prepare_prompts_only), затем refs_enabled
+    """Конфиг, построенный из profile.yaml ниши cartoon (как в prepare_prompts_only), затем refs_enabled
     принудительно ставится в True намеренно: сценарий проверяет путь очереди с референсами (ответы с refs: [1],
-    метки <imageN>). Профиль cartoon_photos сам референсы не использует (refs_enabled: false), поэтому включение
+    метки <imageN>). Профиль cartoon сам референсы не использует (refs_enabled: false), поэтому включение
     здесь — синтетическое условие теста, а не настройка продакшн-профиля. Остальные поля берутся из профиля."""
     # размер батча — из profile.yaml ниши (batch_size), пресет «none», fail_fast выключен — как в prepare_prompts_only;
     # _build_prompt_config и так берёт batch_size профиля, поэтому здесь он передаётся явно
