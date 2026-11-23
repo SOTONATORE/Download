@@ -3734,7 +3734,7 @@ class Orchestrator:
         else:
             entry = self._prompts.get(str(num))
             entry = entry if isinstance(entry, dict) else {}
-            is_i2v_video = self._needs_input_image(slot)
+            is_i2v_video = Orchestrator._needs_input_image(self, slot)
             if is_i2v_video:
                 with self._lock_state():
                     if not hasattr(self, "_i2v_phase2_nums") or not isinstance(self._i2v_phase2_nums, set):

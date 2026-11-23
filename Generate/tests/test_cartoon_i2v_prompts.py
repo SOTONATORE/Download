@@ -258,8 +258,8 @@ def test_build_i2v_prompts_end_to_end_strips_preset_and_resumes(monkeypatch, tmp
 def test_prepare_prompts_only_i2v_inspects_photo_and_video_prompts(monkeypatch, tmp_path):
     srt_file = tmp_path / "test.srt"
     srt_file.write_text(
-        "1\n00:00:00,000 --> 00:00:05,000\nFarmer digs soil.\n\n"
-        "2\n00:00:05,000 --> 00:00:09,000\nChart on wall.\n",
+        "1\n00:00:00,000 --> 00:00:05,000\nФермер выходит утром на поле и аккуратно копает тёплую землю деревянными вилами.\n\n"
+        "2\n00:00:05,000 --> 00:00:09,000\nНа кремовой стене висит простая сравнительная таблица с основными показателями урожая.\n",
         encoding="utf-8",
     )
     missing_file = tmp_path / "missing.txt"

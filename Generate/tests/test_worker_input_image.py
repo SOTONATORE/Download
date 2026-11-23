@@ -176,16 +176,16 @@ def test_inject_workflow_with_input_image():
     bindings = json.loads(BINDINGS_PATH.read_text(encoding="utf-8"))
 
     out = cc.inject_workflow(
-        graph, bindings, "cartoon scene prompt", 57, 123, "clip_1",
-        second_seed=999, input_image="clip_1.png",
+        graph, bindings, "cartoon scene prompt", 57, 123, "clip_42",
+        second_seed=999, input_image="clip_42.png",
     )
     assert out["398:376"]["inputs"]["value"] == "cartoon scene prompt"
     assert out["398:378"]["inputs"]["value"] == 57
     assert out["398:339"]["inputs"]["noise_seed"] == 123
     assert out["398:338"]["inputs"]["noise_seed"] == 999
-    assert out["75"]["inputs"]["filename_prefix"] == "clip_1"
-    assert out["395"]["inputs"]["image"] == "clip_1.png"
-    assert graph["395"]["inputs"]["image"] != "clip_1.png"
+    assert out["75"]["inputs"]["filename_prefix"] == "clip_42"
+    assert out["395"]["inputs"]["image"] == "clip_42.png"
+    assert graph["395"]["inputs"]["image"] != "clip_42.png"
 
 
 def test_inject_workflow_input_image_missing_binding_raises():
@@ -201,7 +201,7 @@ def test_inject_workflow_input_image_missing_binding_raises():
 # POST /input_image: авторизация, валидация, лимит размера, атомарная запись
 # ---------------------------------------------------------------------------
 
-def test_post_input_image_auth_validation_and_atomic_write(make_i2v_app):
+def test_post_input_image_auth_validation_and_atomic_write(make_i2v_app, monkeypatch):
     app, _, inp, _ = make_i2v_app()
 
     with _client(app, None) as c:
@@ -216,13 +216,11 @@ def test_post_input_image_auth_validation_and_atomic_write(make_i2v_app):
         assert c.post("/input_image", content=PNG_BYTES).status_code == 400
         assert c.post("/input_image?name=clip_1.png", content=b"").status_code == 400
 
-        # Завышенный Content-Length -> 413
-        resp_413 = c.post(
-            "/input_image?name=clip_1.png",
-            content=b"",
-            headers={"Content-Length": str(srv.MAX_INPUT_IMAGE_BYTES + 1)},
-        )
+        # Превышение лимита размера -> 413
+        monkeypatch.setattr(srv, "MAX_INPUT_IMAGE_BYTES", 10)
+        resp_413 = c.post("/input_image?name=clip_1.png", content=b"x" * 11)
         assert resp_413.status_code == 413
+        monkeypatch.undo()
 
         # Успешная запись
         ok = c.post("/input_image?name=clip_1.png", content=PNG_BYTES)

@@ -57,7 +57,8 @@ class I2VFakeStore(orch.ReleaseStore):
             tag=tag, title="t", body=f"hash: {FULL_HASH}\nstage: gen\nrole: part", assets=list(assets),
         )
         for name, data in (blobs or {}).items():
-            self.blobs[(tag, name)] = data
+            key = name if isinstance(name, tuple) else (tag, name)
+            self.blobs[key] = data
 
     def find_releases(self, tag: str) -> list:
         rel = self.releases.get(tag)
