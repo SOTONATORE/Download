@@ -23,15 +23,16 @@ Pick the simplest, clearest 2D animation that fits the Source photo and the subt
 # Camera Behaviour
 
 Name the camera behaviour explicitly in every prompt, and state how the shot ends. Keep the camera calm and restrained so the 2D illustration stays stable:
-- Prefer a static frame ("The camera remains static on the flat 2D scene, holding the full composition steady.").
-- When a character walks, runs, or climbs across a wide scene, use at most one gentle move ("The camera tracks smoothly alongside the walking figure from left to right, keeping the horizon level.", "The camera pushes in gently on the wooden board and holds steady.").
+- Every clip must contain visible, gentle motion — never leave both the subject and the camera completely motionless.
+- When a character, hand, microbe, plant, or scale is actively moving, prefer a static frame ("The camera remains static on the flat 2D scene, holding the full composition steady.") or one gentle tracking move ("The camera tracks smoothly alongside the walking figure from left to right, keeping the horizon level.").
+- When the Source photo shows a still tabletop, cutaway, or object arrangement with no character action, animate any natural 2D element (such as leaves or stems swaying gently) or use one slow, smooth camera move ("The camera pushes in gently toward the wooden counter and holds steady.").
 - Never combine multiple camera moves, rapid pans, handheld shake, or cuts.
 
 # Strictly Forbidden Realism Drift and Content Rules
 
 - Zero realism effects or particles: strictly avoid steam, smoke, dust, mist, fog, particles, sparks, embers, rain spray, glowing blooms, lens flare, bokeh, depth of field, 3D CGI shading, soft airbrush gradients, realistic fire flicker, or film grain. Keep every surface flat matte 2D ink and cel fill.
 - Fire and hands: keep hands, fingers, and palms completely away from fire, flames, stoves, candles, torches, and lanterns. If the Source photo shows a flame or campfire, animate only the simple flat 2D flame shape swaying gently and the surrounding scene, without mentioning hands.
-- Silent video only: never describe sound, noise, clicks, hums, rustling, or footsteps audio. Characters remain completely silent: avoid speaking, talking, shouting, laughing, crying, singing, dialogue, or lip and mouth movement. Express feeling through eyebrows, posture, head angle, and limb action only.
+- Silent video only: never describe sound, noise, clicks, hums, rustling, or footsteps audio. Characters remain completely silent: avoid speaking, talking, shouting, laughing, crying, singing, dialogue, or lip and mouth movement. Keep any drawn facial expression fixed as drawn (closed-line smile, fixed O-shaped mouth, or worried wavy mouth) and express feeling through eyebrows, posture, head angle, and limb action only.
 - Adults only: show adults or non-human subjects only; exclude children, babies, boys, girls, teenagers, and young people.
 - No weapons: exclude knives, blades, swords, sabers, spears, and firearms; use wooden spoons, spatulas, or peelers when present in the Source photo.
 - Character limit: keep at most 4 characters in total (humans and animals combined), matching the Source photo. Avoid plural group or crowd words (people, men, women, farmers, workers, villagers, crowds, groups, several, many, rows of, lines of).
