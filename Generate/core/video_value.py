@@ -8,9 +8,18 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+try:
+    from .log_setup import KEY_EVENT_EXTRA
+except ImportError:  # запуск без пакета (плоская раскладка)
+    try:
+        from log_setup import KEY_EVENT_EXTRA  # type: ignore
+    except ImportError:
+        KEY_EVENT_EXTRA = {"console_key": True}
 
 try:
     from .segment_split import Segment
@@ -209,7 +218,8 @@ def _score_i2v_chunk(
     if parsed is None:
         ids = ", ".join(str(i) for i in expected)
         raise ValueError(f"Не удалось получить I2V video_value для сегментов: {ids}")
-    log.info("Оценка I2V video_value: батч %d готов, результатов %d", no, len(parsed))
+    log.info("Оценка I2V video_value: батч %d/%d готов (сегменты %s–%s, результатов %d)",
+             no, total, expected[0], expected[-1], len(parsed), extra=KEY_EVENT_EXTRA)
     return parsed
 
 
@@ -228,10 +238,15 @@ def score_i2v_segments(
     chunks = [ordered[i:i + SCORE_BATCH_SIZE] for i in range(0, len(ordered), SCORE_BATCH_SIZE)]
     total = len(chunks)
     n_workers = max(1, min(workers, total))
+    t0 = time.monotonic()
+    log.info("=== Оценка I2V video_value: сегментов %d, батчей %d (по %d), потоков %d ===",
+             len(ordered), total, SCORE_BATCH_SIZE, n_workers, extra=KEY_EVENT_EXTRA)
     result: dict = {}
     if n_workers == 1:
         for no, chunk in enumerate(chunks, start=1):
             result.update(_score_i2v_chunk(no, total, chunk, photo_prompts, send))
+        log.info("=== Оценка I2V video_value готова: %d сегментов за %.1f с ===",
+                 len(result), time.monotonic() - t0, extra=KEY_EVENT_EXTRA)
         return result
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = [pool.submit(_score_i2v_chunk, no, total, chunk, photo_prompts, send)
@@ -243,6 +258,8 @@ def score_i2v_segments(
             for fut in futures:
                 fut.cancel()
             raise
+    log.info("=== Оценка I2V video_value готова: %d сегментов за %.1f с ===",
+             len(result), time.monotonic() - t0, extra=KEY_EVENT_EXTRA)
     return result
 
 

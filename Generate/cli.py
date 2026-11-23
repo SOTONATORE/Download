@@ -2056,6 +2056,7 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             intro_video_percent=intro_video_percent,
             after_intro_video_percent=after_intro_video_percent,
             min_anim_sec=min_anim_sec,
+            score_workers=orch_mod._value_workers(counting, gemini_options),
         )
         expected_frames = {}
         if timing is not None:

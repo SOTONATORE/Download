@@ -669,11 +669,12 @@ def _transport_provider(transport) -> str:
     return "gemini"
 
 
-def _value_workers(transport) -> int:
+def _value_workers(transport, gemini_options: Optional[dict] = None) -> int:
     """Число потоков оценки video_value.
 
-    Для OpenRouter: число ключей из того же источника, что у генерации промптов (gemini_prompts),
-    но не больше MAX_PARALLEL_BATCHES (10). Для Gemini и прочих транспортов: 1, как раньше.
+    Для OpenRouter: при переданных gemini_options — openrouter_thread_count(keys, openrouter_sends_per_window)
+    (до keys * sends_per_window, как у генерации промптов); без них — min(keys, MAX_PARALLEL_BATCHES).
+    Для Gemini и прочих транспортов: 1.
     """
     if _transport_provider(transport) != "openrouter":
         return 1
@@ -681,6 +682,8 @@ def _value_workers(transport) -> int:
         keys = gp._provider_key_count("openrouter")
     except Exception:  # ключей нет или их не удалось прочитать: один поток, как раньше
         return 1
+    if gemini_options is not None:
+        return gp.openrouter_thread_count(keys, gemini_options.get("openrouter_sends_per_window"))
     return max(1, min(keys, gp.MAX_PARALLEL_BATCHES))
 
 
@@ -2221,7 +2224,7 @@ class Orchestrator:
                 intro_video_percent=getattr(self, "intro_video_percent", 70.0),
                 after_intro_video_percent=getattr(self, "after_intro_video_percent", 10.0),
                 min_anim_sec=getattr(self, "min_anim_sec", 2.0),
-                score_workers=_value_workers(self.gemini_transport),
+                score_workers=_value_workers(self.gemini_transport, self.gemini_options),
             )
         else:
             # один конвейер для видео и фото (prompt_pipeline.build_prompts); проверку вызывает тот же путь

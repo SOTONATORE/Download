@@ -216,11 +216,11 @@ def test_post_input_image_auth_validation_and_atomic_write(make_i2v_app, monkeyp
         assert c.post("/input_image", content=PNG_BYTES).status_code == 400
         assert c.post("/input_image?name=clip_1.png", content=b"").status_code == 400
 
-        # Превышение лимита размера -> 413
-        monkeypatch.setattr(srv, "MAX_INPUT_IMAGE_BYTES", 10)
-        resp_413 = c.post("/input_image?name=clip_1.png", content=b"x" * 11)
-        assert resp_413.status_code == 413
-        monkeypatch.undo()
+        # Превышение лимита размера -> 413 (локальный патч: COMFY_INPUT_DIR фикстуры не откатывается)
+        with monkeypatch.context() as m:
+            m.setattr(srv, "MAX_INPUT_IMAGE_BYTES", 10)
+            resp_413 = c.post("/input_image?name=clip_1.png", content=b"x" * 11)
+            assert resp_413.status_code == 413
 
         # Успешная запись
         ok = c.post("/input_image?name=clip_1.png", content=PNG_BYTES)

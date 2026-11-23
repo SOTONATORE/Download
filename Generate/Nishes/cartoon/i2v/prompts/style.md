@@ -22,10 +22,11 @@ Pick the simplest, clearest 2D animation that fits the Source photo and the subt
 
 # Camera Behaviour
 
-Name the camera behaviour explicitly in every prompt, and state how the shot ends. Keep the camera calm and restrained so the 2D illustration stays stable:
-- Every clip must contain visible, gentle motion — never leave both the subject and the camera completely motionless.
-- When a character, hand, microbe, plant, or scale is actively moving, prefer a static frame ("The camera remains static on the flat 2D scene, holding the full composition steady.") or one gentle tracking move ("The camera tracks smoothly alongside the walking figure from left to right, keeping the horizon level.").
-- When the Source photo shows a still tabletop, cutaway, or object arrangement with no character action, animate any natural 2D element (such as leaves or stems swaying gently) or use one slow, smooth camera move ("The camera pushes in gently toward the wooden counter and holds steady.").
+Name the camera behaviour explicitly in every prompt, and state how the shot ends. Keep the camera calm and restrained so the 2D illustration stays stable, while ensuring the scene itself is genuinely animated:
+- Every clip MUST animate the characters, hands, props, or environmental details themselves (e.g., legs swinging, head tilting or nodding, hands lifting or turning an object, leaves or stems swaying, ripples expanding, scale beam tipping).
+- Never use frozen, motionless phrasing ("holds steady", "sits still", "stands still", "remains motionless") for the subject or scene, and never substitute a bare camera zoom/push-in for actual subject or scene animation.
+- When a character, hand, microbe, plant, or object is actively moving, prefer a static frame ("The camera remains static on the flat 2D scene, keeping the full composition framed.") or one gentle tracking move ("The camera tracks smoothly alongside the walking figure from left to right, keeping the horizon level.").
+- When the Source photo shows a still tabletop, cutaway, or object arrangement with no character action, animate natural 2D details within the frame (leaves or stems swaying gently, flat water ripples expanding, a pointer or magnifying glass gliding across a detail, a scale beam or needle shifting smoothly) rather than relying on a camera push-in alone.
 - Never combine multiple camera moves, rapid pans, handheld shake, or cuts.
 
 # Strictly Forbidden Realism Drift and Content Rules
@@ -41,7 +42,7 @@ Name the camera behaviour explicitly in every prompt, and state how the shot end
 # Example Prompts
 
 Example 1 — wide field scene with main character walking (Duration: 4.5s):
-Wide 2D cartoon view of the dusty path edge under a pale dusty blue sky as the main character with a smooth pure-white round head, small black dot eyes, curved eyebrows, and thin black stick limbs walks steadily along the path toward the lined-up olive-green potato plants. The character swings both stick arms in an easy rhythm while leaning slightly forward to inspect the green foliage ahead. The leafy stems sway gently in a calm breeze across the warm ochre earth, keeping crisp closed black ink outlines and flat matte fills. The camera tracks slowly alongside the walking figure and holds steady on the sunlit field.
+Wide 2D cartoon view of the dusty path edge under a pale dusty blue sky as the main character with a smooth pure-white round head, small black dot eyes, curved eyebrows, and thin black stick limbs walks steadily along the path toward the lined-up olive-green potato plants. The character swings both stick arms in an easy rhythm while leaning slightly forward to inspect the green foliage ahead. The leafy stems sway gently in a calm breeze across the warm ochre earth, keeping crisp closed black ink outlines and flat matte fills. The camera tracks slowly alongside the walking figure, keeping the sunlit field evenly framed.
 
 Example 2 — macro view of cartoon hands peeling a tuber (Duration: 3.5s):
 Macro 2D cartoon view of two warm-toned cartoon hands with simple rounded fingers holding the golden potato over the warm wooden board. The right hand guides the vegetable peeler smoothly along the skin in one steady stroke, curling a single flat tan peel onto the board beside the scattered peel curls. The left hand rotates the tuber slightly to prepare for the next pass while every shape maintains crisp closed black ink outlines and flat matte fills. The camera remains static above the wooden board, holding the peeling motion centered.
@@ -53,7 +54,7 @@ Example 4 — biological cutaway with personified microbe (Duration: 4.0s):
 Enlarged 2D biological cutaway of the curved warm dusty-pink intestine wall around the pale cream channel as the small round sage-green microbe character with small black dot eyes, raised curved eyebrows, and thin black stick limbs bobs smoothly across the channel. The microbe reaches both stick arms gently toward the floating pale blue beaded sugar chains while the chains drift slowly in a steady rhythm. Every shape preserves crisp closed black ink outlines and flat matte fills on the flat single layer. The camera remains static on the cutaway channel.
 
 Example 5 — balance scale visual metaphor with stationary label cards (Duration: 3.5s):
-Clean 2D cartoon view of the brass balance scale on the warm cream backdrop as the horizontal beam tips smoothly downward toward the bumpy tan tuber while the smooth golden potato rises slightly on the opposite tray. The beam settles with one gentle bounce into a steady tilted position while the white framed label card and muted red plaque remain crisp, sharp, and completely stationary. Flat matte fills and crisp closed medium-fine black ink outlines stay uniform across the scene. The camera pushes in gently toward the balance scale and holds steady.
+Clean 2D cartoon view of the brass balance scale on the warm cream backdrop as the horizontal beam tips smoothly downward toward the bumpy tan tuber while the smooth golden potato rises slightly on the opposite tray. The beam settles with one gentle bounce into a tilted position while the white framed label card and muted red plaque remain crisp, sharp, and stationary. Flat matte fills and crisp closed medium-fine black ink outlines stay uniform across the scene. The camera remains static on the balance scale, keeping the full frame sharp.
 
 # Final Check
 
