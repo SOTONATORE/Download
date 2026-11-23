@@ -28,19 +28,6 @@
       "ver": "0.8.2"
     }
   },
-  "403": {
-    "inputs": {
-      "aspect_ratio": "16:9 (Widescreen)",
-      "megapixels": 0.9,
-      "multiple": 32
-    },
-    "class_type": "ResolutionSelector",
-    "_meta": {
-      "title": "Resolution Selector",
-      "cnr_id": "comfy-core",
-      "ver": "0.30.0"
-    }
-  },
   "404": {
     "inputs": {
       "upscale_method": "lanczos",
@@ -59,10 +46,7 @@
   },
   "398:364": {
     "inputs": {
-      "text": [
-        "398:376",
-        0
-      ],
+      "text": "Use the provided start image as the first frame.",
       "clip": [
         "398:387",
         0
@@ -73,17 +57,6 @@
       "title": "CLIP Text Encode (Prompt)",
       "cnr_id": "comfy-core",
       "ver": "0.3.56"
-    }
-  },
-  "398:376": {
-    "inputs": {
-      "value": "Use the provided start image as the first frame."
-    },
-    "class_type": "PrimitiveStringMultiline",
-    "_meta": {
-      "title": "Prompt",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
     }
   },
   "398:384": {
@@ -98,23 +71,9 @@
       "ver": "0.29.0"
     }
   },
-  "398:363": {
-    "inputs": {
-      "value": false
-    },
-    "class_type": "PrimitiveBoolean",
-    "_meta": {
-      "title": "Switch to Text to Video?",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.0"
-    }
-  },
   "398:365": {
     "inputs": {
-      "frame_rate": [
-        "398:359",
-        0
-      ],
+      "frame_rate": 24,
       "positive": [
         "398:364",
         0
@@ -153,20 +112,6 @@
       "ver": "0.29.0"
     }
   },
-  "398:372": {
-    "inputs": {
-      "value": [
-        "403",
-        0
-      ]
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "Width",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
-    }
-  },
   "398:373": {
     "inputs": {
       "text": "pc game, console game, video game, ugly",
@@ -193,20 +138,6 @@
       "title": "Load CLIP",
       "cnr_id": "comfy-core",
       "ver": "0.29.0"
-    }
-  },
-  "398:360": {
-    "inputs": {
-      "value": [
-        "403",
-        1
-      ]
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "Height",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
     }
   },
   "398:352": {
@@ -240,17 +171,6 @@
       "title": "ManualSigmas",
       "cnr_id": "comfy-core",
       "ver": "0.14.1"
-    }
-  },
-  "398:361": {
-    "inputs": {
-      "value": 24
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "Frame Rate",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
     }
   },
   "398:371": {
@@ -321,10 +241,6 @@
   "398:357": {
     "inputs": {
       "strength": 0.7,
-      "bypass": [
-        "398:363",
-        0
-      ],
       "vae": [
         "398:385",
         0
@@ -351,10 +267,7 @@
         "398:378",
         0
       ],
-      "frame_rate": [
-        "398:359",
-        1
-      ],
+      "frame_rate": 24,
       "batch_size": 1,
       "audio_vae": [
         "398:386",
@@ -417,36 +330,6 @@
       "ver": "0.7.0"
     }
   },
-  "398:353": {
-    "inputs": {
-      "expression": "a/2",
-      "values.a": [
-        "398:372",
-        0
-      ]
-    },
-    "class_type": "ComfyMathExpression",
-    "_meta": {
-      "title": "Math Expression",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
-    }
-  },
-  "398:355": {
-    "inputs": {
-      "expression": "a/2",
-      "values.a": [
-        "398:360",
-        0
-      ]
-    },
-    "class_type": "ComfyMathExpression",
-    "_meta": {
-      "title": "Math Expression",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
-    }
-  },
   "398:350": {
     "inputs": {
       "img_compression": 18,
@@ -464,14 +347,8 @@
   },
   "398:356": {
     "inputs": {
-      "width": [
-        "398:353",
-        1
-      ],
-      "height": [
-        "398:355",
-        1
-      ],
+      "width": 640,
+      "height": 352,
       "length": [
         "398:378",
         0
@@ -510,10 +387,6 @@
   "398:349": {
     "inputs": {
       "strength": 1,
-      "bypass": [
-        "398:363",
-        0
-      ],
       "vae": [
         "398:385",
         0
@@ -532,21 +405,6 @@
       "title": "LTXVImgToVideoInplace",
       "cnr_id": "comfy-core",
       "ver": "0.7.0"
-    }
-  },
-  "398:359": {
-    "inputs": {
-      "expression": "a",
-      "values.a": [
-        "398:361",
-        0
-      ]
-    },
-    "class_type": "ComfyMathExpression",
-    "_meta": {
-      "title": "Math Expression (fps)",
-      "cnr_id": "comfy-core",
-      "ver": "0.16.3"
     }
   },
   "398:378": {
@@ -701,10 +559,7 @@
   },
   "398:370": {
     "inputs": {
-      "fps": [
-        "398:359",
-        0
-      ],
+      "fps": 24,
       "bit_depth": 8,
       "color_space": "sRGB",
       "chroma_subsampling": "auto",

@@ -1,7 +1,22 @@
 {
-  "prompt": { "node_id": "398:376", "field": "value" },
-  "num_frames": { "node_id": "398:378", "field": "value" },
-  "seed": { "node_id": "398:339", "field": "noise_seed" },
-  "filename_prefix": { "node_id": "75", "field": "filename_prefix" },
-  "input_image": { "node_id": "395", "field": "image" }
+  "prompt": {
+    "node_id": "398:364",
+    "field": "text"
+  },
+  "num_frames": {
+    "node_id": "398:378",
+    "field": "value"
+  },
+  "seed": {
+    "node_id": "398:339",
+    "field": "noise_seed"
+  },
+  "filename_prefix": {
+    "node_id": "75",
+    "field": "filename_prefix"
+  },
+  "input_image": {
+    "node_id": "395",
+    "field": "image"
+  }
 }
