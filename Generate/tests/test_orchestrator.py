@@ -656,7 +656,7 @@ def test_run_labels_show_missing_number_and_run_position(tmp_path, monkeypatch, 
     assert "клип 7 (в запуске 1 из 3): начало" in caplog.text
     assert "клип 7 (в запуске 1 из 3): готов" in caplog.text
     assert "клип 9 (в запуске 3 из 3): готов" in caplog.text
-    assert "готово 3 из 3 клипов (100%)" in caplog.text
+    assert "[видео] готово 3 из 3 (100%)" in caplog.text
 
 
 # ---------------------------------------------------------------------------

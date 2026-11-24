@@ -3625,7 +3625,7 @@ class Orchestrator:
             return
         if num in self._done or self._assigned_slot(num) is not None:
             return  # готовый или назначенный клип не возвращается в очередь
-        self._consecutive_clip_failures += 1
+        self._consecutive_clip_failures = getattr(self, "_consecutive_clip_failures", 0) + 1
         if self._consecutive_clip_failures >= 5 and not self._fail_fast_stopped:
             self._fail_fast_stopped = True
             log.error("5 клипов подряд завершились ошибкой, остановка генерации", extra=KEY_EVENT_EXTRA)
