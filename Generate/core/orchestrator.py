@@ -1294,6 +1294,8 @@ class Orchestrator:
         self.deadline_reached = False
         self.budget_exceeded = False
         self._oom_stopped = False         # нехватка видеопамяти на клипе: запуск останавливается (P1)
+        self._consecutive_clip_failures = 0
+        self._fail_fast_stopped = False
         self._run_pos: dict = {}          # номер клипа из missing.txt -> место в списке этого запуска (P2)
         self.cleanup_ok = True
         self.run_id = str(run_id).strip()
@@ -1418,7 +1420,16 @@ class Orchestrator:
         # журнал файла получает каждую строку с префиксом, как прежде; консоль печатает пачку группой
         for line in lines:
             log.info("[карта %d] %s", slot.instance_id, line, extra=WORKER_LOG_EXTRA)
-        print_worker_group(slot.instance_id, lines)
+        console_lines = [
+            line for line in lines
+            if not (
+                'DEBUG Generate.worker.server: HTTP: "GET /health' in line
+                or 'DEBUG Generate.worker.server: HTTP: "GET /logs' in line
+                or line.lstrip().startswith("[#")
+            )
+        ]
+        if console_lines:
+            print_worker_group(slot.instance_id, console_lines)
         return True
 
     def _pull_due_logs(self, now: float) -> None:
@@ -1925,6 +1936,8 @@ class Orchestrator:
         summary.fallback_photos = sorted(getattr(self, "_i2v_fallback_photos", ()))
         full = summary.completed == len(needed) and self.cleanup_ok
         summary.exit_code = EXIT_OK if full else EXIT_PARTIAL
+        if self._fail_fast_stopped:
+            summary.exit_code = 1
 
     def _report_text(self, summary: RunSummary) -> str:
         """Отчёт запуска (run/summary.md): только числа и итоговые признаки, без адресов и токенов."""
@@ -2502,14 +2515,14 @@ class Orchestrator:
                 log.error("Бюджет исчерпан: снимаем все карты, новые не арендуем.")
                 for slot in list(self._slots.values()):
                     self._retire(slot, "бюджет исчерпан")
-            if self._oom_stopped and drain_since is None:
-                drain_since = now  # нехватка видеопамяти: как срок job, начатое дозаливаем, новых клипов нет
-            stopping = deadline_hit or self.budget_exceeded or self._oom_stopped
+            if (self._oom_stopped or self._fail_fast_stopped) and drain_since is None:
+                drain_since = now  # нехватка видеопамяти или fail-fast: начатое дозаливаем, новых клипов нет
+            stopping = deadline_hit or self.budget_exceeded or self._oom_stopped or self._fail_fast_stopped
 
             for slot in list(self._slots.values()):
                 self._step_slot(slot, now, stopping)
-            # нехватка видеопамяти на этом обходе: аренды и новые клипы в этом же обходе не нужны
-            stopping = stopping or self._oom_stopped
+            # нехватка видеопамяти или fail-fast на этом обходе: аренды и новые клипы в этом же обходе не нужны
+            stopping = stopping or self._oom_stopped or self._fail_fast_stopped
             # уровни 2..MAX буфера: после того как каждая готовая карта получила первую задачу
             self._dispatch_levels(now, stopping)
             self._pull_due_logs(now)
@@ -3208,7 +3221,7 @@ class Orchestrator:
         # карта с задачами в буфере не принимает первую задачу здесь и не переключается, не снимается
         if self._slots.get(slot.index) is not slot or slot.tasks:
             return
-        stopping = stopping or self._oom_stopped  # нехватка видеопамяти уже на этом шаге: новые клипы не берутся
+        stopping = stopping or self._oom_stopped or self._fail_fast_stopped  # остановка уже на этом шаге: новые клипы не берутся
         if not stopping and self._queue_for_role(slot.role):
             if not slot.accepted and self._accept_timed_out(slot, now):
                 return
@@ -3612,6 +3625,10 @@ class Orchestrator:
             return
         if num in self._done or self._assigned_slot(num) is not None:
             return  # готовый или назначенный клип не возвращается в очередь
+        self._consecutive_clip_failures += 1
+        if self._consecutive_clip_failures >= 5 and not self._fail_fast_stopped:
+            self._fail_fast_stopped = True
+            log.error("5 клипов подряд завершились ошибкой, остановка генерации", extra=KEY_EVENT_EXTRA)
         used = self._attempts.get(num, 0)
         if used >= MAX_ATTEMPTS:
             if getattr(self, "i2v_mode", False) and num in getattr(self, "_i2v_phase2_nums", ()):
@@ -4114,8 +4131,13 @@ class Orchestrator:
                     pending_i2v = getattr(self, "_pending_i2v_uploads", None)
                     if isinstance(pending_i2v, set):
                         pending_i2v.discard(num)
+                    photo_done = len(self._i2v_phase2_nums)
+                    photo_total = len(self._photo_nums) if getattr(self, "_photo_nums", None) else self._total_needed
                 log.info("Фото %d.png выдано в Release (рендер: %s, %.1f с); клип поставлен в очередь I2V.",
                          num, card, duration)
+                log.info("[фото] готово %d из %d (%d%%)",
+                         photo_done, photo_total, photo_done * 100 // photo_total if photo_total else 0,
+                         extra=KEY_EVENT_EXTRA)
                 return
             if is_i2v_entry and not video_ready:
                 self._record_i2v_fallback(num, "видео-промпт не готов")
@@ -4126,13 +4148,14 @@ class Orchestrator:
                 if isinstance(entry, dict):
                     entry["video_render_status"] = "done"
             self._done.add(num)
+            self._consecutive_clip_failures = 0
             self._durations.append(duration)
             self._mark(num, "done")
             log.info("Клип %d выдан в Release (рендер: %s, %.1f с).", num, card, duration)
             total = self._total_needed
             done = len(self._done)
             log.info("%s: готов", self._clip_label(num), extra=KEY_EVENT_EXTRA)
-            log.info("готово %d из %d клипов (%d%%)", done, total, done * 100 // total if total else 0,
+            log.info("[видео] готово %d из %d (%d%%)", done, total, done * 100 // total if total else 0,
                      extra=KEY_EVENT_EXTRA)
 
     def _finish_clip(self, slot: _CardSlot, now: float, task: Optional[_Task] = None) -> None:

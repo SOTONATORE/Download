@@ -77,7 +77,7 @@ download_model() {
             rm -f "${path}.aria2"
         fi
     else
-        # --summary-interval=10: строка прогресса (процент, скорость) каждые 10 с.
+        # --summary-interval=30: строка прогресса (процент, скорость) каждые 30 с.
         # --console-log-level=warn снят: прогресс виден в логе. Служебные строки aria2 (в т.ч. адреса
         # перенаправлений) идут в bootstrap.log и через его хвост в GET /logs; query-часть адресов
         # там заменяется на «?***» (server.py, strip_url_queries).
@@ -87,7 +87,7 @@ download_model() {
         # Каждая строка вывода aria2c получает префикс «[file=<имя>] » (sed -u: построчно), строки идут
         # в bootstrap.log. Так параллельные загрузки различимы в мониторе (core/weights_log.py).
         aria2c \
-            -x 16 -s 16 -k 1M -c --summary-interval=10 \
+            -x 16 -s 16 -k 1M -c --summary-interval=30 \
             -i <(printf '%s\n' "${url}" "  header=Authorization: Bearer ${HF_TOKEN}" \
                  "  dir=${target_dir}" "  out=${name}") 2>&1 \
             | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"

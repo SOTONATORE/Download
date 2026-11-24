@@ -252,7 +252,8 @@
       "latent": [
         "398:356",
         0
-      ]
+      ],
+      "bypass": false
     },
     "class_type": "LTXVImgToVideoInplace",
     "_meta": {
@@ -398,7 +399,8 @@
       "latent": [
         "398:348",
         0
-      ]
+      ],
+      "bypass": false
     },
     "class_type": "LTXVImgToVideoInplace",
     "_meta": {

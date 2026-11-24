@@ -1592,13 +1592,21 @@ class WorkerApp:
 
     def _run_switch_script(self, old_dir: Path, new_dir: Path) -> Tuple[int, str]:
         """Запуск switch_profile.sh: (код выхода, последняя строка «[switch]» — причина или пусто)."""
-        proc = subprocess.run(["bash", str(self.switch_script), str(old_dir), str(new_dir)],
-                              env=self._switch_env(new_dir), capture_output=True, text=True)
-        out_lines = (proc.stdout or "").splitlines()
-        for line in out_lines:
-            log.info("%s", line)  # строки скрипта уже без токенов; маска формата дополнительно применяется
-        for line in (proc.stderr or "").splitlines()[-5:]:
-            log.warning("%s", line)
+        proc = subprocess.Popen(
+            ["bash", str(self.switch_script), str(old_dir), str(new_dir)],
+            env=self._switch_env(new_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        out_lines = []
+        if proc.stdout is not None:
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\r\n")
+                out_lines.append(line)
+                log.info("%s", line)  # строки скрипта уже без токенов; маска формата дополнительно применяется
+        proc.wait()
         last = next((line for line in reversed(out_lines) if line.startswith("[switch]")), "")
         return proc.returncode, last
 
