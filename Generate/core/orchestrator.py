@@ -610,6 +610,7 @@ FILES_LIST_NAME = "FILES.txt"
 LOG_BUNDLE_NAME = "run-logs.zip"
 MISSING_FILENAME = "missing.txt"
 DISTRIBUTION_FILENAME = "distribution.json"  # STEP 3b: распределение видео/фото
+OPTIMIZED_SRT_FILENAME = "final_optimized.srt"
 SERVICE_DIR = "service"
 
 
@@ -946,12 +947,16 @@ class RunPublisher:
             return
         self.uploaded.append(name)
 
-    def finish(self, *, prompts_path=None, report_path=None, bundle_path=None) -> None:
+    def finish(self, *, prompts_path=None, report_path=None, bundle_path=None,
+               optimized_srt_path=None) -> None:
         """E2, E4: служебные файлы и отчёты в ФИНАЛ · ГЕНЕРАЦИЯ; generated_links.txt там же (стадия 6)."""
         if report_path:
             self._soft(lambda: self.up.upload_run_file(report_path), os.path.basename(report_path))
         if bundle_path:
             self._soft(lambda: self.up.upload_run_file(bundle_path), os.path.basename(bundle_path))
+        if optimized_srt_path and os.path.isfile(str(optimized_srt_path)):
+            dst = self._copy(str(optimized_srt_path), OPTIMIZED_SRT_FILENAME)
+            self._soft(lambda: self.up.upload_run_file(dst), OPTIMIZED_SRT_FILENAME)
         if prompts_path and os.path.isfile(str(prompts_path)):
             dst = self._copy(str(prompts_path), PROMPTS_FILENAME)
             self._soft(lambda: self.up.upload_service_file(dst), PROMPTS_FILENAME)
@@ -981,10 +986,13 @@ class Orchestrator:
     intro_seconds: float = 180.0
     intro_video_percent: float = 70.0
     after_intro_video_percent: float = 10.0
-    min_anim_sec: float = 2.0
+    total_video_percent: Optional[float] = None
+    after_half_video_percent: Optional[float] = None
+    min_anim_sec: float = 2.5
     i2v_video_cfg = None
     i2v_video_profile: Optional[str] = None
     i2v_timing = None
+    srt_path = None
     clock = staticmethod(time.monotonic)  # часы по умолчанию; конструктор подменяет их своими
 
     def __init__(
@@ -1064,10 +1072,13 @@ class Orchestrator:
         intro_seconds: float = 180.0,
         intro_video_percent: float = 70.0,
         after_intro_video_percent: float = 10.0,
-        min_anim_sec: float = 2.0,
+        total_video_percent: Optional[float] = None,
+        after_half_video_percent: Optional[float] = None,
+        min_anim_sec: float = 2.5,
         i2v_video_cfg=None,
         i2v_video_profile: Optional[str] = None,
         i2v_timing=None,
+        srt_path=None,
     ) -> None:
         if max_cards <= 0:
             raise gp.GeminiInputError("max_cards должен быть больше нуля.")
@@ -1115,10 +1126,13 @@ class Orchestrator:
         self.intro_seconds = float(intro_seconds)
         self.intro_video_percent = float(intro_video_percent)
         self.after_intro_video_percent = float(after_intro_video_percent)
+        self.total_video_percent = float(total_video_percent) if total_video_percent is not None else None
+        self.after_half_video_percent = float(after_half_video_percent) if after_half_video_percent is not None else None
         self.min_anim_sec = float(min_anim_sec)
         self.i2v_video_cfg = i2v_video_cfg
         self.i2v_video_profile = i2v_video_profile or None
         self.i2v_timing = i2v_timing
+        self.srt_path = srt_path
         # превью (prompts.txt): задачи фото без Gemini, в конце очереди фото; при «выкл» не создаются
         self.prompts_file = prompts_file
         self.prompts_count = prompts_count
@@ -1955,8 +1969,14 @@ class Orchestrator:
                 self._artifact.write_files_list()
                 bundle_path = os.path.join(self._tmp, LOG_BUNDLE_NAME)
                 self._artifact.make_bundle(bundle_path, for_release=True)
+            srt_path = getattr(self, "srt_path", None)
+            optimized_srt_path = (
+                srt_path
+                if srt_path and os.path.basename(str(srt_path)) == OPTIMIZED_SRT_FILENAME
+                else None
+            )
             pub.finish(prompts_path=str(self.prompts_path), report_path=report_path,
-                       bundle_path=bundle_path)
+                       bundle_path=bundle_path, optimized_srt_path=optimized_srt_path)
             if pub.failures:  # E4: частичный итог, каждая ошибка уже записана одной строкой
                 summary.exit_code = EXIT_PARTIAL
         log.info("Итог: готово %d из %d, ошибок %d, не начато %d, арендовано карт %d, "
@@ -2223,7 +2243,9 @@ class Orchestrator:
                 intro_seconds=getattr(self, "intro_seconds", 180.0),
                 intro_video_percent=getattr(self, "intro_video_percent", 70.0),
                 after_intro_video_percent=getattr(self, "after_intro_video_percent", 10.0),
-                min_anim_sec=getattr(self, "min_anim_sec", 2.0),
+                total_video_percent=getattr(self, "total_video_percent", None),
+                after_half_video_percent=getattr(self, "after_half_video_percent", None),
+                min_anim_sec=getattr(self, "min_anim_sec", 2.5),
                 score_workers=_value_workers(self.gemini_transport, self.gemini_options),
             )
         else:

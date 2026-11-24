@@ -60,7 +60,7 @@ try:  # пакетный и «плоский» импорт
     from Generate.core import previews
     from Generate.core.log_setup import mask_text, setup_logging, teardown_logging
     from Generate.core.orchestrator import (
-        ReleaseStartError, RunPublisher, run_generation)
+        OPTIMIZED_SRT_FILENAME, ReleaseStartError, RunPublisher, run_generation)
     from Generate.core.release_adapter import (
         LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader)
     from Generate.core.release_names import final_tag
@@ -80,7 +80,7 @@ except ImportError:  # pragma: no cover
     import previews  # type: ignore
     from log_setup import mask_text, setup_logging, teardown_logging  # type: ignore
     from orchestrator import (  # type: ignore
-        ReleaseStartError, RunPublisher, run_generation)
+        OPTIMIZED_SRT_FILENAME, ReleaseStartError, RunPublisher, run_generation)
     from release_adapter import (  # type: ignore
         LINKS_FILENAME, PROMPTS_FILENAME, GhCommandRunner, ReleaseUploader)
     from release_names import final_tag  # type: ignore
@@ -719,21 +719,42 @@ def _check_previews(prompts_count, prompts_file: str, photo_profile) -> Optional
     return None
 
 
-def _validate_i2v_params(args) -> tuple[float, float, float, float]:
+def _validate_i2v_params(
+    args,
+) -> tuple[float, float, float, Optional[float], Optional[float], float]:
     """Проверяет числовые параметры --i2v-mode; при ошибке бросает GeminiInputError."""
     intro_minutes = float(getattr(args, "intro_minutes", 3.0))
     intro_video_percent = float(getattr(args, "intro_video_percent", 70.0))
     after_intro_video_percent = float(getattr(args, "after_intro_video_percent", 10.0))
-    min_anim_sec = float(getattr(args, "min_anim_sec", 2.0))
+    raw_total = getattr(args, "total_video_percent", None)
+    total_video_percent = float(raw_total) if raw_total is not None else None
+    raw_after_half = getattr(args, "after_half_video_percent", None)
+    after_half_video_percent = float(raw_after_half) if raw_after_half is not None else None
+    min_anim_sec = float(getattr(args, "min_anim_sec", 2.5))
     if not math.isfinite(intro_minutes) or intro_minutes < 0:
         raise GeminiInputError("Ошибка входных данных: --intro-minutes должен быть неотрицательным числом.")
     if not math.isfinite(intro_video_percent) or not 0.0 <= intro_video_percent <= 100.0:
         raise GeminiInputError("Ошибка входных данных: --intro-video-percent должен быть от 0 до 100.")
     if not math.isfinite(after_intro_video_percent) or not 0.0 <= after_intro_video_percent <= 100.0:
         raise GeminiInputError("Ошибка входных данных: --after-intro-video-percent должен быть от 0 до 100.")
+    if total_video_percent is not None and (
+        not math.isfinite(total_video_percent) or not 0.0 <= total_video_percent <= 100.0
+    ):
+        raise GeminiInputError("Ошибка входных данных: --total-video-percent должен быть от 0 до 100.")
+    if after_half_video_percent is not None and (
+        not math.isfinite(after_half_video_percent) or not 0.0 <= after_half_video_percent <= 100.0
+    ):
+        raise GeminiInputError("Ошибка входных данных: --after-half-video-percent должен быть от 0 до 100.")
     if not math.isfinite(min_anim_sec) or min_anim_sec < 0:
         raise GeminiInputError("Ошибка входных данных: --min-anim-sec должен быть неотрицательным числом.")
-    return intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec
+    return (
+        intro_minutes,
+        intro_video_percent,
+        after_intro_video_percent,
+        total_video_percent,
+        after_half_video_percent,
+        min_anim_sec,
+    )
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -748,7 +769,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     i2v_video_profile = None
     if i2v_mode:
         try:
-            intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+            (
+                intro_minutes,
+                intro_video_percent,
+                after_intro_video_percent,
+                total_video_percent,
+                after_half_video_percent,
+                min_anim_sec,
+            ) = _validate_i2v_params(args)
         except GeminiInputError as e:
             _err(str(e))
             return EXIT_INPUT
@@ -809,9 +837,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(_text_family_line(_cfg, family))
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
     if i2v_mode:
-        print(f"Режим I2V: фото {photo_profile}, видео {i2v_video_profile}, "
-              f"вступление {intro_minutes:g} мин ({intro_video_percent:g}%), "
-              f"далее {after_intro_video_percent:g}%, порог {min_anim_sec:g} с")
+        if total_video_percent is not None or after_half_video_percent is not None:
+            parts = [f"вступление {intro_minutes:g} мин ({intro_video_percent:g}%)"]
+            if total_video_percent is not None:
+                parts.append(f"всего {total_video_percent:g}%")
+            if after_half_video_percent is not None:
+                parts.append(f"после середины {after_half_video_percent:g}%")
+            parts.append(f"порог {min_anim_sec:g} с")
+            print(f"Режим I2V: фото {photo_profile}, видео {i2v_video_profile}, {', '.join(parts)}")
+        else:
+            print(f"Режим I2V: фото {photo_profile}, видео {i2v_video_profile}, "
+                  f"вступление {intro_minutes:g} мин ({intro_video_percent:g}%), "
+                  f"далее {after_intro_video_percent:g}%, порог {min_anim_sec:g} с")
     if previews.count_value(getattr(args, "prompts_count", None)):
         print(f"Превью: файл промптов {args.prompts_file}, вариантов на промпт {args.prompts_count}")
     print(f"srt_hash: {srt_hash(segments)}")
@@ -924,10 +961,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     intro_minutes = 3.0
     intro_video_percent = 70.0
     after_intro_video_percent = 10.0
-    min_anim_sec = 2.0
+    total_video_percent = None
+    after_half_video_percent = None
+    min_anim_sec = 2.5
     if i2v_mode:
         try:
-            intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+            (
+                intro_minutes,
+                intro_video_percent,
+                after_intro_video_percent,
+                total_video_percent,
+                after_half_video_percent,
+                min_anim_sec,
+            ) = _validate_i2v_params(args)
         except GeminiInputError as e:
             _err(str(e))
             return EXIT_INPUT
@@ -1135,11 +1181,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             pilot_start_cmd=(getattr(args, "pilot_start_cmd", "") or "").strip() or None,
             # артефакт запуска (SPEC 10.4): каталог задаёт workflow; пусто = не ведётся
             artifact_dir=(getattr(args, "artifact_dir", "") or None),
+            srt_path=args.srt,
             **({
                 "i2v_mode": True,
                 "intro_seconds": intro_minutes * 60.0,
                 "intro_video_percent": intro_video_percent,
                 "after_intro_video_percent": after_intro_video_percent,
+                "total_video_percent": total_video_percent,
+                "after_half_video_percent": after_half_video_percent,
                 "min_anim_sec": min_anim_sec,
                 "i2v_video_cfg": i2v_video_cfg,
                 "i2v_video_profile": i2v_video_profile,
@@ -1699,9 +1748,14 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
         uploader.prepare()
         clips = len(uploader.done)
 
+        optimized_srt_path = (
+            args.srt
+            if os.path.basename(str(args.srt)) == OPTIMIZED_SRT_FILENAME and os.path.isfile(args.srt)
+            else None
+        )
         with tempfile.TemporaryDirectory() as tmp:
             pub = RunPublisher(uploader, args.repo, tmp)
-            pub.finish(prompts_path=args.prompts_path)
+            pub.finish(prompts_path=args.prompts_path, optimized_srt_path=optimized_srt_path)
     except Exception as e:  # noqa: BLE001
         # текст берём только у своих ошибок проекта (у них есть exit_code); иначе только тип
         if hasattr(e, "exit_code"):
@@ -1712,6 +1766,7 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
 
     prompts_uploaded = PROMPTS_FILENAME in pub.uploaded
     links_uploaded = LINKS_FILENAME in pub.uploaded
+    optimized_srt_uploaded = OPTIMIZED_SRT_FILENAME in pub.uploaded
     if not os.path.isfile(args.prompts_path):
         print(f"Файл промптов не найден ({args.prompts_path}): он не загружен.")
     print("Выдача клипов завершена.")
@@ -1719,6 +1774,8 @@ def cmd_finalize_release(args: argparse.Namespace) -> int:
     print(f"  клипов в частях: {clips}")
     print(f"  prompts.json загружен: {'да' if prompts_uploaded else 'нет'}")
     print(f"  generated_links.txt загружен: {'да' if links_uploaded else 'нет'}")
+    if optimized_srt_path is not None:
+        print(f"  {OPTIMIZED_SRT_FILENAME} загружен: {'да' if optimized_srt_uploaded else 'нет'}")
     for name in pub.failures:
         _err(f"Не удалось загрузить {name}.")
     return EXIT_RUNTIME if pub.failures else EXIT_OK
@@ -1861,13 +1918,25 @@ def _review_reasons(prompts: dict, nums) -> dict:
 
 def _verify_report(prep_args: dict, counts: dict, failures: list) -> str:
     v, ph = counts["video"], counts["photo"]
-    i2v_line = (
-        [f"- Режим I2V: включён (вступление {prep_args['intro_minutes']:g} мин: "
-         f"{prep_args['intro_video_percent']:g}%, далее {prep_args['after_intro_video_percent']:g}%, "
-         f"порог {prep_args['min_anim_sec']:g} с)"]
-        if prep_args.get("i2v_mode")
-        else []
-    )
+    if prep_args.get("i2v_mode"):
+        tot = prep_args.get("total_video_percent")
+        ah = prep_args.get("after_half_video_percent")
+        if tot is not None or ah is not None:
+            parts = [f"вступление {prep_args['intro_minutes']:g} мин: {prep_args['intro_video_percent']:g}%"]
+            if tot is not None:
+                parts.append(f"всего {tot:g}%")
+            if ah is not None:
+                parts.append(f"после середины {ah:g}%")
+            parts.append(f"порог {prep_args['min_anim_sec']:g} с")
+            i2v_line = [f"- Режим I2V: включён ({', '.join(parts)})"]
+        else:
+            i2v_line = [
+                f"- Режим I2V: включён (вступление {prep_args['intro_minutes']:g} мин: "
+                f"{prep_args['intro_video_percent']:g}%, далее {prep_args['after_intro_video_percent']:g}%, "
+                f"порог {prep_args['min_anim_sec']:g} с)"
+            ]
+    else:
+        i2v_line = []
     lines = [
         "## Проверка Gemini: отчёт",
         "",
@@ -2007,7 +2076,14 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
     if i2v_mode:
         if photo_profile is None:
             raise GeminiInputError("Ошибка входных данных: режим --i2v-mode требует --photo-profile.")
-        intro_minutes, intro_video_percent, after_intro_video_percent, min_anim_sec = _validate_i2v_params(args)
+        (
+            intro_minutes,
+            intro_video_percent,
+            after_intro_video_percent,
+            total_video_percent,
+            after_half_video_percent,
+            min_anim_sec,
+        ) = _validate_i2v_params(args)
         video_profile = f"{photo_profile}_i2v"
         if _check_photo_profile(photo_profile) is not None:
             raise GeminiInputError("Ошибка входных данных: профиль фото не прошёл проверку (см. сообщение выше).")
@@ -2055,6 +2131,8 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             intro_seconds=intro_minutes * 60.0,
             intro_video_percent=intro_video_percent,
             after_intro_video_percent=after_intro_video_percent,
+            total_video_percent=total_video_percent,
+            after_half_video_percent=after_half_video_percent,
             min_anim_sec=min_anim_sec,
             score_workers=orch_mod._value_workers(counting, gemini_options),
         )
@@ -2106,6 +2184,8 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             "i2v_mode": True, "intro_minutes": intro_minutes,
             "intro_video_percent": intro_video_percent,
             "after_intro_video_percent": after_intro_video_percent,
+            "total_video_percent": total_video_percent,
+            "after_half_video_percent": after_half_video_percent,
             "min_anim_sec": min_anim_sec,
         }
         problems = (v["problems"] + p["problems"] + [f"клип {n}: промпт не готов" for n, _, _ in failures]
@@ -2236,9 +2316,13 @@ def _add_i2v_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--intro-video-percent", type=float, default=70.0,
                    help="доля I2V-видео во вступлении, %% (по умолчанию 70.0)")
     p.add_argument("--after-intro-video-percent", type=float, default=10.0,
-                   help="доля I2V-видео после вступления, %% (по умолчанию 10.0)")
-    p.add_argument("--min-anim-sec", type=float, default=2.0,
-                   help="минимальная длительность сегмента для I2V-анимации, с (по умолчанию 2.0)")
+                   help="доля I2V-видео после вступления (устаревший псевдоним), %% (по умолчанию 10.0)")
+    p.add_argument("--total-video-percent", type=float, default=20.0,
+                   help="общая доля I2V-видео по ролику, %% (по умолчанию 20.0)")
+    p.add_argument("--after-half-video-percent", type=float, default=5.0,
+                   help="доля I2V-видео во второй половине ролика, %% (по умолчанию 5.0)")
+    p.add_argument("--min-anim-sec", type=float, default=2.5,
+                   help="минимальная длительность сегмента для I2V-анимации, с (по умолчанию 2.5)")
 
 
 def build_parser() -> argparse.ArgumentParser:

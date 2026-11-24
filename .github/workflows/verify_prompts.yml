@@ -27,6 +27,10 @@ on:
         description: "Для ниши cartoon: проверить двухэтапный I2V-конвейер (фото для всех + I2V-видео для выбранных)"
         type: boolean
         default: false
+      total_video_percent:
+        description: "Для cartoon_i2v: общая доля видео от длительности ролика, %"
+        type: number
+        default: 20
       intro_minutes:
         description: "Для cartoon_i2v: длина вступления, минут"
         type: number
@@ -35,14 +39,14 @@ on:
         description: "Для cartoon_i2v: доля видео во вступлении, %"
         type: number
         default: 70
-      after_intro_video_percent:
-        description: "Для cartoon_i2v: доля видео после вступления, %"
+      after_half_video_percent:
+        description: "Для cartoon_i2v: доля видео после 50% ролика, %"
         type: number
-        default: 10
+        default: 5
       min_anim_sec:
         description: "Для cartoon_i2v: минимальная длительность сегмента для анимации, с"
         type: number
-        default: 2.0
+        default: 2.5
       video_profile:
         description: "Видео-модель: ltx25 = видео проверяется; none = видео не проверяется. Варианты сверяются с профилями без поля type (видео)"
         type: choice
@@ -187,10 +191,12 @@ jobs:
           PHOTO_PROFILE: ${{ inputs.niche != 'none' && inputs.niche || (inputs.photo_profile != 'none' && inputs.photo_profile || '') }}
           # строка '0', а не число: при числе 0 выражение && || вернёт значение выбора
           VIDEO_PERCENT: ${{ inputs.niche != 'none' && '0' || inputs.video_percent }}
+          NICHE: ${{ inputs.niche }}
           CARTOON_I2V: ${{ inputs.niche == 'cartoon' && inputs.cartoon_i2v || false }}
+          TOTAL_VIDEO_PERCENT: ${{ inputs.total_video_percent }}
           INTRO_MINUTES: ${{ inputs.intro_minutes }}
           INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
-          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          AFTER_HALF_VIDEO_PERCENT: ${{ inputs.after_half_video_percent }}
           MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
           INTRO_SECONDS: ${{ inputs.intro_seconds }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
@@ -354,11 +360,27 @@ jobs:
               fail("CARTOON_I2V допускает только значения true и false")
           cartoon_i2v = cartoon_i2v_text == "true"
 
+          # Для ниши cartoon (или cartoon_i2v) оптимизируем весь SRT до подготовки промптов.
+          srt_for_prep = os.environ["SRT_PATH"]
+          if os.environ.get("NICHE", "").strip() == "cartoon" or cartoon_i2v:
+              from Generate.core.srt_optimizer import DEFAULT_TARGET_SEC, format_stats, optimize_srt_file
+              opt_srt_path = os.path.join(art_dir, "final_optimized.srt")
+              try:
+                  opt_stats = optimize_srt_file(srt_for_prep, opt_srt_path, min_sec=2.5, max_sec=5.0)
+              except Exception as exc:  # noqa: BLE001
+                  fail("оптимизация SRT не удалась: " + type(exc).__name__ + ": " + mask(exc))
+              for w in opt_stats.warnings:
+                  say("ВНИМАНИЕ (оптимизация SRT): " + w)
+              opt_line = format_stats(opt_stats, 2.5, DEFAULT_TARGET_SEC, 5.0)
+              say(opt_line)
+              summary(opt_line)
+              srt_for_prep = opt_srt_path
+
           # Тот же путь, что у cli run: профили, пресет, распределение, промпты (без Vast и релиза).
           from Generate.cli import prepare_prompts_only
 
           ns = argparse.Namespace(
-              srt=os.environ["SRT_PATH"],
+              srt=srt_for_prep,
               missing=os.environ["MISSING_PATH"],
               prompts_path=os.environ["PROMPTS_PATH"],
               artifact_dir=art_dir,
@@ -373,10 +395,11 @@ jobs:
               text_model=text_env or text_from_photo or None,
               fail_fast=fail_fast,
               i2v_mode=cartoon_i2v,
+              total_video_percent=float(os.environ.get("TOTAL_VIDEO_PERCENT") or 20.0),
               intro_minutes=float(os.environ.get("INTRO_MINUTES") or 3.0),
               intro_video_percent=float(os.environ.get("INTRO_VIDEO_PERCENT") or 70.0),
-              after_intro_video_percent=float(os.environ.get("AFTER_INTRO_VIDEO_PERCENT") or 10.0),
-              min_anim_sec=float(os.environ.get("MIN_ANIM_SEC") or 2.0),
+              after_half_video_percent=float(os.environ.get("AFTER_HALF_VIDEO_PERCENT") or 5.0),
+              min_anim_sec=float(os.environ.get("MIN_ANIM_SEC") or 2.5),
           )
           try:
               prep = prepare_prompts_only(ns)
@@ -496,5 +519,6 @@ jobs:
             verify-artifact/prompts.json
             verify-artifact/distribution.json
             verify-artifact/report.md
+            verify-artifact/final_optimized.srt
             verify-artifact/run/debug.log
             verify-artifact/raw/

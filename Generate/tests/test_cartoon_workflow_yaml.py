@@ -33,13 +33,16 @@ def test_generate_cartoon_workflow_yaml_and_inputs():
     assert 1 <= len(inputs) <= MAX_DISPATCH_INPUTS
     assert inputs["mode"]["options"] == ["partial_i2v", "photo_only"]
     assert inputs["mode"]["default"] == "partial_i2v"
+    assert float(inputs["total_video_percent"]["default"]) == 20.0
     assert float(inputs["intro_minutes"]["default"]) == 3.0
     assert float(inputs["intro_video_percent"]["default"]) == 70.0
-    assert float(inputs["after_intro_video_percent"]["default"]) == 10.0
-    assert float(inputs["min_anim_sec"]["default"]) == 2.0
+    assert float(inputs["after_half_video_percent"]["default"]) == 5.0
+    assert float(inputs["min_anim_sec"]["default"]) == 2.5
 
     steps_text = GENERATE_CARTOON.read_text(encoding="utf-8")
     assert "--i2v-mode" in steps_text
+    assert "srt_optimizer" in steps_text
+    assert "final_optimized.srt" in steps_text
     assert "watch-heartbeat" in steps_text
     assert "kill-cards" in steps_text
     assert "finalize-release" in steps_text
@@ -54,10 +57,15 @@ def test_verify_prompts_workflow_yaml_and_cartoon_i2v_inputs():
     assert "cartoon_photos" not in inputs["niche"]["options"]
     assert inputs["cartoon_i2v"]["type"] == "boolean"
     assert inputs["cartoon_i2v"]["default"] is False
+    assert float(inputs["total_video_percent"]["default"]) == 20.0
     assert float(inputs["intro_minutes"]["default"]) == 3.0
     assert float(inputs["intro_video_percent"]["default"]) == 70.0
-    assert float(inputs["after_intro_video_percent"]["default"]) == 10.0
-    assert float(inputs["min_anim_sec"]["default"]) == 2.0
+    assert float(inputs["after_half_video_percent"]["default"]) == 5.0
+    assert float(inputs["min_anim_sec"]["default"]) == 2.5
+
+    steps_text = VERIFY_PROMPTS.read_text(encoding="utf-8")
+    assert "srt_optimizer" in steps_text
+    assert "final_optimized.srt" in steps_text
 
 
 def test_cartoon_i2v_profile_weights_bindings_and_workflow():

@@ -297,7 +297,16 @@ def write_distribution(
         "video_seconds": result["video_seconds"],
         "intro_seconds_used": result["intro_seconds_used"],
     }
-    for key in ("intro_video_percent", "after_intro_video_percent", "min_anim_sec", "eligible"):
+    for key in (
+        "total_video_percent",
+        "intro_video_percent",
+        "middle_video_percent",
+        "after_half_video_percent",
+        "after_intro_video_percent",
+        "half_seconds",
+        "min_anim_sec",
+        "eligible",
+    ):
         if key in result:
             payload[key] = result[key]
     payload["segments"] = records

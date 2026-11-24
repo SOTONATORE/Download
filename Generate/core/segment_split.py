@@ -167,16 +167,24 @@ def select_i2v_segments(
     video_values: Mapping[int, int],
     intro_seconds: float,
     intro_video_percent: float,
-    after_intro_video_percent: float,
+    after_intro_video_percent: float = 10.0,
     min_anim_sec: float = 2.0,
     window_seconds: float = WINDOW_SECONDS,
+    *,
+    total_video_percent: float | None = None,
+    after_half_video_percent: float | None = None,
 ) -> dict:
     """Равномерный отбор сегментов для I2V-анимации в нише картунов. Чистая функция.
 
     Правила:
     - сегменты с duration < min_anim_sec всегда остаются фото (не допускаются к анимации);
-    - две зоны по start: вступление (start < intro_seconds -> intro_video_percent)
-      и основная часть (start >= intro_seconds -> after_intro_video_percent);
+    - в 3-зонном режиме (заданы total_video_percent или after_half_video_percent):
+      общий бюджет = total_dur * total_video_percent / 100;
+      зона 1 (start < intro_seconds) -> intro_video_percent;
+      зона 3 (start >= 50% ролика) -> after_half_video_percent;
+      зона 2 (между вступлением и 50% ролика) -> весь остаток общего бюджета;
+    - в 2-зонном режиме (legacy, оба новых параметра None):
+      вступление -> intro_video_percent, далее -> after_intro_video_percent;
     - внутри каждого окна window_seconds (45 с) квота считается локально по долям зоны,
       с минимальным ограниченным переносом остатка (не более _I2V_MAX_CARRY_SEC), без всплесков;
     - при низкой доле (< 50%) применяется мягкая защита от выбора подряд идущих сегментов.
@@ -184,6 +192,15 @@ def select_i2v_segments(
     _check_intro_seconds(intro_seconds)
     _check_video_percent(intro_video_percent)
     _check_video_percent(after_intro_video_percent)
+    three_zone = total_video_percent is not None or after_half_video_percent is not None
+    if three_zone:
+        tot_pct = 20.0 if total_video_percent is None else float(total_video_percent)
+        tail_pct = 5.0 if after_half_video_percent is None else float(after_half_video_percent)
+        _check_video_percent(tot_pct)
+        _check_video_percent(tail_pct)
+    else:
+        tot_pct = None
+        tail_pct = None
     if not _is_number(min_anim_sec) or min_anim_sec < 0:
         raise ValueError(f"min_anim_sec должен быть неотрицательным числом, получено: {min_anim_sec!r}")
     if not _is_number(window_seconds) or window_seconds <= 0:
@@ -202,10 +219,46 @@ def select_i2v_segments(
             _check_value(seg.id, video_values[seg.id])
 
     intro_rate = intro_video_percent / 100.0
-    after_rate = after_intro_video_percent / 100.0
+    half_seconds = ((ordered[0].start + ordered[-1].end) / 2.0) if ordered else 0.0
 
-    def _seg_rate(seg: Segment) -> float:
-        return intro_rate if seg.start < intro_seconds else after_rate
+    if three_zone:
+        assert tot_pct is not None and tail_pct is not None
+        tail_rate = tail_pct / 100.0
+
+        def _seg_zone(seg: Segment) -> int:
+            if seg.start < intro_seconds:
+                return 0
+            if seg.start >= half_seconds:
+                return 2
+            return 1
+
+        total_dur = sum(s.duration for s in ordered)
+        intro_dur = sum(s.duration for s in ordered if _seg_zone(s) == 0)
+        middle_dur = sum(s.duration for s in ordered if _seg_zone(s) == 1)
+        tail_dur = sum(s.duration for s in ordered if _seg_zone(s) == 2)
+        total_budget = total_dur * (tot_pct / 100.0)
+        intro_budget = intro_dur * intro_rate
+        tail_budget = tail_dur * tail_rate
+        middle_budget = max(0.0, total_budget - intro_budget - tail_budget)
+        middle_rate = min(1.0, middle_budget / middle_dur) if middle_dur > _EPS else 0.0
+        middle_video_percent = middle_rate * 100.0
+
+        def _seg_rate(seg: Segment) -> float:
+            z = _seg_zone(seg)
+            if z == 0:
+                return intro_rate
+            if z == 1:
+                return middle_rate
+            return tail_rate
+    else:
+        after_rate = after_intro_video_percent / 100.0
+        middle_video_percent = after_intro_video_percent
+
+        def _seg_zone(seg: Segment) -> int:
+            return 0 if seg.start < intro_seconds else 1
+
+        def _seg_rate(seg: Segment) -> float:
+            return intro_rate if seg.start < intro_seconds else after_rate
 
     budget = sum(s.duration * _seg_rate(s) for s in ordered)
     pos_by_id = {s.id: idx for idx, s in enumerate(ordered)}
@@ -217,7 +270,7 @@ def select_i2v_segments(
         windows.setdefault(math.floor(seg.start / window_seconds), []).append(seg)
 
     carry = 0.0
-    prev_zone_intro: bool | None = None
+    prev_zone: int | None = None
 
     for key in sorted(windows):
         members = windows[key]
@@ -225,11 +278,11 @@ def select_i2v_segments(
         window_target = sum(s.duration * _seg_rate(s) for s in members)
         avg_rate = (window_target / win_dur) if win_dur > 0 else 0.0
 
-        # Сброс остатка при переходе из вступления в основную часть, чтобы квота вступления не утекала далее.
-        zone_intro = members[0].start < intro_seconds
-        if prev_zone_intro is not None and zone_intro != prev_zone_intro:
+        # Сброс остатка при смене зоны, чтобы квота одной зоны не утекала в соседнюю.
+        cur_zone = _seg_zone(members[0])
+        if prev_zone is not None and cur_zone != prev_zone:
             carry = 0.0
-        prev_zone_intro = zone_intro
+        prev_zone = cur_zone
 
         if window_target <= _EPS:
             carry = 0.0
@@ -278,7 +331,7 @@ def select_i2v_segments(
 
         carry = max(-carry_cap, min(carry_cap, effective_quota - window_video))
 
-    return {
+    res = {
         "video": [s.id for s in ordered if s.id in selected],
         "photo": [s.id for s in ordered if s.id not in selected],
         "eligible": [s.id for s in ordered if s.id in eligible_ids],
@@ -289,3 +342,9 @@ def select_i2v_segments(
         "after_intro_video_percent": after_intro_video_percent,
         "min_anim_sec": min_anim_sec,
     }
+    if three_zone:
+        res["total_video_percent"] = tot_pct
+        res["after_half_video_percent"] = tail_pct
+        res["middle_video_percent"] = round(middle_video_percent, 2)
+        res["half_seconds"] = half_seconds
+    return res

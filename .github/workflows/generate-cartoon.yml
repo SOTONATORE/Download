@@ -11,6 +11,10 @@ on:
           - "partial_i2v"
           - "photo_only"
         default: "partial_i2v"
+      total_video_percent:
+        description: "Общая доля I2V-видео от длительности ролика, % (0–100)"
+        type: number
+        default: 20
       intro_minutes:
         description: "Длина вступления для I2V, минут (по умолчанию 3)"
         type: number
@@ -19,14 +23,14 @@ on:
         description: "Доля I2V-видео во вступлении, % (0–100)"
         type: number
         default: 70
-      after_intro_video_percent:
-        description: "Доля I2V-видео после вступления, % (0–100)"
+      after_half_video_percent:
+        description: "Доля I2V-видео после 50% ролика, % (0–100)"
         type: number
-        default: 10
+        default: 5
       min_anim_sec:
         description: "Минимальная длительность сегмента для I2V-анимации, секунд"
         type: number
-        default: 2.0
+        default: 2.5
       srt_path:
         description: "Путь к файлу SRT"
         type: string
@@ -180,13 +184,24 @@ jobs:
         if: steps.lang_need.outputs.needed == 'true'
         run: pip install -r Generate/requirements-lang.txt
 
-      - name: Preflight check
+      - name: Optimize SRT
         env:
           SRT_PATH: ${{ inputs.srt_path }}
+        run: |
+          opt_srt="$RUNNER_TEMP/final_optimized.srt"
+          art_dir="$RUNNER_TEMP/generate-artifact"
+          mkdir -p "$art_dir"
+          python -m Generate.core.srt_optimizer "$SRT_PATH" "$opt_srt" --min-sec 2.5 --max-sec 5.0
+          cp "$opt_srt" "$art_dir/final_optimized.srt"
+          echo "OPT_SRT_PATH=$opt_srt" >> "$GITHUB_ENV"
+
+      - name: Preflight check
+        env:
           MODE: ${{ inputs.mode }}
+          TOTAL_VIDEO_PERCENT: ${{ inputs.total_video_percent }}
           INTRO_MINUTES: ${{ inputs.intro_minutes }}
           INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
-          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          AFTER_HALF_VIDEO_PERCENT: ${{ inputs.after_half_video_percent }}
           MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
           PHOTO_PROFILE: ${{ env.PHOTO_PROFILE }}
           TEXT_MODEL: ${{ inputs.text_model }}
@@ -202,7 +217,7 @@ jobs:
           OPENROUTER10: ${{ secrets.OPENROUTER10 }}
         run: |
           args=(
-            --srt "$SRT_PATH"
+            --srt "$OPT_SRT_PATH"
             --missing "missing.txt"
             --photo-profile "$PHOTO_PROFILE"
             --text-model "$TEXT_MODEL"
@@ -210,9 +225,10 @@ jobs:
           if [ "$MODE" = "partial_i2v" ]; then
             args+=(
               --i2v-mode
+              --total-video-percent "$TOTAL_VIDEO_PERCENT"
               --intro-minutes "$INTRO_MINUTES"
               --intro-video-percent "$INTRO_VIDEO_PERCENT"
-              --after-intro-video-percent "$AFTER_INTRO_VIDEO_PERCENT"
+              --after-half-video-percent "$AFTER_HALF_VIDEO_PERCENT"
               --min-anim-sec "$MIN_ANIM_SEC"
             )
           fi
@@ -260,11 +276,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODE: ${{ inputs.mode }}
+          TOTAL_VIDEO_PERCENT: ${{ inputs.total_video_percent }}
           INTRO_MINUTES: ${{ inputs.intro_minutes }}
           INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
-          AFTER_INTRO_VIDEO_PERCENT: ${{ inputs.after_intro_video_percent }}
+          AFTER_HALF_VIDEO_PERCENT: ${{ inputs.after_half_video_percent }}
           MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
-          SRT_PATH: ${{ inputs.srt_path }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           MAX_CARDS: ${{ inputs.max_cards }}
@@ -293,7 +309,7 @@ jobs:
           mkdir -p "$(dirname "$HB_PATH")" "$ART_DIR"
 
           args=(
-            --srt "$SRT_PATH"
+            --srt "$OPT_SRT_PATH"
             --missing "missing.txt"
             --limit-clips "$LIMIT_CLIPS"
             --max-cards "$MAX_CARDS"
@@ -322,9 +338,10 @@ jobs:
           if [ "$MODE" = "partial_i2v" ]; then
             args+=(
               --i2v-mode
+              --total-video-percent "$TOTAL_VIDEO_PERCENT"
               --intro-minutes "$INTRO_MINUTES"
               --intro-video-percent "$INTRO_VIDEO_PERCENT"
-              --after-intro-video-percent "$AFTER_INTRO_VIDEO_PERCENT"
+              --after-half-video-percent "$AFTER_HALF_VIDEO_PERCENT"
               --min-anim-sec "$MIN_ANIM_SEC"
             )
           fi
@@ -472,7 +489,7 @@ jobs:
         run: |
           args=(
             --repo "$REPO"
-            --srt "$SRT_PATH"
+            --srt "${OPT_SRT_PATH:-$SRT_PATH}"
             --model-profile "$MODEL_PROFILE"
             --run-id "$RUN_ID"
           )

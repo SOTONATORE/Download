@@ -787,7 +787,9 @@ def build_i2v_prompts(
     intro_seconds: float = 180.0,
     intro_video_percent: float = 70.0,
     after_intro_video_percent: float = 10.0,
-    min_anim_sec: float = 2.0,
+    total_video_percent: float | None = None,
+    after_half_video_percent: float | None = None,
+    min_anim_sec: float = 2.5,
     score_send=None,
     score_workers: int = 1,
 ) -> PromptRun:
@@ -840,7 +842,12 @@ def build_i2v_prompts(
             for n in needed_list
         }
         eligible_segs = [s for s in ss_segs if s.duration >= min_anim_sec - 1e-9]
-        if not eligible_segs or (intro_video_percent == 0 and after_intro_video_percent == 0):
+        zero_video = (
+            (total_video_percent == 0 and intro_video_percent == 0 and (after_half_video_percent or 0) == 0)
+            if (total_video_percent is not None or after_half_video_percent is not None)
+            else (intro_video_percent == 0 and after_intro_video_percent == 0)
+        )
+        if not eligible_segs or zero_video:
             values = {s.id: 0 for s in eligible_segs}
         else:
             send_fn = score_send if score_send is not None else _default_i2v_value_sender(transport, gemini_options)
@@ -858,6 +865,8 @@ def build_i2v_prompts(
             intro_video_percent=intro_video_percent,
             after_intro_video_percent=after_intro_video_percent,
             min_anim_sec=min_anim_sec,
+            total_video_percent=total_video_percent,
+            after_half_video_percent=after_half_video_percent,
         )
         if distribution_path is not None:
             vv.write_distribution(distribution_path, dist, ss_segs, values)
@@ -872,9 +881,18 @@ def build_i2v_prompts(
         state["video_profile"] = video_profile
         state["prompts"] = {k: prompts[k] for k in sorted(prompts, key=int)}
         go.atomic_write_json(prompts_path, state)
-        log.info("I2V-отбор готов: видео %d из %d сегментов (вступление %.0f с: %.0f%%, далее %.0f%%, порог %.1f с).",
-                 len(i2v_nums), len(needed_list), intro_seconds, intro_video_percent,
-                 after_intro_video_percent, min_anim_sec)
+        if total_video_percent is not None or after_half_video_percent is not None:
+            log.info(
+                "I2V-отбор готов: видео %d из %d сегментов (общий бюджет %.0f%%: вступление %.0f с %.0f%%, "
+                "середина %.1f%%, после 50%% %.0f%%, порог %.1f с).",
+                len(i2v_nums), len(needed_list),
+                dist.get("total_video_percent", 20.0), intro_seconds, intro_video_percent,
+                dist.get("middle_video_percent", 0.0), dist.get("after_half_video_percent", 5.0), min_anim_sec,
+            )
+        else:
+            log.info("I2V-отбор готов: видео %d из %d сегментов (вступление %.0f с: %.0f%%, далее %.0f%%, порог %.1f с).",
+                     len(i2v_nums), len(needed_list), intro_seconds, intro_video_percent,
+                     after_intro_video_percent, min_anim_sec)
 
     # Этап 3: генерация I2V видео-промптов только для выбранных сегментов
     pending_i2v = [n for n in i2v_nums if n in set(ready_photos) and not _video_prompt_ready(prompts.get(str(n)))]

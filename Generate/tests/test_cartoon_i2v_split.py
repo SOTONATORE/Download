@@ -185,3 +185,101 @@ def test_realistic_durations_from_final_srt_or_synthetic():
         win_vid = sum(s.duration for s in members if s.id in video_set)
         if win_total >= 20.0:
             assert win_vid <= win_total * 0.35 + 3.0, f"окно {w_idx}: слишком высокая доля видео {win_vid}/{win_total}"
+
+
+def test_three_zone_mode_36_min_timeline_budget_and_zone_ratios():
+    # 36 минут = 2160 с: 540 сегментов по 4 с.
+    # Зона 1 (0..180 с): 70% = 126 с; зона 3 (1080..2160 с): 5% = 54 с;
+    # общий бюджет 20% = 432 с -> зона 2 (180..1080 с, 900 с): остаток 252 с = 28.0%.
+    segs = _make_uniform_segments(540, dur=4.0)
+    values = {s.id: ((s.id * 41) % 101) for s in segs}
+
+    res = select_i2v_segments(
+        segs,
+        values,
+        intro_seconds=180.0,
+        intro_video_percent=70.0,
+        min_anim_sec=2.5,
+        total_video_percent=20.0,
+        after_half_video_percent=5.0,
+    )
+
+    assert res["total_video_percent"] == 20.0
+    assert res["after_half_video_percent"] == 5.0
+    assert 27.0 <= res["middle_video_percent"] <= 30.0
+    assert res["half_seconds"] == pytest.approx(1080.0)
+
+    total_dur = sum(s.duration for s in segs)
+    video_set = set(res["video"])
+    intro_segs = [s for s in segs if s.start < 180.0]
+    middle_segs = [s for s in segs if 180.0 <= s.start < 1080.0]
+    tail_segs = [s for s in segs if s.start >= 1080.0]
+
+    intro_ratio = sum(s.duration for s in intro_segs if s.id in video_set) / sum(s.duration for s in intro_segs)
+    middle_ratio = sum(s.duration for s in middle_segs if s.id in video_set) / sum(s.duration for s in middle_segs)
+    tail_ratio = sum(s.duration for s in tail_segs if s.id in video_set) / sum(s.duration for s in tail_segs)
+    total_ratio = res["video_seconds"] / total_dur
+
+    assert 0.17 <= total_ratio <= 0.23
+    assert 0.60 <= intro_ratio <= 0.78
+    assert 0.23 <= middle_ratio <= 0.33
+    assert 0.03 <= tail_ratio <= 0.08
+
+
+def test_three_zone_mode_never_selects_segments_shorter_than_min_anim_sec():
+    segs: list[Segment] = []
+    t = 0.0
+    for i in range(1, 201):
+        dur = 2.0 if i % 4 == 0 else (2.4 if i % 7 == 0 else 4.0)
+        segs.append(Segment(id=i, start=t, end=t + dur, text=f"Seg {i}"))
+        t += dur
+
+    values = {s.id: 100 for s in segs}
+    res = select_i2v_segments(
+        segs,
+        values,
+        intro_seconds=180.0,
+        intro_video_percent=70.0,
+        min_anim_sec=2.5,
+        total_video_percent=20.0,
+        after_half_video_percent=5.0,
+    )
+
+    by_id = {s.id: s for s in segs}
+    assert res["video"]
+    for vid in res["video"]:
+        assert by_id[vid].duration >= 2.5 - 1e-9
+    for s in segs:
+        if s.duration < 2.5 - 1e-9:
+            assert s.id not in res["eligible"]
+            assert s.id not in res["video"]
+            assert s.id in res["photo"]
+
+
+def test_three_zone_validation_errors():
+    segs = _make_uniform_segments(4, dur=4.0)
+    values = {s.id: 50 for s in segs}
+
+    for bad_total in (-1.0, 100.1):
+        with pytest.raises(ValueError):
+            select_i2v_segments(
+                segs,
+                values,
+                intro_seconds=10.0,
+                intro_video_percent=70.0,
+                min_anim_sec=2.5,
+                total_video_percent=bad_total,
+                after_half_video_percent=5.0,
+            )
+
+    for bad_tail in (-0.5, 120.0):
+        with pytest.raises(ValueError):
+            select_i2v_segments(
+                segs,
+                values,
+                intro_seconds=10.0,
+                intro_video_percent=70.0,
+                min_anim_sec=2.5,
+                total_video_percent=20.0,
+                after_half_video_percent=bad_tail,
+            )
