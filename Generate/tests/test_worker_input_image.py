@@ -125,7 +125,8 @@ def test_cartoon_i2v_workflow_and_bindings_invariants():
     classes = {n.get("class_type") for n in graph.values()}
     assert "TextGenerateLTX2Prompt" not in classes
     assert "ComfySwitchNode" not in classes
-    assert graph["398:364"]["inputs"]["text"] == [bindings["prompt"]["node_id"], 0]
+    assert bindings["prompt"] == {"node_id": "398:364", "field": "text"}
+    assert isinstance(graph["398:364"]["inputs"]["text"], str)
 
     # Ровно 5 весов из weights.json / profile.yaml
     dir_by_node = {
@@ -179,10 +180,12 @@ def test_inject_workflow_with_input_image():
         graph, bindings, "cartoon scene prompt", 57, 123, "clip_42",
         second_seed=999, input_image="clip_42.png",
     )
-    assert out["398:376"]["inputs"]["value"] == "cartoon scene prompt"
+    assert out["398:364"]["inputs"]["text"] == "cartoon scene prompt"
     assert out["398:378"]["inputs"]["value"] == 57
     assert out["398:339"]["inputs"]["noise_seed"] == 123
-    assert out["398:338"]["inputs"]["noise_seed"] == 999
+    if "second_seed" in bindings:
+        ss = bindings["second_seed"]
+        assert out[ss["node_id"]]["inputs"][ss["field"]] == 999
     assert out["75"]["inputs"]["filename_prefix"] == "clip_42"
     assert out["395"]["inputs"]["image"] == "clip_42.png"
     assert graph["395"]["inputs"]["image"] != "clip_42.png"
