@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -383,7 +384,14 @@ class ReleaseUploader:
         elif num in self.done:
             return False
         tag = self._active_tag()
-        self.store.upload_asset(tag, path)
+        for attempt in range(4):
+            try:
+                self.store.upload_asset(tag, path)
+                break
+            except Exception:
+                if attempt >= 3:
+                    raise
+                time.sleep(2 ** attempt)
         self._counts[tag] += 1
         self.asset_tags[name] = tag
         if is_photo:

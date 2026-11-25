@@ -2579,15 +2579,23 @@ class _WaveJob:
         rnd = self.pkg_round.get(fix_no, self.round_no)
         log.info("%sФикс: круг %d, пакет %d, клипы %s, начало, клипов в пакете: %d.",
                  self.tag, rnd, fix_no, _nums_ranges(nums), len(clips), extra=KEY_EVENT_EXTRA)
-        lines = [f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
-                 + _rework_subtitle_note(c, builder.texts, getattr(builder, "by_segment", None))
-                 # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
-                 + (" " + TEXTLESS_REWORK_TEXT
-                    if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
-                 + (f" Refs for segment_index {c.num}: "
-                    f"{json.dumps(c.extra['refs']) if 'refs' in c.extra else 'missing or invalid, return a valid refs list'}."
-                    if builder.cfg.refs_enabled else "")
-                 for c in clips]
+        src_photos = builder.cfg.source_photo_prompts or {}
+        durs = builder.cfg.segment_durations or {}
+        lines = []
+        for c in clips:
+            line = (f"Prompt for segment_index {c.num}: {c.prompt_raw} {_rework_text(c.rework_pending)}"
+                    + _rework_subtitle_note(c, builder.texts, getattr(builder, "by_segment", None))
+                    # Русский: на 4-м и далее круге клипа только с надписями — кадр без текста; иначе строка прежняя
+                    + (" " + TEXTLESS_REWORK_TEXT
+                       if _textless_round(builder.cfg, c.rework_pending, (c.rework_round or 0) + 1) else "")
+                    + (f" Refs for segment_index {c.num}: "
+                       f"{json.dumps(c.extra['refs']) if 'refs' in c.extra else 'missing or invalid, return a valid refs list'}."
+                       if builder.cfg.refs_enabled else ""))
+            if c.num in durs and durs[c.num] is not None:
+                line += f" Duration: {durs[c.num]:.2f}s."
+            if c.num in src_photos and src_photos[c.num]:
+                line += f" Source photo (animate ONLY what is already drawn here): {src_photos[c.num]}"
+            lines.append(line)
         user = "\n".join(lines) + "\n\nReturn only the JSON array with one item per segment_index."
         try:
             t_req = time.monotonic()

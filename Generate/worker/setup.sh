@@ -173,6 +173,13 @@ restart_comfy() {
         log "Перезапуск ComfyUI: ОШИБКА: COMFYUI_ARGS пуст, ComfyUI не запущен заново."
         return 1
     fi
+    local attn_str
+    local -a ATTN_ARGS=()
+    attn_str="$(comfy_attention_args "${1:-1}")"
+    if [ -n "${attn_str}" ]; then
+        read -r -a ATTN_ARGS <<< "${attn_str}"
+        ARGS+=("${ATTN_ARGS[@]}")
+    fi
     # Тот же способ, что в bootstrap.sh шаг 4б: cd в отдельном процессе шелла, вывод дописывается в лог
     (
         cd "${COMFY_DIR}" || exit 1
@@ -339,6 +346,7 @@ log "Веса перед ожиданием ComfyUI: все файлы на ме
 log "Ожидаю готовности ComfyUI на порту 18188 (до ${COMFY_TIMEOUT_SEC} сек)..."
 ELAPSED=0
 READY=0
+ATTN_ATTEMPT=1
 while [ "${ELAPSED}" -lt "${COMFY_TIMEOUT_SEC}" ]; do
     if curl -sf -o /dev/null "${COMFY_READY_URL}"; then
         READY=1
@@ -347,6 +355,12 @@ while [ "${ELAPSED}" -lt "${COMFY_TIMEOUT_SEC}" ]; do
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
         log "ОШИБКА: процесс сервера воркера неожиданно завершился."
         exit 1
+    fi
+    comfy_pid="$(cat "${COMFY_PID_FILE}" 2>/dev/null || true)"
+    if [ -n "${comfy_pid}" ] && ! kill -0 "${comfy_pid}" 2>/dev/null && [ "${ATTN_ATTEMPT}" -lt 3 ]; then
+        ATTN_ATTEMPT=$((ATTN_ATTEMPT + 1))
+        log "ComfyUI завершился, пробую fallback attention (попытка ${ATTN_ATTEMPT})..."
+        restart_comfy "${ATTN_ATTEMPT}" || true
     fi
     sleep "${COMFY_POLL_SEC}"
     ELAPSED=$((ELAPSED + COMFY_POLL_SEC))

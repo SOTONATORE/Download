@@ -1261,6 +1261,9 @@ class Orchestrator:
         self._done: set = set()
         self._failed: set = set()
         self._durations: list = []
+        self._photo_durations: list = []
+        self._video_durations: list = []
+        self._asset_downloads: set = set()
         # A2: общая блокировка состояния (главный поток и фоновая выгрузка); RLock: вложенные вызовы безопасны
         self._state_lock = threading.RLock()
         self._upload_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
@@ -1417,19 +1420,11 @@ class Orchestrator:
                 slot.weights_reason = reason  # снятие карты делает _pull_due_logs, не здесь (нет рекурсии)
         if final:
             log.info("Логи карты %d перед уничтожением: новых строк %d.", slot.instance_id, len(lines))
-        # журнал файла получает каждую строку с префиксом, как прежде; консоль печатает пачку группой
+        # журнал файла получает каждую строку с префиксом; консоль не печатает группы воркера (только артефакты)
         for line in lines:
+            if line.lstrip().startswith("[file="):
+                continue
             log.info("[карта %d] %s", slot.instance_id, line, extra=WORKER_LOG_EXTRA)
-        console_lines = [
-            line for line in lines
-            if not (
-                'DEBUG Generate.worker.server: HTTP: "GET /health' in line
-                or 'DEBUG Generate.worker.server: HTTP: "GET /logs' in line
-                or line.lstrip().startswith("[#")
-            )
-        ]
-        if console_lines:
-            print_worker_group(slot.instance_id, console_lines)
         return True
 
     def _pull_due_logs(self, now: float) -> None:
@@ -1774,7 +1769,9 @@ class Orchestrator:
             if n in done_videos:
                 continue
             entry = prompts.get(str(n))
-            if n in done_photos and isinstance(entry, dict) and entry.get("i2v") is False:
+            if n in done_photos and isinstance(entry, dict) and (
+                entry.get("i2v") is False or entry.get("video_render_status") == "fallback_photo"
+            ):
                 continue
             needed.append(n)
         return needed
@@ -2562,12 +2559,16 @@ class Orchestrator:
         if stopping:
             return
         blocked = getattr(self, "_tick_429", set())
-        depth_max = getattr(self, "max_card_queue_depth", MAX_CARD_QUEUE_DEPTH)
-        for depth in range(2, depth_max + 1):
+        base_depth = getattr(self, "max_card_queue_depth", MAX_CARD_QUEUE_DEPTH)
+        max_depth = max(base_depth, 12) if (getattr(self, "photo_profile", None) or getattr(self, "i2v_mode", False)) else base_depth
+        for depth in range(2, max_depth + 1):
             if not self._video_queue and not self._photo_queue:
                 return
             for slot in list(self._slots.values()):
                 if self._slots.get(slot.index) is not slot or slot.state != "ready":
+                    continue
+                slot_depth = max(base_depth, 12) if slot.role == "photo" else base_depth
+                if depth > slot_depth:
                     continue
                 if slot.index in blocked or len(slot.tasks) != depth - 1:
                     continue
@@ -2581,7 +2582,12 @@ class Orchestrator:
         if remaining <= 0:
             return 0
         with self._lock_state():
-            durs = list(self._durations)
+            if self._video_queue and getattr(self, "_video_durations", None):
+                durs = list(self._video_durations)
+            elif self._photo_queue and getattr(self, "_photo_durations", None):
+                durs = list(self._photo_durations)
+            else:
+                durs = list(self._durations)
         avg = sum(durs) / len(durs) if durs else self.render_estimate
         time_left = max(1.0, self._deadline_sec - (now - self._t0))
         need = math.ceil(remaining * avg / (time_left * 0.8))
@@ -3820,10 +3826,22 @@ class Orchestrator:
                     uploader = getattr(self, "_uploader", None)
                     if (uploader is not None and hasattr(uploader, "download_clip_asset")
                             and num in getattr(uploader, "done_photos", ())):
-                        try:
-                            uploader.download_clip_asset(f"{num}.png", cache_path)
-                        except Exception as exc:
-                            log.warning("Не удалось скачать %d.png из Release для I2V: %s", num, exc)
+                        with self._lock_state():
+                            in_flight = num in self._asset_downloads
+                            if not in_flight:
+                                self._asset_downloads.add(num)
+                        if not in_flight:
+                            def _bg_download_asset(_n=num, _p=cache_path, _u=uploader) -> None:
+                                try:
+                                    _u.download_clip_asset(f"{_n}.png", _p)
+                                except Exception as exc:
+                                    log.warning("Не удалось скачать %d.png из Release для I2V: %s", _n, exc)
+                                finally:
+                                    with self._lock_state():
+                                        self._asset_downloads.discard(_n)
+                            threading.Thread(target=_bg_download_asset, name=f"asset-dl-{num}", daemon=True).start()
+                        self._video_queue.append(num)
+                        return
                 if not cache_path.is_file():
                     self._attempts[num] = MAX_ATTEMPTS
                     self._fail_clip(num, f"в photos_cache нет входного изображения {num}.png")
@@ -4150,6 +4168,10 @@ class Orchestrator:
             self._done.add(num)
             self._consecutive_clip_failures = 0
             self._durations.append(duration)
+            if is_photo_file:
+                self._photo_durations.append(duration)
+            else:
+                self._video_durations.append(duration)
             self._mark(num, "done")
             log.info("Клип %d выдан в Release (рендер: %s, %.1f с).", num, card, duration)
             total = self._total_needed
@@ -4174,25 +4196,35 @@ class Orchestrator:
         # время рендера от старта на карте (running_since), а не от постановки в буфер
         started_at = task.running_since if task.running_since is not None else task.started
         duration = max(0.0, now - started_at)
-        try:
-            self._download(slot, task.id, path)
-        except (_WorkerNetError, _WorkerHttpError) as exc:
-            self._release_download(path)  # частично скачанный файл не нужен
-            with self._lock_state():
-                self._fail_clip(task.num, f"не удалось скачать клип с воркера ({exc})")
-            return
-        # файл уже у оркестратора: воркер освобождает диск сразу; сбой ack сам файл не отменяет
-        try:
-            self._call(slot, "POST", f"/ack/{task.id}")
-        except (_WorkerNetError, _WorkerHttpError):
-            log.warning("Воркер не подтвердил удаление файла %s с диска карты.", name)
-        if getattr(self, "i2v_mode", False) and slot.role == "photo" and preview is None:
-            with self._lock_state():
-                if self._is_i2v_clip(task.num):
-                    if not hasattr(self, "_pending_i2v_uploads") or not isinstance(self._pending_i2v_uploads, set):
-                        self._pending_i2v_uploads = set()
-                    self._pending_i2v_uploads.add(task.num)
-        self._enqueue_upload(task.num, path, duration, preview is not None, _card_name(slot))
+        is_preview = preview is not None
+        is_photo = slot.role == "photo"
+        card_name = _card_name(slot)
+
+        def _bg_download_and_ack() -> None:
+            try:
+                self._download(slot, task.id, path)
+            except (_WorkerNetError, _WorkerHttpError) as exc:
+                self._release_download(path)  # частично скачанный файл не нужен
+                with self._lock_state():
+                    self._fail_clip(task.num, f"не удалось скачать клип с воркера ({exc})")
+                return
+            # файл уже у оркестратора: воркер освобождает диск сразу; сбой ack сам файл не отменяет
+            try:
+                self._call(slot, "POST", f"/ack/{task.id}")
+            except (_WorkerNetError, _WorkerHttpError):
+                log.warning("Воркер не подтвердил удаление файла %s с диска карты.", name)
+            if getattr(self, "i2v_mode", False) and is_photo and not is_preview:
+                with self._lock_state():
+                    if self._is_i2v_clip(task.num):
+                        if not hasattr(self, "_pending_i2v_uploads") or not isinstance(self._pending_i2v_uploads, set):
+                            self._pending_i2v_uploads = set()
+                        self._pending_i2v_uploads.add(task.num)
+            self._enqueue_upload(task.num, path, duration, is_preview, card_name)
+
+        if getattr(self, "_upload_thread", None) is None:
+            _bg_download_and_ack()
+        else:
+            threading.Thread(target=_bg_download_and_ack, name=f"clip-dl-{task.num}", daemon=True).start()
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:

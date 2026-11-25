@@ -2,13 +2,14 @@
   "75": {
     "inputs": {
       "filename_prefix": "clip",
-      "format": "auto",
-      "format.codec": "auto",
-      "codec": "auto",
+      "format": "mp4",
+      "format.codec": "h264",
+      "codec": "h264",
       "video": [
         "398:370",
         0
-      ]
+      ],
+      "crf": 15
     },
     "class_type": "SaveVideo",
     "_meta": {
@@ -30,7 +31,7 @@
   },
   "404": {
     "inputs": {
-      "upscale_method": "lanczos",
+      "upscale_method": "bicubic",
       "width": 1920,
       "height": 1080,
       "crop": "center",
@@ -103,13 +104,15 @@
   },
   "398:386": {
     "inputs": {
-      "vae_name": "ltx-2.5-audio-vae-bf16.safetensors"
+      "img_compression": 0,
+      "image": [
+        "398:351",
+        0
+      ]
     },
-    "class_type": "VAELoader",
+    "class_type": "LTXVPreprocess",
     "_meta": {
-      "title": "Load VAE",
-      "cnr_id": "comfy-core",
-      "ver": "0.29.0"
+      "title": "LTXVPreprocess (Pass 2)"
     }
   },
   "398:373": {
@@ -142,7 +145,7 @@
   },
   "398:352": {
     "inputs": {
-      "sampler_name": "euler_ancestral"
+      "sampler_name": "euler"
     },
     "class_type": "KSamplerSelect",
     "_meta": {
@@ -240,7 +243,7 @@
   },
   "398:357": {
     "inputs": {
-      "strength": 0.7,
+      "strength": 0.85,
       "vae": [
         "398:385",
         0
@@ -317,7 +320,7 @@
   "398:351": {
     "inputs": {
       "resize_type": "scale longer dimension",
-      "resize_type.longer_size": 1536,
+      "resize_type.longer_size": 1280,
       "scale_method": "lanczos",
       "input": [
         "395",
@@ -333,7 +336,7 @@
   },
   "398:350": {
     "inputs": {
-      "img_compression": 18,
+      "img_compression": 8,
       "image": [
         "398:351",
         0
@@ -393,7 +396,7 @@
         0
       ],
       "image": [
-        "398:350",
+        "398:386",
         0
       ],
       "latent": [
@@ -484,7 +487,7 @@
   },
   "398:341": {
     "inputs": {
-      "sampler_name": "euler_ancestral"
+      "sampler_name": "euler"
     },
     "class_type": "KSamplerSelect",
     "_meta": {
@@ -567,7 +570,7 @@
       "chroma_subsampling": "auto",
       "codec": "none",
       "images": [
-        "404",
+        "405",
         0
       ]
     },
@@ -576,6 +579,21 @@
       "title": "Create Video",
       "cnr_id": "comfy-core",
       "ver": "0.5.1"
+    }
+  },
+  "405": {
+    "inputs": {
+      "sharpen_radius": 1,
+      "sigma": 0.5,
+      "alpha": 0.3,
+      "image": [
+        "404",
+        0
+      ]
+    },
+    "class_type": "ImageSharpen",
+    "_meta": {
+      "title": "ImageSharpen"
     }
   }
 }

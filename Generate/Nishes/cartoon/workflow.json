@@ -40,8 +40,8 @@
       "seed": 679152989211317,
       "steps": 8,
       "cfg": 1,
-      "sampler_name": "er_sde",
-      "scheduler": "linear_quadratic",
+      "sampler_name": "euler",
+      "scheduler": "simple",
       "denoise": 1,
       "model": [
         "490",

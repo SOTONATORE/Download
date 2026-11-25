@@ -201,6 +201,8 @@ def _classify(text: str) -> Event:
 def parse_line(line: str) -> Event:
     """Классифицирует строку лога. Неизвестные строки получают kind «other» (их не трогаем)."""
     text = _drop_query(line.strip())
+    if text.startswith("[switch] "):
+        text = text[len("[switch] "):].lstrip()
     m = FILE_PREFIX_RE.match(text)
     ev = replace(_classify(text[m.end():]), file=m.group("file")) if m else _classify(text)
     if ev.kind == "aria_unknown":

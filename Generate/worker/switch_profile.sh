@@ -300,10 +300,16 @@ READY=0
 ATTEMPT=0
 while [ "${ATTEMPT}" -lt "${COMFY_START_ATTEMPTS_MAX}" ]; do
     ATTEMPT=$((ATTEMPT + 1))
-    log "Шаг 4: запуск ComfyUI, попытка ${ATTEMPT} из ${COMFY_START_ATTEMPTS_MAX}."
+    ATTN_STR="$(comfy_attention_args "${ATTEMPT}")"
+    RUN_ARGS=("${ARGS[@]}")
+    if [ -n "${ATTN_STR}" ]; then
+        read -r -a ATTN_ARGS <<< "${ATTN_STR}"
+        RUN_ARGS+=("${ATTN_ARGS[@]}")
+    fi
+    log "Шаг 4: запуск ComfyUI, попытка ${ATTEMPT} из ${COMFY_START_ATTEMPTS_MAX} (attention: ${ATTN_STR:-default SDPA})."
     (
         cd "${COMFY_DIR}" || exit 1
-        nohup "${COMFY_PYTHON}" main.py "${ARGS[@]}" >> "${COMFY_LOG_FILE}" 2>&1 &
+        nohup "${COMFY_PYTHON}" main.py "${RUN_ARGS[@]}" >> "${COMFY_LOG_FILE}" 2>&1 &
         printf '%s\n' "$!" > "${COMFY_PID_FILE}"
     )
     rc=$?

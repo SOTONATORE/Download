@@ -20,10 +20,25 @@
 # COMFY_TIMEOUT_SEC и COMFY_POLL_SEC здесь не читаются: ожидание ComfyUI после загрузки остаётся в setup.sh.
 # Перезапуск ComfyUI (restart_comfy) тоже остаётся в setup.sh.
 
-# Загрузка одного файла модели в фоне:
+# Загрузка одного файла модели в фоне с ограничением параллелизма (1-2 файла одновременно):
 # start_download <локальный подкаталог в models/> <имя файла> [путь в репозитории HF] [базовый URL HF]
 # Без третьего и четвёртого аргумента URL строится как раньше: HF_BASE_URL/<подкаталог>/<имя файла> (LTX).
+MAX_CONCURRENT_DOWNLOADS="${MAX_CONCURRENT_DOWNLOADS:-2}"
+
+_active_download_count() {
+    local count=0 pid
+    for pid in "${DL_PIDS[@]}"; do
+        if kill -0 "${pid}" 2>/dev/null; then
+            count=$((count + 1))
+        fi
+    done
+    printf '%s\n' "${count}"
+}
+
 start_download() {
+    while [ "$(_active_download_count)" -ge "${MAX_CONCURRENT_DOWNLOADS}" ]; do
+        sleep 1
+    done
     MODEL_FILE_INDEX=$((MODEL_FILE_INDEX + 1))
     MODEL_PATHS+=("${COMFY_MODELS_DIR}/$1/$2")
     download_model "${MODEL_FILE_INDEX}" "$1" "$2" "${3:-}" "${4:-}" &
@@ -87,7 +102,8 @@ download_model() {
         # Каждая строка вывода aria2c получает префикс «[file=<имя>] » (sed -u: построчно), строки идут
         # в bootstrap.log. Так параллельные загрузки различимы в мониторе (core/weights_log.py).
         aria2c \
-            -x 16 -s 16 -k 1M -c --summary-interval=30 \
+            -x 8 -s 8 -k 8M -c --summary-interval=30 \
+            --connect-timeout=15 --timeout=30 --lowest-speed-limit=1M \
             -i <(printf '%s\n' "${url}" "  header=Authorization: Bearer ${HF_TOKEN}" \
                  "  dir=${target_dir}" "  out=${name}") 2>&1 \
             | sed -u "s|^|[file=${name}] |" >>"${WORKER_BOOTSTRAP_LOG}"
@@ -131,5 +147,18 @@ wait_downloads() {
         fi
         sleep 1
     done
+}
+
+# Выбор флагов attention для запуска ComfyUI по номеру попытки:
+# 1 -> --use-sage-attention --fast cublas_ops
+# 2 -> --use-flash-attention --fast cublas_ops
+# 3+ -> стандартный PyTorch SDPA (без дополнительных флагов)
+comfy_attention_args() {
+    local attempt="${1:-1}"
+    case "${attempt}" in
+        1) printf '%s\n' "--use-sage-attention --fast cublas_ops" ;;
+        2) printf '%s\n' "--use-flash-attention --fast cublas_ops" ;;
+        *) printf '%s\n' "" ;;
+    esac
 }
 

@@ -170,18 +170,23 @@ def score_segments(segments: Sequence[Segment], send: Callable[[str], str], work
     return result
 
 
-def build_i2v_value_prompt(segments: Sequence[Segment], photo_prompts: Mapping[int, str]) -> str:
+def build_i2v_value_prompt(
+    segments: Sequence[Segment],
+    photo_prompts: Mapping[int, str],
+    settings: Mapping[int, str] | None = None,
+) -> str:
     """Builds the English instruction for LLM: rate I2V animation suitability (0-100) from SRT + photo prompt."""
     lines = [
         "You rate how well each 2D cartoon still frame suits being animated as a short image-to-video (I2V) clip",
         "rather than staying a static photo, based on BOTH the subtitle text and the already-written photo prompt.",
         "",
         "For every segment give an integer video_value from 0 to 100:",
-        "- high value (70-100): character action (walking, running, climbing, cooking, working, pointing, reacting), "
-        "personified microbes or crops interacting, macro hands peeling/slicing/handling objects, moving animals;",
+        "- very low value (0-15): overhead/top-down shots, dense foliage or crop fields, repeating grids or patterned arrays (high risk of AI morphing/flicker);",
         "- low value (0-30): static text or number cards, checklists, flat maps, timelines, charts, split A|B diagrams, "
         "plain inanimate object arrangements with no natural motion;",
-        "- medium value (31-69): calm character pose or mild environmental motion (leaves swaying, balance scale tipping).",
+        "- medium value (31-69): calm character pose or mild environmental motion (leaves swaying, balance scale tipping);",
+        "- high value (70-100): character action (walking, running, climbing, cooking, working, pointing, reacting), "
+        "personified microbes or crops interacting, macro hands peeling/slicing/handling objects, moving animals.",
         "",
         "Return ONLY a JSON list of objects of the form {\"id\": <number>, \"video_value\": <integer>},",
         "one object for each segment number. No text before or after the JSON.",
@@ -190,8 +195,10 @@ def build_i2v_value_prompt(segments: Sequence[Segment], photo_prompts: Mapping[i
     ]
     for seg in sorted(segments, key=lambda s: (s.start, s.id)):
         photo = " ".join(str(photo_prompts.get(seg.id, "")).split())
+        setting = " ".join(str(settings.get(seg.id, "")).split()) if settings else ""
+        setting_part = f" | Setting: {setting}" if setting else ""
         lines.append(
-            f"id {seg.id} ({seg.start:.2f}–{seg.end:.2f} s, {seg.duration:.2f} s) | SRT: {seg.text} | Photo: {photo}"
+            f"id {seg.id} ({seg.start:.2f}–{seg.end:.2f} s, {seg.duration:.2f} s) | SRT: {seg.text}{setting_part} | Photo: {photo}"
         )
     return "\n".join(lines)
 
@@ -202,8 +209,9 @@ def _score_i2v_chunk(
     chunk: Sequence[Segment],
     photo_prompts: Mapping[int, str],
     send: Callable[[str], str],
+    settings: Mapping[int, str] | None = None,
 ) -> dict:
-    prompt = build_i2v_value_prompt(chunk, photo_prompts)
+    prompt = build_i2v_value_prompt(chunk, photo_prompts, settings)
     expected = [s.id for s in chunk]
     parsed = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -229,6 +237,7 @@ def score_i2v_segments(
     send: Callable[[str], str],
     workers: int = 1,
     min_anim_sec: float = 0.0,
+    settings: Mapping[int, str] | None = None,
 ) -> dict:
     """Оценивает I2V video_value только для пригодных сегментов (duration >= min_anim_sec), по фото-промпту + SRT."""
     eligible = [s for s in segments if s.duration >= min_anim_sec - 1e-9]
@@ -244,12 +253,12 @@ def score_i2v_segments(
     result: dict = {}
     if n_workers == 1:
         for no, chunk in enumerate(chunks, start=1):
-            result.update(_score_i2v_chunk(no, total, chunk, photo_prompts, send))
+            result.update(_score_i2v_chunk(no, total, chunk, photo_prompts, send, settings))
         log.info("=== Оценка I2V video_value готова: %d сегментов за %.1f с ===",
                  len(result), time.monotonic() - t0, extra=KEY_EVENT_EXTRA)
         return result
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_score_i2v_chunk, no, total, chunk, photo_prompts, send)
+        futures = [pool.submit(_score_i2v_chunk, no, total, chunk, photo_prompts, send, settings)
                    for no, chunk in enumerate(chunks, start=1)]
         try:
             for fut in futures:

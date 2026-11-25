@@ -116,7 +116,7 @@ on:
       disk_gb:
         description: "Размер диска карты Vast.ai, ГБ"
         type: number
-        default: 100
+        default: 60
       silent_host_timeout_min:
         description: "Таймаут первого ответа хоста, минут"
         type: number
