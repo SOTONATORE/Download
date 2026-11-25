@@ -151,15 +151,33 @@ def test_cartoon_i2v_workflow_and_bindings_invariants():
     assert graph_pairs == weight_pairs
     assert set(profile["model_files"].values()) == {e["name"] for e in weights["files"]}
 
-    # SaveVideo = "75", LoadImage = "395", ImageScale 1920x1080 lanczos center, без аудио на выходе
+    # SaveVideo = "75" (mp4/h264/crf 15), LoadImage = "395", ImageScale 1920x1080 bicubic center, ImageSharpen, без аудио
     assert graph["75"]["class_type"] == "SaveVideo"
+    assert graph["75"]["inputs"]["format"] == "mp4"
+    assert graph["75"]["inputs"]["codec"] == "h264"
+    assert graph["75"]["inputs"]["crf"] == 15
     assert graph["395"]["class_type"] == "LoadImage"
+    assert "ImageSharpen" in classes
     scale_nodes = [n for n in graph.values() if n.get("class_type") == "ImageScale"]
     assert len(scale_nodes) == 1
     assert scale_nodes[0]["inputs"]["width"] == 1920
     assert scale_nodes[0]["inputs"]["height"] == 1080
-    assert scale_nodes[0]["inputs"]["upscale_method"] == "lanczos"
+    assert scale_nodes[0]["inputs"]["upscale_method"] == "bicubic"
     assert scale_nodes[0]["inputs"]["crop"] == "center"
+    samplers = [n["inputs"]["sampler_name"] for n in graph.values() if n.get("class_type") == "KSamplerSelect"]
+    assert samplers and all(s == "euler" for s in samplers)
+    img_compressions = {
+        n["inputs"]["img_compression"]
+        for n in graph.values()
+        if n.get("class_type") == "LTXVImgToVideoInplace"
+    }
+    assert img_compressions == {0, 8}
+    lora_strengths = {
+        n["inputs"]["strength"]
+        for n in graph.values()
+        if n.get("class_type") == "LoraLoaderModelOnly"
+    }
+    assert 0.85 in lora_strengths
     create_video = next(n for n in graph.values() if n.get("class_type") == "CreateVideo")
     assert "audio" not in create_video["inputs"]
 

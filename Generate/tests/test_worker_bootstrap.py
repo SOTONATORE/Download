@@ -315,7 +315,8 @@ def test_setup_comfy_pid_is_used_only_by_restart():
     # Наблюдатель (start_comfy_watch) разрешён для COMFY_PID_FILE через comfy_proc_dead: без чтения PID
     # наблюдатель не отличит умершую ComfyUI от живой и не выставит WORKER_COMFY_DEAD_FLAG.
     total = sum(body.count("COMFY_PID_FILE") for body in bodies.values())
-    assert code.count("COMFY_PID_FILE") == total
+    # +1 обращение в цикле ожидания готовности ComfyUI (fallback attention при падении процесса)
+    assert code.count("COMFY_PID_FILE") == total + 1
 
 
 # --- setup.sh: параллельная загрузка и загрузчик (Fix 1, Fix 4) ---
@@ -366,8 +367,9 @@ def test_setup_downloads_run_in_parallel(tmp_path):
     starts = [float(r[2]) for r in rows if r[0] == "start"]
     ends = [float(r[2]) for r in rows if r[0] == "end"]
     assert len(starts) == _MODEL_FILES and len(ends) == _MODEL_FILES
-    assert max(starts) < min(ends), "загрузки шли не одновременно"
-    assert max(ends) - min(starts) < 3.5, f"этап загрузки занял {max(ends) - min(starts):.1f} с"
+    # 2 параллельных загрузки: вторая стартует до завершения первой, весь этап быстрее последовательных ~10 с
+    assert starts[1] < ends[0], "загрузки шли не одновременно"
+    assert max(ends) - min(starts) < 8.5, f"этап загрузки занял {max(ends) - min(starts):.1f} с"
 
 
 def test_setup_falls_back_to_curl_when_aria2_and_apt_unavailable(tmp_path):

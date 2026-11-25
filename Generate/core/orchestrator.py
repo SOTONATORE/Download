@@ -3827,9 +3827,10 @@ class Orchestrator:
                     if (uploader is not None and hasattr(uploader, "download_clip_asset")
                             and num in getattr(uploader, "done_photos", ())):
                         with self._lock_state():
-                            in_flight = num in self._asset_downloads
+                            asset_downloads = self.__dict__.setdefault("_asset_downloads", set())
+                            in_flight = num in asset_downloads
                             if not in_flight:
-                                self._asset_downloads.add(num)
+                                asset_downloads.add(num)
                         if not in_flight:
                             def _bg_download_asset(_n=num, _p=cache_path, _u=uploader) -> None:
                                 try:
@@ -3838,7 +3839,7 @@ class Orchestrator:
                                     log.warning("Не удалось скачать %d.png из Release для I2V: %s", _n, exc)
                                 finally:
                                     with self._lock_state():
-                                        self._asset_downloads.discard(_n)
+                                        self.__dict__.setdefault("_asset_downloads", set()).discard(_n)
                             threading.Thread(target=_bg_download_asset, name=f"asset-dl-{num}", daemon=True).start()
                         self._video_queue.append(num)
                         return
@@ -4169,9 +4170,9 @@ class Orchestrator:
             self._consecutive_clip_failures = 0
             self._durations.append(duration)
             if is_photo_file:
-                self._photo_durations.append(duration)
+                self.__dict__.setdefault("_photo_durations", []).append(duration)
             else:
-                self._video_durations.append(duration)
+                self.__dict__.setdefault("_video_durations", []).append(duration)
             self._mark(num, "done")
             log.info("Клип %d выдан в Release (рендер: %s, %.1f с).", num, card, duration)
             total = self._total_needed
