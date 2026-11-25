@@ -132,7 +132,7 @@
   },
   "398:387": {
     "inputs": {
-      "clip_name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "clip_name": "gemma4-12b-with-proj-ltx-2.5-Q4_K_M.gguf",
       "type": "ltxv",
       "device": "default"
     },
