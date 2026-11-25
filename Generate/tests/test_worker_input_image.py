@@ -172,12 +172,12 @@ def test_cartoon_i2v_workflow_and_bindings_invariants():
         if n.get("class_type") == "LTXVPreprocess"
     }
     assert img_compressions == {0, 8}
-    lora_strengths = {
+    i2v_strengths = {
         n["inputs"]["strength"]
         for n in graph.values()
-        if n.get("class_type") == "LoraLoaderModelOnly"
+        if n.get("class_type") == "LTXVImgToVideoInplace"
     }
-    assert 0.85 in lora_strengths
+    assert 0.85 in i2v_strengths
     create_video = next(n for n in graph.values() if n.get("class_type") == "CreateVideo")
     assert "audio" not in create_video["inputs"]
 
