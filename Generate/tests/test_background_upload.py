@@ -125,6 +125,7 @@ def test_download_then_ack_before_upload_finishes(tmp_path):
     o._start_upload_thread()
     try:
         _run_clip(o, slot, 1)
+        o._join_download_threads()
         assert o.events == [("download", "t1"), ("POST", "/ack/t1")]
         assert slot.tasks == []                 # задача снята с карты
         assert o._pending_uploads_count() == 1  # файл ждёт в очереди выгрузки

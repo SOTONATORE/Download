@@ -169,7 +169,7 @@ def test_cartoon_i2v_workflow_and_bindings_invariants():
     img_compressions = {
         n["inputs"]["img_compression"]
         for n in graph.values()
-        if n.get("class_type") == "LTXVImgToVideoInplace"
+        if n.get("class_type") == "LTXVPreprocess"
     }
     assert img_compressions == {0, 8}
     lora_strengths = {
