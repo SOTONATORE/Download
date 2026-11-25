@@ -1268,6 +1268,7 @@ class Orchestrator:
         self._state_lock = threading.RLock()
         self._upload_queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
         self._upload_thread: Optional[threading.Thread] = None
+        self._clip_download_threads: list[threading.Thread] = []
         self._pending_uploads: int = 0
         self._uploaded_since_links: int = 0
         self._bad_machines: set = set()
@@ -2317,9 +2318,18 @@ class Orchestrator:
         with self._lock_state():
             return getattr(self, "_pending_uploads", 0)
 
+    def _active_download_count(self) -> int:
+        with self._lock_state():
+            threads = getattr(self, "_clip_download_threads", None)
+            if not threads:
+                return 0
+            alive = [t for t in threads if t.is_alive()]
+            self._clip_download_threads = alive
+            return len(alive)
+
     def _inflight(self) -> int:
-        # A2: клипы, скачанные с карты и ждущие GitHub Release, тоже незавершённая работа: цикл не выходит раньше
-        return self._render_inflight() + self._pending_uploads_count()
+        # A2: клипы, скачиваемые/ожидающие GitHub Release, тоже незавершённая работа: цикл не выходит раньше
+        return self._render_inflight() + self._pending_uploads_count() + self._active_download_count()
 
     @property
     def _queue(self) -> deque:
@@ -4012,11 +4022,26 @@ class Orchestrator:
             finally:
                 q.task_done()
 
+    def _join_download_threads(self) -> None:
+        """Дожидается завершения всех фоновых потоков скачивания/ack перед остановкой загрузчика."""
+        while True:
+            with self._lock_state():
+                threads = list(getattr(self, "_clip_download_threads", None) or [])
+            alive = [t for t in threads if t.is_alive()]
+            if not alive:
+                with self._lock_state():
+                    if hasattr(self, "_clip_download_threads"):
+                        self._clip_download_threads = []
+                return
+            for t in alive:
+                t.join()
+
     def _stop_upload_thread(self) -> None:
         """Дозаливка перед выходом из _work: None ставится в конец очереди, поэтому все скачанные клипы уходят в Release раньше.
 
         Ожидание без таймаута: иначе _tmp удалился бы, пока файлы ещё нужны загрузчику. Раз в минуту пишется строка о ходе.
         """
+        self._join_download_threads()
         thread = self._upload_thread
         if thread is None:
             return
@@ -4225,7 +4250,12 @@ class Orchestrator:
         if getattr(self, "_upload_thread", None) is None:
             _bg_download_and_ack()
         else:
-            threading.Thread(target=_bg_download_and_ack, name=f"clip-dl-{task.num}", daemon=True).start()
+            t = threading.Thread(target=_bg_download_and_ack, name=f"clip-dl-{task.num}", daemon=True)
+            with self._lock_state():
+                if not hasattr(self, "_clip_download_threads") or not isinstance(self._clip_download_threads, list):
+                    self._clip_download_threads = []
+                self._clip_download_threads.append(t)
+            t.start()
 
     # --- финал -------------------------------------------------------------------
     def _cleanup(self) -> None:

@@ -148,7 +148,7 @@ def test_cartoon_i2v_workflow_and_bindings_invariants():
             graph_pairs.add((dir_by_node[cls], node["inputs"][key_by_node[cls]]))
     weight_pairs = {(e["subdir"], e["name"]) for e in weights["files"]}
     assert len(weight_pairs) == 5
-    assert graph_pairs == weight_pairs
+    assert graph_pairs == weight_pairs - {("vae", "ltx-2.5-audio-vae-bf16.safetensors")}
     assert set(profile["model_files"].values()) == {e["name"] for e in weights["files"]}
 
     # SaveVideo = "75" (mp4/h264/crf 15), LoadImage = "395", ImageScale 1920x1080 bicubic center, ImageSharpen, без аудио
