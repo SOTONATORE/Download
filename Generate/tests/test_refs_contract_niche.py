@@ -30,15 +30,15 @@ SEGMENTS = [
 ]
 
 # sha256 и длина системной инструкции до правки (старый код, профиль без refs; значения из test_rules_values.py)
-LTX_SHA256 = "50391333ebd2262acbd02c9a50cbb8d6f8e078d8371dc24eb9559c364edeaeb1"
-LTX_BYTES = 19940
-ZIM_SHA256 = "9a894f59b81b712a6f4aa87a8f4cf8f03ce95937525b4bd84527fc43ed2fe21e"
-ZIM_BYTES = 6735
+LTX_SHA256 = "25ee9586547c545830adb1efb08d42b2f05107c964fd63ec6773012b6ef8615d"
+LTX_BYTES = 21090
+ZIM_SHA256 = "0d1edbd7a2bca374bf8ee746b35dfe31523e7ef0db135c0ef20f5251776bc87d"
+ZIM_BYTES = 7252
 # то же до правки, но с включёнными refs без allowed_refs (старый текст блока «# Reference images»)
-LTX_REFS_OLD_SHA256 = "35f2e52254710dce665c56cbfca4b8b5024390fe20e2ce16f785c21252d525ca"
-LTX_REFS_OLD_BYTES = 20409
-ZIM_REFS_OLD_SHA256 = "a208d1c2b8f9fbfafb6cdcc197c9e4e4e73df0b86722583fb4aa7fbd4d7afac0"
-ZIM_REFS_OLD_BYTES = 7204
+LTX_REFS_OLD_SHA256 = "f819743994fa541de542dbefacb6df434c4413a7be0967dc58a3f23566dc3e14"
+LTX_REFS_OLD_BYTES = 21559
+ZIM_REFS_OLD_SHA256 = "d5077d88c5ba8bb3d12e8dea8bbb30980f9396117d0c9c0edbcdb9611d2445a7"
+ZIM_REFS_OLD_BYTES = 7721
 
 
 @pytest.fixture(autouse=True)

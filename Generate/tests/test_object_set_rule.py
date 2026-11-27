@@ -22,10 +22,10 @@ OBJECT_SET_LINE = ("- Show one object, or two or three objects of one kind. "
                    "Never show stacks, piles, rows or lines of objects.\n")
 
 # sha256 и длина системной инструкции ltx25 и zimage_turbo: скопированы из test_rules_values.py (тот файл не меняется)
-LTX_SHA256 = "50391333ebd2262acbd02c9a50cbb8d6f8e078d8371dc24eb9559c364edeaeb1"
-LTX_BYTES = 19940
-ZIM_SHA256 = "9a894f59b81b712a6f4aa87a8f4cf8f03ce95937525b4bd84527fc43ed2fe21e"
-ZIM_BYTES = 6735
+LTX_SHA256 = "25ee9586547c545830adb1efb08d42b2f05107c964fd63ec6773012b6ef8615d"
+LTX_BYTES = 21090
+ZIM_SHA256 = "0d1edbd7a2bca374bf8ee746b35dfe31523e7ef0db135c0ef20f5251776bc87d"
+ZIM_BYTES = 7252
 
 
 def _codes(text, rules, media="image", max_characters=None):

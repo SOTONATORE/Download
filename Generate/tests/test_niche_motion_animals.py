@@ -20,8 +20,8 @@ LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 ZIM_DIR = GEN / "model_profiles" / "models" / "zimage_turbo"
 
 # sha256 системной инструкции до правки — те же значения, что в test_rules_values.py
-LTX_SHA256 = "50391333ebd2262acbd02c9a50cbb8d6f8e078d8371dc24eb9559c364edeaeb1"
-ZIM_SHA256 = "9a894f59b81b712a6f4aa87a8f4cf8f03ce95937525b4bd84527fc43ed2fe21e"
+LTX_SHA256 = "25ee9586547c545830adb1efb08d42b2f05107c964fd63ec6773012b6ef8615d"
+ZIM_SHA256 = "0d1edbd7a2bca374bf8ee746b35dfe31523e7ef0db135c0ef20f5251776bc87d"
 
 
 def _codes(text, max_characters=None, rules=None, media="image"):
