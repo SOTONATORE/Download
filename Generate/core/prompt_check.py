@@ -178,6 +178,7 @@ PROBLEM_SPEECH = "speech"
 PROBLEM_FIRE_HANDS = "hands_near_fire"
 PROBLEM_CHAOS = "battle_or_chaos"
 PROBLEM_WEAPON = "weapon"
+PROBLEM_GORE_OR_CRUELTY = "gore_or_cruelty"
 PROBLEM_CLOSE_FACE = "close_face"
 PROBLEM_ETHNICITY = "ethnicity_not_in_text"
 # наборы предметов (стопки, кучи, ряды, линии): только при rules object_sets: forbidden
@@ -248,6 +249,7 @@ CONTENT_REASON_RU = {
     PROBLEM_FIRE_HANDS: "руки рядом с огнём",
     PROBLEM_CHAOS: "битва, атака или хаотичное движение",
     PROBLEM_WEAPON: "оружие в кадре",
+    PROBLEM_GORE_OR_CRUELTY: "кровь, травмы, боль или жестокость к животным",
     PROBLEM_CLOSE_FACE: "крупный план лица",
     PROBLEM_ETHNICITY: "внешность или происхождение не из текста сегмента",
     PROBLEM_OBJECT_SET: "стопки, кучи, ряды или линии предметов",
@@ -262,6 +264,7 @@ CONTENT_LABEL_EN = {
     PROBLEM_FIRE_HANDS: "hands near fire",
     PROBLEM_CHAOS: "battle or chaotic motion",
     PROBLEM_WEAPON: "weapon in frame",
+    PROBLEM_GORE_OR_CRUELTY: "blood, injury, pain or cruelty to animals",
     PROBLEM_CLOSE_FACE: "close-up of a face",
     PROBLEM_ETHNICITY: "origin or features not in the segment text",
     PROBLEM_OBJECT_SET: "stacks, piles, rows or lines of objects",
@@ -286,6 +289,8 @@ CONTENT_HINT_EN = {
     PROBLEM_CHAOS: "Remove battles, charges, gallops in formation, gunfire, explosions, smoke puffs and dust "
                    "clouds. Show a calm, static or slowly moving scene.",
     PROBLEM_WEAPON: "Remove all firearms, sabres, swords, spears and other weapons from the frame.",
+    PROBLEM_GORE_OR_CRUELTY: "Remove all blood, wounds, injuries, bruises, physical pain, corpses and any harm or "
+                             "cruelty to animals. Show intact, unharmed subjects or a clean symbolic visual instead.",
     PROBLEM_CLOSE_FACE: "Remove close-ups and portraits. Show people from a medium or wide distance, with "
                         "faces small in the frame.",
     PROBLEM_ETHNICITY: "Describe people's origin, skin tone and features only as the segment text supports them. "
@@ -445,7 +450,18 @@ _CONTENT_RX = (
     (PROBLEM_CHAOS, re.compile(
         r"\b(?:charg\w*|gallop\w*|battles?|battling|skirmish\w*|explo\w*|gunfire|firing|" + _SHOOT_RX_PART + r"|bullets?|"
         r"smoke puffs?|smoke clouds?|clouds? of (?:dust|smoke)|in formation|assault\w*|attack\w*|ambush\w*|"
-        r"rush\w*|stampede\w*|riot\w*|fight\w*|blood\w*|wounded)\b", re.IGNORECASE)),
+        r"rush\w*|stampede\w*|riot\w*|fight\w*)\b", re.IGNORECASE)),
+    (PROBLEM_GORE_OR_CRUELTY, re.compile(
+        r"\b(?:blood(?!stream\b|\s+(?:vessels?|cells?|sugar|pressure|oranges?)\b)\w*|"
+        r"bleed\w*|bled|gore|gory|hemorrhag\w*|haemorrhag\w*|"
+        r"wounded|(?:open|bleeding|deep)\s+wounds?|wounds?(?!\s+(?:around|up|into|through)\b)|"
+        r"injur\w*|bruis\w*|lacerat\w*|gash(?:es|ed)?|open sores?|scarred|fractur\w*|broken bones?|"
+        r"mutilat\w*|maim\w*|dismember\w*|severed|corpses?|dead bod(?:y|ies)|carcass\w*|"
+        r"tortur\w*|agony|agoniz\w*|excruciating|in pain|painful\w*|severe pain|physical pain|"
+        r"animal cruelty|animal abuse|abused animals?|slaughter\w*|cruelty|torment\w*|mistreat\w*|"
+        r"(?:beating|kicking|hitting|whipping|starving|harming|hurting|butcher(?:ing|ed)?|dead)\s+"
+        r"(?:(?:a|an|the)\s+)?(?:animals?|dogs?|cats?|horses?|cows?|goats?|sheep|birds?|donkeys?|oxen|ox|pigs?|rabbits?|chickens?))\b",
+        re.IGNORECASE)),
     (PROBLEM_WEAPON, re.compile(
         r"\b(?:rifles?|guns?|machine ?guns?|automatics?|submachine guns?|pistols?|sabres?|sabers?|swords?|"
         r"bayonets?|muskets?|carbines?|knives|knife|daggers?|spears?|lances?|whips?)\b", re.IGNORECASE)),

@@ -73,6 +73,12 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - Describe subject motion with specific verbs and a direction ("walks toward the camera", "turns her head to the left").
 - Vocabulary the official guide lists: follows, tracks, pans across, circles around, tilts upward, pushes in / pulls back, overhead view, handheld movement, over-the-shoulder, wide establishing shot, static frame, slow motion, time-lapse, lingering shot, continuous shot.
 - Never combine several simultaneous camera moves.
+- **(recommendation) Visual diversity across consecutive clips:** Vary shots contextually across independent axes rather than a rigid repeating loop; adjacent clips must differ on at least two axes and never repeat the same shot scale and angle back to back:
+  - Shot scale: extreme wide establishing, wide shot, medium wide, medium shot, tight object/detail shot (avoid repetitive static mid-shots).
+  - Camera angle: eye-level, low angle, high angle, overhead bird's-eye, three-quarter angle, side profile, over-the-shoulder / back view.
+  - Subject placement: left third, right third, deep background, foreground-depth view, or environment-only scene.
+  - Camera motion: vary between static frame, slow pan, gentle tracking, slow push-in, pull-back, and slow tilt up/down (one move per clip).
+  - Lighting and atmosphere: vary lighting setup and time of day to fit the story beat instead of reusing one identical backdrop.
 
 ## 7. Light, colour, atmosphere, style
 
@@ -88,6 +94,7 @@ Cover these elements in roughly this order, as flowing prose (not as labels):
 - **No small objects.** Do not show small objects or hand actions with them (needles, thread, abacus, beads, cloth, bundles, cups, dung cakes, stacking, stitching, tucking). Show one large object or the wide scene instead.
 - **No fire contact.** Keep hands and fingers away from fire, flames, candles and lanterns.
 - **No battles or weapons.** No charges, gallops in formation, gunfire, explosions or smoke puffs. No firearms, sabres, swords, spears or knives.
+- **No blood, injury, pain or animal cruelty.** Never show blood, wounds, injuries, bruises, physical pain or agony, corpses, or any harm, mistreatment or cruelty to animals. Keep all people and animals intact and unharmed.
 - **Few identical objects.** At most one or two horses, vehicles or animals, each described distinctly; no herds or rows.
 - When the text says something is absent (for example no saddle), describe the visible state instead (for example a bare horse back).
 - **On-screen text is unreliable** (spelling and consistency across frames are not guaranteed). Do not include readable text, captions, signs with words, subtitles, numbers, dates or titles in the frame. Do not quote the subtitle text as on-screen text. If the passage mentions a sign or a date, show something else that carries the idea.

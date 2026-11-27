@@ -20,20 +20,33 @@ On-frame text is different: take it only from the Text line of the current segme
 
 # Visual Diversity and Shot Scale
 
-Vary the camera distance, the angle and the subject from segment to segment. Pick the shot that best shows the segment's idea:
-- Wide scene: a field, farm, factory floor, market or supermarket aisle, with a figure at about 20 percent of image height.
+Choose each shot by the segment's meaning across four independent axes so consecutive frames never fall into a rigid cycle or repetitive template. Adjacent segments must differ on at least two axes, and the exact same layout mode or camera angle must never repeat back to back:
+
+1. **Composition and shot scale** (pick the mode that best conveys the beat):
+- Wide establishing scene: a field, farm, factory floor, market or supermarket aisle, with a figure at about 20 percent of image height.
 - Medium interaction: a figure at 40 to 60 percent of image height, leaning in from the left or right, seated, walking or handling an object.
+- Three-quarter full figure: a character shown from head to toe at a natural diagonal angle in context.
+- Foreground-to-background depth: a large concrete prop on one side of the foreground with the main setting or small figure visible behind it on the same flat 2D plane.
 - Macro view of hands or objects: two hands peeling a potato, a hand holding a tuber, tuber skins compared side by side. Hands and objects may fill most of the frame; a human face never does.
 - Overhead flat view: dishes on a table, sorted tubers in a tray, tools on a workbench, seen from directly above.
 - Cross-section or cutaway: a vertical soil cross-section, an enlarged biological vessel, a cut-open tuber with its roots.
 - Illustrated flat map: olive and sage landmasses, crisp coastlines, a dashed terracotta route arrow, short uppercase labels.
 - Split comparison: the frame divided vertically into two panels, A on one side and B on the other.
 - Visual metaphor: a brass balance scale, a winner's podium, a chained padlock, circular process arrows, a spotlight cone over an object, a magnifying glass circle enlarging a detail.
+- Diagram, chart or timeline: a warm cream chart card, checklist or clean horizontal timeline.
 - Neat arrangement: lined-up crops, shelves stocked with jars, a crate of produce or a small heap on a conveyor belt, kept clean and readable with few tiny items.
 
-About half or more of all frames work best as pure object, macro, cutaway, map, chart and balance-scale scenes that show objects and diagrams only, with people and personified characters left out. Add a character only when human action, scale, tasting, confusion, farming, factory or lab work, or a clear emotion adds value to the segment.
+2. **Camera angle** (vary naturally across scenes instead of defaulting to flat front-on eye-level):
+- Eye-level view, low angle (looking slightly upward to emphasize height or scale), high angle (looking down across a workspace, table or field), top-down bird's-eye view, three-quarter angle, side profile view, and back view or over-the-shoulder view looking past a figure toward an object or landscape.
 
-Never reuse one fixed shot order or sentence opener. Do not start every prompt with the same phrase, and do not place the character at the center every time. Vary the visual mode from clip to clip: never use the same layout mode for three consecutive segments, such as three medium kitchen scenes in a row, and never alternate overhead and macro shots of the same object back to back. Open each prompt with its subject or camera view, for example "Macro view of two hands ...", "Overhead flat view of ...", "Vertical soil cross-section ...", "Brass balance scale on a warm cream backdrop ...", "Split vertically down the center ...". Vary hero position and scale: tiny in a landscape, leaning in from the left or right, seated, walking. When consecutive segments share one sentence, give each segment a different facet of the same idea.
+3. **Subject placement and visual rhythm**:
+- Alternate placement across segments: left third, right third, far background, diagonal composition, seen from behind, or character-free object/diagram frames.
+- About half or more of all frames work best as pure object, macro, cutaway, map, chart and balance-scale scenes that show objects and diagrams only, with people and personified characters left out. Add a character only when human action, scale, tasting, confusion, farming, factory or lab work, or a clear emotion adds value to the segment.
+
+4. **Setting, time of day and flat 2D light temperature**:
+- Vary the flat 2D palette temperature and backdrop context to match the story beat (pale dusty-blue morning sky, warm ochre midday field, amber dusk horizon, indoor cream wall with a simple warm lamp cone) while keeping crisp flat fills, single-layer 2D comic ink outlines and zero realistic gradients or bokeh.
+
+Never reuse one fixed shot order or sentence opener. Do not start every prompt with the same phrase, and do not place the character at the center every time. Never use the same layout mode for three consecutive segments, such as three medium kitchen scenes in a row, and never alternate overhead and macro shots of the same object back to back. Open each prompt with its subject or camera view, for example "Macro view of two hands ...", "Low-angle view of ...", "Overhead flat view of ...", "Over-the-shoulder view past ...", "Vertical soil cross-section ...", "Brass balance scale on a warm cream backdrop ...", "Split vertically down the center ...". When consecutive segments share one sentence, give each segment a different facet of the same idea.
 
 Close-up views are allowed for hands, feet, food, plants, tools, objects and cutaways: write macro view or tight view for them. Close-ups of faces, heads, eyes and portraits are forbidden: show whole figures at normal scale instead.
 
@@ -93,7 +106,7 @@ Forbidden prompt words to exclude from every prompt: parchment, flag, passport, 
 
 # Safety and Content Rules
 
-Show adults only; children, babies and young people are forbidden. Weapons are forbidden in every frame: use a vegetable peeler, wooden spoon, spatula or garden trowel instead of blades. Speech is silent: write the expression itself (smile, squint, O-shaped mouth, worried mouth) and never a speech verb, shouted word, or a talking mouth.
+Show adults only; children, babies and young people are forbidden. Weapons are forbidden in every frame: use a vegetable peeler, wooden spoon, spatula or garden trowel instead of blades. Blood, wounds, injuries, bruises, physical pain or agony, corpses and any harm, mistreatment or cruelty to animals are strictly forbidden: whenever a segment touches on illness, danger or harsh conditions, show intact unharmed subjects, a clean educational diagram, or a calm visual metaphor (such as a warning triangle or balance scale) instead. Speech is silent: write the expression itself (smile, squint, O-shaped mouth, worried mouth) and never a speech verb, shouted word, or a talking mouth.
 
 Include at most 4 characters in total per frame, counting humans and animals together. When two to four adults appear, describe each adult one by one, or write two adult characters or three adult characters. Avoid plural group nouns such as people, men, women, farmers, workers, villagers, crowds or groups.
 
