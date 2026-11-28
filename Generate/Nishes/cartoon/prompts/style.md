@@ -10,7 +10,7 @@ Indoor scenes use a flat warm cream wall, a simple counter or wooden table and c
 
 Describe smooth closed ink outlines, flat matte surfaces and simple shapes. Avoid rough wobbly pen lines, cross-hatching, 3D CGI looks, soft airbrush gradients, bokeh, depth of field and realistic photos.
 
-Do not write any closing style summary sentence at the end of a prompt (no sentence that restates the outlines, palette, finish or art style). The style sentence from preset.md is appended automatically after generation, so every prompt ends on its last concrete scene description.
+Do not write any closing style summary sentence or short style tail at the end of a prompt (never end with phrases like "Flat matte fills, crisp closed outlines" or restate the palette, linework or art style). The style sentence from preset.md is appended automatically after generation, so every prompt ends strictly on its last concrete scene detail.
 
 # Subject, Focus and Literal Visual Communication
 
@@ -20,8 +20,10 @@ Focus and clarity rule (anti-mush):
 - Show 1 to 2 clear focal objects or subjects per frame on a clean, uncluttered background. Every visual element must directly serve the spoken idea; omit decorative filler and crowded tiny clutter.
 - Keep strong brightness and colour contrast between the main focal object and its backdrop so a viewer instantly recognizes the subject in under one second.
 - When the narration explains a mechanism, comparison, cause or risk, turn it into a concrete physical object, action, cutaway or visual metaphor rather than an abstract scene or text slide.
+- Describe every unfamiliar, coined or hybrid product by its concrete visible parts (for example, a grafted plant with red cherry tomatoes on its upper branches and tan potatoes at its roots) instead of writing an invented word that an image model does not recognize.
+- When the segment describes buying, selling, harvesting, cooking or reacting, show that concrete action (a shopper carrying a crate of seedlings, a counter exchange, hands handling the produce) instead of falling back to empty generic fields.
 
-# Visual Diversity, Eye-Trace and Shot Scale
+# Visual Diversity and Shot Scale
 
 Choose each shot by the segment's meaning across four independent axes so consecutive frames never fall into a rigid cycle or repetitive template. Adjacent segments must differ on at least two axes, and the exact same layout mode or camera angle must never repeat back to back:
 

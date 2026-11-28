@@ -16,9 +16,9 @@ LTX_STYLE = GEN / "model_profiles" / "models" / "ltx25" / "prompts" / "style.md"
 # кадра (дети, нагота, толпа, мелкие предметы, речь, руки у огня, битвы, оружие, внешность по тексту) и
 # в style.md ltx25 добавлены соответствующие запреты. Прежнее значение 17163 байт, новое 19989.
 # эталон системной инструкции ltx25: обновлён после правки образцов в style.md (шаг «Good» стал без толпы и речи). Прежнее значение 20153 байт, новое 19940.
-BASELINE_BYTES = 21090
-# хеш базы обновлён вместе с длиной (4-axis diversity + safety в style.md ltx25).
-BASELINE_SHA256 = "25ee9586547c545830adb1efb08d42b2f05107c964fd63ec6773012b6ef8615d"
+BASELINE_BYTES = 21778
+# хеш базы обновлён вместе с длиной (style.md ltx25).
+BASELINE_SHA256 = "c2c22f67e35f4ebba736cfe3b93555d33b65d93d1edd3fc9f50316c434439dbb"
 
 
 @pytest.fixture

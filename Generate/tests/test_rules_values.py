@@ -17,10 +17,10 @@ LTX_DIR = GEN / "model_profiles" / "models" / "ltx25"
 ZIM_DIR = GEN / "model_profiles" / "models" / "zimage_turbo"
 
 # sha256 и длина системной инструкции до правки (старый код, конфиг по умолчанию, preset none)
-LTX_SHA256 = "25ee9586547c545830adb1efb08d42b2f05107c964fd63ec6773012b6ef8615d"
-LTX_BYTES = 21090
-ZIM_SHA256 = "0d1edbd7a2bca374bf8ee746b35dfe31523e7ef0db135c0ef20f5251776bc87d"
-ZIM_BYTES = 7252
+LTX_SHA256 = "c2c22f67e35f4ebba736cfe3b93555d33b65d93d1edd3fc9f50316c434439dbb"
+LTX_BYTES = 21778
+ZIM_SHA256 = "8d73370aa6d2a4cfc3f2a3a75775dd795f8b9942bc779ddab150eec649f687e0"
+ZIM_BYTES = 7249
 
 
 # (a) нет файла rules.yaml — значения по умолчанию
