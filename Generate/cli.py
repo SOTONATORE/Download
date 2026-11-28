@@ -102,6 +102,7 @@ LOG_LEVELS = ("INFO", "DEBUG")
 DEFAULT_SRT = "final.srt"
 DEFAULT_MISSING = "missing.txt"
 DEFAULT_PROMPTS = "prompts.json"
+DEFAULT_CUES = "montage_cues.json"
 STYLE_DIR = "Generate/model_profiles/models"
 # папка режимов: style.md режима лежит здесь, если профиля нет в model_profiles/models
 NISHES_DIR = "Generate/Nishes"
@@ -407,9 +408,38 @@ def _niche_preset_file(profile: str, preset: str) -> Optional[str]:
     return str(path) if path.is_file() else None
 
 
+def _load_segment_cues(cues_path: Optional[str], segments: list) -> Optional[dict]:
+    """Загружает montage_cues.json и сопоставляет подсказки с сегментами SRT.
+
+    Пустая строка, None или «none» -> None (работа без cues).
+    Если передан путь по умолчанию (montage_cues.json) и файла нет -> INFO-лог и None.
+    Если передан явный пользовательский путь и файла нет -> GeminiInputError.
+    """
+    raw = (cues_path or "").strip()
+    if not raw or raw.lower() == "none":
+        return None
+    if not os.path.isfile(raw):
+        if raw == DEFAULT_CUES and os.path.basename(raw) == DEFAULT_CUES:
+            log.info("%s не найден, работаем без cues.", DEFAULT_CUES)
+            return None
+        raise GeminiInputError(f"Файл cues не найден: {raw}")
+    try:
+        from Generate.core.cues_loader import load_montage_cues, map_cues_to_segments
+    except ImportError:  # pragma: no cover
+        from cues_loader import load_montage_cues, map_cues_to_segments  # type: ignore
+    try:
+        data = load_montage_cues(raw)
+        mapped = map_cues_to_segments(segments, data)
+    except (ValueError, OSError) as exc:
+        raise GeminiInputError(f"Ошибка загрузки файла cues ({raw}): {exc}") from None
+    log.info("Загружены cues из %s: сопоставлено сегментов %d из %d.", raw, len(mapped), len(segments))
+    return mapped
+
+
 def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NONE,
                          fail_fast: bool = False, raw_dir: Optional[str] = None,
-                         srt_path: Optional[str] = None):
+                         srt_path: Optional[str] = None,
+                         segment_cues: Optional[dict] = None):
     cls = _find_symbol("PromptConfig", ("gemini_prompts", "gemini_orchestrator", "timing"))
     # тип профиля (type: video | image) читается строкой, без PyYAML; значения по умолчанию нет
     try:
@@ -514,6 +544,8 @@ def _build_prompt_config(profile: str, batch_size: int, preset: str = PRESET_NON
     if profile_batch is not None:
         batch_size = profile_batch
         kwargs["fix_batch_size"] = profile_batch
+    if segment_cues is not None:
+        kwargs["segment_cues"] = segment_cues
     return cls(style_file=style_file, media=media, batch_size=batch_size, preset=preset, **kwargs)
 
 
@@ -833,9 +865,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     if code is not None:
         return code
 
+    try:
+        segment_cues = _load_segment_cues(getattr(args, "cues", None), segments)
+    except GeminiInputError as e:
+        _err(f"Ошибка входных данных: {e}")
+        return EXIT_INPUT
+
     print(f"Конфигурация в порядке: {Path(args.config or DEFAULT_CONFIG_PATH).name}")
     print(_text_family_line(_cfg, family))
     print(f"Проверка пройдена. Сегментов в SRT: {len(segments)}")
+    if segment_cues is not None:
+        print(f"Cues: сопоставлено сегментов {len(segment_cues)} из {len(segments)}")
     if i2v_mode:
         if total_video_percent is not None or after_half_video_percent is not None:
             parts = [f"вступление {intro_minutes:g} мин ({intro_video_percent:g}%)"]
@@ -1049,10 +1089,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         raw_dir = str(Path(args.artifact_dir) / "raw") if getattr(args, "artifact_dir", "") else None
         # raw_dir — только при заданном --artifact-dir: без него вызов прежний, без лишнего именованного аргумента
         raw_kw = {"raw_dir": raw_dir} if raw_dir else {}
+        segment_cues = _load_segment_cues(getattr(args, "cues", None), segments)
+        cues_kw = {"segment_cues": segment_cues} if segment_cues is not None else {}
         prompt_cfg = _build_prompt_config(cfg.model_profile, cfg.gemini_batch_size, cfg.preset,
-                                          **raw_kw, **_srt_kwargs(cfg.model_profile, args.srt))
+                                          **raw_kw, **cues_kw, **_srt_kwargs(cfg.model_profile, args.srt))
         photo_prompt_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
-                                                 **raw_kw, **_srt_kwargs(photo_profile, args.srt))
+                                                 **raw_kw, **cues_kw, **_srt_kwargs(photo_profile, args.srt))
                             if photo_profile is not None else None)
         i2v_video_cfg = None
         i2v_timing = None
@@ -1060,7 +1102,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             i2v_timing = _build_timing(cfg, i2v_video_profile)
             i2v_video_cfg = _build_prompt_config(
                 i2v_video_profile, cfg.gemini_batch_size, cfg.preset,
-                **raw_kw, **_srt_kwargs(i2v_video_profile, args.srt))
+                **raw_kw, **cues_kw, **_srt_kwargs(i2v_video_profile, args.srt))
         # пилот: ни Gemini, ни Release не нужны (клиенты не создаются)
         stage = "текстового транспорта"
         transport = None if _pilot_mode(args) else _make_transport(cfg, family)
@@ -2105,12 +2147,14 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             missing = missing[: cfg.limit_clips]
 
         timing = _build_timing(cfg, video_profile)
+        segment_cues = _load_segment_cues(getattr(args, "cues", None), segments)
+        cues_kw = {"segment_cues": segment_cues} if segment_cues is not None else {}
         video_cfg = _build_prompt_config(video_profile, cfg.gemini_batch_size, cfg.preset,
                                           fail_fast=fail_fast, raw_dir=raw_dir,
-                                          **_srt_kwargs(video_profile, args.srt))
+                                          **cues_kw, **_srt_kwargs(video_profile, args.srt))
         photo_cfg = _build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
                                           fail_fast=fail_fast, raw_dir=raw_dir,
-                                          **_srt_kwargs(photo_profile, args.srt))
+                                          **cues_kw, **_srt_kwargs(photo_profile, args.srt))
         family = resolve_text_family(cfg, getattr(args, "text_model", None), video_profile)
         counting = _ReworkCounter(_make_transport(cfg, family))
         gemini_options = _gemini_options(cfg, family)
@@ -2135,6 +2179,7 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
             after_half_video_percent=after_half_video_percent,
             min_anim_sec=min_anim_sec,
             score_workers=orch_mod._value_workers(counting, gemini_options),
+            **cues_kw,
         )
         expected_frames = {}
         if timing is not None:
@@ -2218,13 +2263,15 @@ def prepare_prompts_only(args: argparse.Namespace) -> PreparedPrompts:
         raise GeminiInputError("нет клипов для проверки: в missing нет номеров.")
 
     timing = _build_timing(cfg, args.video_profile)
+    segment_cues = _load_segment_cues(getattr(args, "cues", None), segments)
+    cues_kw = {"segment_cues": segment_cues} if segment_cues is not None else {}
     # fail_fast из ns (нет атрибута — выключено); сырой ответ — в <artifact_dir>/raw, только при проблеме
     prompt_cfg = _build_prompt_config(args.video_profile, cfg.gemini_batch_size, cfg.preset,
                                       fail_fast=fail_fast, raw_dir=raw_dir,
-                                      **_srt_kwargs(args.video_profile, args.srt))
+                                      **cues_kw, **_srt_kwargs(args.video_profile, args.srt))
     photo_cfg = (_build_prompt_config(photo_profile, cfg.gemini_batch_size, cfg.preset,
                                       fail_fast=fail_fast, raw_dir=raw_dir,
-                                      **_srt_kwargs(photo_profile, args.srt))
+                                      **cues_kw, **_srt_kwargs(photo_profile, args.srt))
                  if photo_profile is not None else None)
     family = resolve_text_family(cfg, getattr(args, "text_model", None), cfg.model_profile)
     counting = _ReworkCounter(_make_transport(cfg, family))
@@ -2333,6 +2380,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"путь к файлу missing (по умолчанию {DEFAULT_MISSING})")
     common.add_argument("--config", default=None,
                         help="путь к файлу конфигурации (по умолчанию Generate/config.default.yaml)")
+    common.add_argument("--cues", default=None,
+                        help=f"путь к файлу {DEFAULT_CUES} (подсказки монтажа); «none» = не использовать")
 
     parser = argparse.ArgumentParser(
         prog="python -m Generate.cli",

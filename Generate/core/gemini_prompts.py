@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional, Protocol
 
 try:  # пакетный и «плоский» импорт (как в остальных модулях core)
     from .srt_parser import Segment
+    from .cues_loader import build_batch_cue_guide, format_segment_cue
     from .model_constants import PRESET_NONE, PROFILE_NAME_PATTERN
     from .frame_rules import rephrase_note  # правило для запрещённых типов кадра (шаг 4)
     from .prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # проверка промптов (шаг 6)
@@ -35,6 +36,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
                            PROBLEM_DANGLING_TEXT, PROBLEM_LETTERING_NOT_IN_SEGMENT, frame_has_lettering)
 except ImportError:  # pragma: no cover
     from srt_parser import Segment  # type: ignore
+    from cues_loader import build_batch_cue_guide, format_segment_cue  # type: ignore
     from model_constants import PRESET_NONE, PROFILE_NAME_PATTERN  # type: ignore
     from frame_rules import rephrase_note  # type: ignore
     from prompt_check import (PROBLEM_CAMERA_MOTION, find_camera_motion, find_problems,  # type: ignore
@@ -156,6 +158,8 @@ class PromptConfig:
     # I2V-режим: словарь {номер_сегмента: фото-промпт без хвоста preset.md} и {номер_сегмента: длительность_сек}
     source_photo_prompts: Optional[dict] = None
     segment_durations: Optional[dict] = None
+    # Опциональные монтажные подсказки (montage_cues.json): словарь {номер_сегмента: SegmentCue}
+    segment_cues: Optional[dict] = None
 
     def __post_init__(self) -> None:
         # Русский: fix_batch_size, если задан, — целое не меньше 1 (bool не принимается)
@@ -359,13 +363,19 @@ def _format_segment_block(
     *,
     source_photo: Optional[str] = None,
     duration_sec: Optional[float] = None,
+    segment_cues: Optional[dict] = None,
 ) -> str:
     """Блок одного сегмента для пользовательского запроса. Номер идёт только как служебное
     поле segment_index (его модель вернёт в ответе), в смысловой текст он не входит.
     allowed_items: разрешённые типы кадра ниши (rules.yaml allowed_shot_items) для правила перефразирования.
     source_photo / duration_sec: опциональные данные I2V (фото-промпт без хвоста стиля и длительность клипа)."""
     sen = by_segment[seg.num]
-    lines = [f"segment_index: {seg.num}"]
+    header = f"segment_index: {seg.num}"
+    if segment_cues:
+        cue_str = format_segment_cue(segment_cues.get(seg.num))
+        if cue_str:
+            header += f" | Cue: {cue_str}"
+    lines = [header]
     if duration_sec is not None:
         lines.append(f"Duration: {duration_sec:.2f}s")
     if source_photo:
@@ -941,7 +951,8 @@ def _shares_sentence(chunk: list, by_segment: dict) -> bool:
     return any(by_segment[a].number == by_segment[b].number for a, b in zip(nums, nums[1:]))
 
 
-def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict, allowed_items=frozenset()) -> str:
+def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict,
+                    allowed_items=frozenset(), segment_cues: Optional[dict] = None) -> str:
     """Батч одним текстом для cartoon_photos: контекст до и после (только смысл, целые предложения),
     затем по одной строке на сегмент: segment_index, Text и Sentence с маркером >>...<<.
     Контекст не повторяется внутри батча. Правило перефразирования добавляется один раз, если нужно."""
@@ -967,6 +978,10 @@ def _format_passage(chunk: list, by_num: dict, sentences: list, by_segment: dict
             line = f"segment_index: {n} | Text (what this segment says): (silence / no text)"
             if sen.text:
                 line += f" | Sentence: {sen.text}"
+        if segment_cues:
+            cue_str = format_segment_cue(segment_cues.get(n))
+            if cue_str:
+                line += f" | Cue: {cue_str}"
         lines.append(line)
         note = rephrase_note(text, allowed_items)
         if note and note not in notes:
@@ -1013,23 +1028,29 @@ class _Builder:
     def batches(self, nums: list) -> list:
         nums = sorted(set(nums))
         size = self.cfg.batch_size
+        cues_map = self.cfg.segment_cues or None
         out = []
         for i in range(0, len(nums), size):
             chunk = nums[i:i + size]
             if self.cfg.batch_passage:
                 # cartoon_photos: батч одним текстом, строка на сегмент (см. _format_passage)
                 body = _format_passage(chunk, self.by_num, self.sentences, self.by_segment,
-                                       self.cfg.rules.allowed_shot_items)
+                                       self.cfg.rules.allowed_shot_items, segment_cues=cues_map)
             else:
                 src_photos = self.cfg.source_photo_prompts or {}
                 durs = self.cfg.segment_durations or {}
                 blocks = [_format_segment_block(self.by_num[n], self.sentences, self.by_segment,
                                                 self.cfg.rules.allowed_shot_items,
                                                 source_photo=src_photos.get(n),
-                                                duration_sec=durs.get(n))
+                                                duration_sec=durs.get(n),
+                                                segment_cues=cues_map)
                           for n in chunk]
                 body = "\n\n".join(blocks)
             user = ("Write prompts for the following segments. Return only the JSON array.\n\n" + body)
+            if cues_map:
+                cue_guide = build_batch_cue_guide(cues_map.get(n) for n in chunk)
+                if cue_guide:
+                    user += "\n\n" + cue_guide
             out.append(BatchRequest(tuple(chunk), self.system, user, self.schema))
         return out
 

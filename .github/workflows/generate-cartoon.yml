@@ -35,6 +35,10 @@ on:
         description: "Путь к файлу SRT"
         type: string
         default: "final.srt"
+      cues_path:
+        description: "Путь к montage_cues.json (в корне рядом с final.srt); none = не использовать"
+        type: string
+        default: "montage_cues.json"
       limit_clips:
         description: "0 = все сегменты SRT; N > 0 = первые N сегментов по возрастанию номера (пробный прогон)"
         type: string
@@ -205,6 +209,7 @@ jobs:
           MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
           PHOTO_PROFILE: ${{ env.PHOTO_PROFILE }}
           TEXT_MODEL: ${{ inputs.text_model }}
+          CUES_PATH: ${{ inputs.cues_path }}
           OPENROUTER1: ${{ secrets.OPENROUTER1 }}
           OPENROUTER2: ${{ secrets.OPENROUTER2 }}
           OPENROUTER3: ${{ secrets.OPENROUTER3 }}
@@ -219,6 +224,7 @@ jobs:
           args=(
             --srt "$OPT_SRT_PATH"
             --missing "missing.txt"
+            --cues "$CUES_PATH"
             --photo-profile "$PHOTO_PROFILE"
             --text-model "$TEXT_MODEL"
           )
@@ -281,6 +287,7 @@ jobs:
           INTRO_VIDEO_PERCENT: ${{ inputs.intro_video_percent }}
           AFTER_HALF_VIDEO_PERCENT: ${{ inputs.after_half_video_percent }}
           MIN_ANIM_SEC: ${{ inputs.min_anim_sec }}
+          CUES_PATH: ${{ inputs.cues_path }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           MAX_CARDS: ${{ inputs.max_cards }}
@@ -311,6 +318,7 @@ jobs:
           args=(
             --srt "$OPT_SRT_PATH"
             --missing "missing.txt"
+            --cues "$CUES_PATH"
             --limit-clips "$LIMIT_CLIPS"
             --max-cards "$MAX_CARDS"
             --budget-limit "$BUDGET_LIMIT"

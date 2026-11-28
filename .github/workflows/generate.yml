@@ -229,6 +229,8 @@ jobs:
         env:
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          # в generate.yml уже 25 входов workflow_dispatch (лимит GitHub Actions), поэтому montage_cues.json подхватывается из корня автоматически (если файла нет — пропускается)
+          CUES_PATH: "montage_cues.json"
           PROMPTS_FILE: ${{ inputs.prompts_path }}
           PROMPTS_COUNT: ${{ inputs.prompts_count }}
           # фото-профиль для превью: пусто, если фото-модель выключена (превью без неё не запускаются)
@@ -247,6 +249,7 @@ jobs:
         run: |
           # превью: при «выкл» файл промптов не читается; при 1..4 проверяются файл и фото-модель, до аренды
           python -m Generate.cli check --srt "$SRT_PATH" --missing "$MISSING_PATH" \
+            --cues "$CUES_PATH" \
             --prompts-file "$PROMPTS_FILE" --prompts-count "$PROMPTS_COUNT" \
             --photo-profile "$PREVIEW_PHOTO_PROFILE" \
             --text-model "$TEXT_MODEL"
@@ -303,6 +306,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          # в generate.yml уже 25 входов workflow_dispatch (лимит GitHub Actions), поэтому montage_cues.json подхватывается из корня автоматически (если файла нет — пропускается)
+          CUES_PATH: "montage_cues.json"
           PROMPTS_FILE: ${{ inputs.prompts_path }}
           PROMPTS_COUNT: ${{ inputs.prompts_count }}
           LIMIT_CLIPS: ${{ inputs.limit_clips }}
@@ -342,6 +347,7 @@ jobs:
           args=(
             --srt "$SRT_PATH"
             --missing "$MISSING_PATH"
+            --cues "$CUES_PATH"
             --prompts-file "$PROMPTS_FILE"
             --prompts-count "$PROMPTS_COUNT"
             --limit-clips "$LIMIT_CLIPS"

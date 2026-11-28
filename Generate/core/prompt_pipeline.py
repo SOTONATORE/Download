@@ -24,6 +24,7 @@ try:  # пакетный и «плоский» импорт (как в оста�
     from . import prompt_check as pc
     from . import segment_split as ss
     from . import video_value as vv
+    from .cues_loader import apply_cue_video_boost
     from .timing import compute_timings
 except ImportError:  # pragma: no cover
     import gemini_orchestrator as go  # type: ignore
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover
     import prompt_check as pc  # type: ignore
     import segment_split as ss  # type: ignore
     import video_value as vv  # type: ignore
+    from cues_loader import apply_cue_video_boost  # type: ignore
     from timing import compute_timings  # type: ignore
 
 # тот же логгер, что у оркестратора: строки журнала не меняются
@@ -792,6 +794,7 @@ def build_i2v_prompts(
     min_anim_sec: float = 2.5,
     score_send=None,
     score_workers: int = 1,
+    segment_cues: Optional[dict] = None,
 ) -> PromptRun:
     """Двухэтапный конвейер промптов для I2V (ниша картунов):
     1. Фото-промпты для всех needed (с дедупликацией и антимонотонностью).
@@ -859,6 +862,12 @@ def build_i2v_prompts(
                 raise gp.GeminiRuntimeError(
                     f"Оценка I2V video_value не удалась: {exc} Запуск остановлен, запасного значения нет."
                 ) from None
+        if segment_cues and values:
+            boosted = apply_cue_video_boost(values, segment_cues)
+            changed = sum(1 for k, v in boosted.items() if values.get(k) != v)
+            values = boosted
+            log.info("I2V-отбор: учтены монтажные подсказки (montage_cues) — скорректировано %d из %d сегментов.",
+                     changed, len(values))
         dist = ss.select_i2v_segments(
             ss_segs, values,
             intro_seconds=intro_seconds,

@@ -16,6 +16,10 @@ on:
         description: "Путь к файлу missing"
         type: string
         default: "missing.txt"
+      cues_path:
+        description: "Путь к montage_cues.json (в корне рядом с final.srt); none = не использовать"
+        type: string
+        default: "montage_cues.json"
       niche:
         description: "Ниша: none = обычный выбор ниже; другое значение = ниша, она переопределяет видео, фото и текстовую модель"
         type: choice
@@ -182,6 +186,7 @@ jobs:
           OPENROUTER10: ${{ secrets.OPENROUTER10 }}
           SRT_PATH: ${{ inputs.srt_path }}
           MISSING_PATH: ${{ inputs.missing_path }}
+          CUES_PATH: ${{ inputs.cues_path }}
           # выбор моделей (none = модель выключена), как в generate.yml
           # ниша (не none) переопределяет видео и фото; при cartoon_i2v: true включается профиль <niche>_i2v
           VIDEO_MODEL: ${{ inputs.niche != 'none' && (inputs.cartoon_i2v && format('{0}_i2v', inputs.niche) || 'none') || inputs.video_profile }}
@@ -382,6 +387,7 @@ jobs:
           ns = argparse.Namespace(
               srt=srt_for_prep,
               missing=os.environ["MISSING_PATH"],
+              cues=os.environ.get("CUES_PATH") or None,
               prompts_path=os.environ["PROMPTS_PATH"],
               artifact_dir=art_dir,
               video_model=video_model,
