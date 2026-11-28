@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "language": "fr",
+  "mood_segments": [
+    {
+      "start": 0.0,
+      "end": 117.96,
+      "mood": "curiosity",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 117.96,
+      "end": 355.91,
+      "mood": "tension",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 355.91,
+      "end": 491.45,
+      "mood": "tension",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 491.45,
+      "end": 762.02,
+      "mood": "curiosity",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 762.02,
+      "end": 984.78,
+      "mood": "action",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 984.78,
+      "end": 1109.24,
+      "mood": "calm",
+      "fade_out_sec": 15.0
+    },
+    {
+      "start": 1109.24,
+      "end": 1275.91,
+      "mood": "reveal",
+      "fade_out_sec": 0.0
+    }
+  ],
+  "hard_music_cuts": [
+    {
+      "start": 28.0,
+      "duration": 2.5,
+      "reason": "self_destruct_hook"
+    },
+    {
+      "start": 154.77,
+      "duration": 2.5,
+      "reason": "reproduction_twist"
+    },
+    {
+      "start": 355.91,
+      "duration": 2.5,
+      "reason": "cannibalism_reveal"
+    },
+    {
+      "start": 491.45,
+      "duration": 2.5,
+      "reason": "yield_shock"
+    },
+    {
+      "start": 762.02,
+      "duration": 2.5,
+      "reason": "freezing_price_war"
+    },
+    {
+      "start": 1045.09,
+      "duration": 2.5,
+      "reason": "surimi_paradox"
+    },
+    {
+      "start": 1179.85,
+      "duration": 2.5,
+      "reason": "petfood_bioplastic_twist"
+    }
+  ],
+  "ambience_segments": [
+    {
+      "start": 0.0,
+      "end": 117.96,
+      "ambience": "ocean_port"
+    },
+    {
+      "start": 117.96,
+      "end": 355.91,
+      "ambience": "ocean_port"
+    }
+  ],
+  "accent_subtitles": [
+    {
+      "start": 15.32,
+      "end": 16.04,
+      "text": "INTROUVABLE",
+      "style": "danger"
+    },
+    {
+      "start": 48.49,
+      "end": 50.73,
+      "text": "NAGEUR SAVOUREUX",
+      "style": "positive"
+    },
+    {
+      "start": 149.51,
+      "end": 151.24,
+      "text": "LAGUNES SAUMÂTRES",
+      "style": "neutral"
+    },
+    {
+      "start": 154.77,
+      "end": 156.69,
+      "text": "ARME BIOLOGIQUE",
+      "style": "danger"
+    },
+    {
+      "start": 218.17,
+      "end": 220.17,
+      "text": "LE NAISSAIN",
+      "style": "danger"
+    },
+    {
+      "start": 269.54,
+      "end": 271.82,
+      "text": "NASSES SÉLECTIVES",
+      "style": "neutral"
+    },
+    {
+      "start": 308.28,
+      "end": 310.08,
+      "text": "LÉTHARGIE",
+      "style": "neutral"
+    },
+    {
+      "start": 379.55,
+      "end": 381.51,
+      "text": "CANNIBALISME",
+      "style": "danger"
+    },
+    {
+      "start": 416.75,
+      "end": 418.56,
+      "text": "TOURTEAU BRETON",
+      "style": "neutral"
+    },
+    {
+      "start": 433.9,
+      "end": 435.16,
+      "text": "AUTOLYSE",
+      "style": "danger"
+    },
+    {
+      "start": 454.76,
+      "end": 455.82,
+      "text": "AMMONIAQUE",
+      "style": "danger"
+    },
+    {
+      "start": 463.97,
+      "end": 465.85,
+      "text": "CUIT VIVANT",
+      "style": "danger"
+    },
+    {
+      "start": 508.49,
+      "end": 510.65,
+      "text": "CANNIBALISME",
+      "style": "danger"
+    },
+    {
+      "start": 562.77,
+      "end": 564.21,
+      "text": "CARTILAGE FIN",
+      "style": "neutral"
+    },
+    {
+      "start": 571.97,
+      "end": 573.57,
+      "text": "CARTILAGE FIN",
+      "style": "neutral"
+    },
+    {
+      "start": 771.83,
+      "end": 773.99,
+      "text": "AUTOLYSE",
+      "style": "danger"
+    },
+    {
+      "start": 789.84,
+      "end": 791.84,
+      "text": "CONGÉLATION",
+      "style": "neutral"
+    },
+    {
+      "start": 799.84,
+      "end": 801.75,
+      "text": "CONGÉLATION",
+      "style": "neutral"
+    },
+    {
+      "start": 810.91,
+      "end": 812.72,
+      "text": "CENTRALES D'ACHAT",
+      "style": "neutral"
+    },
+    {
+      "start": 828.21,
+      "end": 829.91,
+      "text": "MODÈLE TUNISIEN",
+      "style": "positive"
+    },
+    {
+      "start": 857.35,
+      "end": 859.42,
+      "text": "CONGÉLATION",
+      "style": "neutral"
+    },
+    {
+      "start": 874.2,
+      "end": 875.99,
+      "text": "CONGÉLATION",
+      "style": "neutral"
+    },
+    {
+      "start": 887.41,
+      "end": 889.27,
+      "text": "MODÈLE CATALAN",
+      "style": "neutral"
+    },
+    {
+      "start": 955.46,
+      "end": 957.29,
+      "text": "CENTRALES D'ACHAT",
+      "style": "neutral"
+    },
+    {
+      "start": 1054.69,
+      "end": 1057.17,
+      "text": "LE SURIMI",
+      "style": "positive"
+    },
+    {
+      "start": 1067.53,
+      "end": 1069.65,
+      "text": "LE SURIMI",
+      "style": "positive"
+    },
+    {
+      "start": 1085.67,
+      "end": 1087.75,
+      "text": "FAUX CRABE",
+      "style": "danger"
+    },
+    {
+      "start": 1120.24,
+      "end": 1121.83,
+      "text": "CENTRALES D'ACHAT",
+      "style": "neutral"
+    },
+    {
+      "start": 1134.92,
+      "end": 1137.0,
+      "text": "AUTOLYSE",
+      "style": "danger"
+    },
+    {
+      "start": 1158.06,
+      "end": 1160.38,
+      "text": "BISQUES ET BOCAUX",
+      "style": "positive"
+    },
+    {
+      "start": 1197.81,
+      "end": 1199.79,
+      "text": "PROJET FIL BLU",
+      "style": "positive"
+    },
+    {
+      "start": 1231.66,
+      "end": 1232.66,
+      "text": "BIOPLASTIQUES",
+      "style": "positive"
+    },
+    {
+      "start": 1265.95,
+      "end": 1267.31,
+      "text": "BATAILLE PERDUE",
+      "style": "danger"
+    }
+  ]
+}
