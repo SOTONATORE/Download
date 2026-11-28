@@ -103,8 +103,9 @@ def test_system_instruction_builds_from_style():
     assert cfg.max_characters == MAX_CHARACTERS
     text = gp.build_system_instruction(cfg)
     assert "# Style guide" in text
-    assert "# Subject and Context" in text
-    assert "reading <TEXT> in bold black uppercase lettering" in text
+    assert "# Subject, Focus and Literal Visual Communication" in text
+    assert "# Text Policy" in text
+    assert "in bold black uppercase lettering" in text
     assert "free of" not in text.lower()
 
 
@@ -152,18 +153,21 @@ def test_style_mouth_slots_are_positive_and_single():
     assert "choose one mouth shape directly on the face" in text
 
 
-def test_style_has_no_zero_or_rare_words():
-    """Слова zero и rare не употребляются в style.md: модель не должна выводить «Zero characters» и «rare»."""
-    assert re.search(r"\b(zero|rare)\b", _style_text(), re.I) is None
-
-
-def test_style_plaque_rule_for_ordinary_scenes_and_analytical_layouts():
-    """Обычные сцены без плашек; надписи только на аналитических схемах и при наличии Text."""
+def test_style_has_no_zero_character_count_phrases():
+    """В style.md нет «Zero characters» / «zero people»; плавающий текст запрещён."""
     text = _style_text()
-    assert "with no plaques, label cards, header bands or lettering" in text
-    assert "analytical layouts" in text
-    assert "1 to 4 words" in text
-    assert "is always followed by in bold black uppercase lettering" in text
+    assert re.search(r"\bzero\s+(?:characters?|people)\b", text, re.I) is None
+    assert "no floating or overlaid text" in text
+
+
+def test_style_plaque_rule_forbids_overlay_and_allows_diegetic_signs():
+    """Плавающие плашки и карточки запрещены; допускаются только редкие физические вывески внутри сцены."""
+    text = _style_text()
+    assert "no floating or overlaid text of any kind" in text
+    assert "label cards" in text and "header bands" in text and "title plaques" in text
+    assert "diegetic in-world" in text.lower()
+    assert "1 to 2 uppercase words" in text
+    assert "in bold black uppercase lettering" in text
 
 
 def test_style_layout_rhythm_rule_present():
@@ -172,9 +176,9 @@ def test_style_layout_rhythm_rule_present():
 
 
 def test_style_emphasis_and_frame_choice_do_not_use_forming():
-    """Разделы Emphasis markers и Choosing the Frame пишут making / creating, а не forming / formed."""
+    """Разделы Visual emphasis markers и Choosing the Frame пишут making / creating, а не forming / formed."""
     text = _style_text()
-    emphasis = text.split("Emphasis markers:", 1)[1].split("\n\n", 1)[0]
+    emphasis = text.split("Visual emphasis markers (text-free):", 1)[1].split("\n\n", 1)[0]
     frame = text.split("# Choosing the Frame", 1)[1].split("\n# ", 1)[0]
     for body in (emphasis, frame):
         assert re.search(r"\b(forming|formed)\b", body) is None

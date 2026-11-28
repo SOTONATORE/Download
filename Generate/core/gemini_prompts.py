@@ -223,8 +223,24 @@ class GeminiTransport(Protocol):
 SENTENCE_END_CHARS = ".?!\u2026\u3002\uff01\uff1f"
 SENTENCE_CLOSERS = "\"'\u00bb\u201d\u2019)]"
 SENTENCE_OPENERS = "\"'\u00ab\u201c\u2018\u201e(["
-NO_BREAK_ABBREVIATIONS = frozenset({"Mr.", "Mrs.", "Ms.", "Dr.", "St.", "No.", "Jr.", "Sr.", "vs."})
-LOWERCASE_CONTINUES_ABBREVIATIONS = frozenset({"etc."})
+NO_BREAK_ABBREVIATIONS = frozenset({
+    "Mr.", "Mrs.", "Ms.", "Dr.", "St.", "No.", "Jr.", "Sr.", "vs.",
+    # French
+    "M.", "Mme.", "Mlle.", "MM.", "av.", "apr.", "env.", "cf.", "Ste.",
+    # German
+    "Hr.", "Fr.", "Prof.", "z.B.", "bzw.", "ca.",
+    # Spanish
+    "Sra.", "Srta.", "Ud.",
+    # Russian
+    "ул.", "см.",
+})
+LOWERCASE_CONTINUES_ABBREVIATIONS = frozenset({
+    "etc.",
+    # French
+    "J.-C.",
+    # Russian
+    "г.", "гг.", "т.д.", "т.п.", "др.",
+})
 
 
 @dataclass
@@ -240,7 +256,7 @@ class Sentence:
 
 
 def _strip_closers(text: str) -> str:
-    return text.rstrip(SENTENCE_CLOSERS + " ")
+    return text.rstrip(SENTENCE_CLOSERS + " \u00a0\u202f")
 
 
 def _ends_sentence(text: str, next_text: Optional[str]) -> bool:
@@ -742,12 +758,13 @@ def _content_rules(media: str, max_characters: Optional[int] = None, rules: Opti
 
 
 _BATCH_TEXT_FRAMING = (
-    "Most frames are text-free visual illustrations. Decide each segment independently and do not copy a label-card "
-    "pattern from earlier items in the batch. Never place label cards, plaques, header bands or lettering on ordinary "
-    "wide, medium, macro, overhead, spotlight, podium or neat-arrangement scenes, unless the frame shows a number, date "
-    "or measurement. Keep on-frame text strictly for maps, charts, timelines, split comparisons, balance scales, labeled "
-    "scientific cutaways or diagrams, and dedicated number, date or proper-name frames. Never split an incomplete "
-    "modifier across segments: a lone adjective without its noun is forbidden. ")
+    "Over 90 percent of frames are completely text-free pure visual illustrations. Decide each segment independently "
+    "and do not copy a text pattern from earlier items in the batch. Strictly forbid all floating or overlaid text "
+    "carriers: never place label cards, title plaques, accent plaques, framed plaques, header bands, pointer-arrow "
+    "labels, number cards or standalone text slides in any frame. Only rare physical diegetic in-world signs "
+    "(such as a storefront shop sign, wooden harbor sign or street plaque mounted on a building or post) are allowed "
+    "when the physical setting genuinely calls for it. Never split an incomplete modifier across segments: a lone "
+    "adjective without its noun is forbidden. ")
 
 
 def _output_language_sentence(cfg: PromptConfig) -> str:
@@ -914,7 +931,8 @@ def _passage_context(sentences: list, first: int, last: int) -> tuple:
 
 def _needs_full_sentence(text: str) -> bool:
     """Фрагмент без визуального контекста: короткий (до _FRAGMENT_NOTE_MAX_WORDS слов) или без конечного знака."""
-    return len(text.split()) <= _FRAGMENT_NOTE_MAX_WORDS or text[-1] not in ".!?\u2026"
+    core = _strip_closers(text)
+    return len(text.split()) <= _FRAGMENT_NOTE_MAX_WORDS or not core or core[-1] not in SENTENCE_END_CHARS
 
 
 def _shares_sentence(chunk: list, by_segment: dict) -> bool:
@@ -1063,6 +1081,7 @@ _HERO_CANON_PARTS = ("round head", "stick")
 # Русский: per-clip проверки batch_passage (без квот по пакету); английские подсказки — в _parse_hint_en
 _BLANK_CARD_REASON = "надпись: пустая табличка или карточка без текста"
 _UNAUTH_TEXT_REASON = "надпись: текст на обычной сцене без разрешения"
+_OVERLAY_CARRIER_REASON = "надпись: запрещённая плашка или карточка поверх кадра"
 _ZERO_PHRASE_REASON = "стиль: «zero» вместо позитивного описания"
 _TYPE_B_ON_HERO_REASON = "персонаж: одежда типа B на главном герое типа A"
 _MOUTH_REASON = "персонаж: рот противоречит себе или вынесен над головой"
@@ -1073,6 +1092,11 @@ _SITUATIONAL_REASON = "стиль: служебное слово «situational»
 _TYPE_LABEL_RX = re.compile(r"\btype\s+[abc]\b(?:\s+(?:mascot|character|cartoon|figure))?", re.IGNORECASE)
 _SITUATIONAL_RX = re.compile(r"\bsituational\b", re.IGNORECASE)
 _CARD_WORDS_RX = re.compile(r"\b(?:label card|title plaque|accent plaque|framed plaque|header band|nameplate)s?\b", re.I)
+_OVERLAY_CARRIER_RX = re.compile(
+    r"\b(?:label card|title plaque|accent plaque|framed plaque|header band|number card)s?\b", re.I)
+_DIEGETIC_SIGN_RX = re.compile(
+    r"\b(?:shop sign|storefront sign|street sign|harbor sign|harbour sign|wooden sign|signboard|"
+    r"awning|street plaque|market sign|bakery sign)s?\b", re.I)
 _READ_WORDS_RX = re.compile(r"\b(?:read|reads|reading)\b|:", re.I)
 _ORDINARY_MODES = frozenset({"wide", "medium", "macro", "overhead", "spotlight", "podium", "neat"})
 _ORDINARY_OPENER_RX = re.compile(r"^\W*(?:an?|the)?\s*(?:[\w-]+\s+){0,2}?(wide|medium|macro|overhead|spotlight|podium|neat)\b",
@@ -1108,8 +1132,12 @@ _CLAUSE_SPLIT_RX = re.compile(r";|,\s*while\b|\s+and\s+(?=(?:the\s+|an?\s+)?(?:m
                               r"figures?|farmers?|scientists?|chefs?|miners?|men|man|women|woman|persons?|microbes?|"
                               r"villagers?|boys?|girls?|one|another|other)\b)", re.I)
 # «reads/reading <LABEL>»: метка до «in … lettering», запятой, точки, строчного продолжения или конца
-_READ_LABEL_RX = re.compile(r"\b(?i:reads?|reading)\s+(?:the\s+)?(?:words?\s+|text\s+|label\s+)?[\"'\u201c\u00ab]?"
-                            r"([^\n,.;\"'\u201d\u00bb]+?)(?=\s+(?i:in)\s|\s+[a-z\u0430-\u044f\u0451]|[\"'\u201d\u00bb]?\s*[,.;]|$)")
+# Французские апострофы внутри метки (L'EAU, D'OR, C'EST) не обрезают надпись; строчные латинские с диакритикой включены
+_READ_LABEL_RX = re.compile(
+    r"\b(?i:reads?|reading)\s+(?:the\s+)?(?:words?\s+|text\s+|label\s+)?[\"'\u201c\u00ab]?"
+    r"([^\n,.;\"\u201d\u00bb]+?)"
+    r"(?=\s+(?i:in)\s|\s+[a-z\u00e0-\u00ff\u0153\u0430-\u044f\u0451]|[\"'\u201d\u00bb]?\s*[,.;]|$)"
+)
 _FREE_OF_RX = re.compile(r"\bfree of\s+(?:[\w-]+\s+){0,2}?(?:words?|text|labels?|smoke|fire|wood|clothing|headwear|"
                          r"expressions?|smiling|smile|stick limbs?|crowds?)\b", re.I)
 _STYLE_RULES = [
@@ -1296,6 +1324,9 @@ def _parse_hint_en(item: str) -> str:
     if reason == _UNAUTH_TEXT_REASON:
         return ("Remove all plaques, label cards, header bands, pointer-arrow text and lettering; keep this "
                 "ordinary scene text-free.")
+    if reason == _OVERLAY_CARRIER_REASON:
+        return ("Remove all floating or overlaid text carriers (label cards, title plaques, accent plaques, "
+                "framed plaques, header bands, number cards); keep the frame as a pure text-free visual illustration.")
     if reason == _ZERO_PHRASE_REASON:
         return ("Do not write zero with a count; describe only the visible elements in positive wording, for example "
                 "an empty path or one figure.")
@@ -1891,8 +1922,13 @@ def _batch_style_reasons(text: str, setting: str = "") -> list:
         reasons.append(_FREE_OF_REASON)
     if _blank_card(text):
         reasons.append(_BLANK_CARD_REASON)
-    if (frame_has_lettering(text) and _ordinary_layout(text, setting) and not _ANALYTIC_RX.search(text)
-            and not _ANALYTIC_RX.search(setting or "") and not re.search(r"\d", text)
+    if _OVERLAY_CARRIER_RX.search(text):
+        reasons.append(_OVERLAY_CARRIER_REASON)
+    if (frame_has_lettering(text) and _ordinary_layout(text, setting)
+            and not _DIEGETIC_SIGN_RX.search(text)
+            and not _ANALYTIC_RX.search(text)
+            and not _ANALYTIC_RX.search(setting or "")
+            and not re.search(r"\d", text)
             and not _ROMAN_TOKEN_RX.search(text)):
         reasons.append(_UNAUTH_TEXT_REASON)
     if _ZERO_RX.search(text):

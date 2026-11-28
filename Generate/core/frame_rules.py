@@ -50,6 +50,38 @@ FORBIDDEN_FRAME_RU_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Французские и европейские (DE/ES) основы запрещённых типов кадра для мультиязычных SRT.
+FORBIDDEN_FRAME_EU_RE = re.compile(
+    r"\b(?:cartes?"
+    r"|calendriers?"
+    r"|graphiques?"
+    r"|diagrammes?"
+    r"|infographies?"
+    r"|drapeaux?"
+    r"|blasons?"
+    r"|armoiries"
+    r"|embl[eè]mes?"
+    r"|journa(?:l|ux)"
+    r"|pi[eè]ces?\s+d['\u2019]identit[eé]"
+    r"|passeports?"
+    r"|papiers?"
+    r"|lettres?"
+    r"|parchemins?"
+    r"|tableaux?"
+    r"|formulaires?"
+    r"|karten?"
+    r"|kalendern?"
+    r"|flaggen?"
+    r"|reisep(?:ass|ässe|asse)"
+    r"|zeitung(?:en)?"
+    r"|brief(?:e|en)?"
+    r"|mapas?"
+    r"|banderas?"
+    r"|pasaportes?"
+    r"|peri[oó]dicos?)\b",
+    re.IGNORECASE,
+)
+
 # Правило, которое добавляется в запрос модели для сегмента с запрещённым кадром.
 # Само правило не называет запрещённые предметы как задание нарисовать их в кадре.
 REPHRASE_RULE_EN = (
@@ -83,6 +115,23 @@ _RU_WORD_ITEMS = (
     ("диаграмм", "diagram"), ("инфографик", "infographic"), ("газет", "newspaper"), ("бумаг", "paper"),
     ("бумажн", "paper"), ("письм", "letter"), ("таблиц", "spreadsheet"),
 )
+# Французские фразы бумажных листов (как _RU_PHRASE_ITEMS).
+_EU_PHRASE_ITEMS = (
+    (re.compile(r"\bfeuilles?\s+blanches?\b", re.IGNORECASE), "blank sheet"),
+    (re.compile(r"\bfeuilles?\s+de\s+papier\b", re.IGNORECASE), "sheet of paper"),
+    (re.compile(r"\bfeuilles?\s+de\s+parchemin\b", re.IGNORECASE), "sheet of parchment"),
+)
+# Французские/DE/ES основы с именем разрешённого типа (rules.yaml allowed_shot_items).
+# Всегда запрещённые (drapeau, blason, armoiries, emblème, pièce d'identité, passeport, parchemin,
+# formulaire, flagge, reisepass, bandera, pasaporte) сюда не входят.
+_EU_WORD_ITEMS = (
+    ("carte", "map"), ("calendrier", "calendar"), ("graphique", "chart"),
+    ("diagramme", "diagram"), ("infographie", "infographic"),
+    ("journal", "newspaper"), ("journaux", "newspaper"), ("papier", "paper"),
+    ("lettre", "letter"), ("tableau", "spreadsheet"),
+    ("karte", "map"), ("kalender", "calendar"), ("zeitung", "newspaper"), ("brief", "letter"),
+    ("mapa", "map"), ("periódico", "newspaper"), ("periodico", "newspaper"),
+)
 
 
 def _in_spans(span: tuple, spans: list) -> bool:
@@ -106,7 +155,7 @@ def uncovered_hits(segment_text: str, allowed_items=frozenset()) -> list:
             spans.append(m.span())
         else:
             hits.append(m.group(0))
-    for rx, item in _RU_PHRASE_ITEMS:
+    for rx, item in _RU_PHRASE_ITEMS + _EU_PHRASE_ITEMS:
         for m in rx.finditer(text):
             if item in released:
                 spans.append(m.span())
@@ -121,6 +170,14 @@ def uncovered_hits(segment_text: str, allowed_items=frozenset()) -> list:
         word = m.group(0).lower()
         item = next((it for stem, it in _RU_WORD_ITEMS if word.startswith(stem)), None)
         if item in released and not _in_spans(m.span(), spans):
+            continue
+        hits.append(m.group(0))
+    for m in FORBIDDEN_FRAME_EU_RE.finditer(text):
+        if _in_spans(m.span(), spans):
+            continue
+        word = m.group(0).lower()
+        item = next((it for stem, it in _EU_WORD_ITEMS if word.startswith(stem)), None)
+        if item in released:
             continue
         hits.append(m.group(0))
     return hits

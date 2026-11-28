@@ -37,8 +37,10 @@ Rules marked **(recommendation)** are not from the official LTX documentation; t
 - One clip is one continuous take. Write a **single flowing paragraph** in **present tense**.
 - The model animates verbs. Give every sentence something that happens (walks, turns, drifts, lifts), not only how things look. A description of appearance alone gives the model little to animate.
 - Concrete and physical beats abstract. Translate ideas, emotions and concepts into things a camera can film.
-- Keep the scene focused: one main subject, one or two actions, a few clear characters at most. Crowded frames reduce clarity.
-- Use one coherent light logic per shot. Mixed or contradictory light sources confuse the model.
+- Keep the scene focused: 1 to 2 clear focal subjects, one or two actions, strong brightness/colour separation from an uncluttered background (no visual mush), and a few clear characters at most. Crowded frames reduce clarity.
+- Literal visual communication: directly film the concrete object, action or physical consequence named in the narration beat rather than vague decorative filler.
+- Eye-trace continuity: keep the primary focal subject inside a readable central or smoothly shifting zone across consecutive clips so the viewer's eyes never jump abruptly between opposite corners on every cut.
+- Match lighting and colour temperature to the emotional tone of the beat (cool overcast or shadowed contrast for tension/risk; warm amber or daylight for discovery/history; soft neutral light for calm breathers) using one coherent light logic per shot. Mixed or contradictory light sources confuse the model.
 - Be internally consistent. Do not combine contradictory states (a still lake with crashing waves).
 - Plain natural language, not numbers. Do not specify angles, speeds or counts ("exactly 3 birds", "pan at 2 degrees per second").
 - Do not use tag lists, keyword spam, brackets, parameters, shot lists or numbered beats. Formatting from other video models does not carry over to LTX.

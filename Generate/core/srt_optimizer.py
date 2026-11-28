@@ -37,7 +37,7 @@ REFINE_PASSES = 20
 COST_EPS = 1e-9
 
 SENTENCE_CLOSERS = "\"'\u00bb\u201d\u2019)]"
-SENTENCE_END_CHARS = ".!?\u2026"
+SENTENCE_END_CHARS = ".!?\u2026\u3002\uff01\uff1f"
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,7 @@ class OptimizeStats:
 
 
 def _strip_closers(text: str) -> str:
-    return text.rstrip(SENTENCE_CLOSERS + " ")
+    return text.rstrip(SENTENCE_CLOSERS + " \u00a0\u202f")
 
 
 def ends_sentence(text: str) -> bool:

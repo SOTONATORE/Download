@@ -20,7 +20,7 @@ Write one paragraph, with no lists. Make it detailed enough to specify compositi
 
 # 3. Composition and Visual Diversity
 
-Show the subject named in the segment text, with one main subject lit by natural light. Take the place, the period and the people's appearance from the segment text and its setting (for the Kazakh steppe story: Kazakh steppe landscape, Kazakh people, the period the text names); never add a nationality, ethnicity or skin tone the text does not mention. Keep the subject, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
+Show the exact concrete object or subject named in the segment text (literal visual communication, no vague decorative filler), with 1 to 2 clear focal subjects sharply separated by light and contrast from an uncluttered background (no visual mush). Keep the main subject in a readable central or gently shifting zone for smooth eye-trace continuity across cuts. Match the lighting and colour temperature to the emotional tone of the beat (cool overcast/shadowed contrast for tension or risk; warm golden/amber light for discovery or history; soft neutral daylight for calm breathers). Take the place, the period and the people's appearance from the segment text and its setting; never add a nationality, ethnicity or skin tone the text does not mention. Keep the subject, the action and the state exactly as the segment text gives them. State the composition, lighting, materials and colour scheme explicitly.
 
 Vary shots across four axes (change 2+ axes; no repeating loop or scale/angle):
 - Scale: extreme wide, wide, medium, tight object/hand detail (no faces), OTS, foreground depth.

@@ -380,10 +380,10 @@ def test_output_language_unchanged_without_dangling_check(tmp_path):
 
 def test_batch_framing_is_before_formatting_rules_and_language_neutral_for_english(tmp_path):
     out = gp._output_language_sentence(_lang_cfg(tmp_path, dangling=True, passage=True, frame_language="English"))
-    assert "Most frames are text-free visual illustrations" in out
-    assert "label-card pattern" in out and "header bands" in out and "balance scales" in out
+    assert "Over 90 percent of frames are completely text-free pure visual illustrations" in out
+    assert "label cards" in out and "header bands" in out and "diegetic in-world signs" in out
     assert "lone adjective without its noun" in out
-    assert out.index("Most frames are text-free") < out.index("On-frame text must be a complete phrase")
+    assert out.index("Over 90 percent of frames are completely text-free") < out.index("On-frame text must be a complete phrase")
     assert "ЗЕМЛЯНАЯ" not in out and "земляной" not in out
     assert not re.search("[\u0400-\u04FF]", out)
 
@@ -402,7 +402,7 @@ def test_russian_frame_language_keeps_russian_example(tmp_path):
 
 def test_framing_only_for_batch_passage(tmp_path):
     out = gp._output_language_sentence(_lang_cfg(tmp_path, dangling=True, passage=False, frame_language="Russian"))
-    assert "Most frames are text-free" not in out
+    assert "Over 90 percent of frames are completely text-free" not in out
     assert "ЗЕМЛЯНАЯ ГРУША" in out     # русский пример остаётся для русского текста
 
 

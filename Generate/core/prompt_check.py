@@ -46,7 +46,10 @@ FORBIDDEN_IMAGE_WORDS_EN = (
 # «lettering» (надпись) — не запрещённое слово: ALLOWED_SHOT_ITEM_TERMS["lettering"] пуст, поэтому основа «letter»
 # не должна его ловить без разрешения «letter» в профиле.
 _STEM_EXCLUDE = {
-    "form": ("format", "formal", "formation", "formula", "forming", "formed"),
+    "form": (
+        "format", "formal", "formation", "formula", "forming", "formed",
+        "forme", "formes", "former", "formant", "formée", "formées", "formés",
+    ),
     "letter": ("lettering",),
 }
 
@@ -551,6 +554,7 @@ ETHNIC_ROOTS = (
     "japan", "korean", "mongol", "middle east", "south asia",
     # европейские написания (немецкий, испанский, французский, польский и др.); сравнение без диакритики
     "áfrica", "afrika", "indien", "asien", "orient",
+    "afrique", "africain", "chine", "chinois", "japon", "japonais", "corée", "coréen", "asiatique", "inde",
 )
 
 
@@ -842,6 +846,15 @@ DANGLING_TEXT_WORDS = frozenset({
     "aren't", "isn't", "wasn't", "weren't", "don't", "doesn't", "didn't", "can't", "won't",
     "that", "this", "with", "from", "into", "about", "at", "on", "in", "as", "or", "if", "than", "then",
     "which", "who",
+    # French
+    "de", "du", "des", "le", "la", "les", "un", "une", "et", "ou", "à", "au", "aux", "en", "dans", "par",
+    "pour", "sur", "avec", "que", "qui", "est", "sont", "ne", "pas", "l'", "d'",
+    # Russian
+    "и", "в", "на", "с", "по", "к", "от", "из", "за", "о", "у", "но", "а", "или", "что", "как", "не", "ни",
+    # German
+    "der", "die", "das", "und", "oder", "mit", "von", "zu", "auf", "für",
+    # Spanish
+    "el", "los", "las", "del", "y", "o", "con", "por", "para",
 })
 # Типографский апостроф и хвостовая пунктуация последнего слова надписи
 _TYPO_APOSTROPHE = "\u2019"
@@ -937,6 +950,12 @@ _NEGATION_WORDS = frozenset({
     "can't", "cannot", "don't", "not", "never", "no", "won't", "isn't", "aren't",
     "doesn't", "didn't", "without",
     "не", "нет", "ни", "без",  # русские отрицания: «не является», «нет», «ни», «без»
+    # French
+    "ne", "pas", "n'est", "n'a", "n'ont", "jamais", "aucun", "aucune", "sans", "rien", "non",
+    # German
+    "nicht", "kein", "keine", "nie", "ohne",
+    # Spanish (folded и с диакритикой)
+    "nunca", "sin", "ningún", "ningun", "ninguna",
 })
 _WORD_CHAR_CATEGORIES = ("L", "N", "M")
 _APOSTROPHE_VARIANTS = ("\u2019", "\u2018", "\u02bc")
@@ -969,12 +988,13 @@ def _word_tokens(text: str) -> list:
 
 
 def _fold(text: str) -> str:
-    """Сравнительная форма: casefold и NFKD (ß → ss, İ → i̇), турецкое ı → i.
+    """Сравнительная форма: casefold, лигатуры (œ → oe, æ → ae, ß → ss), NFKD и турецкое ı → i.
 
     У текста с латиницей или кириллицей диакритика снимается («Áfrika» = «Afrika», «ёлка» = «елка»).
     Деванагари, тайский и арабский не трогаются: их комбинирующие знаки — часть слова.
     """
-    s = unicodedata.normalize("NFKD", (text or "").casefold()).replace("ı", "i")
+    raw = (text or "").casefold().replace("œ", "oe").replace("æ", "ae").replace("ß", "ss")
+    s = unicodedata.normalize("NFKD", raw).replace("ı", "i")
     if _LATIN_CYR_RX.search(s):
         s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
     return s
@@ -1033,7 +1053,17 @@ def _ru_word_matches(a: str, b: str) -> bool:
 
 # Окончания европейских слов после общей основы: немецкий, испанский, польский, турецкий, французский и др.
 _EURO_TAILS = frozenset({"s", "n", "e", "en", "er", "ern", "es", "em", "ie", "ien", "ia", "os", "as", "ow",
-                         "ler", "lar"})
+                         "ler", "lar", "x", "aux", "ee", "ees", "ée", "ées"})
+# Французские элизии перед гласной/немой h (в нижнем регистре, прямой апостроф)
+_FR_ELISION_PREFIXES = ("l'", "d'", "n'", "qu'", "j'", "s'", "c'", "m'", "t'")
+
+
+def _strip_fr_elision(word: str) -> Optional[str]:
+    """Снимает французский префикс элизии («l'histoire» → «histoire», «l'eau» → «eau»); иначе None."""
+    for pref in _FR_ELISION_PREFIXES:
+        if word.startswith(pref) and len(word) > len(pref):
+            return word[len(pref):]
+    return None
 
 
 def _latin_forms(word: str) -> set:
@@ -1072,11 +1102,25 @@ def _euro_prefix_match(a: str, b: str) -> bool:
 
 def _latin_word_matches(a: str, b: str) -> bool:
     """Латиница: точно, либо через варианты английской флексии, либо европейская флексия.
-    Апостроф: «istanbul'da» совпадает с «istanbul» (турецкий падежный суффикс после апострофа)."""
-    if "'" in b and _latin_word_matches(a, b.split("'")[0]):
+    Апостроф: французские элизии («l'histoire» → «histoire», «l'eau» → «eau») и турецкие суффиксы («istanbul'da»)."""
+    a = a.replace(_TYPO_APOSTROPHE, "'")
+    b = b.replace(_TYPO_APOSTROPHE, "'")
+    if a == b:
         return True
-    if "'" in a and _latin_word_matches(a.split("'")[0], b):
+    b_elided = _strip_fr_elision(b)
+    if b_elided is not None and _latin_word_matches(a, b_elided):
         return True
+    a_elided = _strip_fr_elision(a)
+    if a_elided is not None and _latin_word_matches(a_elided, b):
+        return True
+    if "'" in b:
+        head = b.split("'")[0]
+        if len(head) >= 3 and _latin_word_matches(a, head):
+            return True
+    if "'" in a:
+        head = a.split("'")[0]
+        if len(head) >= 3 and _latin_word_matches(head, b):
+            return True
     if len(a) < 4 or len(b) < 4 or abs(len(a) - len(b)) > 3:
         return False
     if not (_LATIN_RX.search(a) and _LATIN_RX.search(b)):

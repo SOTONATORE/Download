@@ -113,9 +113,11 @@ def test_forbidden_list_covers_validator_words():
     assert missing == []
 
 
-def test_plaque_lettering_phrase_is_specified():
-    """Инструкция требует точную формулировку «reading <TEXT> in bold black uppercase lettering»."""
-    assert "reading <TEXT> in bold black uppercase lettering" in _style_text()
+def test_diegetic_sign_lettering_phrase_is_specified():
+    """Инструкция запрещает плавающий текст и задаёт оформление редких физических вывесок."""
+    text = _style_text()
+    assert "no floating or overlaid text" in text
+    assert "in bold black uppercase lettering" in text
 
 
 # ------------------------------------------------------------------ примеры и preset

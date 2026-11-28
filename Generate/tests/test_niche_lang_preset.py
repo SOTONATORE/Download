@@ -20,12 +20,10 @@ ENGLISH_SRT = "1\n00:00:00,000 --> 00:00:02,000\nThe cat is on the table and it 
 
 # --- правило текста на кадре в style.md ----------------------------------------------------------
 
-def test_style_text_rule_has_the_four_word_and_one_word_per_part_rules():
+def test_style_text_rule_forbids_overlay_and_keeps_diegetic_sign_limits():
     text = (NICHE_DIR / "prompts" / "style.md").read_text(encoding="utf-8")
-    # Точные фразы из style.md (абзац про текст на кадре, строка 29 и раздел Final Check).
-    for phrase in ("1 to 4 words", "one word for each part", "at most 4 parts",
-                   "exactly one text phrase per frame",  # режим текстовых кадров (a)
-                   "one main title plus the short labels or dates that the layout requires"):  # режим сравнения и таймлайна (b)
+    for phrase in ("no floating or overlaid text", "diegetic in-world text",
+                   "1 to 2 uppercase words", "over 90 percent"):
         assert phrase in text, phrase
 
 
